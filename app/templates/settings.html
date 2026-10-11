@@ -1,12 +1,13 @@
-{% extends "base.html" %}{% from "_ui.html" import toggle, deadline_modes, chat_picker %}
+{% extends "base.html" %}{% from "_ui.html" import toggle, chat_picker %}
 {% block title %}Настройки — SYSAI{% endblock %}
 {% macro switch(name, title, hint='') %}
 <input type="hidden" name="present_{{ name }}" value="1">
 {{ toggle(name, s[name], title, hint) }}
 {% endmacro %}
-{% macro recipients(name) %}
+{% macro recipients(name, placeholder) %}
 <input type="hidden" name="present_{{ name }}" value="1">
-{{ chat_picker(name, s[name], chats) }}
+{% if ai %}<input name="{{ name }}_extra" placeholder="{{ placeholder }}" value="{{ s[name]|join(', ') }}">
+{% else %}{{ chat_picker(name, s[name], chats) }}{% endif %}
 {% endmacro %}
 {% macro credential(name, title, placeholder) %}
 <label class="f">{{ title }} <input type="password" name="{{ name }}" placeholder="{{ placeholder }}" autocomplete="new-password"></label>
@@ -18,79 +19,51 @@
     <option value="clear">Удалить ключ из приложения</option>
   </select>
 </label>
-<p class="small muted">Для нового ключа выберите «Сохранить введённый ключ». Удаление не меняет ключ, заданный на сервере.</p>
 {% endmacro %}
 {% block body %}
-<div class="page-h"><div><h1>Настройки</h1><p>Добавьте ключ и выберите, нужно ли проверять отчёт. Остальное можно оставить как есть.</p></div></div>
+<div class="page-h"><div><h1>Настройки</h1><p>Режим, ключ и получатели. Больше ничего не нужно.</p></div></div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 <form method="post" action="/settings" class="setup simple-settings">
   <section class="card setup-step">
-    <h2>Ключ OpenRouter</h2>
-    <p class="small muted">Нужен для распознавания записи и подготовки отчёта. Telegram и Bitrix24 не обязательны.</p>
-    {{ credential('openrouter_api_key', 'Ключ OpenRouter', 'sk-or-v1-…') }}
-    {% if masked.openrouter_api_key or env.openrouter_api_key %}
-    <button type="submit" class="btn sm" formaction="/settings/test-openrouter" formnovalidate>Проверить ключ</button>
-    <p class="small muted">Проверяется уже сохранённый ключ, не введённый в поле. Сначала сохраните новый ключ, затем проверьте его.</p>
+    <h2>Кто пишет людям</h2>
+    {{ switch('ai_employee', 'ИИ-сотрудник', 'Включено: пишет с вашего аккаунта Telegram обычным текстом, сам формулирует каждое сообщение и ведёт диалог. Выключено: обычный бот (старая логика).') }}
+    {% if ai %}
+    <p class="small">
+      {% if account.connected %}Аккаунт подключён: <b>{{ account.me.name }}</b>{% if account.me.username %} @{{ account.me.username }}{% endif %}.
+      {% elif account.configured %}Аккаунт сохранён, но не подключён{% if account.error %}: {{ account.error }}{% endif %}.
+      {% else %}Аккаунт Telegram ещё не подключён.{% endif %}
+      <a href="/settings/telegram">Telegram-аккаунт →</a>
+    </p>
+    <label class="f">Как он общается
+      <textarea name="persona" rows="3" maxlength="600" placeholder="{{ persona_default }}">{{ s.persona }}</textarea></label>
+    <p class="small muted">Имя берётся из самого аккаунта. Пусто: используется манера по умолчанию. На прямой вопрос «ты человек?» он не станет утверждать, что человек.</p>
+    {% else %}
+    {{ credential('telegram_bot_token', 'Токен Telegram-бота', 'Токен от BotFather') }}
     {% endif %}
   </section>
   <section class="card setup-step">
-    <h2>Как обрабатывать совещания</h2>
-    {{ switch('approval_required', 'Сначала показать черновик', 'Включено: проверьте отчёт перед отправкой. Выключено: отправка выбранным получателям начнётся сразу после обработки.') }}
-    <p class="small muted">Отчёт всегда доступен на сайте. Если получатели не выбраны, отправлять его в Telegram некуда.</p>
+    <h2>Ключ OpenRouter</h2>
+    <p class="small muted">Нужен для расшифровки записи, отчёта и всех сообщений ИИ-сотрудника.</p>
+    {{ credential('openrouter_api_key', 'Ключ OpenRouter', 'sk-or-v1-…') }}
+    {% if masked.openrouter_api_key or env.openrouter_api_key %}
+    <button type="submit" class="btn sm" formaction="/settings/test-openrouter" formnovalidate>Проверить сохранённый ключ</button>
+    {% endif %}
   </section>
-  <details class="card settings-more">
-    <summary>Telegram и получатели отчёта <span class="small muted">Необязательно</span></summary>
-    <div class="settings-content">
-      <p class="small muted">Подключайте, только если хотите получать отчёты или задачи в Telegram. Для работы на сайте бот не нужен.</p>
-      {{ credential('telegram_bot_token', 'Токен Telegram-бота', 'Токен от BotFather') }}
-      <h3>Кому отправлять полный отчёт</h3>
-      <p class="small muted">Выберите чаты или укажите их номера. Чтобы чат появился в списке, напишите боту /start или добавьте бота в группу.</p>
-      {{ recipients('report_chat_ids') }}
-      {{ switch('send_tasks_to_assignees', 'Отправлять исполнителям их задачи', 'Каждому — только его задачи. Для этого сотрудник должен привязать свой Telegram.') }}
-      <h3>Кто проверяет черновик</h3>
-      <p class="small muted">Эти чаты получают черновик, когда включена проверка. Без них можно проверить отчёт на сайте.</p>
-      {{ recipients('approver_chat_ids') }}
-      <h3>Кому передавать сложные вопросы</h3>
-      <p class="small muted">Секретарь получает вопросы, на которые бот не смог ответить. Можно оставить пустым.</p>
-      {{ recipients('secretary_chat_ids') }}
-      <h3>Диалоги с сотрудниками</h3>
-      {{ switch('dialogue_enabled', 'Отвечать сотрудникам по их задачам', 'Бот сможет обсуждать задачи с сотрудниками в Telegram.') }}
-    </div>
-  </details>
-  <details class="card settings-more">
-    <summary>Сроки задач <span class="small muted">Необязательно</span></summary>
-    <div class="settings-content">
-      <p class="small muted">Срок, названный на совещании, важнее. Этот режим нужен только для задач без названного срока. «Уточнять» требует подключённого Telegram.</p>
-      {{ deadline_modes(s.deadline_mode) }}
-      <label class="f">Срок по умолчанию, рабочих дней <input type="number" min="1" step="1" name="default_deadline_days" value="{{ s.default_deadline_days }}"></label>
-      <label class="f">Сколько часов ждать ответа о сроке <input type="number" min="1" step="any" name="ask_timeout_hours" value="{{ s.ask_timeout_hours }}"></label>
-      <p class="small muted">Только для режима «Уточнять». Если ответа нет, используется срок по умолчанию.</p>
-      {{ switch('allow_deadline_proposals', 'Разрешать сотрудникам предлагать новый срок', 'Предложение не означает автоматическое согласование.') }}
-    </div>
-  </details>
-  <details class="card settings-more">
-    <summary>Bitrix24 <span class="small muted">Необязательно</span></summary>
-    <div class="settings-content">
-      <p class="small muted">Нужен только для создания задач в вашей CRM. Если CRM не используете, не заполняйте этот раздел.</p>
-      {{ credential('bitrix_webhook_url', 'Вебхук Bitrix24', 'Адрес входящего вебхука Bitrix24') }}
-      {{ switch('bitrix_enabled', 'Создавать задачи в Bitrix24', 'Для отправки нужен действующий вебхук. Можно сохранить вебхук и включить отправку одновременно.') }}
-    </div>
-  </details>
-  <details class="card settings-more">
-    <summary>Оформление и дополнительные параметры <span class="small muted">Для опытных пользователей</span></summary>
-    <div class="settings-content">
-      <p class="small muted">Обычно менять не нужно. Платные модели OpenRouter могут расходовать баланс вашего ключа.</p>
-      {{ switch('include_transcript_in_pdf', 'Добавлять полную расшифровку в PDF', 'PDF станет длиннее. Без этого в нём остаётся отчёт.') }}
-      <label class="f">Название компании в отчёте <input name="company_name" value="{{ s.company_name }}"></label>
-      <label class="f">Цвет оформления <input type="color" name="accent_color" value="{{ s.accent_color }}"></label>
-      <label class="f">Названия и термины для распознавания <textarea name="glossary" rows="3">{{ s.glossary }}</textarea></label>
-      <label class="f">Модель распознавания <input name="transcribe_model" value="{{ s.transcribe_model }}"></label>
-      <label class="f">Модель подготовки отчёта <input name="report_model" value="{{ s.report_model }}"></label>
-      <label class="f">Бесплатная модель переписки <input name="conversation_model" value="{{ s.conversation_model }}"></label>
-      <p class="small muted">Допустимы openrouter/free или название модели с окончанием :free.</p>
-      <label class="f">Стиль ответов сотрудникам <textarea name="conversation_tone" rows="3" maxlength="1000">{{ s.conversation_tone }}</textarea></label>
-    </div>
-  </details>
+  <section class="card setup-step">
+    <h2>Кому писать</h2>
+    {{ switch('approval_required', 'Сначала показать черновик проверяющему', 'Включено: проверяющий видит план и подтверждает отправку. Выключено: после обработки всё уходит сразу.') }}
+    <h3>Проверяющий</h3>
+    <p class="small muted">{% if ai %}Через запятую: @username, номер +375… или числовой ID. Ему ИИ-сотрудник пришлёт черновик, он же отвечает на вопросы сотрудников.{% else %}Чаты, которые получают черновик. Без них отчёт можно проверить на сайте.{% endif %}</p>
+    {{ recipients('approver_chat_ids', '@username или +375291234567') }}
+    <h3>Группа для отчёта <span class="small muted">необязательно</span></h3>
+    <p class="small muted">{% if ai %}@имя группы или её числовой ID (начинается с -100). После подтверждения туда уйдёт отчёт и PDF.{% else %}Сюда после подтверждения уходит полный отчёт.{% endif %}</p>
+    {{ recipients('report_chat_ids', '@имя_группы или -1001234567890') }}
+    {{ switch('send_tasks_to_assignees', 'Писать исполнителям их задачи', 'Каждому только его задачи, по справочнику сотрудников.') }}
+  </section>
+  <section class="card setup-step">
+    <h2>Отчёт</h2>
+    <label class="f">Название компании <input name="company_name" value="{{ s.company_name }}"></label>
+  </section>
   <div class="row sticky center"><button type="submit" class="btn primary">Сохранить настройки</button></div>
 </form>
 {% if ephemeral %}<p class="small muted">База сейчас временная: без Postgres ключи и совещания могут сброситься при перезапуске.</p>{% endif %}

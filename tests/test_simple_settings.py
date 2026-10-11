@@ -43,14 +43,13 @@ def test_rendered_settings_are_minimal_and_never_echo_secrets(client):
         if name in settings_store.SECRET_KEYS:
             assert attrs["type"] == "password"
             assert not attrs.get("value")
-        if name in ("transcribe_model", "report_model", "conversation_model", "report_chat_ids_extra",
-                    "telegram_bot_token", "bitrix_webhook_url", "deadline_mode"):
-            assert depth > 0
+        # these controls are not drawn at all any more: the page keeps only the mode, the key and the recipients
+        assert name not in ("transcribe_model", "report_model", "conversation_model", "bitrix_webhook_url",
+                            "deadline_mode", "glossary", "accent_color")
         if name in ("approval_required", "openrouter_api_key"):
             assert depth == 0
-    assert "<details" in html and "<details open" not in html
+    assert "<details" not in html  # nothing is hidden behind folds any more
     assert any(b.get("formaction") == "/settings/test-openrouter" for b in controls.buttons)
-    assert "Сначала сохраните новый ключ" in html
 
 
 def test_partial_save_keeps_all_omitted_settings(client):

@@ -1,0 +1,40 @@
+{% extends "base.html" %}{% block title %}Telegram-аккаунт — SYSAI{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>Telegram-аккаунт</h1><p>ИИ-сотрудник пишет людям с этого аккаунта, как обычный человек.</p></div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+<section class="card">
+  {% if account.connected %}
+  <h2>Подключён</h2>
+  <p><b>{{ account.me.name }}</b>{% if account.me.username %} <span class="muted">@{{ account.me.username }}</span>{% endif %} {{ account.phone }}</p>
+  {% if account.paused %}<div class="warn small">Telegram ограничил отправку с этого аккаунта: сообщения временно не уходят.</div>{% endif %}
+  <p class="small muted">Сессия хранится в базе в зашифрованном виде. Не запускайте этот же аккаунт ещё где-то через api_id: Telegram разлогинит одну из сессий.</p>
+  <form method="post" action="/settings/telegram/logout" onsubmit="return confirm('Выйти из аккаунта? Сообщения перестанут отправляться.')"><button class="btn danger">Выйти из аккаунта</button></form>
+  {% elif account.step == 'code' %}
+  <h2>Введите код</h2>
+  <p class="small muted">Telegram отправил код в приложение на номер {{ account.phone }} (сообщение от «Telegram»). Не пересылайте код никому в чат: Telegram отменит его.</p>
+  <form method="post" action="/settings/telegram/code" class="emp-form">
+    <label class="f">Код <input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+    <button class="btn primary">Войти</button>
+  </form>
+  <form method="post" action="/settings/telegram/logout"><button class="btn sm">Начать заново</button></form>
+  {% elif account.step == 'password' %}
+  <h2>Пароль двухэтапной проверки</h2>
+  <p class="small muted">На аккаунте включён облачный пароль. Введите его.</p>
+  <form method="post" action="/settings/telegram/password" class="emp-form">
+    <label class="f">Пароль <input type="password" name="password" autocomplete="current-password" required autofocus></label>
+    <button class="btn primary">Войти</button>
+  </form>
+  <form method="post" action="/settings/telegram/logout"><button class="btn sm">Начать заново</button></form>
+  {% else %}
+  <h2>Войти в аккаунт</h2>
+  {% if account.configured %}<div class="warn small">{{ account.error or 'Аккаунт сохранён, но не подключён. Подождите минуту или войдите заново.' }}</div>{% endif %}
+  <p class="small muted">Нужны api_id и api_hash со страницы <a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a> (бесплатно), телефон аккаунта и доступ к приложению Telegram за кодом. Лучше отдельный аккаунт, а не основной.</p>
+  <form method="post" action="/settings/telegram/start" class="emp-form">
+    <label class="f">api_id <input name="api_id" inputmode="numeric" autocomplete="off" required></label>
+    <label class="f">api_hash <input type="password" name="api_hash" autocomplete="off" required></label>
+    <label class="f">Телефон <input name="phone" placeholder="+375291234567" autocomplete="tel" required></label>
+    <button class="btn primary">Получить код</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

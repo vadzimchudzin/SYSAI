@@ -78,7 +78,8 @@ class Employee(Base):
     aliases = Column(String(500), default="")  # comma separated: "Ваня, Иван Петрович"
     position = Column(String(200), default="")
     channel = Column(String(20), default="telegram")  # only telegram in MVP
-    telegram_chat_id = Column(String(40), default="")
+    telegram_chat_id = Column(String(40), default="")  # bot chat id; in AI-employee mode @username, +phone or id
+    telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
     bitrix_user_id = Column(String(40), default="")
     active = Column(Boolean, default=True)
 
@@ -294,6 +295,7 @@ def init_db():
     Base.metadata.create_all(engine)
     _add_column_if_missing("meetings", "options", "options JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
 
 
 def dumps(v) -> str:

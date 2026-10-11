@@ -4,7 +4,7 @@ import hashlib
 
 import httpx
 
-from . import config, telegram
+from . import config, telegram, userbot
 from .db import DeadlineRequest, Delivery, SessionLocal, Task, now
 
 MAX_ATTEMPTS = 3
@@ -17,6 +17,8 @@ def enqueue(s, meeting_id, phase, kind, chat, payload, document=None, task_ids=N
     existing = s.query(Delivery).filter_by(meeting_id=meeting_id, key=key).first()
     if existing:
         return existing
+    if callable(payload):  # texts written by the model are produced only for rows that really get created
+        payload = payload()
     row = Delivery(meeting_id=meeting_id, key=key, phase=phase, kind=kind, chat_id=str(chat),
                    payload=payload, document=document, task_ids=ids, depends_on=depends_on)
     s.add(row)
@@ -47,15 +49,16 @@ def send(row_id):
         s.refresh(row)
         payload, chat, document = row.payload, row.chat_id, row.document
     try:
-        if not config.telegram_enabled():
+        transport = userbot if userbot.ai_mode() else telegram  # the AI employee writes from an account, not a bot
+        if transport is telegram and not config.telegram_enabled():
             raise telegram.TelegramError("Telegram отключён или токен не задан")
         if document is not None:
-            result = telegram.send_document(chat, payload["filename"], document, payload.get("caption", ""))
+            result = transport.send_document(chat, payload["filename"], document, payload.get("caption", ""))
         else:
             if payload.get("reply_to"):
-                result = telegram.send_message(chat, payload["text"], payload.get("buttons"), reply_to=payload["reply_to"])
+                result = transport.send_message(chat, payload["text"], payload.get("buttons"), reply_to=payload["reply_to"])
             else:
-                result = telegram.send_message(chat, payload["text"], payload.get("buttons"))
+                result = transport.send_message(chat, payload["text"], payload.get("buttons"))
         message_id = result["message_id"]
     except Exception as exc:
         # Read timeouts and interrupted sends cannot prove Telegram rejected the message.

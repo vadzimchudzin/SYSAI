@@ -6,9 +6,12 @@
   <label class="f">Как называют на совещаниях <input name="aliases" value="{{ e.aliases if e }}" placeholder="Ваня, Иван Сергеевич, Петров"></label>
   <label class="f">Должность <input name="position" list="positions" value="{{ e.position if e }}" placeholder="Выберите или впишите свою"></label>
   <label class="f">Куда писать <select name="channel"><option value="telegram">Telegram</option></select></label>
+  {% if ai %}<label class="f">Telegram <input name="telegram_manual" placeholder="@username или +375291234567" value="{{ e.telegram_chat_id if e }}"></label>
+  {% else %}
   <label class="f">Telegram <select name="telegram_chat_id"><option value="">— не привязан —</option>
     {% for c in chats %}<option value="{{ c.chat_id }}" {{ 'selected' if e and e.telegram_chat_id == c.chat_id }}>{{ c.title }}{% if c.username %} @{{ c.username }}{% endif %}{% if c.chat_id in linked and not (e and e.telegram_chat_id == c.chat_id) %} (уже привязан){% endif %}</option>{% endfor %}
   </select><input name="telegram_manual" placeholder="или chat_id вручную" value="{{ e.telegram_chat_id if e and e.telegram_chat_id not in chats|map(attribute='chat_id')|list }}"></label>
+  {% endif %}
   <label class="f">ID в Bitrix24 <small class="muted">(позже)</small><input name="bitrix_user_id" value="{{ e.bitrix_user_id if e }}"></label>
   {% if e %}<label class="check"><input type="checkbox" name="active" {{ 'checked' if e.active }}> Активен</label>{% endif %}
   <button class="btn primary">{{ 'Сохранить' if e else 'Добавить' }}</button>
@@ -17,7 +20,7 @@
 {% block body %}
 <datalist id="positions">{% for p in positions %}<option value="{{ p }}">{% endfor %}</datalist>
 <div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div></div>
-<div class="card note">Чтобы бот мог писать сотруднику, тот должен один раз открыть бота и нажать <b>/start</b> — после этого он появится в списке «Telegram».</div>
+{% if ai %}<div class="card note">ИИ-сотрудник пишет с подключённого аккаунта. Укажите @username сотрудника или его номер телефона. Если по номеру человека не найти, добавьте его в контакты аккаунта или укажите @username.</div>{% else %}<div class="card note">Чтобы бот мог писать сотруднику, тот должен один раз открыть бота и нажать <b>/start</b> — после этого он появится в списке «Telegram».</div>{% endif %}
 <div class="grid2">
 <section class="card"><h2>Добавить сотрудника</h2>{{ form(None) }}</section>
 <section class="card"><h2>Справочник ({{ employees|length }})</h2>

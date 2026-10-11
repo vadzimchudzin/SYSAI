@@ -15,7 +15,8 @@ def test_conversation_settings_are_saved_and_paid_models_rejected(client):
     assert client.post("/settings", data={"conversation_model": "paid/model"}).status_code == 400
     assert settings_store.get("conversation_model") == "test/model:free"
     page = client.get("/settings")
-    assert "Диалоги с сотрудниками" in page.text and "Бесплатная модель переписки" in page.text
+    # the page is minimal: these controls are no longer drawn, the saved values keep working
+    assert "Диалоги с сотрудниками" not in page.text and "Бесплатная модель переписки" not in page.text
 
 
 def test_history_and_escalations_visible_and_resolution_is_scoped(client):

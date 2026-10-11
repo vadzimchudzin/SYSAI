@@ -8,7 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func
 
-from . import analyze, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive, settings_store, telegram, transcribe
+from . import (analyze, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive, settings_store, telegram,
+               transcribe, userbot, voice)
 from .db import DeadlineRequest, Delivery, Employee, Meeting, SessionLocal, Task, TelegramChat, now
 
 log = logging.getLogger("sysai.pipeline")
@@ -211,6 +212,11 @@ def request_approval(meeting_id: int):
         approvers = settings.get("approver_chat_ids") or []
         revision = int((m.options or {}).get("approval_revision", 0)) + 1
         pdf = render.report_pdf(m, settings) if approvers else None
+        ai = userbot.ai_mode()
+        draft_text = ""
+        if ai and approvers:  # one message for all reviewers, written by the model; raises VoiceError, nothing is sent then
+            link = f"{config.PUBLIC_URL}/meetings/{meeting_id}" if config.PUBLIC_URL else ""
+            draft_text = voice.for_reviewer(m, link)
         buttons = [[{"text": "✅ Отправить", "callback_data": f"ap:{meeting_id}:{revision}"},
                     {"text": "❌ Отклонить", "callback_data": f"rj:{meeting_id}:{revision}"}]]
         if config.PUBLIC_URL:
@@ -224,6 +230,13 @@ def request_approval(meeting_id: int):
                                  Delivery.status.in_(("pending", "failed", "uncertain"))).update(
             {Delivery.status: "cancelled"}, synchronize_session=False)
         for chat in approvers:
+            if ai:  # the AI employee talks first and attaches the file; no buttons, the reviewer answers in words
+                delivery.enqueue(s, meeting_id, "draft", "summary", chat,
+                                 {"text": draft_text, "approval_revision": revision}, revision=str(revision))
+                delivery.enqueue(s, meeting_id, "draft", "pdf", chat,
+                                 {"filename": render.pdf_name(m), "caption": "", "approval_revision": revision},
+                                 document=pdf, revision=str(revision))
+                continue
             delivery.enqueue(s, meeting_id, "draft", "pdf", chat,
                              {"filename": render.pdf_name(m), "caption": "Черновик отчёта", "approval_revision": revision},
                              document=pdf, revision=str(revision))
@@ -284,7 +297,44 @@ def deliver(meeting_id: int):
         s.commit()
 
 
+def _plan_delivery_ai(m, settings):
+    """After approval the AI employee writes to the group and to each employee, in its own words."""
+    with SessionLocal() as s:
+        meeting = load(s, m.id)
+        archived = report_archive.ensure(s, meeting, settings)
+        for chat in settings.get("report_chat_ids") or []:
+            delivery.enqueue(s, m.id, "final", "summary", chat, lambda: {"text": voice.for_group(meeting)})
+            delivery.enqueue(s, m.id, "final", "pdf", chat, {"filename": render.pdf_name(m), "caption": ""},
+                             document=archived.pdf)
+        orphan, by_chat = [], {}
+        for t in meeting.tasks:
+            chat = t.assignee.telegram_chat_id if t.assignee else ""
+            if settings["send_tasks_to_assignees"] and chat:
+                by_chat.setdefault(chat, []).append(t)
+            elif not chat:
+                t.status = "no_recipient"
+                orphan.append(t)
+            if settings.get("bitrix_enabled") and t.assignee and t.assignee.bitrix_user_id and not t.bitrix_task_id:
+                try:
+                    t.bitrix_task_id = bitrix.create_task(t, meeting)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("bitrix task failed: %s", e)
+        for chat, tasks in by_chat.items():
+            first = s.query(Delivery).filter_by(chat_id=str(chat), status="sent").count() == 0
+            delivery.enqueue(s, m.id, "final", "tasks", chat,
+                             lambda: {"text": voice.for_assignee(meeting, tasks[0].assignee, tasks, first)},
+                             task_ids=[t.id for t in tasks])
+        if orphan:
+            for chat in settings.get("approver_chat_ids") or []:
+                delivery.enqueue(s, m.id, "final", "orphan", chat, lambda: {"text": voice.for_unassigned(meeting, orphan)},
+                                 task_ids=[t.id for t in orphan])
+        meeting.options = dict(meeting.options or {}, delivery_planned=True)
+        s.commit()
+
+
 def _plan_delivery(m, settings):
+    if userbot.ai_mode():
+        return _plan_delivery_ai(m, settings)
     with SessionLocal() as s:
         meeting = load(s, m.id)
         archived = report_archive.ensure(s, meeting, settings)
@@ -393,6 +443,8 @@ def _remember_chat(chat: dict, active: bool = True):
 
 
 def handle_update(u: dict):
+    if userbot.ai_mode():
+        return  # the bot is off in AI-employee mode: the Telegram account answers, see agent.py
     settings = settings_store.all_settings()
     if "my_chat_member" in u:
         st = u["my_chat_member"]["new_chat_member"]["status"]
@@ -534,7 +586,8 @@ def _safe_deliver(meeting_id: int):
     except Exception as e:  # noqa: BLE001
         log.exception("deliver failed")
         delivery.recover(meeting_id)
-        _set(meeting_id, status="delivery_failed", progress="Ошибка доставки", error="Не удалось завершить рассылку")
+        _set(meeting_id, status="delivery_failed", progress="Ошибка доставки",
+             error=str(e)[:300] if isinstance(e, voice.VoiceError) else "Не удалось завершить рассылку")
 
 
 def retry_delivery(meeting_id):
@@ -627,12 +680,12 @@ def mic_scan():
 
 
 def start_background():
-    from . import conversations
+    from . import agent, conversations
     resume_jobs()
     conversations.recover()
     def loop():
         while True:
-            for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending):
+            for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending):
                 try:
                     fn()
                 except Exception:

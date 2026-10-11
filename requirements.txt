@@ -7,3 +7,5 @@ sqlalchemy==2.0.40
 httpx==0.28.1
 weasyprint==65.1
 psycopg[binary]==3.2.9
+telethon==1.45.0
+cryptography==50.0.2

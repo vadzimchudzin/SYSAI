@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import accounts, bitrix, config, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram
+from . import accounts, agent, bitrix, config, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram, userbot
 from .analyze import mmss
 from .ui_icons import ICONS
 from .db import (ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
@@ -55,7 +55,9 @@ def startup():
     if config.TESTING:
         return
     pipeline.start_background()
-    if config.telegram_enabled():
+    if userbot.ai_mode():
+        userbot.sync(agent.handle_incoming)  # the AI employee answers from the Telegram account, the bot webhook stays off
+    elif config.telegram_enabled():
         try:
             if config.TELEGRAM_MODE == "polling":
                 telegram.start_polling(pipeline.handle_update)
@@ -102,8 +104,10 @@ def guard_admin(request: Request):
 def page(request: Request, name: str, **ctx):
     me = current_user(request)
     pending_users = accounts.pending_count() if me and me["role"] == "superuser" else 0
-    return tpl.TemplateResponse(request, name, {"request": request, "llm": config.llm_enabled(),
-                                                "tg": config.telegram_enabled(), "ephemeral": EPHEMERAL,
+    ai = userbot.ai_mode()
+    return tpl.TemplateResponse(request, name, {"request": request, "llm": config.llm_enabled(), "ai": ai,
+                                                "tg": userbot.ready() if ai else config.telegram_enabled(),
+                                                "ephemeral": EPHEMERAL,
                                                 "me": me, "pending_users": pending_users, **ctx})
 
 
@@ -593,10 +597,16 @@ def settings_view(request: Request, msg: str = ""):
     masked = {k: bool(st.get(k)) for k in settings_store.SECRET_KEYS}
     env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN),
            "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL)}
-    for k in settings_store.SECRET_KEYS:
+    for k in settings_store.SECRET_KEYS + settings_store.HIDDEN_KEYS:
         st.pop(k, None)  # secrets never go back to the browser, only a mask
-    return page(request, "settings.html", s=st, chats=known_chats(), msg=msg, masked=masked, env=env,
-                bitrix_url=bool(config.bitrix_url()))
+    ai = bool(st.get("ai_employee"))
+    return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
+                account=userbot.status() if ai else None, persona_default=voice_default_persona())
+
+
+def voice_default_persona() -> str:
+    from . import voice
+    return voice.DEFAULT_PERSONA
 
 
 def _chat_ids(form, name: str) -> list[str]:
@@ -616,14 +626,14 @@ async def settings_save(request: Request):
     updates = {}
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
-              "bitrix_enabled"):
+              "bitrix_enabled", "ai_employee"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids"):
         if k in f or k + "_extra" in f or f.get("present_" + k) == "1":
             updates[k] = _chat_ids(f, k)
     for k in ("transcribe_model", "report_model", "conversation_model", "conversation_tone",
-              "company_name", "accent_color", "glossary"):
+              "company_name", "accent_color", "glossary", "persona"):
         if k in f:
             value = str(f[k]).strip()
             updates[k] = value if k == "glossary" else value or settings_store.DEFAULTS[k]
@@ -659,10 +669,22 @@ async def settings_save(request: Request):
             updates[k] = value
         elif action != "keep":
             raise HTTPException(400, "Неизвестное действие с ключом")
+    ai_after = bool(updates["ai_employee"]) if "ai_employee" in updates else userbot.ai_mode()
+    if ai_after:  # in AI-employee mode people are addressed by @username, +phone or numeric id
+        for k in ("approver_chat_ids", "report_chat_ids"):
+            if k in updates:
+                try:
+                    updates[k] = [userbot.normalize_ref(x) for x in updates[k]]
+                except userbot.RefError as e:
+                    raise HTTPException(400, str(e))
     if updates:
         settings_store.set_many(updates)
     msg = "Сохранено"
-    if config.telegram_token() != old_token and config.telegram_enabled() and not config.TESTING:
+    if "ai_employee" in updates and not config.TESTING:
+        userbot.sync(agent.handle_incoming)
+        if ai_after and not userbot.configured():
+            msg += ". Теперь подключите Telegram-аккаунт"
+    if config.telegram_token() != old_token and config.telegram_enabled() and not config.TESTING and not ai_after:
         try:
             msg += ". Telegram подключён" if telegram.set_webhook() else ". Токен сохранён, но адрес сайта не известен"
         except Exception as e:  # noqa: BLE001
@@ -720,6 +742,54 @@ def test_bitrix(request: Request):
         return RedirectResponse(f"/settings?msg=Bitrix24: {str(e)[:200]}", 303)
 
 
+# ----------------------------------------------------------------------------- telegram account of the AI employee
+def _tg_redirect(message: str):
+    return RedirectResponse("/settings/telegram?msg=" + quote(message), 303)
+
+
+def _tg_step(action, success: str):
+    """Runs one login step and turns any failure into a message in the panel."""
+    try:
+        return _tg_redirect(action() or success)
+    except userbot.LoginError as e:
+        return _tg_redirect(str(e))
+    except Exception as e:  # noqa: BLE001
+        log.exception("telegram account step failed")
+        return _tg_redirect(f"Не удалось связаться с Telegram: {str(e)[:200]}")
+
+
+@app.get("/settings/telegram", response_class=HTMLResponse)
+def telegram_account_view(request: Request, msg: str = ""):
+    guard_admin(request)
+    return page(request, "telegram_account.html", account=userbot.status(), msg=msg)
+
+
+@app.post("/settings/telegram/start")
+def telegram_account_start(request: Request, api_id: str = Form(""), api_hash: str = Form(""), phone: str = Form("")):
+    guard_admin(request)
+    return _tg_step(lambda: userbot.login_start(api_id, api_hash, phone),
+                    "Код отправлен в Telegram: он придёт сообщением от «Telegram» в приложении.")
+
+
+@app.post("/settings/telegram/code")
+def telegram_account_code(request: Request, code: str = Form("")):
+    guard_admin(request)
+    return _tg_step(lambda: "Нужен пароль двухэтапной проверки." if userbot.login_code(code) == "password" else
+                    "Аккаунт подключён.", "")
+
+
+@app.post("/settings/telegram/password")
+def telegram_account_password(request: Request, password: str = Form("")):
+    guard_admin(request)
+    return _tg_step(lambda: userbot.login_password(password), "Аккаунт подключён.")
+
+
+@app.post("/settings/telegram/logout")
+def telegram_account_logout(request: Request):
+    guard_admin(request)
+    return _tg_step(userbot.logout, "Вышли из аккаунта.")
+
+
 # ----------------------------------------------------------------------------- employees
 @app.get("/employees", response_class=HTMLResponse)
 def employees_view(request: Request, edit: int = 0):
@@ -727,7 +797,8 @@ def employees_view(request: Request, edit: int = 0):
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
-    chats = [c for c in known_chats() if c.kind == "private"]
+    ai = userbot.ai_mode()
+    chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
                 positions=settings_store.POSITIONS, edit=edit)
 
@@ -740,7 +811,15 @@ def employee_save(request: Request, id: int = Form(0), name: str = Form(...), al
     with SessionLocal() as s:
         e = s.get(Employee, id) if id else Employee()
         e.name, e.aliases, e.position, e.channel = name.strip(), aliases.strip(), position.strip(), channel
-        e.telegram_chat_id = (telegram_manual.strip() or telegram_chat_id).strip()
+        ref = (telegram_manual.strip() or telegram_chat_id).strip()
+        if ref and userbot.ai_mode():
+            try:
+                ref = userbot.normalize_ref(ref)
+            except userbot.RefError as exc:
+                raise HTTPException(400, str(exc))
+        if (e.telegram_chat_id or "") != ref:
+            e.telegram_user_id = ""  # the person behind the address changed, learn the id again
+        e.telegram_chat_id = ref
         e.bitrix_user_id = bitrix_user_id.strip()
         e.active = bool(active) if id else True
         s.add(e)

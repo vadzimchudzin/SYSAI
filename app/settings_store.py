@@ -8,6 +8,12 @@ POSITIONS = ["Директор", "Заместитель директора", "�
              "Офис-менеджер", "Помощник руководителя"]
 
 DEFAULTS = {
+    # AI employee: writes from a Telegram account instead of a bot
+    "ai_employee": False,
+    "persona": "",                   # how the AI employee talks; empty = built-in default
+    "agent_model": "google/gemini-2.5-flash",
+    "userbot_api_id": "", "userbot_api_hash": "", "userbot_session": "", "userbot_phone": "",  # sealed, see userbot.py
+    "userbot_pending": "", "userbot_me": {},
     # access
     "registration_open": True,       # people can leave a sign-up request; a superuser approves it
     # processing
@@ -85,6 +91,8 @@ def set_many(values: dict):
 
 
 SECRET_KEYS = ("openrouter_api_key", "telegram_bot_token", "bitrix_webhook_url")
+# Never sent to the browser (sealed Telegram account data).
+HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me")
 
 
 def mask(v: str) -> str:
