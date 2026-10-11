@@ -1,0 +1,59 @@
+{% extends "base.html" %}{% block title %}Пользователи — SYSAI{% endblock %}
+{% block body %}
+{% set pending = users|selectattr('status', 'equalto', 'pending')|list %}
+{% set others = users|rejectattr('status', 'equalto', 'pending')|list %}
+<div class="page-h"><div><h1>Пользователи</h1><p>Свободной регистрации нет: заявку подтверждает суперпользователь.</p></div></div>
+{% if msg %}<div class="card note">{{ msg }}</div>{% endif %}
+<section class="card"><h2>Заявки на доступ ({{ pending|length }})</h2>
+  {% if not pending %}<p class="muted">Новых заявок нет.</p>{% endif %}
+  {% for u in pending %}
+  <div class="emp"><div class="row between">
+    <div><b>{{ u.username }}</b> <span class="muted">{{ u.display_name }}</span>
+      <div class="small muted">подана {{ u.created }}</div></div>
+    <div class="actions">
+      <form method="post" action="/admin/users/{{ u.id }}/approve"><button class="btn sm primary">Одобрить</button></form>
+      <form method="post" action="/admin/users/{{ u.id }}/reject"><button class="btn sm danger">Отклонить</button></form>
+    </div></div></div>
+  {% endfor %}
+  <form method="post" action="/admin/users/registration" class="row between" style="margin-top:14px">
+    <input type="hidden" name="open" value="{{ '' if registration_open else '1' }}">
+    <span class="small muted">Приём заявок: <b>{{ 'открыт' if registration_open else 'закрыт' }}</b></span>
+    <button class="btn sm">{{ 'Закрыть приём заявок' if registration_open else 'Открыть приём заявок' }}</button>
+  </form>
+</section>
+<div class="grid2">
+<section class="card"><h2>Создать пользователя</h2>
+  <form method="post" action="/admin/users/create" class="emp-form">
+    <label class="f">Логин <input name="username" required placeholder="ivan.petrov" autocomplete="off"></label>
+    <label class="f">Имя <input name="display_name" placeholder="Иван Петров" autocomplete="off"></label>
+    <label class="f">Пароль <input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+    <label class="f">Роль <select name="role"><option value="user">Пользователь</option><option value="superuser">Суперпользователь</option></select></label>
+    <button class="btn primary">Создать</button>
+  </form>
+</section>
+<section class="card"><h2>Аккаунты ({{ others|length }})</h2>
+  {% for u in others %}
+  {% set self = me and me.username == u.username %}
+  <div class="emp {{ '' if u.status == 'approved' else 'off' }}"><div class="row between">
+    <div><b>{{ u.username }}</b>{% if self %} <span class="small muted">(вы)</span>{% endif %} <span class="muted">{{ u.display_name }}</span>
+      <div class="small">
+        {% if u.role == 'superuser' %}<span class="pill green">суперпользователь</span>{% else %}<span class="pill">пользователь</span>{% endif %}
+        {% if u.status == 'approved' %}<span class="pill green">активен</span>
+        {% elif u.status == 'rejected' %}<span class="pill red">заявка отклонена</span>
+        {% else %}<span class="pill red">отключён</span>{% endif %}
+      </div>
+      <div class="small muted">вход: {{ u.last_login }}</div></div>
+    <div class="actions">
+      {% if u.status == 'approved' %}
+        {% if u.role == 'user' %}<form method="post" action="/admin/users/{{ u.id }}/promote" onsubmit="return confirm('Сделать {{ u.username }} суперпользователем?')"><button class="btn sm">В суперпользователи</button></form>
+        {% elif not self %}<form method="post" action="/admin/users/{{ u.id }}/demote"><button class="btn sm">Снять права</button></form>{% endif %}
+        {% if not self %}<form method="post" action="/admin/users/{{ u.id }}/disable" onsubmit="return confirm('Отключить {{ u.username }}?')"><button class="btn sm">Отключить</button></form>{% endif %}
+      {% else %}
+        <form method="post" action="/admin/users/{{ u.id }}/approve"><button class="btn sm primary">Включить</button></form>
+      {% endif %}
+      {% if not self %}<form method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Удалить аккаунт {{ u.username }}?')"><button class="btn sm danger">×</button></form>{% endif %}
+    </div></div></div>
+  {% endfor %}
+</section>
+</div>
+{% endblock %}

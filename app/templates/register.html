@@ -1,0 +1,24 @@
+{% from "_logo.html" import logo %}<!doctype html>
+<html lang="ru"><head>{% include "_head.html" %}<title>Заявка на доступ — SYSAI</title></head>
+<body><div class="auth"><div class="auth-box">
+  <a href="/">{{ logo('md', animate=True) }}</a>
+  {% if sent %}
+  <h1>Заявка отправлена</h1>
+  <p>Администратор проверит её и подтвердит доступ. После этого войдите со своим логином и паролем.</p>
+  <a class="btn primary wide" href="/login">К входу</a>
+  {% elif not open %}
+  <h1>Приём заявок закрыт</h1>
+  <p>Свободной регистрации нет. Обратитесь к администратору.</p>
+  {% else %}
+  <h1>Заявка на доступ</h1><p>Аккаунт появится после подтверждения администратором.</p>
+  <form method="post" action="/register" class="auth-form">
+    <label class="f">Логин <input name="username" autocomplete="username" required autofocus value="{{ username }}" placeholder="ivan.petrov"></label>
+    <label class="f">Имя <input name="display_name" autocomplete="name" value="{{ display_name }}" placeholder="Иван Петров"></label>
+    <label class="f">Пароль <input type="password" name="password" autocomplete="new-password" required minlength="8"></label>
+    <label class="f">Повторите пароль <input type="password" name="password2" autocomplete="new-password" required minlength="8"></label>
+    {% if error %}<div class="warn small">{{ error }}</div>{% endif %}
+    <button class="btn primary wide">Отправить заявку</button>
+  </form>
+  {% endif %}
+  <p class="small muted" style="margin-top:18px"><a href="/login" class="muted">← Ко входу</a></p>
+</div></div></body></html>

@@ -45,6 +45,21 @@ class Setting(Base):
     value = Column(Text, nullable=False)  # JSON
 
 
+class User(Base):
+    """Panel accounts. Sign-up requests start as "pending" and cannot sign in until a superuser approves them."""
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    username = Column(String(64), nullable=False, unique=True)
+    display_name = Column(String(120), default="")
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(20), default="user")        # user | superuser
+    status = Column(String(20), default="pending")   # pending | approved | rejected | disabled
+    created_at = Column(DateTime(timezone=True), default=now)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    decided_by = Column(String(64), default="")
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class TelegramChat(Base):
     """Chats the bot knows: people who pressed /start, groups and channels it was added to."""
     __tablename__ = "telegram_chats"
@@ -252,20 +267,33 @@ def wait_for_db(attempts: int = 6, delay: float = 3.0):
             time.sleep(delay * attempt)
 
 
+def _add_column_if_missing(table: str, column: str, ddl: str):
+    """Lightweight migration for databases created by earlier versions."""
+    from sqlalchemy import inspect
+    for attempt in (1, 2):
+        if column in {c["name"] for c in inspect(engine).get_columns(table)}:
+            return
+        try:
+            with engine.begin() as con:
+                con.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+            return
+        except OperationalError as exc:
+            # SQLite parses ALTER against the schema cached by the pooled connection. A connection that missed a
+            # schema change made through another one reports a duplicate column that is not there: reconnect once.
+            if "duplicate column" not in str(exc).lower() or attempt == 2:
+                raise
+            engine.dispose()
+
+
 def init_db():
+    if engine.dialect.name == "sqlite":
+        # Pooled SQLite connections cache the schema; start from fresh ones after DDL done through another connection.
+        engine.dispose()
     wait_for_db()
     log.info("Database ready: %s%s", engine.dialect.name, f" @ {engine.url.host}" if engine.url.host else "")
     Base.metadata.create_all(engine)
-    # lightweight migration for databases created by earlier versions
-    from sqlalchemy import inspect
-    cols = {c["name"] for c in inspect(engine).get_columns("meetings")}
-    if "options" not in cols:
-        with engine.begin() as con:
-            con.execute(text("ALTER TABLE meetings ADD COLUMN options JSON"))
-    delivery_cols = {c["name"] for c in inspect(engine).get_columns("deliveries")}
-    if "cycle_attempts" not in delivery_cols:
-        with engine.begin() as con:
-            con.execute(text("ALTER TABLE deliveries ADD COLUMN cycle_attempts INTEGER NOT NULL DEFAULT 0"))
+    _add_column_if_missing("meetings", "options", "options JSON")
+    _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
 
 
 def dumps(v) -> str:

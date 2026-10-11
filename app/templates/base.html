@@ -8,8 +8,11 @@
     <a href="/app/new" class="btn primary new">{{ icon('plus') }} Новое совещание</a>
     <a class="nav {{ 'on' if path == '/app' }}" href="/app">{{ icon('home') }} Обзор</a>
     <a class="nav {{ 'on' if path.startswith('/meetings') }}" href="/meetings">{{ icon('list') }} Совещания</a>
+    {% if me and me.role == 'superuser' %}
     <a class="nav {{ 'on' if path.startswith('/employees') }}" href="/employees">{{ icon('users') }} Сотрудники</a>
+    <a class="nav {{ 'on' if path.startswith('/admin/users') }}" href="/admin/users">{{ icon('key') }} Пользователи{% if pending_users %} <span class="pill red">{{ pending_users }}</span>{% endif %}</a>
     <a class="nav {{ 'on' if path.startswith('/settings') }}" href="/settings">{{ icon('gear') }} Настройки</a>
+    {% endif %}
     <div class="sp"></div>
     <div class="me"><span class="ava">{{ (request.session.get('user') or 'S')[:2]|upper }}</span><span>{{ request.session.get('user') or 'SYSAI' }}</span>
       <a href="/logout" class="muted" title="Выйти" style="margin-left:auto">{{ icon('logout') }}</a></div>
@@ -18,7 +21,7 @@
     <div class="topbar"><a href="/app">{{ logo('sm') }}</a><button class="btn sm ghost" onclick="document.getElementById('side').classList.toggle('open')">{{ icon('menu') }}</button></div>
     <div class="content">
       {% if not llm or not tg %}<div class="banner">
-        {% if not llm %}<b>Ключ OpenRouter не задан.</b> Для настоящего аудио подключите модель. Тестовый пример доступен отдельно через «Демо без аудио». <a href="/settings">Вставить ключ →</a><br>{% endif %}
+        {% if not llm %}<b>Ключ OpenRouter не задан.</b> Для настоящего аудио подключите модель. Тестовый пример доступен отдельно через «Демо без аудио». {% if me and me.role == 'superuser' %}<a href="/settings">Вставить ключ →</a>{% endif %}<br>{% endif %}
         {% if not tg %}<b>Telegram выключен.</b> Токен бота не задан — сообщения не отправляются.{% endif %}</div>{% endif %}
       {% block body %}{% endblock %}
     </div>

@@ -16,5 +16,5 @@
 </div>
 <div class="card"><div class="row between"><h2>Последние совещания</h2><a href="/meetings" class="small">Все →</a></div>
   {% include "_meetings_table.html" %}</div>
-{% if not employees_count %}<div class="card note">Начните с <a href="/employees">справочника сотрудников</a> — так SYSAI будет назначать задачи по именам.</div>{% endif %}
+{% if not employees_count and me and me.role == 'superuser' %}<div class="card note">Начните с <a href="/employees">справочника сотрудников</a> — так SYSAI будет назначать задачи по именам.</div>{% endif %}
 {% endblock %}

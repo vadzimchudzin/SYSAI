@@ -16,10 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import bitrix, config, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram
+from . import accounts, bitrix, config, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram
 from .analyze import mmss
 from .ui_icons import ICONS
-from .db import ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, init_db, now
+from .db import (ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
+                 init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("sysai")
@@ -48,6 +49,7 @@ tpl.env.globals.update(STATUS=STATUS, ICONS=ICONS)
 
 def startup():
     init_db()
+    accounts.ensure_superuser()
     (config.DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
     config.MIC_INBOX_DIR.mkdir(parents=True, exist_ok=True)
     if config.TESTING:
@@ -63,8 +65,26 @@ def startup():
             log.warning("Telegram setup failed: %s", e)
 
 
+def current_user(request: Request) -> dict | None:
+    """The signed-in account behind the session cookie, only while it is still approved (cached per request)."""
+    cached = getattr(request.state, "user", False)
+    if cached is not False:
+        return cached
+    user = None
+    uid = request.session.get("uid")
+    if uid is not None:
+        with SessionLocal() as s:
+            row = s.get(User, uid)
+            if row is not None and row.status == "approved":
+                user = {"id": row.id, "username": row.username, "name": row.display_name or row.username, "role": row.role}
+        if user is None:
+            request.session.clear()  # the account was disabled or removed: the cookie dies with it
+    request.state.user = user
+    return user
+
+
 def authed(request: Request) -> bool:
-    return bool(request.session.get("auth"))
+    return current_user(request) is not None
 
 
 def guard(request: Request):
@@ -72,9 +92,19 @@ def guard(request: Request):
         raise HTTPException(status_code=303, headers={"Location": "/login"})
 
 
+def guard_admin(request: Request):
+    """Settings, the employee directory and user management belong to superusers."""
+    guard(request)
+    if current_user(request)["role"] != "superuser":
+        raise HTTPException(status_code=403, detail="Раздел доступен только суперпользователю.")
+
+
 def page(request: Request, name: str, **ctx):
+    me = current_user(request)
+    pending_users = accounts.pending_count() if me and me["role"] == "superuser" else 0
     return tpl.TemplateResponse(request, name, {"request": request, "llm": config.llm_enabled(),
-                                                "tg": config.telegram_enabled(), "ephemeral": EPHEMERAL, **ctx})
+                                                "tg": config.telegram_enabled(), "ephemeral": EPHEMERAL,
+                                                "me": me, "pending_users": pending_users, **ctx})
 
 
 EPHEMERAL = config.DATABASE_URL.startswith("sqlite") and bool(os.getenv("RENDER"))
@@ -90,13 +120,12 @@ def login_form(request: Request, error: str = ""):
 
 @app.post("/login")
 def login(request: Request, username: str = Form(""), password: str = Form(...)):
-    ok_user = hmac.compare_digest(username.strip().lower(), config.ADMIN_USERNAME.lower())
-    if ok_user and hmac.compare_digest(password, config.ADMIN_PASSWORD):
-        request.session["auth"] = True
-        request.session["user"] = config.ADMIN_USERNAME
+    user, problem = accounts.authenticate(username, password)
+    if user is not None:
+        request.session.update(auth=True, uid=user.id, user=user.display_name or user.username, role=user.role)
         return RedirectResponse("/app", 303)
     time.sleep(1)
-    return RedirectResponse("/login?error=1", 303)
+    return RedirectResponse("/login?error=" + problem, 303)
 
 
 @app.get("/logout")
@@ -559,7 +588,7 @@ def known_chats():
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_view(request: Request, msg: str = ""):
-    guard(request)
+    guard_admin(request)
     st = settings_store.all_settings()
     masked = {k: bool(st.get(k)) for k in settings_store.SECRET_KEYS}
     env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN),
@@ -579,7 +608,7 @@ def _chat_ids(form, name: str) -> list[str]:
 
 @app.post("/settings")
 async def settings_save(request: Request):
-    guard(request)
+    guard_admin(request)
     f = await request.form()
     # Only update submitted controls. Omitted settings belong to other sections
     # or clients and must not be reset to defaults. Presence markers distinguish
@@ -651,7 +680,7 @@ def _num(v, default):
 
 @app.post("/settings/test-openrouter")
 def test_openrouter(request: Request):
-    guard(request)
+    guard_admin(request)
     from . import llm
     try:
         return RedirectResponse("/settings?msg=OpenRouter: " + llm.check_key(), 303)
@@ -661,7 +690,7 @@ def test_openrouter(request: Request):
 
 @app.post("/settings/test-telegram")
 def test_telegram(request: Request):
-    guard(request)
+    guard_admin(request)
     s = settings_store.all_settings()
     chats = list(dict.fromkeys((s["report_chat_ids"] or []) + (s["approver_chat_ids"] or [])))
     if not config.telegram_enabled():
@@ -684,7 +713,7 @@ def test_telegram(request: Request):
 
 @app.post("/settings/test-bitrix")
 def test_bitrix(request: Request):
-    guard(request)
+    guard_admin(request)
     try:
         return RedirectResponse(f"/settings?msg=Bitrix24 подключён: {bitrix.check()}", 303)
     except Exception as e:  # noqa: BLE001
@@ -694,7 +723,7 @@ def test_bitrix(request: Request):
 # ----------------------------------------------------------------------------- employees
 @app.get("/employees", response_class=HTMLResponse)
 def employees_view(request: Request, edit: int = 0):
-    guard(request)
+    guard_admin(request)
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
@@ -707,7 +736,7 @@ def employees_view(request: Request, edit: int = 0):
 def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
                   position: str = Form(""), channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
                   telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
-    guard(request)
+    guard_admin(request)
     with SessionLocal() as s:
         e = s.get(Employee, id) if id else Employee()
         e.name, e.aliases, e.position, e.channel = name.strip(), aliases.strip(), position.strip(), channel
@@ -721,7 +750,7 @@ def employee_save(request: Request, id: int = Form(0), name: str = Form(...), al
 
 @app.post("/employees/{eid}/delete")
 def employee_delete(request: Request, eid: int):
-    guard(request)
+    guard_admin(request)
     with SessionLocal() as s:
         for t in s.query(Task).filter_by(assignee_id=eid):
             t.assignee_id = None
@@ -730,6 +759,73 @@ def employee_delete(request: Request, eid: int):
             s.delete(e)
         s.commit()
     return RedirectResponse("/employees", 303)
+
+
+# ----------------------------------------------------------------------------- sign-up requests and users
+def _register_page(request: Request, status_code: int = 200, **ctx):
+    base = {"request": request, "open": accounts.registration_open(), "sent": False, "error": "", "username": "",
+            "display_name": ""}
+    return tpl.TemplateResponse(request, "register.html", {**base, **ctx}, status_code=status_code)
+
+
+@app.get("/register", response_class=HTMLResponse)
+def register_form(request: Request):
+    if authed(request):
+        return RedirectResponse("/app", 303)
+    return _register_page(request)
+
+
+@app.post("/register", response_class=HTMLResponse)
+def register_submit(request: Request, username: str = Form(""), display_name: str = Form(""),
+                    password: str = Form(""), password2: str = Form("")):
+    ip = request.client.host if request.client else "unknown"
+    try:
+        if not accounts.allow_registration(ip):
+            raise accounts.AccountError("Слишком много попыток с вашего адреса. Попробуйте позже.")
+        if password != password2:
+            raise accounts.AccountError("Пароли не совпадают.")
+        accounts.register(username, password, display_name)
+    except accounts.AccountError as e:
+        return _register_page(request, 400, error=str(e), username=username.strip(), display_name=display_name.strip())
+    return _register_page(request, sent=True)
+
+
+def _users_redirect(message: str):
+    return RedirectResponse("/admin/users?msg=" + quote(message), 303)
+
+
+@app.get("/admin/users", response_class=HTMLResponse)
+def users_view(request: Request, msg: str = ""):
+    guard_admin(request)
+    return page(request, "users.html", users=accounts.list_users(), registration_open=accounts.registration_open(),
+                msg=msg)
+
+
+@app.post("/admin/users/create")
+def users_create(request: Request, username: str = Form(""), display_name: str = Form(""), password: str = Form(""),
+                 role: str = Form("user")):
+    guard_admin(request)
+    try:
+        accounts.create_user(username, password, role, current_user(request)["username"], display_name)
+    except accounts.AccountError as e:
+        return _users_redirect(str(e))
+    return _users_redirect(f"{accounts.normalize(username)}: аккаунт создан")
+
+
+@app.post("/admin/users/registration")
+def users_registration(request: Request, open: str = Form("")):
+    guard_admin(request)
+    settings_store.set_many({"registration_open": open == "1"})
+    return _users_redirect("Приём заявок открыт." if open == "1" else "Приём заявок закрыт.")
+
+
+@app.post("/admin/users/{uid}/{action}")
+def users_action(request: Request, uid: int, action: str):
+    guard_admin(request)
+    try:
+        return _users_redirect(accounts.apply(uid, action, current_user(request)["username"]))
+    except accounts.AccountError as e:
+        return _users_redirect(str(e))
 
 
 # ----------------------------------------------------------------------------- telegram webhook

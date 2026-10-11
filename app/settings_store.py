@@ -8,6 +8,8 @@ POSITIONS = ["Директор", "Заместитель директора", "�
              "Офис-менеджер", "Помощник руководителя"]
 
 DEFAULTS = {
+    # access
+    "registration_open": True,       # people can leave a sign-up request; a superuser approves it
     # processing
     "auto_ingest": False,            # pick up recordings from the microphone automatically (mocked inbox in MVP)
     "approval_required": True,       # draft goes to approvers before anything is sent
