@@ -107,6 +107,10 @@ def _process(meeting_id: int):
             saved_report = m.report
             total = m.duration_sec
         settings = meeting_settings(meeting_id)
+        terms = _directory_terms()
+        if terms:  # names and nicknames from the directory help to hear and to spell people correctly
+            glossary = (settings.get("glossary") or "").strip()
+            settings = dict(settings, glossary=(glossary + ("; " if glossary else "") + "имена сотрудников: " + ", ".join(terms))[:2500])
         if saved_report is not None:
             # Crash after _save_report committed: tasks and their IDs are already durable.
             _set(meeting_id, status="analyzing", error="")
@@ -137,6 +141,18 @@ def _process(meeting_id: int):
     except Exception as e:  # noqa: BLE001
         log.exception("meeting %s failed", meeting_id)
         _set(meeting_id, status="error", progress="Ошибка", error=str(e)[:2000])
+
+
+def _directory_terms(limit: int = 80) -> list:
+    """Names and nicknames of active employees, each once, in the order of the directory."""
+    with SessionLocal() as s:
+        people = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.id).all()
+        found = []
+        for person in people:
+            for term in [person.name] + person.alias_list():
+                if term.strip() and term.strip() not in found:
+                    found.append(term.strip())
+        return found[:limit]
 
 
 def _force_review_options(m):

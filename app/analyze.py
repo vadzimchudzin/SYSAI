@@ -16,7 +16,10 @@ SYSTEM = """Ты — опытный секретарь руководителя.
 - Пиши по-русски, деловым языком, конкретно. Ничего не выдумывай: только то, что прозвучало.
 - Задачи: каждое поручение отдельно. Формулируй как действие («Подготовить…», «Согласовать…»).
   Исполнитель — только если он явно назван или очевиден из контекста. Сопоставь со справочником сотрудников
-  (по имени, псевдонимам, должности) и укажи employee_id. Если не уверен — employee_id null и assignee_name как прозвучало.
+  (по имени, фамилии, псевдонимам из поля aliases, должности; имя может прозвучать в любом падеже: «Вадиму», «у Вадима»)
+  и укажи employee_id. Если имя или псевдоним человека из справочника прозвучал рядом с поручением, employee_id
+  обязателен. null ставь, только если такого человека в справочнике нет или подходят несколько; в assignee_name
+  всегда пиши имя так, как оно прозвучало.
 - Срок: если назван («до пятницы», «к 15-му», «через неделю») — переведи в дату YYYY-MM-DD относительно даты
   совещания {meeting_date} ({weekday}) и процитируй в deadline_quote. Если срок не назван — deadline null.
 - Для задач и тем укажи время в записи (MM:SS) и короткую цитату-основание.
@@ -451,6 +454,55 @@ def _deduplicate_tasks(tasks, employees):
     return unique
 
 
+_PAIR_ENDINGS = ("ом", "ем", "ой", "ей", "ою", "ею", "ам", "ям")
+_STOP_WORDS = {"у", "к", "от", "для", "по", "на", "с", "со", "и", "же", "мне", "ему", "ей", "им", "это"}
+
+
+def _words(text) -> list:
+    words = re.findall(r"[a-zа-я0-9]+", re.sub(r"\(.*?\)", " ", str(text or "")).lower().replace("ё", "е"))
+    return [w for w in words if len(w) > 1 and w not in _STOP_WORDS]
+
+
+def _stems(word: str) -> set:
+    """Plausible stems of a Russian name: «Вадиму», «Вадима», «Вадимом» share «вадим»; «Андрей» and «Андрею» share «андре»."""
+    stems = {word}
+    if word[-1] in "йь" and len(word) - 1 >= 3:
+        stems.add(word[:-1])
+    for ending in _PAIR_ENDINGS:
+        if word.endswith(ending) and len(word) - 2 >= 3:
+            stems.add(word[:-2])
+    if word[-1] in "аяеыиоуюэ" and len(word) - 1 >= 3:
+        stems.add(word[:-1])
+    return stems
+
+
+def _same_word(a: str, b: str) -> bool:
+    return a == b or bool(_stems(a) & _stems(b))
+
+
+def _aliases(employee) -> list:
+    try:
+        return list(employee.alias_list())
+    except AttributeError:
+        return [a.strip() for a in str(getattr(employee, "aliases", "") or "").split(",") if a.strip()]
+
+
+def match_employee(name, employees):
+    """The one directory employee a spoken name points at, or None (unknown or ambiguous: never guess).
+
+    The model is told to map names itself but plays safe and leaves employee_id empty; this catches the cases where
+    the name, an alias or a surname from the directory was plainly said, in any grammatical case."""
+    spoken = _words(name)
+    if not spoken:
+        return None
+    hits = []
+    for employee in employees:
+        known = [w for phrase in [getattr(employee, "name", "")] + _aliases(employee) for w in _words(phrase)]
+        if all(any(_same_word(s, k) for k in known) for s in spoken):
+            hits.append(employee)
+    return hits[0] if len(hits) == 1 else None
+
+
 def normalize(r: dict, employees, meeting_date=None) -> dict:
     ids = {e.id for e in employees}
     out = {k: r.get(k) or [] for k in ("participants", "topics", "decisions", "tasks", "open_questions", "risks",
@@ -462,6 +514,9 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         normalized = dict(participant)
         eid = normalized.get("employee_id")
         normalized["employee_id"] = eid if isinstance(eid, int) and not isinstance(eid, bool) and eid in ids else None
+        if normalized["employee_id"] is None and normalized.get("name"):
+            matched = match_employee(normalized["name"], employees)
+            normalized["employee_id"] = matched.id if matched else None
         participants.append(normalized)
     out["participants"] = participants
     out["title"] = (r.get("title") or "Совещание").strip()
@@ -477,6 +532,9 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
             eid = int(eid) if eid is not None else None
         except (TypeError, ValueError):
             eid = None
+        if eid not in ids:
+            matched = match_employee(t.get("assignee_name"), employees)
+            eid = matched.id if matched else None
         d = None
         if t.get("deadline"):
             d = normalize_deadline(t["deadline"], meeting_date)

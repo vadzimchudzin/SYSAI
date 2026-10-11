@@ -376,6 +376,14 @@ def test_first_contact_is_flagged_for_the_model(tgacc, model):
     assert assignee_calls and all(c["facts"]["first_message_to_this_person"] for c in assignee_calls)
 
 
+def test_the_first_message_to_an_employee_is_not_an_introduction(tgacc, model):
+    mid = make_meeting()
+    pipeline.submit_deliver(mid)
+    system = next(c["system"] for c in model.calls if "одному сотруднику" in c["system"])
+    assert "без представления" in system and "представься" not in system
+    assert "Не представляйся" in system and "ИИ-ассистент" in system  # honest only when asked directly
+
+
 def test_a_missing_task_is_asked_for_again_and_then_the_message_is_accepted(tgacc, model):
     mid = make_meeting(status="analyzing", people=(("Иван Петров", "@ivan", ("Смета", "Договор")),))
     model.omit_once = True
