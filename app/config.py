@@ -19,7 +19,11 @@ def database_url(value: str | None, data_dir: pathlib.Path) -> str:
     # Provider URLs omit the installed SQLAlchemy psycopg driver name.
     for prefix in ("postgres://", "postgresql://"):
         if url.startswith(prefix):
-            return "postgresql+psycopg://" + url[len(prefix):]
+            url = "postgresql+psycopg://" + url[len(prefix):]
+            break
+    # Neon only accepts TLS connections; a string pasted without sslmode must not fail on that.
+    if url.startswith("postgresql") and ".neon.tech" in url.split("?")[0] and "sslmode=" not in url:
+        url += ("&" if "?" in url else "?") + "sslmode=require"
     return url
 
 

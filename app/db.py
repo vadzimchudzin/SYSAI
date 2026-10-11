@@ -1,18 +1,36 @@
 """Database models (SQLite by default, Postgres via DATABASE_URL)."""
 import datetime as dt
 import json
+import logging
+import time
 
 from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint,
-                        create_engine)
+                        create_engine, text)
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from . import config
 
-engine = create_engine(
-    config.DATABASE_URL,
-    connect_args={"check_same_thread": False} if config.DATABASE_URL.startswith("sqlite") else {},
-    pool_pre_ping=True,
-)
+log = logging.getLogger("sysai.db")
+
+
+def engine_options(url: str) -> dict:
+    """Connection settings per backend.
+
+    Postgres (Neon): an idle compute suspends and needs a few seconds to wake up, so connections are
+    recycled, pre-pinged and given a generous connect timeout. Neon's pooled host (PgBouncer in transaction
+    mode) cannot keep psycopg's automatically prepared statements, so server-side preparing is switched off.
+    """
+    if url.startswith("sqlite"):
+        return {"connect_args": {"check_same_thread": False}, "pool_pre_ping": True}
+    connect_args = {"connect_timeout": 30}
+    if url.startswith("postgresql+psycopg://"):
+        connect_args["prepare_threshold"] = None
+    return {"pool_pre_ping": True, "pool_recycle": 300, "pool_size": 8, "max_overflow": 8,
+            "connect_args": connect_args}
+
+
+engine = create_engine(config.DATABASE_URL, **engine_options(config.DATABASE_URL))
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 Base = declarative_base()
 
@@ -219,10 +237,27 @@ class Delivery(Base):
     sent_at = Column(DateTime(timezone=True), nullable=True)
 
 
+def wait_for_db(attempts: int = 6, delay: float = 3.0):
+    """Block until the database answers. A suspended Neon compute needs a few seconds to wake up,
+    so a failed first connection retries with a growing pause instead of crashing the boot."""
+    for attempt in range(1, attempts + 1):
+        try:
+            with engine.connect() as con:
+                con.execute(text("SELECT 1"))
+            return
+        except OperationalError as exc:
+            if attempt == attempts:
+                raise
+            log.warning("Database is not ready (attempt %s of %s): %s", attempt, attempts, str(exc).splitlines()[0])
+            time.sleep(delay * attempt)
+
+
 def init_db():
+    wait_for_db()
+    log.info("Database ready: %s%s", engine.dialect.name, f" @ {engine.url.host}" if engine.url.host else "")
     Base.metadata.create_all(engine)
     # lightweight migration for databases created by earlier versions
-    from sqlalchemy import inspect, text
+    from sqlalchemy import inspect
     cols = {c["name"] for c in inspect(engine).get_columns("meetings")}
     if "options" not in cols:
         with engine.begin() as con:
