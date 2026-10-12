@@ -1,0 +1,9 @@
+# HTTPS перед SYSAI. Адрес и способ получения сертификата берутся из .env:
+#   SITE_ADDRESS  IP сервера, имя в локальной сети или домен
+#   TLS_ARG       internal: сертификат от локального центра Caddy (для офисной сети)
+#                 или почта: настоящий сертификат Let's Encrypt (для домена, открытого из интернета)
+{$SITE_ADDRESS} {
+	tls {$TLS_ARG:internal}
+	encode zstd gzip
+	reverse_proxy sysai:8000
+}
