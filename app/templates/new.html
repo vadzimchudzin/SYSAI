@@ -55,5 +55,5 @@
   <p class="small muted" style="margin-bottom:0">Сроки и получатели берутся из <a href="/settings">настроек</a>. <button class="linkish" formaction="/demo" formnovalidate name="source" value="demo">Показать демо без аудио</button></p>
 </section>
 </form>
-<script src="/static/recording.js" defer data-max-bytes="{{ config.MAX_UPLOAD_MB * 1024 * 1024 }}"></script>
+<script src="{{ asset('recording.js') }}" defer data-max-bytes="{{ config.MAX_UPLOAD_MB * 1024 * 1024 }}"></script>
 {% endblock %}

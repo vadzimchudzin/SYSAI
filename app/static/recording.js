@@ -5,7 +5,7 @@
   const stop = document.getElementById('recording-stop'), retry = document.getElementById('recording-retry');
   const cancel = document.getElementById('recording-cancel'), download = document.getElementById('recording-download');
   const state = document.getElementById('recording-state'), progress = document.getElementById('recording-progress');
-  const maxBytes = Number(document.querySelector('script[src="/static/recording.js"]').dataset.maxBytes);
+  const maxBytes = Number(document.querySelector('script[src^="/static/recording.js"]').dataset.maxBytes);
   let recorder, stream, id, mime, chunks = [], next = 0, bytes = 0, busy = false;
   let ended = false, cancelled = false, active = false, failed = false, startedAt, timer, url;
 

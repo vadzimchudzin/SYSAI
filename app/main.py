@@ -50,6 +50,21 @@ STATUS.update(delivery_queued=("В очереди отправки", "blue"), de
               delivery_failed=("Ошибка доставки", "red"), ready=("Отчёт готов", "green"))
 tpl.env.globals.update(STATUS=STATUS, ICONS=ICONS)
 
+_ASSET_VERSIONS: dict = {}
+
+
+def asset(name: str) -> str:
+    """/static/<name>?v=<content hash>. Render's CDN lets browsers keep static files for 4 hours, so without the version a
+    deploy shows new pages with old styles; the hash changes only when the file does."""
+    version = _ASSET_VERSIONS.get(name)
+    if version is None:
+        import hashlib
+        version = _ASSET_VERSIONS[name] = hashlib.md5((BASE / "static" / name).read_bytes()).hexdigest()[:10]
+    return f"/static/{name}?v={version}"
+
+
+tpl.env.globals.update(asset=asset)
+
 
 def startup():
     init_db()
