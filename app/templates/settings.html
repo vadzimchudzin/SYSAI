@@ -50,17 +50,6 @@
     {% endif %}
   </section>
   <section class="card setup-step">
-    <h2>Распознавание речи</h2>
-    <p class="small muted">ElevenLabs Scribe отделяет говорящих по всей записи и даёт время каждого слова. Нужен свой ключ с elevenlabs.io. Gemini работает по ключу OpenRouter и подходит как запасной вариант.</p>
-    <label class="f">Кто распознаёт запись
-      <select name="transcribe_provider">
-        <option value="elevenlabs" {{ 'selected' if s.transcribe_provider != 'gemini' }}>ElevenLabs Scribe</option>
-        <option value="gemini" {{ 'selected' if s.transcribe_provider == 'gemini' }}>Gemini (через OpenRouter)</option>
-      </select>
-    </label>
-    {{ credential('elevenlabs_api_key', 'Ключ ElevenLabs', 'sk_…') }}
-  </section>
-  <section class="card setup-step">
     <h2>Кому писать</h2>
     {{ switch('approval_required', 'Сначала показать черновик проверяющему', 'Включено: проверяющий видит план и подтверждает отправку. Выключено: после обработки всё уходит сразу.') }}
     <h3>Проверяющий</h3>

@@ -35,8 +35,6 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_BASE_URL = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io").rstrip("/")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "webhook")  # webhook | polling | off
@@ -65,10 +63,6 @@ def _panel(key: str) -> str:
 
 def openrouter_key() -> str:
     return _panel("openrouter_api_key") or OPENROUTER_API_KEY
-
-
-def elevenlabs_key() -> str:
-    return _panel("elevenlabs_api_key") or ELEVENLABS_API_KEY
 
 
 def telegram_token() -> str:

@@ -33,8 +33,7 @@ def make_long_mp3(path, seconds):
 
 
 def settings(**overrides):
-    # These tests cover the Gemini path; the default provider is ElevenLabs Scribe (see test_scribe.py).
-    return {"transcribe_model": "test/model", "transcribe_provider": "gemini", **overrides}
+    return {"transcribe_model": "test/model", **overrides}
 
 
 @pytest.mark.parametrize("duration,tail", [(122.4, 2.4), (120.35, 0.35)])

@@ -155,7 +155,7 @@ def test_transcribe_chunks_and_payload(monkeypatch, tmp_path):
         return '```json\n{"segments": [{"speaker": "Спикер 1", "start": 5, "text": "фрагмент %d"}]}\n```' % len(seen)
     monkeypatch.setattr(transcribe.config, "OPENROUTER_API_KEY", "x")
     monkeypatch.setattr(llm, "chat", fake_chat)
-    total, segs = transcribe.transcribe(str(wav), {**settings_store.DEFAULTS, "chunk_minutes": 1, "transcribe_provider": "gemini"})
+    total, segs = transcribe.transcribe(str(wav), {**settings_store.DEFAULTS, "chunk_minutes": 1})
     assert round(total) == 150 and len(segs) == 3
     assert [s["start"] for s in segs] == [5.0, 65.0, 125.0]
     assert "продолжение записи" in seen[1]

@@ -12,19 +12,8 @@ import math
 import pathlib
 import re
 import shutil
-import tempfile
-import time
-
-import httpx
 
 from . import audio, checkpoints, config, llm
-
-SCRIBE_MODEL = "scribe_v2"
-SCRIBE_TIMEOUT = 900          # seconds for one request: a long recording takes minutes to recognise
-SCRIBE_PAUSE = 2.0            # a silence this long starts a new paragraph
-SCRIBE_MAX_WORDS = 120        # longest paragraph before it is split
-LANGUAGE_CODES = {"ru": "rus", "en": "eng"}
-RETRY_STATUSES = (408, 429, 500, 502, 503, 504)
 
 DEMO = pathlib.Path(__file__).resolve().parent.parent / "samples" / "demo_transcript.json"
 SHORT_AUDIO_SECONDS = 10  # Includes codec padding around 1–5 second recordings.
@@ -116,13 +105,6 @@ def _merge(segments, new, boundary):
 
 
 def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=None) -> tuple[float, list]:
-    """Speech to text with speakers. ElevenLabs Scribe by default; Gemini stays as the fallback provider."""
-    if (settings.get("transcribe_provider") or "elevenlabs") == "gemini":
-        return transcribe_gemini(path, settings, progress, checkpoint)
-    return transcribe_scribe(path, settings, progress, checkpoint)
-
-
-def transcribe_gemini(path: str, settings: dict, progress=lambda msg: None, checkpoint=None) -> tuple[float, list]:
     if not config.llm_enabled():
         raise llm.LLMError("Для настоящего аудио нужен ключ OpenRouter. Демо запускается отдельно.")
     digest = hashlib.sha256()
@@ -189,123 +171,6 @@ def transcribe_gemini(path: str, settings: dict, progress=lambda msg: None, chec
         a["end"] = b["start"]
     if segments:
         segments[-1]["end"] = min(round(total, 1), total)
-    return total, segments
-
-
-def _scribe_post(audio_bytes: bytes, language: str | None) -> dict:
-    """One recognition request. Transient failures are retried; account problems are explained, not retried."""
-    key = config.elevenlabs_key()
-    if not key:
-        raise llm.LLMError("Нужен ключ ElevenLabs: вставьте его в Настройках или переключите распознавание на Gemini")
-    fields = {"model_id": SCRIBE_MODEL, "diarize": "true", "timestamps_granularity": "word"}
-    if language:
-        fields["language_code"] = language
-    url = f"{config.ELEVENLABS_BASE_URL}/v1/speech-to-text"
-    last = "нет ответа"
-    for attempt in range(3):
-        try:
-            response = httpx.post(url, headers={"xi-api-key": key}, data=fields,
-                                  files={"file": ("meeting.mp3", audio_bytes, "audio/mpeg")}, timeout=SCRIBE_TIMEOUT)
-        except httpx.HTTPError as exc:
-            last = str(exc)[:200]
-            time.sleep(5 * (attempt + 1))
-            continue
-        if response.status_code in RETRY_STATUSES:
-            last = f"HTTP {response.status_code}"
-            time.sleep(5 * (attempt + 1))
-            continue
-        if response.status_code in (401, 403):
-            raise llm.LLMError("ElevenLabs не принял ключ: проверьте ключ в Настройках")
-        if response.status_code == 402 or "quota" in response.text.lower():
-            raise llm.LLMError("ElevenLabs: закончился баланс или лимит. Пополните аккаунт или переключите распознавание на Gemini")
-        if response.status_code != 200:
-            raise llm.LLMError(f"ElevenLabs HTTP {response.status_code}: {response.text[:300]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise llm.LLMError("ElevenLabs вернул не JSON") from exc
-    raise llm.LLMError(f"ElevenLabs недоступен: {last}")
-
-
-def scribe_segments(data: dict) -> list:
-    """Scribe words with speaker ids into paragraphs: a new paragraph on a speaker change, a long pause or a long run.
-
-    Speakers are numbered in the order they first speak ("Спикер 1", "Спикер 2"). The labels are the same across the whole
-    recording, because Scribe diarizes the file in one pass. Nothing is dropped silently: a word without time is an error.
-    """
-    words = data.get("words") if isinstance(data, dict) else None
-    if not isinstance(words, list):
-        raise llm.LLMError("ElevenLabs вернул ответ без слов")
-    labels, segments, current, last_end = {}, [], None, None
-
-    def close():
-        if current is not None:
-            text = "".join(current["parts"]).strip()
-            if text:
-                segments.append({"speaker": current["label"], "start": round(current["start"], 1), "text": text})
-
-    for token in words:
-        if not isinstance(token, dict):
-            raise llm.LLMError("ElevenLabs вернул некорректное слово")
-        kind = token.get("type", "word")
-        if kind == "audio_event":
-            continue
-        text = str(token.get("text") or "")
-        if kind != "word":  # spacing and punctuation keep the sentence intact; they carry no timing
-            if current is not None:
-                current["parts"].append(text)
-            continue
-        start, end = token.get("start"), token.get("end")
-        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in (start, end)):
-            raise llm.LLMError("ElevenLabs вернул слово без времени")
-        sid = str(token.get("speaker_id") or (current["sid"] if current else "speaker_0"))
-        new_paragraph = (current is None or sid != current["sid"] or float(start) - last_end > SCRIBE_PAUSE
-                         or current["words"] >= SCRIBE_MAX_WORDS)
-        if new_paragraph:
-            close()
-            if sid not in labels:
-                labels[sid] = f"Спикер {len(labels) + 1}"
-            current = {"sid": sid, "label": labels[sid], "start": float(start), "parts": [], "words": 0}
-        current["parts"].append(text)
-        current["words"] += 1
-        last_end = float(end)
-    close()
-    return segments
-
-
-def transcribe_scribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=None) -> tuple[float, list]:
-    """The whole recording in one ElevenLabs request. The answer is kept as a checkpoint, so a later failure in the
-    analysis does not pay for recognition again."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    total = audio.duration(path)
-    language = LANGUAGE_CODES.get(settings.get("language", "ru"))
-    key = checkpoints.fingerprint({"audio": digest.hexdigest(), "provider": "elevenlabs", "model": SCRIBE_MODEL,
-                                   "language": language, "pause": SCRIBE_PAUSE, "max_words": SCRIBE_MAX_WORDS, "version": 1})
-    cached = checkpoint.get("scribe", 0, key) if checkpoint else None
-    if cached is None:
-        progress("Распознавание ElevenLabs Scribe")
-        work = pathlib.Path(tempfile.mkdtemp(prefix="sysai_scribe_"))
-        try:
-            prepared = work / "meeting.mp3"
-            audio.extract(path, prepared, 0, total)
-            data = _scribe_post(prepared.read_bytes(), language)
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
-        cached = {"words": [{k: w.get(k) for k in ("text", "start", "end", "type", "speaker_id")}
-                            for w in data.get("words") or [] if isinstance(w, dict)],
-                  "audio_duration_secs": data.get("audio_duration_secs")}
-        if checkpoint:
-            checkpoint.put("scribe", 0, key, cached)
-    progress("Разбор реплик по говорящим")
-    segments = scribe_segments(cached)
-    if not segments:
-        raise llm.LLMError("Речь в записи не распознана. Проверьте аудио; рассылка не запускалась.")
-    for a, b in zip(segments, segments[1:]):
-        a["end"] = b["start"]
-    segments[-1]["end"] = min(round(total, 1), total)
     return total, segments
 
 

@@ -613,7 +613,6 @@ def settings_view(request: Request, msg: str = ""):
     st = settings_store.all_settings()
     masked = {k: bool(st.get(k)) for k in settings_store.SECRET_KEYS}
     env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN),
-           "elevenlabs_api_key": bool(config.ELEVENLABS_API_KEY),
            "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL)}
     for k in settings_store.SECRET_KEYS + settings_store.HIDDEN_KEYS:
         st.pop(k, None)  # secrets never go back to the browser, only a mask
@@ -675,11 +674,6 @@ async def settings_save(request: Request):
     # Secrets are never echoed in hidden inputs. A value alone (including a
     # legacy hidden value) is not an instruction to replace a credential.
     # Require the explicit action selected in the visible credential control.
-    if "transcribe_provider" in f:
-        provider = str(f["transcribe_provider"]).strip()
-        if provider not in ("elevenlabs", "gemini"):
-            raise HTTPException(400, "Неизвестный способ распознавания")
-        updates["transcribe_provider"] = provider
     old_token = config.telegram_token()
     for k in settings_store.SECRET_KEYS:
         action = f.get("action_" + k, "keep")
