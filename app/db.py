@@ -58,7 +58,7 @@ class Reminder(Base):
     details = Column(Text, default="")
     recipients = Column(JSON, default=list)          # [{"ref": "@ivan", "name": "Иван", "employee_id": 3}]
     delivered = Column(JSON, default=list)          # refs that already got the message
-    status = Column(String(20), default="pending", index=True)  # pending | sending | sent | failed | cancelled
+    status = Column(String(20), default="pending", index=True)  # pending | sending | sent | failed | cancelled | missed (not sent: noticed more than reminders.MAX_LATE late)
     attempts = Column(Integer, default=0)
     error = Column(Text, default="")
     claimed_at = Column(DateTime(timezone=True), nullable=True)

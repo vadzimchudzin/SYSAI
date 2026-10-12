@@ -15,13 +15,16 @@ class RModel(FakeModel):
 
     def __call__(self, model_name, messages, **kwargs):
         system = messages[0]["content"]
-        if "Ты напоминаешь человеку" in system or "Ты отчитываешься перед тем, кто просил напомнить" in system:
+        if ("Ты напоминаешь человеку" in system or "Ты отчитываешься перед тем, кто просил напомнить" in system
+                or "Ты сообщаешь тому, кто просил напомнить" in system):
             facts = _facts(messages)
             self.calls.append({"system": system, "facts": facts, "user": messages[1]["content"]})
             if self.down:
                 raise llm.LLMError("модель недоступна")
             if "Ты напоминаешь человеку" in system:
                 text = f"[reminder:{facts['recipient']['name']}] {facts['topic']} | {facts['details']}"
+            elif "Ты сообщаешь тому, кто просил напомнить" in system:
+                text = f"[missed] {facts['topic']} | late={facts['minutes_late']} | for={facts['for']}"
             else:
                 text = f"[report] ok={facts['delivered_to']} fail={[f['who'] for f in facts['not_delivered_to']]}"
             return json.dumps({"text": text}, ensure_ascii=False)
@@ -473,6 +476,92 @@ def test_the_reminder_lands_in_the_conversation_history(tgacc, model):
     director(model, lambda facts: remind(everyone(facts)), "напомни всем")
     reminders.run_due()
     assert any(role == "assistant" and text.startswith("[reminder:Иван") for role, _, text, _ in rows(42))
+
+
+# ----------------------------------------------------------------------------- the service was down when it was due
+def go_back(hours=0, minutes=0):
+    """The reminder was due this long ago (the service was down or asleep until now)."""
+    with SessionLocal() as s:
+        s.query(Reminder).update({"due_at": now() - dt.timedelta(hours=hours, minutes=minutes)})
+        s.commit()
+
+
+def test_a_reminder_noticed_hours_late_is_not_sent_and_the_asker_is_told(tgacc, model):
+    make_meeting()
+    director(model, lambda facts: remind(everyone(facts)), "напомни всем про совещание")
+    go_back(hours=3)
+    reminders.run_due()
+    assert reminder_rows()[0][1] == "missed" and reminder_rows()[0][4] == []
+    assert not any(ref in ("@ivan", "@anna") for ref, _ in tgacc.sent)         # nobody got a message about a meeting that is over
+    ref, text = tgacc.sent[-1]
+    assert ref == "7" and text.startswith("[missed] Совещание сегодня") and "late=180" in text and "Иван Петров" in text
+    with SessionLocal() as s:
+        assert "опоздание 180 мин" in s.query(Reminder).one().error
+
+
+def test_a_reminder_a_few_minutes_late_still_goes_out(tgacc, model):
+    make_meeting()
+    director(model, lambda facts: remind(everyone(facts)), "напомни всем")
+    go_back(minutes=reminders.MAX_LATE // 60 - 5)
+    reminders.run_due()
+    assert reminder_rows()[0][1] == "sent" and any(ref == "@ivan" for ref, _ in tgacc.sent)
+
+
+def test_the_limit_is_twenty_minutes(tgacc, model):
+    assert reminders.MAX_LATE == 20 * 60
+    make_meeting()
+    director(model, lambda facts: remind(everyone(facts)), "напомни всем")
+    go_back(minutes=21)
+    reminders.run_due()
+    assert reminder_rows()[0][1] == "missed"
+
+
+def test_a_missed_reminder_is_reported_once_and_never_retried(tgacc, model):
+    make_meeting()
+    director(model, lambda facts: remind(everyone(facts)), "напомни всем")
+    go_back(hours=2)
+    reminders.run_due()
+    reminders.run_due()
+    reminders.run_due()
+    assert sum(1 for ref, t in tgacc.sent if t.startswith("[missed]")) == 1
+    with SessionLocal() as s:
+        assert reminders.pending_view(s, "7", True) == []
+
+
+def test_nothing_is_said_about_a_missed_reminder_while_the_account_is_away_but_it_is_when_it_returns(tgacc, model, monkeypatch):
+    make_meeting()
+    director(model, lambda facts: remind(everyone(facts)), "напомни всем")
+    go_back(hours=5)
+    connected = userbot.ready
+    monkeypatch.setattr(userbot, "ready", lambda: False)
+    reminders.run_due()
+    assert reminder_rows()[0][1] == "pending" and not any(t.startswith("[missed]") for _, t in tgacc.sent)
+    monkeypatch.setattr(userbot, "ready", connected)
+    reminders.run_due()
+    assert reminder_rows()[0][1] == "missed" and tgacc.sent[-1][1].startswith("[missed]")
+
+
+def test_a_late_retry_is_judged_by_its_own_time_not_by_the_original(tgacc, model):
+    make_meeting()
+    director(model, lambda facts: remind(everyone(facts)), "напомни всем")
+    with SessionLocal() as s:       # Ivan got it on time, Anna's attempt failed and its retry was due 3 hours ago
+        s.query(Reminder).update({"delivered": ["@ivan"], "attempts": 1, "due_at": now() - dt.timedelta(hours=3)})
+        s.commit()
+    reminders.run_due()
+    assert reminder_rows()[0][1] == "missed"
+    assert not any(ref == "@anna" for ref, _ in tgacc.sent)
+    assert "for=['Анна Орлова']" in tgacc.sent[-1][1]                        # only the one who was left out
+
+
+def test_a_punctual_reminder_is_not_late_because_the_queue_before_it_was_long(tgacc, model):
+    make_meeting()
+    director(model, lambda facts: remind(everyone(facts)), "напомни всем")
+    due = now() - dt.timedelta(hours=1)
+    with SessionLocal() as s:
+        s.query(Reminder).update({"due_at": due})
+        s.commit()
+    reminders._deliver(1, noticed=due + dt.timedelta(minutes=1))            # the loop saw it a minute after its time
+    assert reminder_rows()[0][1] == "sent"
 
 
 def test_parse_when():

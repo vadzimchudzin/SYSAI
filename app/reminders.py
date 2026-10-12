@@ -21,6 +21,7 @@ MAX_ATTEMPTS = 5
 RETRY_AFTER = 60          # seconds before a failed delivery is tried again (grows with every attempt)
 SEND_DELAY = 4            # a reminder "now" leaves a few seconds later, so the answer to the person goes first
 STALE_SENDING = 300       # a delivery that has been "sending" this long was interrupted: take it again
+MAX_LATE = 20 * 60        # seconds: a reminder noticed later than this (the service was down or asleep) is not sent to people
 TALKING_HOURS = 8
 _lock = threading.Lock()
 
@@ -167,13 +168,16 @@ def run_due() -> None:
                    .order_by(Reminder.due_at).limit(20).all()]
         for reminder_id in ids:
             try:
-                _deliver(reminder_id)
+                _deliver(reminder_id, noticed=stamp)
             except Exception:  # noqa: BLE001
                 log.exception("reminder %s failed", reminder_id)
 
 
-def _deliver(reminder_id: int) -> None:
+def _deliver(reminder_id: int, noticed=None) -> None:
+    """`noticed` is the moment the loop saw the reminder was due (not the moment this one's turn came): a long queue
+    must not make a punctual reminder look late."""
     from . import agent
+    noticed = noticed or now()
     with SessionLocal() as s:
         claimed = s.query(Reminder).filter(Reminder.id == reminder_id, Reminder.status == "pending").update(
             {"status": "sending", "claimed_at": now()}, synchronize_session=False)
@@ -183,6 +187,22 @@ def _deliver(reminder_id: int) -> None:
         row = s.get(Reminder, reminder_id)
         topic, details, by, chat = row.topic, row.details, row.requested_by, row.chat_id
         people, delivered = list(row.recipients or []), list(row.delivered or [])
+        # due_at is the moment this delivery was expected: the original time, or the time of a retry (a failed attempt
+        # moves it a few minutes ahead). Either way, noticing it long after means the service was not running.
+        late = (noticed - aware(row.due_at)).total_seconds()
+        if late > MAX_LATE:
+            row.status = "missed"
+            row.error = f"не отправлено вовремя: опоздание {int(late // 60)} мин, оставшимся людям ничего не ушло"
+            due_text = local_text(row.due_at)
+            s.commit()
+            missed = True
+        else:
+            missed = False
+    if missed:
+        log.warning("reminder %s is %d minutes late: not sent, the person who asked is told", reminder_id, int(late // 60))
+        _report_missed(reminder_id, topic, due_text, int(late // 60), chat,
+                       [p.get("name") or p["ref"] for p in people if p["ref"] not in delivered])
+        return
     failures = {}
     for person in people:
         if person["ref"] in delivered:
@@ -214,6 +234,20 @@ def _deliver(reminder_id: int) -> None:
         s.commit()
     if final and chat and (len(people) > 1 or failures or (people and people[0]["ref"] != chat)):
         _report(reminder_id, status)
+
+
+def _report_missed(reminder_id: int, topic: str, due_text: str, late_minutes: int, chat: str, names: list) -> None:
+    """The service was down when the reminder was due: people get nothing (a message about a meeting that is over would
+    only confuse), the person who asked is told and can ask again if it still matters."""
+    if not chat:
+        return
+    from . import agent
+    try:
+        text = voice.for_reminder_missed(topic, due_text, late_minutes, names)
+        sent = userbot.send_message(chat, text, urgent=True)
+        agent.record_outgoing(chat, text, sent.get("message_id"), sent.get("user_id") or chat)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("report on the missed reminder %s not sent: %s", reminder_id, exc)
 
 
 def _report(reminder_id: int, status: str) -> None:

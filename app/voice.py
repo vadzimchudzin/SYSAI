@@ -181,6 +181,17 @@ def for_reminder(topic: str, details: str, requested_by: str, recipient_name: st
     return _ask(system_prompt(task), facts)["text"]
 
 
+def for_reminder_missed(topic: str, due_text: str, late_minutes: int, names: list) -> str:
+    """Tells the person who asked for a reminder that it did not go out on time, because the service was not running."""
+    facts = {"topic": topic, "should_have_gone_at": due_text, "minutes_late": late_minutes, "for": names, "now": today()}
+    task = ("Ты сообщаешь тому, кто просил напомнить (topic, for), что напоминание не ушло вовремя: в назначенное время "
+            "(should_have_gone_at, по времени сервиса) сервис не работал, поэтому он заметил это только через minutes_late минут. "
+            "Людям из for ничего не отправлено, чтобы не писать им с опозданием. Скажи об этом прямо, в одну-две фразы, без "
+            "оправданий, и предложи напомнить сейчас, если это ещё нужно. Используй только эти данные. "
+            'JSON: {"text": "..."}.')
+    return _ask(system_prompt(task), facts)["text"]
+
+
 def for_reminder_report(topic: str, delivered: list, failed: list) -> str:
     """Tells the person who asked for a reminder who got it and who did not."""
     facts = {"topic": topic, "delivered_to": delivered, "not_delivered_to": failed}
