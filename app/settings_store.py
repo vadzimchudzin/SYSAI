@@ -46,6 +46,8 @@ DEFAULTS = {
     # integrations (keys pasted in the panel; environment variables are the fallback)
     "bitrix_enabled": False,
     "openrouter_api_key": "",
+    "elevenlabs_api_key": "",
+    "transcribe_provider": "elevenlabs",   # elevenlabs (Scribe: speakers and word times) | gemini
     "telegram_bot_token": "",
     "bitrix_webhook_url": "",
 }
@@ -91,7 +93,7 @@ def set_many(values: dict):
         s.commit()
 
 
-SECRET_KEYS = ("openrouter_api_key", "telegram_bot_token", "bitrix_webhook_url")
+SECRET_KEYS = ("openrouter_api_key", "elevenlabs_api_key", "telegram_bot_token", "bitrix_webhook_url")
 # Never sent to the browser (sealed Telegram account data).
 HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me")
 
