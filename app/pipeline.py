@@ -156,6 +156,25 @@ def _directory_terms(limit: int = 80) -> list:
         return found[:limit]
 
 
+def review_plan(meeting, settings: dict) -> dict:
+    """What leaves the building after approval, from the saved data alone (no model calls, so it is cheap to show)."""
+    people, unassigned, assistant_tasks = {}, [], []
+    for task in meeting.tasks:
+        if task.executor == "assistant":
+            assistant_tasks.append({"title": task.title, "status": task.status})
+        elif task.assignee is None:
+            unassigned.append({"title": task.title, "said": task.assignee_name or "не назначен"})
+        else:
+            person = people.setdefault(task.assignee_id, {
+                "name": task.assignee.name, "reachable": bool(task.assignee.telegram_chat_id), "tasks": []})
+            person["tasks"].append({"title": task.title,
+                                    "deadline": deadlines.fmt(task.deadline) if task.deadline else "без срока"})
+    return {"reviewers": [str(x) for x in settings.get("approver_chat_ids") or []],
+            "groups": [str(x) for x in settings.get("report_chat_ids") or []],
+            "send_tasks": bool(settings.get("send_tasks_to_assignees")),
+            "people": list(people.values()), "unassigned": unassigned, "assistant": assistant_tasks}
+
+
 def _force_review_options(m):
     """Persist the safety override, including reports recovered after a crash."""
     if (m.report or {}).get("requires_review"):

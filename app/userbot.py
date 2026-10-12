@@ -7,6 +7,7 @@ The Telegram client itself sits behind a small backend interface; tests plug a f
 """
 import asyncio
 import base64
+import datetime as dt
 import hashlib
 import io
 import json
@@ -15,6 +16,7 @@ import random
 import re
 import threading
 import time
+import zoneinfo
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -333,6 +335,48 @@ class PeerFlood(telegram.TelegramError):
     """Telegram refuses further sending from the account (too many complaints or too many new contacts)."""
 
 
+class QuietHours(telegram.TelegramError):
+    """Messages to people wait for the morning: the quiet hours are on (see quiet_until)."""
+
+    def __init__(self, seconds_left: float):
+        super().__init__("Тихие часы: сообщения уйдут утром", retryable=True, retry_after=max(60, int(seconds_left)))
+
+
+def _zone():
+    try:
+        return zoneinfo.ZoneInfo(config.TIMEZONE)
+    except zoneinfo.ZoneInfoNotFoundError:
+        return dt.timezone.utc
+
+
+def local_time(moment) -> str:
+    return moment.astimezone(_zone()).strftime("%H:%M %d.%m")
+
+
+def quiet_until(now_utc=None):
+    """When the quiet hours end, if they are on at that moment; otherwise None.
+
+    Settings quiet_from_hour and quiet_to_hour are hours of the service time zone; equal hours mean no quiet time.
+    Tests see no quiet hours unless they pass now_utc explicitly."""
+    if now_utc is None and config.TESTING:
+        return None
+    start, end = settings_store.get("quiet_from_hour"), settings_store.get("quiet_to_hour")
+    if start is None or end is None:
+        return None
+    start, end = int(start), int(end)
+    if start == end:
+        return None
+    now = (now_utc or dt.datetime.now(dt.timezone.utc)).astimezone(_zone())
+    hour = now.hour
+    inside = start <= hour < end if start < end else (hour >= start or hour < end)
+    if not inside:
+        return None
+    opens = now.replace(hour=end, minute=0, second=0, microsecond=0)
+    if opens <= now:
+        opens += dt.timedelta(days=1)
+    return opens.astimezone(dt.timezone.utc)
+
+
 # ----------------------------------------------------------------------------- the account used by the app
 backend = None
 _on_message = None
@@ -538,6 +582,9 @@ def _guard_send():
     now = time.time()
     if now < _paused_until[0]:
         raise telegram.TelegramError("Telegram ограничил отправку с аккаунта. Сообщения не уходят, пока не закончится пауза.")
+    until = quiet_until()
+    if until is not None:
+        raise QuietHours((until - dt.datetime.now(dt.timezone.utc)).total_seconds())
     if not ready():
         if configured():
             raise telegram.TelegramError("Аккаунт Telegram подключается, подождите минуту", retryable=True, retry_after=20)

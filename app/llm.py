@@ -1,11 +1,16 @@
 """OpenRouter client (OpenAI-compatible chat completions)."""
+import datetime as dt
 import json
+import logging
 import re
 import time
 
 import httpx
+from sqlalchemy import func
 
-from . import config
+from . import config, db, settings_store
+
+log = logging.getLogger("sysai.llm")
 
 
 class LLMError(RuntimeError):
@@ -16,11 +21,53 @@ class IncompleteResponse(LLMError):
     pass
 
 
+def _today() -> str:
+    return dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+
+def spent_today() -> float:
+    """Money spent on OpenRouter today (UTC), from the costs the service itself recorded."""
+    with db.SessionLocal() as s:
+        total = s.query(func.coalesce(func.sum(db.LlmSpend.cost), 0.0)).filter(db.LlmSpend.day == _today()).scalar()
+    return float(total or 0.0)
+
+
+def budget_usd() -> float:
+    """Daily limit in dollars; 0 means no limit."""
+    try:
+        return max(0.0, float(settings_store.get("daily_budget_usd") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def check_budget() -> None:
+    limit = budget_usd()
+    if limit <= 0:
+        return
+    spent = spent_today()
+    if spent >= limit:
+        raise LLMError(f"Дневной лимит расходов на ИИ исчерпан: ${spent:.2f} из ${limit:.2f}. "
+                       "Новые запросы пойдут завтра (по UTC) или после увеличения лимита в настройках")
+
+
+def record_cost(model: str, usage) -> None:
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or not cost > 0:
+        return
+    try:
+        with db.SessionLocal() as s:
+            s.add(db.LlmSpend(day=_today(), model=str(model)[:120], cost=float(cost)))
+            s.commit()
+    except Exception:  # noqa: BLE001  the answer is still good when the bookkeeping fails
+        log.exception("could not record the cost of %s", model)
+
+
 def chat(model: str, messages: list, json_mode: bool = False, temperature: float = 0.1,
          max_tokens: int | None = None, timeout: float = 600) -> str:
     key = config.openrouter_key()
     if not key:
         raise LLMError("Ключ OpenRouter не задан (Настройки → Подключения)")
+    check_budget()
     body = {"model": model, "messages": messages, "temperature": temperature}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
@@ -42,6 +89,7 @@ def chat(model: str, messages: list, json_mode: bool = False, temperature: float
             data = r.json()
             if "error" in data:
                 raise LLMError(f"OpenRouter: {data['error']}")
+            record_cost(model, data.get("usage"))
             try:
                 choice = data["choices"][0]
                 reason = choice.get("finish_reason")

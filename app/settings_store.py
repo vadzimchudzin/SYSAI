@@ -17,6 +17,10 @@ DEFAULTS = {
     "userbot_pending": "", "userbot_me": {},
     # access
     "registration_open": True,       # people can leave a sign-up request; a superuser approves it
+    # spending and quiet hours
+    "daily_budget_usd": 5.0,         # OpenRouter spend per UTC day; 0 = no limit
+    "quiet_from_hour": 21,           # no messages to people from this hour (service time zone) ...
+    "quiet_to_hour": 9,              # ... until this hour; equal hours mean no quiet time
     # processing
     "auto_ingest": False,            # pick up recordings from the microphone automatically (mocked inbox in MVP)
     "approval_required": True,       # draft goes to approvers before anything is sent

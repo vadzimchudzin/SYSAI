@@ -81,6 +81,8 @@ def handle_incoming(msg: dict) -> None:
         return
     if row_id is None:
         return
+    if userbot.quiet_until() is not None:
+        return  # the reply waits in the queue until the quiet hours end (see run_pending)
     if _testing():
         process(row_id)
     else:
@@ -132,6 +134,8 @@ def record_outgoing(ref: str, text: str, message_id, user_id) -> None:
 def run_pending() -> None:
     """Retries messages that could not be answered yet (model unavailable, Telegram hiccup)."""
     if not userbot.ai_mode():
+        return
+    if userbot.quiet_until() is not None:
         return
     limit = now() - dt.timedelta(seconds=RETRY_AFTER)
     with SessionLocal() as s:

@@ -50,6 +50,15 @@
     {% endif %}
   </section>
   <section class="card setup-step">
+    <h2>Расходы и тихие часы</h2>
+    <label class="f">Дневной лимит расходов на ИИ, $ <input type="number" min="0" step="0.5" name="daily_budget_usd" value="{{ s.daily_budget_usd }}"></label>
+    <p class="small muted">Сегодня потрачено ${{ spent }} (по UTC). 0 — без лимита. Когда лимит исчерпан, ИИ не пишет и не расшифровывает до завтра.</p>
+    {% if ai %}
+    <label class="f">Тихие часы: не писать с <input type="number" min="0" max="23" name="quiet_from_hour" value="{{ s.quiet_from_hour }}"> до <input type="number" min="0" max="23" name="quiet_to_hour" value="{{ s.quiet_to_hour }}"> часов</label>
+    <p class="small muted">По времени сервиса (TIMEZONE). В это время сообщения людям и ответы ждут утра. Одинаковые часы означают, что тихих часов нет.</p>
+    {% endif %}
+  </section>
+  <section class="card setup-step">
     <h2>Кому писать</h2>
     {{ switch('approval_required', 'Сначала показать черновик проверяющему', 'Включено: проверяющий видит план и подтверждает отправку. Выключено: после обработки всё уходит сразу.') }}
     <h3>Проверяющий</h3>

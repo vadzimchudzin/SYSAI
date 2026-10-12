@@ -35,7 +35,25 @@ def flush(meeting_id, phase):
         send(row_id)
 
 
+def _quiet_postpone(row_id) -> bool:
+    """In quiet hours a message to a person waits for the morning. Waiting is not an attempt and not a failure."""
+    if not userbot.ai_mode():
+        return False
+    until = userbot.quiet_until()
+    if until is None:
+        return False
+    with SessionLocal() as s:
+        row = s.get(Delivery, row_id)
+        if row is not None and row.status == "pending":
+            row.next_attempt_at = until
+            row.error = "Тихие часы: отправим утром, " + userbot.local_time(until)
+            s.commit()
+    return True
+
+
 def send(row_id):
+    if _quiet_postpone(row_id):
+        return
     with SessionLocal() as s:
         row = s.get(Delivery, row_id)
         if row.depends_on and s.get(Delivery, row.depends_on).status != "sent":

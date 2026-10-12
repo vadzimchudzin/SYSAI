@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import accounts, agent, bitrix, config, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram, userbot
+from . import accounts, agent, bitrix, config, llm, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram, userbot
 from .analyze import mmss
 from .ui_icons import ICONS
 from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
@@ -334,7 +334,13 @@ def meeting_view(request: Request, mid: int):
         employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
         artifacts = [{"id": a.id, "title": a.title, "filename": a.filename, "svg": a.svg or ""} for a in
                      s.query(Artifact).filter_by(meeting_id=mid).order_by(Artifact.id.desc()).all()]
-    return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts)
+    with SessionLocal() as s:
+        loaded = pipeline.load(s, mid)
+        plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
+                if userbot.ai_mode() and loaded.status in ("awaiting_approval", "rejected") else None)
+    until = userbot.quiet_until()
+    return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
+                plan=plan, quiet_at=userbot.local_time(until) if until is not None else "")
 
 
 @app.get("/artifacts/{aid}")
@@ -618,7 +624,7 @@ def settings_view(request: Request, msg: str = ""):
         st.pop(k, None)  # secrets never go back to the browser, only a mask
     ai = bool(st.get("ai_employee"))
     return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
-                account=userbot.status() if ai else None, persona_default=voice_default_persona())
+                account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2))
 
 
 def voice_default_persona() -> str:
@@ -674,6 +680,20 @@ async def settings_save(request: Request):
     # Secrets are never echoed in hidden inputs. A value alone (including a
     # legacy hidden value) is not an instruction to replace a credential.
     # Require the explicit action selected in the visible credential control.
+    if "daily_budget_usd" in f:
+        try:
+            updates["daily_budget_usd"] = max(0.0, float(str(f["daily_budget_usd"]).replace(",", ".") or 0))
+        except ValueError:
+            raise HTTPException(400, "Лимит расходов укажите числом в долларах")
+    for k in ("quiet_from_hour", "quiet_to_hour"):
+        if k in f:
+            try:
+                hour = int(str(f[k]).strip())
+            except ValueError:
+                raise HTTPException(400, "Тихие часы: целые часы от 0 до 23")
+            if not 0 <= hour <= 23:
+                raise HTTPException(400, "Тихие часы: целые часы от 0 до 23")
+            updates[k] = hour
     old_token = config.telegram_token()
     for k in settings_store.SECRET_KEYS:
         action = f.get("action_" + k, "keep")

@@ -49,7 +49,9 @@ def schedule(meeting_id: int) -> None:
 
 
 def run_pending() -> None:
-    """After a restart: unfinished tasks of the assistant continue."""
+    """After a restart or in the morning: unfinished tasks of the assistant continue."""
+    if userbot.quiet_until() is not None:
+        return
     with SessionLocal() as s:
         ids = [t.id for t in s.query(Task).filter(Task.executor == "assistant", Task.status == "assistant_todo").all()
                if t.meeting is not None and t.meeting.status in report_archive.APPROVED_STATUSES]
@@ -212,6 +214,8 @@ def _tell_reviewers(message: str, filename=None, pdf=None) -> int:
 
 
 def run_task(task_id: int) -> None:
+    if userbot.quiet_until() is not None:
+        return  # started after the quiet hours, see run_pending
     with SessionLocal() as s:
         claimed = s.query(Task).filter(Task.id == task_id, Task.executor == "assistant", Task.status == "assistant_todo").update(
             {Task.status: "assistant_running"}, synchronize_session=False)

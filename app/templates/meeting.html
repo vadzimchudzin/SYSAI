@@ -1,5 +1,18 @@
 {% extends "base.html" %}{% from "_icons.html" import icon %}{% block title %}{{ m.title or 'Совещание' }} — SYSAI{% endblock %}
 {% block body %}
+{% if plan %}<section class="card"><h2>Что уйдёт после подтверждения</h2>
+  {% if quiet_at %}<div class="warn small">Сейчас тихие часы: сообщения людям уйдут после {{ quiet_at }}.</div>{% endif %}
+  <ul>
+    {% if plan.reviewers %}<li>Проверяющим ({{ plan.reviewers|length }}): черновик и PDF, без кнопок.</li>{% endif %}
+    {% if plan.groups %}<li>В группу ({{ plan.groups|length }}): итог и PDF.</li>{% endif %}
+    {% if not plan.send_tasks %}<li class="small">Задачи исполнителям не уйдут: отправка исполнителям выключена в настройках.</li>{% endif %}
+    {% for p in plan.people %}<li><b>{{ p.name }}</b>: задач {{ p.tasks|length }}{% if p.tasks %} ({% for t in p.tasks %}{{ t.title }}{% if not loop.last %}; {% endif %}{% endfor %}){% endif %}.
+      {% if not p.reachable %}<span class="warn small">Нет Telegram, задачи не уйдут.</span>{% elif plan.send_tasks %}Получит сообщение со своими задачами.{% endif %}</li>{% endfor %}
+    {% for t in plan.assistant %}<li>Берёт на себя ассистент: {{ t.title }}. Сделает после подтверждения и пришлёт проверяющему.</li>{% endfor %}
+    {% for t in plan.unassigned %}<li class="warn small">Без исполнителя: {{ t.title }} (прозвучало: {{ t.said }}). Назначьте выше или отдайте ассистенту.</li>{% endfor %}
+  </ul>
+  <p class="small muted">Графики и сводки ассистента строятся только после подтверждения: в черновике их ещё нет.</p>
+</section>{% endif %}
 {% if artifacts %}<section class="card"><h2>Материалы ассистента</h2>
   {% for a in artifacts %}<div class="row between"><b>{{ a.title }}</b><a class="btn sm" href="/artifacts/{{ a.id }}" target="_blank" rel="noopener">PDF</a></div>
   {% if a.svg %}<div class="chart" style="margin:10px 0">{{ a.svg|safe }}</div>{% endif %}{% endfor %}</section>{% endif %}

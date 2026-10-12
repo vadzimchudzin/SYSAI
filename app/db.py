@@ -306,6 +306,16 @@ class Artifact(Base):
     created_at = Column(DateTime(timezone=True), default=now)
 
 
+class LlmSpend(Base):
+    """What one OpenRouter call cost (usage.cost in the answer). The daily budget is the sum for the UTC day."""
+    __tablename__ = "llm_spend"
+    id = Column(Integer, primary_key=True)
+    day = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD, UTC
+    model = Column(String(120), default="")
+    cost = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
 def _add_column_if_missing(table: str, column: str, ddl: str):
     """Lightweight migration for databases created by earlier versions."""
     from sqlalchemy import inspect
