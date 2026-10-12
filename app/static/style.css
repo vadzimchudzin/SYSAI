@@ -409,3 +409,33 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
   .landing .legend .lr::before{background:var(--clay)}.legend .lb::before{background:var(--sblue)}
   .landing .step .n{color:var(--clay)}
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.wm i{transform:none}}
+
+/* ---------- legal: footer with the owner, documents, consent ---------- */
+.legal-foot { align-items: flex-end; }
+.legal-foot .lf-main { display: flex; flex-direction: column; gap: 4px; }
+.legal-foot .lf-req { font-size: 12px; color: var(--muted); }
+.legal-foot .lf-req a { margin: 0; }
+.legal-foot .lf-links { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.legal-foot .lf-links a { margin-left: 0; }
+.doc { width: min(820px, 100%); margin: 0 auto; padding: 5vh 20px 70px; position: relative; z-index: 2; }
+.doc-eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+.doc h1 { font-family: var(--serif); font-weight: 400; font-size: clamp(30px, 4.4vw, 46px); line-height: 1.1; letter-spacing: -.02em; margin: 0 0 16px; }
+.doc .lead-doc { color: var(--soft); font-size: 17px; margin: 0 0 30px; }
+.doc h2 { font-family: var(--serif); font-weight: 500; font-size: 22px; margin: 34px 0 10px; }
+.doc p, .doc li { color: var(--soft); line-height: 1.65; }
+.doc ul { padding-left: 20px; }
+.doc .tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+.doc table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.doc th, .doc td { text-align: left; vertical-align: top; padding: 10px 14px; border-bottom: 1px solid var(--line); color: var(--soft); }
+.doc th { color: var(--muted); font-weight: 600; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; background: var(--bg2); }
+.doc tr:last-child td { border-bottom: 0; }
+.req { display: grid; grid-template-columns: minmax(160px, 260px) 1fr; gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 0 0 22px; }
+.req dt, .req dd { margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.req dt { color: var(--muted); font-size: 13px; background: var(--bg2); }
+.req dd { color: var(--text); }
+.req dt:last-of-type, .req dd:last-of-type { border-bottom: 0; }
+.consent { display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; line-height: 1.5; color: var(--muted); margin: 4px 0 6px; cursor: pointer; }
+.consent input { margin-top: 3px; accent-color: var(--clay); flex: none; width: 16px; height: 16px; }
+.legal-links { margin-top: 6px; }
+.privacy-note { margin: 10px 0 0; }
+@media (max-width: 640px) { .req { grid-template-columns: 1fr; } .req dt { border-bottom: 0; padding-bottom: 2px; } }

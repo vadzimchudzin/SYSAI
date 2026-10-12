@@ -52,7 +52,17 @@ DEFAULTS = {
     "openrouter_api_key": "",
     "telegram_bot_token": "",
     "bitrix_webhook_url": "",
+    # site owner: shown in the footer, on /legal and in the privacy policy (defaults from sysat.by)
+    "legal_name": "ООО «СисЭйТи»",
+    "legal_unp": "",
+    "legal_address": "222520, Минская обл., г. Борисов, ул. 1 Июля, д. 6",
+    "legal_email": "company@sysat.by",
+    "legal_phone": "+375 29 139-10-80",
+    "legal_site": "https://sysat.by",
+    "pd_responsible": "",            # ФИО и должность ответственного за обработку персональных данных
 }
+
+LEGAL_KEYS = ("legal_name", "legal_unp", "legal_address", "legal_email", "legal_phone", "legal_site", "pd_responsible")
 
 
 def get(key):

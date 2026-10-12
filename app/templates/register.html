@@ -16,9 +16,13 @@
     <label class="f">Имя <input name="display_name" autocomplete="name" value="{{ display_name }}" placeholder="Иван Петров"></label>
     <label class="f">Пароль <input type="password" name="password" autocomplete="new-password" required minlength="8"></label>
     <label class="f">Повторите пароль <input type="password" name="password2" autocomplete="new-password" required minlength="8"></label>
+    {% set L = legal_info() %}
+    <label class="consent"><input type="checkbox" name="consent" value="1" required>
+      <span>Даю согласие {{ L.legal_name }} на обработку моих персональных данных (логин, имя, пароль в виде хэша) для рассмотрения заявки и доступа к SYSAI до удаления учётной записи или отзыва согласия, в том числе на их хранение на серверах в США (хостинг Render), где не обеспечивается надлежащий уровень защиты персональных данных. Без согласия заявку рассмотреть нельзя. Отозвать согласие можно письмом на {{ L.legal_email }}. Подробнее в <a href="/privacy" target="_blank">Политике обработки персональных данных</a>.</span></label>
     {% if error %}<div class="warn small">{{ error }}</div>{% endif %}
     <button class="btn primary wide">Отправить заявку</button>
   </form>
   {% endif %}
   <p class="small muted" style="margin-top:18px"><a href="/login" class="muted">← Ко входу</a></p>
+  <p class="small muted legal-links"><a href="/privacy" class="muted">Политика обработки персональных данных</a> · <a href="/legal" class="muted">Реквизиты</a></p>
 </div></div></body></html>

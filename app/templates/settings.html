@@ -78,6 +78,17 @@
     <h2>Отчёт</h2>
     <label class="f">Название компании <input name="company_name" value="{{ s.company_name }}"></label>
   </section>
+  <section class="card setup-step">
+    <h2>Владелец сайта</h2>
+    <p class="small muted">Показывается в футере, на странице «Реквизиты» и в Политике обработки персональных данных.</p>
+    <label class="f">Наименование <input name="legal_name" value="{{ s.legal_name }}"></label>
+    <label class="f">УНП <input name="legal_unp" value="{{ s.legal_unp }}" inputmode="numeric" placeholder="9 цифр"></label>
+    <label class="f">Юридический адрес <input name="legal_address" value="{{ s.legal_address }}"></label>
+    <label class="f">E-mail для обращений <input name="legal_email" value="{{ s.legal_email }}"></label>
+    <label class="f">Телефон <input name="legal_phone" value="{{ s.legal_phone }}"></label>
+    <label class="f">Сайт компании <input name="legal_site" value="{{ s.legal_site }}"></label>
+    <label class="f">Ответственный за обработку персональных данных <input name="pd_responsible" value="{{ s.pd_responsible }}" placeholder="ФИО, должность"></label>
+  </section>
   <div class="row sticky center"><button type="submit" class="btn primary">Сохранить настройки</button></div>
 </form>
 {% if ephemeral %}<p class="small muted">База сейчас временная: без Postgres ключи и совещания могут сброситься при перезапуске.</p>{% endif %}

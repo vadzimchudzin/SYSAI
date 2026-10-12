@@ -58,6 +58,8 @@ class User(Base):
     decided_at = Column(DateTime(timezone=True), nullable=True)
     decided_by = Column(String(64), default="")
     last_login_at = Column(DateTime(timezone=True), nullable=True)
+    consent_at = Column(DateTime(timezone=True), nullable=True)   # consent to personal data processing (Law 99-Z)
+    consent_version = Column(String(20), default="")
 
 
 class TelegramChat(Base):
@@ -345,6 +347,8 @@ def init_db():
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
+    _add_column_if_missing("users", "consent_at", "consent_at TIMESTAMP")
+    _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
 
 
 def dumps(v) -> str:

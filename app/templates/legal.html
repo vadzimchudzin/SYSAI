@@ -1,0 +1,24 @@
+{% from "_logo.html" import logo %}<!doctype html>
+<html lang="ru"><head>{% include "_head.html" %}<title>Реквизиты и контакты · SYSAI</title></head>
+<body><div class="aura" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="landing">
+  <header class="l-top"><a href="/">{{ logo('md') }}</a>
+    <nav><a href="/" class="hide-m">Главная</a>{% if authed %}<a class="btn sm primary" href="/app">Открыть кабинет</a>{% else %}<a class="btn sm" href="/login">Войти</a>{% endif %}</nav></header>
+  {% set L = legal_info() %}
+  <main class="doc">
+    <p class="doc-eyebrow">Владелец сайта</p>
+    <h1>Реквизиты и контакты</h1>
+    <p class="lead-doc">SYSAI разрабатывает и предоставляет {{ L.legal_name }}. Сервис работает для компаний: договор заключается отдельно, через сайт ничего не продаётся.</p>
+    <dl class="req">
+      <dt>Наименование</dt><dd>{{ L.legal_name }}</dd>
+      {% if L.legal_unp %}<dt>УНП</dt><dd>{{ L.legal_unp }}</dd>{% endif %}
+      <dt>Юридический адрес</dt><dd>{{ L.legal_address }}</dd>
+      {% if L.legal_email %}<dt>E-mail</dt><dd><a href="mailto:{{ L.legal_email }}">{{ L.legal_email }}</a></dd>{% endif %}
+      {% if L.legal_phone %}<dt>Телефон</dt><dd><a href="tel:{{ L.legal_phone|replace(' ', '')|replace('-', '') }}">{{ L.legal_phone }}</a></dd>{% endif %}
+      {% if L.legal_site %}<dt>Сайт компании</dt><dd><a href="{{ L.legal_site }}" rel="noopener">{{ L.legal_site }}</a></dd>{% endif %}
+      {% if L.pd_responsible %}<dt>Ответственный за обработку персональных данных</dt><dd>{{ L.pd_responsible }}</dd>{% endif %}
+    </dl>
+    <p class="small muted">Обращения по персональным данным: <a href="/privacy">Политика обработки персональных данных</a>, раздел «Ваши права».</p>
+  </main>
+  {% include "_legal_footer.html" %}
+</div></body></html>

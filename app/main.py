@@ -66,6 +66,15 @@ def asset(name: str) -> str:
 tpl.env.globals.update(asset=asset)
 
 
+def legal_info() -> dict:
+    """Who runs the site: footer, /legal and the privacy policy read the same settings."""
+    s = settings_store.all_settings()
+    return {k: (s.get(k) or "") for k in settings_store.LEGAL_KEYS}
+
+
+tpl.env.globals.update(legal_info=legal_info, POLICY_DATE="12.10.2026")
+
+
 def startup():
     init_db()
     accounts.ensure_superuser()
@@ -701,6 +710,9 @@ async def settings_save(request: Request):
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids"):
         if k in f or k + "_extra" in f or f.get("present_" + k) == "1":
             updates[k] = _chat_ids(f, k)
+    for k in settings_store.LEGAL_KEYS:
+        if k in f:
+            updates[k] = str(f[k]).strip()[:300]
     for k in ("transcribe_model", "report_model", "conversation_model", "conversation_tone",
               "company_name", "accent_color", "glossary", "persona"):
         if k in f:
@@ -930,6 +942,16 @@ def _register_page(request: Request, status_code: int = 200, **ctx):
     return tpl.TemplateResponse(request, "register.html", {**base, **ctx}, status_code=status_code)
 
 
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy(request: Request):
+    return tpl.TemplateResponse(request, "privacy.html", {"request": request, "authed": authed(request), "year": dt.date.today().year})
+
+
+@app.get("/legal", response_class=HTMLResponse)
+def legal(request: Request):
+    return tpl.TemplateResponse(request, "legal.html", {"request": request, "authed": authed(request), "year": dt.date.today().year})
+
+
 @app.get("/register", response_class=HTMLResponse)
 def register_form(request: Request):
     if authed(request):
@@ -939,14 +961,14 @@ def register_form(request: Request):
 
 @app.post("/register", response_class=HTMLResponse)
 def register_submit(request: Request, username: str = Form(""), display_name: str = Form(""),
-                    password: str = Form(""), password2: str = Form("")):
+                    password: str = Form(""), password2: str = Form(""), consent: str = Form("")):
     ip = request.client.host if request.client else "unknown"
     try:
         if not accounts.allow_registration(ip):
             raise accounts.AccountError("Слишком много попыток с вашего адреса. Попробуйте позже.")
         if password != password2:
             raise accounts.AccountError("Пароли не совпадают.")
-        accounts.register(username, password, display_name)
+        accounts.register(username, password, display_name, consent=bool(consent))
     except accounts.AccountError as e:
         return _register_page(request, 400, error=str(e), username=username.strip(), display_name=display_name.strip())
     return _register_page(request, sent=True)

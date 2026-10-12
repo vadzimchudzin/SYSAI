@@ -100,10 +100,15 @@ def allow_registration(ip: str) -> bool:
 
 
 # ----------------------------------------------------------------------------- sign-up and sign-in
-def register(username: str, password: str, display_name: str = "") -> None:
+CONSENT_VERSION = "2026-10-12"  # bump when the consent text on /register changes
+
+
+def register(username: str, password: str, display_name: str = "", consent: bool = True) -> None:
     """Leave a sign-up request. It stays "pending" until a superuser approves it."""
     if not registration_open():
         raise AccountError("Приём заявок закрыт. Обратитесь к администратору.")
+    if not consent:
+        raise AccountError("Без согласия на обработку персональных данных заявку рассмотреть нельзя.")
     name = _valid_username(username)
     _valid_password(password)
     with SessionLocal() as s:
@@ -112,7 +117,7 @@ def register(username: str, password: str, display_name: str = "") -> None:
         if s.query(User).filter_by(username=name).first():
             raise AccountError("Этот логин уже занят.")
         s.add(User(username=name, display_name=(display_name or "").strip()[:120], password_hash=hash_password(password),
-                   role="user", status="pending"))
+                   role="user", status="pending", consent_at=now(), consent_version=CONSENT_VERSION))
         try:
             s.commit()
         except IntegrityError:

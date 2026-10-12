@@ -21,7 +21,7 @@ def visitor():
 
 
 def sign_up(c, username="ivan", password="correct-horse", **extra):
-    data = {"username": username, "display_name": "Иван", "password": password, "password2": password, **extra}
+    data = {"username": username, "display_name": "Иван", "password": password, "password2": password, "consent": "1", **extra}
     return c.post("/register", data=data)
 
 
@@ -103,7 +103,7 @@ def test_wrong_password_and_unknown_login_look_the_same(client, visitor):
     ({"password2": "different-one"}, "Пароли не совпадают"),
 ])
 def test_sign_up_validation(client, visitor, fields, message):
-    data = {"username": "ivan", "display_name": "", "password": "correct-horse", "password2": "correct-horse", **fields}
+    data = {"username": "ivan", "display_name": "", "password": "correct-horse", "password2": "correct-horse", "consent": "1", **fields}
     r = visitor.post("/register", data=data)
     assert r.status_code == 400 and message in r.text
     assert user_row("ivan") is None

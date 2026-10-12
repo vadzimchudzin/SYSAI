@@ -1,0 +1,5 @@
+{% set L = legal_info() %}<footer class="l-foot legal-foot">
+  <div class="lf-main"><span>© {{ year }} SYSAI · {{ L.legal_name }}</span>
+    <span class="lf-req">{% if L.legal_unp %}УНП {{ L.legal_unp }} · {% endif %}{{ L.legal_address }}{% if L.legal_email %} · <a href="mailto:{{ L.legal_email }}">{{ L.legal_email }}</a>{% endif %}{% if L.legal_phone %} · <a href="tel:{{ L.legal_phone|replace(' ', '')|replace('-', '') }}">{{ L.legal_phone }}</a>{% endif %}</span></div>
+  <span class="lf-links"><a href="/privacy">Политика обработки персональных данных</a><a href="/legal">Реквизиты и контакты</a>{% if L.legal_site %}<a href="{{ L.legal_site }}" rel="noopener">{{ L.legal_site|replace('https://', '')|replace('http://', '') }}</a>{% endif %}</span>
+</footer>
