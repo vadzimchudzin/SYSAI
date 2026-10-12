@@ -16,6 +16,8 @@ from app import config, db, telegram  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def fresh_db():
+    from app import accounts
+    accounts._failures.clear()  # wrong-password counters are per process: one test must not lock out the next
     db.Base.metadata.drop_all(db.engine)
     db.init_db()
     yield

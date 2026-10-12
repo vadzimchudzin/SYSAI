@@ -25,11 +25,15 @@ MAX_PASSWORD = 128
 MAX_PENDING = 50            # unanswered requests kept at once
 REGISTER_LIMIT = 5          # sign-up attempts per address ...
 REGISTER_WINDOW = 3600      # ... per this many seconds
+LOGIN_LIMIT = 8             # wrong passwords per address ...
+LOGIN_NAME_LIMIT = 30       # ... or per login name (a looser cap: a flood cannot lock the director out for long) ...
+LOGIN_WINDOW = 600          # ... within this many seconds
 ROLES = ("user", "superuser")
 ACTIONS = ("approve", "reject", "disable", "promote", "demote", "delete")
 
 _SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
 _attempts: dict[str, list[float]] = {}
+_failures: dict[str, list[float]] = {}   # wrong passwords, keyed "ip:<address>" and "name:<login>"
 _attempts_lock = threading.Lock()
 
 
@@ -125,10 +129,54 @@ def register(username: str, password: str, display_name: str = "", consent: bool
             raise AccountError("Этот логин уже занят.") from None
 
 
+def _login_keys(ip: str, username: str) -> tuple:
+    return (f"ip:{ip}", LOGIN_LIMIT), (f"name:{normalize(username)[:64]}", LOGIN_NAME_LIMIT)
+
+
+def login_blocked(ip: str, username: str) -> bool:
+    """True while this address (or this login name) has had too many wrong passwords in the last minutes."""
+    cutoff = time.monotonic() - LOGIN_WINDOW
+    with _attempts_lock:
+        for key, limit in _login_keys(ip, username):
+            recent = [t for t in _failures.get(key, []) if t > cutoff]
+            if recent:
+                _failures[key] = recent
+            else:
+                _failures.pop(key, None)
+            if len(recent) >= limit:
+                return True
+    return False
+
+
+def note_login_failure(ip: str, username: str) -> None:
+    """Counts one wrong password. Only wrong passwords count: a right one never fills the counter."""
+    moment = time.monotonic()
+    cutoff = moment - LOGIN_WINDOW
+    with _attempts_lock:
+        for key, _ in _login_keys(ip, username):
+            _failures.setdefault(key, []).append(moment)
+        if len(_failures) > 5000:
+            for key in [k for k, v in _failures.items() if not v or v[-1] <= cutoff]:
+                del _failures[key]
+
+
+def insecure_reason() -> str:
+    """Why sign-in is closed on this server ("" when it is open): the secrets are still the public defaults."""
+    if config.weak_secret_key():
+        return "SECRET_KEY"
+    if config.weak_admin_password():
+        return "ADMIN_PASSWORD"
+    return ""
+
+
 def authenticate(username: str, password: str):
     """Returns (user, "") on success, else (None, code): "1" wrong login or password (also for unknown logins),
-    or the account status ("pending", "rejected", "disabled") once the password was right."""
+    the account status ("pending", "rejected", "disabled") once the password was right, or "insecure" when the server
+    still runs on the public default SECRET_KEY (nobody may sign in) or default ADMIN_PASSWORD (the environment
+    superuser may not)."""
     name = normalize(username)
+    if config.weak_secret_key() or (name == normalize(config.ADMIN_USERNAME) and config.weak_admin_password()):
+        return None, "insecure"
     with SessionLocal() as s:
         user = s.query(User).filter_by(username=name).first()
         if user is None:

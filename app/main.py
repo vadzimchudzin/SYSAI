@@ -78,6 +78,10 @@ tpl.env.globals.update(legal_info=legal_info, POLICY_DATE="12.10.2026")
 def startup():
     init_db()
     accounts.ensure_superuser()
+    if accounts.insecure_reason():
+        log.error("SIGN-IN IS CLOSED: %s is still the public default from the README. Set a real value in the service "
+                  "environment and restart; until then nobody (SECRET_KEY) or the superuser (ADMIN_PASSWORD) can sign in.",
+                  accounts.insecure_reason())
     (config.DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
     config.MIC_INBOX_DIR.mkdir(parents=True, exist_ok=True)
     if config.TESTING:
@@ -116,6 +120,9 @@ def current_user(request: Request) -> dict | None:
     if cached is not False:
         return cached
     user = None
+    if config.weak_secret_key():  # the signing key is public: no cookie can be trusted
+        request.state.user = None
+        return None
     uid = request.session.get("uid")
     if uid is not None:
         with SessionLocal() as s:
@@ -167,10 +174,16 @@ def login_form(request: Request, error: str = ""):
 
 @app.post("/login")
 def login(request: Request, username: str = Form(""), password: str = Form(...)):
+    ip = request.client.host if request.client else "unknown"
+    if accounts.login_blocked(ip, username):  # too many wrong passwords lately: do not even check this one
+        time.sleep(1)
+        return RedirectResponse("/login?error=throttled", 303)
     user, problem = accounts.authenticate(username, password)
     if user is not None:
         request.session.update(auth=True, uid=user.id, user=user.display_name or user.username, role=user.role)
         return RedirectResponse("/app", 303)
+    if problem == "1":
+        accounts.note_login_failure(ip, username)
     time.sleep(1)
     return RedirectResponse("/login?error=" + problem, 303)
 
@@ -193,7 +206,9 @@ async def health():
 
 
 @app.get("/health/details")
-def health_details():
+def health_details(request: Request):
+    if not authed(request):  # it says whether the model key and the Telegram account are connected
+        raise HTTPException(status_code=401, detail="Нужен вход")
     return {"ok": True, "llm": config.llm_enabled(), "telegram": config.telegram_enabled(),
             "telegram_account": userbot.ready(), "database": config.DATABASE_URL.split(":")[0].split("+")[0]}
 

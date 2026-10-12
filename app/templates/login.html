@@ -9,6 +9,8 @@
     {% if error == 'pending' %}<div class="warn small">Заявка ещё не подтверждена администратором.</div>
     {% elif error == 'rejected' %}<div class="warn small">Заявка отклонена.</div>
     {% elif error == 'disabled' %}<div class="warn small">Доступ отключён администратором.</div>
+    {% elif error == 'throttled' %}<div class="warn small">Слишком много неверных паролей. Подождите 10 минут и попробуйте снова.</div>
+    {% elif error == 'insecure' %}<div class="warn small">Вход закрыт: на сервере остались пароль или ключ по умолчанию. Задайте ADMIN_PASSWORD и SECRET_KEY в переменных окружения и перезапустите сервис.</div>
     {% elif error %}<div class="warn small">Неверный логин или пароль</div>{% endif %}
     <button class="btn primary wide">Войти</button>
   </form>

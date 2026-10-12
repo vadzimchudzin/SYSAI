@@ -54,6 +54,19 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 WORKERS = int(os.getenv("WORKERS", "2"))
 TESTING = _bool("SYSAI_TESTING")
 
+DEFAULT_SECRET_KEY = "change-me-in-production"
+DEFAULT_ADMIN_PASSWORD = "SYSAI"
+
+
+def weak_secret_key() -> bool:
+    """The key is the public default (or empty): anyone who has read the repository could forge a session cookie."""
+    return not TESTING and SECRET_KEY.strip() in ("", DEFAULT_SECRET_KEY)
+
+
+def weak_admin_password() -> bool:
+    """ADMIN_PASSWORD is the default from the README (or empty): the superuser login stays closed until it is changed."""
+    return not TESTING and ADMIN_PASSWORD.strip().upper() in ("", DEFAULT_ADMIN_PASSWORD.upper())
+
 
 def _panel(key: str) -> str:
     """Value pasted in the web panel (Settings → Подключения); env variable is the fallback."""
