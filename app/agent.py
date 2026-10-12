@@ -22,7 +22,7 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import bitrix, deadlines, llm, reminders, settings_store, transcribe, userbot, voice
+from . import bitrix, deadlines, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
 from .db import (ConversationEscalation, ConversationMessage, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
@@ -83,7 +83,8 @@ def _roster() -> dict:
         with SessionLocal() as s:
             people = tuple((u or "", c or "") for u, c in
                            s.query(Employee.telegram_user_id, Employee.telegram_chat_id).filter_by(active=True).all())
-        refs = tuple(settings_store.get("approver_chat_ids") or []) + tuple(settings_store.get("full_access_chat_ids") or [])
+        refs = (tuple(settings_store.get("director_chat_ids") or []) + tuple(settings_store.get("approver_chat_ids") or [])
+                + tuple(settings_store.get("full_access_chat_ids") or []))
         _ROSTER.update(at=time.time(), refs=refs, employees=people)
     return _ROSTER
 
@@ -156,7 +157,8 @@ def handle_incoming(msg: dict) -> None:
 def _accept(msg: dict):
     chat = str(msg["user_id"])
     with SessionLocal() as s:
-        reviewer = _in_refs("approver_chat_ids", msg)
+        director = _in_refs("director_chat_ids", msg)
+        reviewer = director or _in_refs("approver_chat_ids", msg)
         full = reviewer or _in_refs("full_access_chat_ids", msg)
         employee = _find_employee(s, msg)
         wanted = bool(full or employee)
@@ -165,7 +167,7 @@ def _accept(msg: dict):
             status="agent_pending" if wanted else "agent_ignored",
             text=str(msg["text"]).strip()[:4000] if wanted else "",  # a stranger's words are not kept
             result={"attempts": 0, "name": msg.get("name", "") if wanted else "", "reviewer": reviewer,
-                    "full_access": full, "employee_id": employee.id if employee else None,
+                    "director": director, "full_access": full, "employee_id": employee.id if employee else None,
                     "voice": bool(msg.get("voice_info")), "voice_problem": (msg.get("voice_info") or {}).get("problem"),
                     "username": msg.get("username", "") if wanted else "", "phone": msg.get("phone", "") if wanted else ""})
         s.add(row)
@@ -269,7 +271,8 @@ def _notes_view(s, employee_id=None, limit=15) -> list:
     return out
 
 
-def _context(s, row, result: dict, employee, reviewer: bool, full: bool) -> dict:
+def _context(s, row, result: dict, employee, reviewer: bool, full: bool, director: bool = False,
+             director_mode: bool = False) -> dict:
     chat = row.chat_id
     history = (s.query(ConversationMessage).filter(
         ConversationMessage.chat_id == chat, ConversationMessage.role.in_(("user", "assistant")),
@@ -282,7 +285,8 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool) -> dict
     ctx = {"today": deadlines.today().isoformat(), "now": reminders.now_view(), "sender_name": result.get("name") or None,
            "voice_message": bool(result.get("voice")), "voice_problem": result.get("voice_problem") or None,
            "roles": [r for r, on in (("employee", employee is not None), ("full_access", full and not reviewer),
-                                     ("reviewer", reviewer)) if on],
+                                     ("reviewer", reviewer), ("director", director)) if on],
+           "director_mode": director_mode,
            "conversation": {"already_talking": minutes is not None and minutes < TALKING_HOURS * 60,
                             "minutes_since_last_message": minutes, "messages_so_far": len(history)},
            "memory": (memory.summary if memory else "") or None,
@@ -353,8 +357,10 @@ ACTIONS_HELP = (
     '{"type":"team_report","scope":"all или ID сотрудника"}: человек с полным доступом просит отчёт о том, кто что делает '
     "(код соберёт красивый PDF из базы и пришлёт после твоего ответа, в reply коротко скажи главное). "
     '{"type":"remind","to":"me" или "all" или "reviewers" или [ID сотрудников из команды],"at":"ГГГГ-ММ-ДД ЧЧ:ММ" или null,'
-    '"topic":"о чём напомнить, коротко","details":"время и место, что подготовить, если назвали"}: человек просит '
-    "кому-то напомнить (например, о совещании). at это время напоминания по now.local (сегодня в 15:00, за час до "
+    '"topic":"о чём напомнить, коротко","details":"время и место, что подготовить, если назвали","meeting":true или false}: '
+    "человек просит кому-то напомнить (например, о совещании). meeting=true, если напоминание о совещании, встрече или "
+    "планёрке: напоминание, которое поставлено в личном кабинете и ещё не сработало, тогда снимается для этих людей, чтобы "
+    "не писать им дважды (для остальных тем meeting не указывай). at это время напоминания по now.local (сегодня в 15:00, за час до "
     "совещания, завтра утром считай сам от now), null значит сразу. to=me: себе, это может любой; остальным (all это "
     "все сотрудники из справочника, reviewers это проверяющие) напоминают только проверяющий и люди с полным доступом. "
     "Текст напоминания потом напишешь сам, в reply скажи кому и когда напомнишь; если неясно кому, когда или о чём, "
@@ -380,6 +386,15 @@ def _system() -> str:
         "ждёшь ответа проверяющего (waiting_for_reviewer), честно скажи об этом и что вернёшься с ответом. "
         "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих и "
         "людей с полным доступом. "
+        "Ты подчиняешься директору (roles содержит director). Просьбы уровня директора: что делают, чем заняты и как "
+        "работают другие люди, отчёты по команде, поручения, напоминания другим, любые указания «сделай то-то». Их "
+        "выполняют для директора: ему можно рассказывать всё, что есть в данных. Если director_mode=false, их выполняют "
+        "также проверяющие и люди с полным доступом (roles содержит reviewer или full_access). Всем остальным, а при "
+        "director_mode=true всем, кроме директора, такие просьбы ты не выполняешь и данных о других людях не раскрываешь. "
+        "Откажи мягко, коротко и своими словами, чтобы человек не почувствовал стену: скажи, что такие просьбы ты по "
+        "запросам коллег не выполняешь и с ними лучше к руководителю, и сразу предложи то, что можешь сделать для него "
+        "самого (его задачи, статусы, напоминание ему самому). Не пиши «нет доступа», «недостаточно прав», «запрещено», "
+        "«не уполномочен», не объясняй, как устроены роли, и не называй, кто директор. "
         "Если voice_message=true, текст это автоматическая расшифровка голосового сообщения: возможны ошибки в именах, "
         "числах и времени. Когда от точности зависит действие (кому писать, во сколько напомнить), назови в reply, что "
         "именно ты понял и сделал, чтобы человек мог поправить. Если voice_problem задан (too_long, failed, empty), текст "
@@ -473,7 +488,7 @@ def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str
         ids = {m["id"] for m in ctx.get("meetings_awaiting_approval", [])}
         return "" if action.get("meeting_id") in ids else f"{kind}: совещание не ждёт проверки"
     if kind == "assign_task":
-        if not reviewer:
+        if not (reviewer and full):
             return "assign_task доступно только проверяющему"
         task = next((t for t in ctx.get("unassigned_tasks", []) if t["id"] == action.get("task_id")), None)
         if task is None:
@@ -492,6 +507,8 @@ def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str
     if kind == "remind":
         if not str(action.get("topic") or "").strip():
             return "remind: нужен topic (о чём напомнить)"
+        if action.get("meeting") not in (None, True, False):
+            return "remind: meeting это true или false"
         to = action.get("to")
         if to != "me":
             if not full:
@@ -528,6 +545,26 @@ def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str
     return f"неизвестное действие {kind!r}"
 
 
+def _denied(action: dict, employee, reviewer: bool, full: bool) -> bool:
+    """The action needs more than this person is allowed (as opposed to a mistake in the action itself)."""
+    kind = action.get("type")
+    if kind in ("team_report", "assign_task"):
+        return not full
+    if kind == "remind":
+        return action.get("to") != "me" and not full
+    if kind in ("relay_answer", "approve_meeting", "reject_meeting"):
+        return not reviewer
+    if kind == "note":
+        return action.get("employee_id") not in (None, employee.id if employee else None) and not full
+    return False
+
+
+DECLINE_GENTLY = ("\nЭти действия тебе недоступны: такие просьбы по запросам коллег ты не выполняешь. Не выполняй их и убери "
+                  "из actions. В reply мягко, коротко и по-человечески скажи, что такие просьбы ты не выполняешь и с ними "
+                  "лучше к руководителю, и предложи, чем можешь помочь этому человеку сам. Без слов «нет доступа», «нет "
+                  "прав», «запрещено».")
+
+
 # ----------------------------------------------------------------------------- applying actions (short sessions)
 def _remember(s, text: str, *, employee_id=None, task_id=None, meeting_id=None, kind="fact", source="conversation", author=""):
     s.add(Note(employee_id=employee_id, task_id=task_id, meeting_id=meeting_id, kind=kind, text=str(text).strip()[:800],
@@ -539,7 +576,7 @@ def _employee_ref(s, chat: str):
     return (employee.telegram_chat_id if employee and employee.telegram_chat_id else chat)
 
 
-def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | None = None) -> None:
+def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | None = None, full: bool = False) -> None:
     from . import assistant, pipeline
     kind = action["type"]
     with SessionLocal() as s:
@@ -614,8 +651,10 @@ def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | Non
             if not people:
                 raise AgentError("некому напоминать: у адресатов нет контактов или это сам автор просьбы")
             due = max(reminders.parse_when(action.get("at")), now() + dt.timedelta(seconds=reminders.SEND_DELAY))
-            reminders.create(s, chat=chat, requested_by=author, due=due, topic=str(action["topic"]),
-                             details=str(action.get("details") or ""), recipients=people)
+            reminder_id = reminders.create(s, chat=chat, requested_by=author, due=due, topic=str(action["topic"]),
+                                           details=str(action.get("details") or ""), recipients=people)
+            if action.get("meeting") is True and full:  # the alert from the panel that has not fired gives way to this
+                meeting_alerts.claim(s, people, due, reminder_id)
             names = ", ".join(p["name"] or p["ref"] for p in people)
             _remember(s, f"Напоминание «{str(action['topic']).strip()[:120]}» для: {names}, на {reminders.local_text(due)}",
                       employee_id=employee_id, kind="commitment", source="system", author=author)
@@ -624,6 +663,7 @@ def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | Non
         elif kind == "cancel_reminder":
             if not reminders.cancel(s, action["reminder_id"]):
                 raise AgentError("напоминание уже отправлено или отменено")
+            meeting_alerts.release(s, action["reminder_id"])
             s.commit()
         elif kind == "assign_task":
             task = s.get(Task, action["task_id"])
@@ -677,14 +717,18 @@ def _process(row_id: int) -> None:
         if employee is not None and not employee.active:
             employee = None
         reviewer, full = bool(result.get("reviewer")), bool(result.get("full_access"))
+        director = bool(result.get("director"))
+        director_mode = bool(settings_store.get("director_chat_ids"))
         if employee is None and not full:
             row.status = "agent_ignored"
             s.commit()
             return
+        if director_mode and not director:
+            full = False  # once there is a director, the view of the whole team and the orders are theirs alone
         employee_id = employee.id if employee else None
         author = result.get("name") or (employee.name if employee else "")
         decision = result.get("decision")
-        ctx = _context(s, row, result, employee, reviewer, full) if decision is None else None
+        ctx = _context(s, row, result, employee, reviewer, full, director, director_mode) if decision is None else None
     if decision is None:  # 2. decide (checked actions; a bad answer is explained to the model once)
         system, feedback = _system(), ""
         for attempt in (1, 2):
@@ -695,12 +739,14 @@ def _process(row_id: int) -> None:
             if attempt == 2:
                 raise AgentError("; ".join(errors)[:300])
             feedback = "\nПрошлый ответ нельзя выполнить: " + "; ".join(errors) + ". Исправь ответ."
+            if any(_denied(a, employee, reviewer, full) for a in decision["actions"]):
+                feedback += DECLINE_GENTLY
         result["decision"] = decision
         _store(row_id, result)
     if not result.get("actions_done"):  # 3. act
         for action in decision["actions"]:
             _apply(action, chat, employee_id, author,
-                   {"user_id": chat, "username": result.get("username", ""), "phone": result.get("phone", "")})
+                   {"user_id": chat, "username": result.get("username", ""), "phone": result.get("phone", "")}, full=full)
         _save_memory(chat, employee_id, decision.get("memory", ""))
         result["actions_done"] = True
         _store(row_id, result)

@@ -65,6 +65,25 @@ class Reminder(Base):
     sent_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class MeetingAlert(Base):
+    """A reminder about a meeting set in the web panel ("Напоминания"): the meeting time, a switch and the people to remind.
+    Weekly on the chosen days, or once on a date. The background loop turns a due alert into an ordinary Reminder."""
+    __tablename__ = "meeting_alerts"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    enabled = Column(Boolean, nullable=False, default=True)
+    title = Column(String(120), nullable=False, default="Совещание")
+    details = Column(Text, default="")                    # place, what to prepare
+    meet_time = Column(String(5), nullable=False, default="10:00")   # HH:MM, service time zone
+    lead_minutes = Column(Integer, nullable=False, default=15)       # remind this long before the meeting
+    weekdays = Column(JSON, default=list)                 # 0 = Monday ... 6 = Sunday; unused when once_date is set
+    once_date = Column(Date, nullable=True)
+    recipients = Column(JSON, default=list)               # employee ids
+    last_fired_on = Column(Date, nullable=True)           # the meeting date it was last handled for
+    last_result = Column(String(300), default="")
+    skips = Column(JSON, default=list)                    # [{"date": "2026-10-13", "employee_id": 3, "by": 12}]: the director reminded them
+
+
 class User(Base):
     """Panel accounts. Sign-up requests start as "pending" and cannot sign in until a superuser approves them."""
     __tablename__ = "users"

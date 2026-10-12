@@ -18,7 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import accounts, agent, bitrix, config, llm, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram, userbot
+from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, pipeline, progress_board, render, report_archive,
+               settings_store, telegram, userbot)
 from .analyze import mmss
 from .ui_icons import ICONS
 from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
@@ -722,7 +723,7 @@ async def settings_save(request: Request):
               "bitrix_enabled", "ai_employee"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
-    for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids"):
+    for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
         if k in f or k + "_extra" in f or f.get("present_" + k) == "1":
             updates[k] = _chat_ids(f, k)
     for k in settings_store.LEGAL_KEYS:
@@ -781,7 +782,7 @@ async def settings_save(request: Request):
             raise HTTPException(400, "Неизвестное действие с ключом")
     ai_after = bool(updates["ai_employee"]) if "ai_employee" in updates else userbot.ai_mode()
     if ai_after:  # in AI-employee mode people are addressed by @username, +phone or numeric id
-        for k in ("approver_chat_ids", "report_chat_ids", "full_access_chat_ids"):
+        for k in ("approver_chat_ids", "report_chat_ids", "full_access_chat_ids", "director_chat_ids"):
             if k in updates:
                 try:
                     updates[k] = [userbot.normalize_ref(x) for x in updates[k]]
@@ -935,6 +936,48 @@ def employee_save(request: Request, id: int = Form(0), name: str = Form(...), al
         s.add(e)
         s.commit()
     return RedirectResponse("/employees", 303)
+
+
+# ----------------------------------------------------------------------------- meeting reminders
+@app.get("/reminders", response_class=HTMLResponse)
+def reminders_view(request: Request, edit: int = 0, msg: str = ""):
+    guard_admin(request)
+    return page(request, "reminders.html", msg=msg, **meeting_alerts.page_data(edit))
+
+
+@app.post("/reminders")
+async def reminder_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    values = {k: f.get(k, "") for k in ("title", "details", "meet_time", "lead_minutes", "once_date")}
+    values["weekdays"], values["recipients"] = f.getlist("weekdays"), f.getlist("recipients")
+    try:
+        alert_id = int(f.get("id") or 0)
+    except ValueError:
+        alert_id = 0
+    try:
+        meeting_alerts.save(values, alert_id)
+    except meeting_alerts.AlertError as exc:
+        target = f"/reminders?edit={alert_id}&" if alert_id else "/reminders?"
+        return RedirectResponse(target + "msg=" + quote(str(exc)), 303)
+    return RedirectResponse("/reminders?msg=" + quote("Сохранено"), 303)
+
+
+@app.post("/reminders/{alert_id}/toggle")
+def reminder_toggle(request: Request, alert_id: int):
+    guard_admin(request)
+    try:
+        on = meeting_alerts.toggle(alert_id)
+    except meeting_alerts.AlertError as exc:
+        return RedirectResponse("/reminders?msg=" + quote(str(exc)), 303)
+    return RedirectResponse("/reminders?msg=" + quote("Включено" if on else "Выключено"), 303)
+
+
+@app.post("/reminders/{alert_id}/delete")
+def reminder_delete(request: Request, alert_id: int):
+    guard_admin(request)
+    meeting_alerts.delete(alert_id)
+    return RedirectResponse("/reminders?msg=" + quote("Удалено"), 303)
 
 
 @app.post("/employees/{eid}/delete")

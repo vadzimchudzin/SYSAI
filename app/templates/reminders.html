@@ -1,0 +1,73 @@
+{% extends "base.html" %}{% block title %}Напоминания — SYSAI{% endblock %}
+{% macro form(a) %}
+<form method="post" action="/reminders" class="rm-form" id="rm-form{{ a.id if a else 0 }}">
+  <input type="hidden" name="id" value="{{ a.id if a else 0 }}">
+  <label class="f">Название <input name="title" required maxlength="120" value="{{ a.title if a else 'Совещание' }}" placeholder="Планёрка"></label>
+  <div class="row">
+    <label class="f sm">Время совещания <input type="time" name="meet_time" required value="{{ a.meet_time if a else '10:00' }}"></label>
+    <label class="f sm">Напомнить
+      <select name="lead_minutes">{% for m, label in leads %}<option value="{{ m }}" {{ 'selected' if (a.lead_minutes if a else 15) == m }}>{{ label }}</option>{% endfor %}</select>
+    </label>
+  </div>
+  <div class="f">Дни недели
+    <div class="days">{% for i, name in weekdays %}<label class="day"><input type="checkbox" name="weekdays" value="{{ i }}" {{ 'checked' if (i in a.weekdays if a else i in default_days) }}><span>{{ name }}</span></label>{% endfor %}</div>
+  </div>
+  <label class="f">Или один раз, в дату <input type="date" name="once_date" value="{{ a.once_iso if a }}">
+    <small class="muted">Если дата указана, дни недели не работают, а напоминание выключится само после срабатывания.</small></label>
+  <label class="f">Куда прийти, что подготовить <input name="details" maxlength="500" value="{{ a.details if a }}" placeholder="Переговорная 2, возьмите отчёт за неделю"></label>
+  <div class="f">
+    <span class="row between rm-who-h"><span>Кому напомнить</span>
+      <span class="rm-tools"><button type="button" class="btn sm ghost" data-pick="all">Всех</button> <button type="button" class="btn sm ghost" data-pick="none">Никого</button></span></span>
+    {% if not employees %}<p class="muted small">Сначала добавьте сотрудников в разделе «Сотрудники».</p>{% endif %}
+    <div class="people">{% for e in employees %}
+      <label class="person {{ '' if e.reachable else 'off' }}" title="{{ 'нет Telegram-контакта: написать нельзя' if not e.reachable }}">
+        <input type="checkbox" name="recipients" value="{{ e.id }}" {{ 'checked' if a and e.id in a.recipient_ids }} {{ 'disabled' if not e.reachable }}>
+        <span class="av">{{ e.initials }}</span><span class="who"><b>{{ e.name }}</b><small>{{ e.position or '' }}{% if not e.reachable %}{{ ' · ' if e.position }}нет Telegram{% endif %}</small></span>
+      </label>{% endfor %}
+    </div>
+  </div>
+  <div class="row"><button class="btn primary">{{ 'Сохранить' if a else 'Добавить напоминание' }}</button>{% if a %}<a class="btn" href="/reminders">Отмена</a>{% endif %}</div>
+</form>
+{% endmacro %}
+{% block body %}
+<div class="page-h"><div><h1>Напоминания</h1><p>О совещании: время, переключатель и кому написать. Ассистент напомнит сам в нужную минуту.</p></div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if not ai %}<div class="card note">Напоминания отправляет ИИ-сотрудник. Включите его в <a href="/settings">настройках</a> и подключите Telegram-аккаунт.</div>{% endif %}
+<div class="rm-grid">
+  <section>
+    {% if not alerts %}<div class="card rm-empty"><b>Пока нет ни одного напоминания.</b><p class="muted small">Добавьте первое справа: время совещания, дни и людей. Директор может и сам написать ассистенту «напомни всем о совещании» (текстом или голосом): тогда напоминание из кабинета, которое ещё не сработало, для этих людей снимется.</p></div>{% endif %}
+    {% for a in alerts %}
+    <article class="card rm-card {{ '' if a.enabled else 'off' }}">
+      <div class="rm-time"><b>{{ a.meet_time }}</b><small>{{ a.lead_text }}</small></div>
+      <div class="rm-main">
+        <h3>{{ a.title }}</h3>
+        {% if a.once %}<div class="days ro"><span class="day on once">{{ a.once }}</span></div>
+        {% else %}<div class="days ro">{% for d in a.days %}<span class="day {{ 'on' if d.on }}">{{ d.name }}</span>{% endfor %}</div>{% endif %}
+        <div class="avatars">{% for p in a.people[:7] %}<span class="av {{ '' if p.reachable else 'off' }}" title="{{ p.name }}{{ ' (нет Telegram)' if not p.reachable }}">{{ p.initials }}</span>{% endfor %}{% if a.people|length > 7 %}<span class="av more">+{{ a.people|length - 7 }}</span>{% endif %}<span class="small muted">{{ a.people|length }} чел.</span></div>
+        {% if a.details %}<p class="small soft">{{ a.details }}</p>{% endif %}
+        <p class="small muted">{{ a.next }}</p>
+        {% if a.by_director %}<p class="small"><span class="pill amber">Директор уже напомнил: {{ a.by_director|join(', ') }}</span></p>{% endif %}
+        {% if a.silent %}<p class="small"><span class="pill red">Нет Telegram: {{ a.silent|join(', ') }}</span></p>{% endif %}
+        {% if a.last %}<p class="small muted">Последний раз: {{ a.last }}</p>{% endif %}
+        {% if edit and edit.id == a.id %}<div class="edit-box">{{ form(edit) }}</div>{% endif %}
+      </div>
+      <div class="rm-side">
+        <form method="post" action="/reminders/{{ a.id }}/toggle"><label class="toggle bare" title="{{ 'Выключить' if a.enabled else 'Включить' }}"><input type="checkbox" {{ 'checked' if a.enabled }} onchange="this.form.submit()"><span class="sw"></span></label></form>
+        <a class="btn sm" href="/reminders?edit={{ a.id }}">Изменить</a>
+        <form method="post" action="/reminders/{{ a.id }}/delete" onsubmit="return confirm('Удалить напоминание?')"><button class="btn sm danger" title="Удалить">×</button></form>
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+  <section class="card rm-new"><h2>Новое напоминание</h2>{{ form(None) }}</section>
+</div>
+<script>
+document.querySelectorAll('.rm-form').forEach(function (f) {
+  f.querySelectorAll('[data-pick]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      f.querySelectorAll('input[name=recipients]:not(:disabled)').forEach(function (c) { c.checked = b.dataset.pick === 'all'; });
+    });
+  });
+});
+</script>
+{% endblock %}

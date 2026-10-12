@@ -439,3 +439,44 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .legal-links { margin-top: 6px; }
 .privacy-note { margin: 10px 0 0; }
 @media (max-width: 640px) { .req { grid-template-columns: 1fr; } .req dt { border-bottom: 0; padding-bottom: 2px; } }
+
+/* ---- Напоминания о совещании ---- */
+.rm-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 980px) { .rm-grid { grid-template-columns: 1fr; } }
+.rm-new { position: sticky; top: 16px; }
+.rm-empty p { margin: 8px 0 0; line-height: 1.55; }
+.rm-card { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 18px; align-items: start; padding: 18px 20px; position: relative; overflow: hidden; }
+.rm-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: linear-gradient(var(--clay), var(--sblue)); }
+.rm-card.off { opacity: .55; } .rm-card.off::before { background: var(--line2); }
+.rm-time { text-align: center; padding: 8px 4px; border: 1px solid var(--line2); border-radius: 12px; background: var(--bg2); }
+.rm-time b { display: block; font-family: var(--serif); font-size: 30px; font-weight: 400; letter-spacing: -.02em; line-height: 1.1; }
+.rm-time small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+.rm-main h3 { margin: 2px 0 8px; font-size: 16px; color: var(--text); font-weight: 600; }
+.rm-main p { margin: 6px 0; }
+.rm-side { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.rm-side form { margin: 0; }
+.toggle.bare { padding: 0; border: 0; }
+.days { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+.day { display: inline-flex; cursor: pointer; }
+.day input { display: none; }
+.day span, .day.ro, span.day { min-width: 34px; padding: 5px 8px; text-align: center; border-radius: 9px; border: 1px solid var(--line2); font-size: 12.5px; color: var(--muted); user-select: none; }
+.day input:checked + span, span.day.on { background: var(--clay-bg); border-color: var(--clay); color: var(--text); }
+.day.once { padding: 5px 12px; border-color: var(--sblue); color: var(--blue); background: var(--sblue-bg); }
+.days.ro .day { cursor: default; }
+.avatars { display: flex; align-items: center; gap: 0; margin: 10px 0 2px; }
+.rm-card .av, .person .av { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; background: var(--clay-bg); color: var(--clay); border: 2px solid var(--card); flex: none; }
+.rm-card .av { margin-left: -6px; } .rm-card .avatars .av:first-child { margin-left: 0; } .rm-card .avatars .small { margin-left: 10px; }
+.rm-card .av:nth-child(2n) { background: var(--sblue-bg); color: var(--blue); }
+.rm-card .av.off { opacity: .4; } .rm-card .av.more { background: var(--card2); color: var(--muted); }
+.rm-form { display: grid; gap: 14px; }
+.rm-form .row .f.sm { flex: 1 1 140px; }
+.rm-who-h .btn { padding: 3px 9px; font-size: 12px; }
+.people { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; max-height: 300px; overflow: auto; padding: 2px; }
+.person { display: flex; gap: 10px; align-items: center; padding: 7px 10px; border: 1px solid var(--line2); border-radius: 12px; cursor: pointer; }
+.person input { display: none; }
+.person:has(input:checked) { border-color: var(--clay); background: var(--clay-bg); }
+.person.off { opacity: .45; cursor: not-allowed; }
+.person .who { display: flex; flex-direction: column; min-width: 0; } .person .who b { font-weight: 500; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person .who small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rm-card .edit-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) { .rm-card { grid-template-columns: 1fr; } .rm-side { flex-direction: row; align-items: center; } .rm-time { text-align: left; display: flex; align-items: baseline; gap: 10px; padding: 6px 12px; } }
