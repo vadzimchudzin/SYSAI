@@ -19,6 +19,10 @@ class FakeBackend:
         self.password_needed = False
         self.logged_out = False
         self.next_id = 100
+        self.users = {"@ivan": 42, "@anna": 43, "@the_boss": 7, "@boss": 7}
+        self.alive = True
+        self.connects = 0
+        self.file_data = []
 
     def login_start(self, api_id, api_hash, phone):
         return {"session": "half", "phone": phone, "hash": "h"}
@@ -35,10 +39,15 @@ class FakeBackend:
 
     def connect(self, api_id, api_hash, session, on_message):
         self.connected = (api_id, api_hash, session)
+        self.connects += 1
+        self.alive = True
         return {"id": 1, "name": "Алексей Помощник", "first_name": "Алексей", "username": "alexey_help", "phone": "375"}
 
     def disconnect(self):
         self.connected = None
+
+    def is_connected(self):
+        return self.alive
 
     def log_out(self):
         self.logged_out, self.connected = True, None
@@ -48,14 +57,15 @@ class FakeBackend:
             raise self.fail
         self.next_id += 1
         self.sent.append((ref, text))
-        return {"message_id": self.next_id}
+        return {"message_id": self.next_id, "user_id": self.users.get(ref)}
 
     def send_file(self, ref, filename, content, caption=""):
         if self.fail:
             raise self.fail
         self.next_id += 1
         self.files.append((ref, filename, caption))
-        return {"message_id": self.next_id}
+        self.file_data.append(content)
+        return {"message_id": self.next_id, "user_id": self.users.get(ref), "content": content}
 
 
 def _facts(messages):
@@ -71,12 +81,16 @@ class FakeModel:
         self.down = False
         self.omit_once = False
         self.omit_always = False
+        self.assistant = []
 
     def __call__(self, model_name, messages, **kwargs):
         system, facts = messages[0]["content"], _facts(messages)
         self.calls.append({"system": system, "facts": facts, "user": messages[1]["content"]})
         if self.down:
             raise llm.LLMError("модель недоступна")
+        if "Ты сам выполняешь задачу" in system:
+            item = self.assistant.pop(0)
+            return json.dumps(item(facts) if callable(item) else item, ensure_ascii=False)
         if "Тебе пишет человек" in system:
             item = self.decisions.pop(0)
             return json.dumps(item(facts) if callable(item) else item, ensure_ascii=False)
@@ -87,6 +101,8 @@ class FakeModel:
             text = f"[assignee:{facts['recipient']['name']}]"
         elif "не удалось никому отправить" in system:
             text = "[unassigned]"
+        elif "ассистент не смог выполнить" in system:
+            text = "[assistant-failed]"
         else:
             text = "[reviewer] {{LINK}}"
         if self.omit_always or self.omit_once:
@@ -373,14 +389,14 @@ def test_first_contact_is_flagged_for_the_model(tgacc, model):
     mid = make_meeting()
     pipeline.submit_deliver(mid)
     assignee_calls = [c for c in model.calls if "одному сотруднику" in c["system"]]
-    assert assignee_calls and all(c["facts"]["first_message_to_this_person"] for c in assignee_calls)
+    assert assignee_calls and all(c["facts"]["already_talking"] is False for c in assignee_calls)
 
 
 def test_the_first_message_to_an_employee_is_not_an_introduction(tgacc, model):
     mid = make_meeting()
     pipeline.submit_deliver(mid)
     system = next(c["system"] for c in model.calls if "одному сотруднику" in c["system"])
-    assert "без представления" in system and "представься" not in system
+    assert "Без представления" in system and "представься" not in system
     assert "Не представляйся" in system and "ИИ-ассистент" in system  # honest only when asked directly
 
 
@@ -447,7 +463,7 @@ def test_strangers_are_ignored_entirely(tgacc, model):
     make_meeting(task_status="sent")
     agent.handle_incoming(incoming(user_id=99, username="stranger", text="привет, как дела?"))
     assert model.calls == [] and tgacc.sent == []
-    assert history(99) == [("user", "agent_ignored", "привет, как дела?")]
+    assert history(99) == [("user", "agent_ignored", "")]  # the stranger's words are not kept
 
 
 def test_the_same_message_is_answered_once(tgacc, model):

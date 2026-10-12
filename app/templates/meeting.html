@@ -1,5 +1,8 @@
 {% extends "base.html" %}{% from "_icons.html" import icon %}{% block title %}{{ m.title or 'Совещание' }} — SYSAI{% endblock %}
 {% block body %}
+{% if artifacts %}<section class="card"><h2>Материалы ассистента</h2>
+  {% for a in artifacts %}<div class="row between"><b>{{ a.title }}</b><a class="btn sm" href="/artifacts/{{ a.id }}" target="_blank" rel="noopener">PDF</a></div>
+  {% if a.svg %}<div class="chart" style="margin:10px 0">{{ a.svg|safe }}</div>{% endif %}{% endfor %}</section>{% endif %}
 {% set st = STATUS.get(m.status, (m.status, 'gray')) %}
 <div class="page-h">
   <div><a href="/meetings" class="small muted">← Совещания</a>
@@ -130,7 +133,8 @@
         {% if t.source_quote %}<div class="muted small" style="margin-top:6px"><span class="t">{{ t.source_time }}</span> «{{ t.source_quote }}»</div>{% endif %}</td>
       <td><select name="assignee_{{ t.id }}"><option value="">— не назначен —</option>
         {% for e in employees %}<option value="{{ e.id }}" {{ 'selected' if t.assignee_id == e.id }}>{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}</select>
-        {% if not t.assignee_id and t.assignee_name %}<div class="warn small">Прозвучало «{{ t.assignee_name }}» — нет в справочнике</div>{% endif %}
+        {% if t.executor == 'assistant' %}<div class="small">Берёт на себя ассистент{% if t.status == 'assistant_done' %}: сделано{% elif t.status == 'assistant_failed' %}: не удалось{% elif t.status == 'assistant_running' %}: выполняется{% endif %}</div>
+        {% elif not t.assignee_id and t.assignee_name %}<div class="warn small">Прозвучало «{{ t.assignee_name }}» — нет в справочнике</div>{% endif %}
         {% if t.assignee and not t.assignee.telegram_chat_id %}<div class="warn small">Нет Telegram</div>{% endif %}</td>
       <td><input type="date" name="deadline_{{ t.id }}" value="{{ t.deadline.isoformat() if t.deadline }}">
         <div class="muted small">{{ {'stated':'назван на встрече','default':'по умолчанию','asked':'от исполнителя','manual':'вручную','none':'без срока'}.get(t.deadline_source) }}{% if t.deadline_quote %}: «{{ t.deadline_quote }}»{% endif %}</div></td>

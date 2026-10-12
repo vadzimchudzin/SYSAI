@@ -1,6 +1,7 @@
 """Persistent Telegram outbox. Ambiguous sends require explicit human verification."""
 import datetime as dt
 import hashlib
+import logging
 
 import httpx
 
@@ -8,6 +9,7 @@ from . import config, telegram, userbot
 from .db import DeadlineRequest, Delivery, SessionLocal, Task, now
 
 MAX_ATTEMPTS = 3
+log = logging.getLogger("sysai.delivery")
 
 
 def enqueue(s, meeting_id, phase, kind, chat, payload, document=None, task_ids=None, depends_on=None, revision=""):
@@ -48,6 +50,7 @@ def send(row_id):
             return
         s.refresh(row)
         payload, chat, document = row.payload, row.chat_id, row.document
+    transport, result = None, {}
     try:
         transport = userbot if userbot.ai_mode() else telegram  # the AI employee writes from an account, not a bot
         if transport is telegram and not config.telegram_enabled():
@@ -92,6 +95,13 @@ def send(row_id):
                 if not s.query(DeadlineRequest).filter_by(task_id=tid, message_id=message_id, chat_id=chat).first():
                     s.add(DeadlineRequest(task_id=tid, chat_id=chat, message_id=message_id))
         s.commit()
+    if transport is userbot:  # the conversation with this person now contains what was just sent
+        try:
+            from . import agent
+            text = payload.get("text") or f"[отправил файл {payload.get('filename', '')}]"
+            agent.record_outgoing(chat, text, message_id, (result or {}).get("user_id"))
+        except Exception:  # noqa: BLE001
+            log.exception("could not remember an outgoing message")
 
 
 def recover(meeting_id=None):

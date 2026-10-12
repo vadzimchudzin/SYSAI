@@ -52,6 +52,7 @@ def system_prompt(task: str) -> str:
 def _task_facts(task) -> dict:
     return {"id": task.id, "title": task.title, "description": (task.description or "")[:600],
             "assignee": task.assignee.name if task.assignee else (task.assignee_name or None),
+            "executor": getattr(task, "executor", None) or "person",
             "deadline": task.deadline.isoformat() if task.deadline else None,
             "deadline_spoken": task.deadline_quote or None, "priority": task.priority,
             "quote": (task.source_quote or "")[:300], "quote_time": task.source_time or None}
@@ -105,11 +106,15 @@ def _with_link(text: str, link: str) -> str:
 def for_reviewer(meeting, link: str) -> str:
     """The draft for the person who checks the report: what the meeting was about and who gets which task."""
     facts = meeting_facts(meeting)
-    facts["tasks_without_assignee"] = [t["id"] for t in facts["tasks"] if not t["assignee"]]
+    facts["tasks_without_assignee"] = [t["id"] for t in facts["tasks"] if not t["assignee"] and t["executor"] != "assistant"]
+    facts["tasks_assistant_takes_on"] = [t["id"] for t in facts["tasks"] if t["executor"] == "assistant"]
     facts["tasks_without_deadline"] = [t["id"] for t in facts["tasks"] if not t["deadline"]]
     task = ("Ты пишешь проверяющему (руководителю или секретарю) о готовом черновике протокола. Расскажи по-человечески: "
             "что это за совещание, главное из него, кому ты собираешься раздать какие задачи (по людям, со сроками), что "
-            "осталось неясным (задачи без исполнителя или срока, открытые вопросы). Скажи, что пока никому ничего не "
+            "осталось неясным (задачи без исполнителя или срока, открытые вопросы). Задачи из "
+            "tasks_assistant_takes_on ты берёшь на себя и выполнишь сам после согласия (график, сводка и т.п.): скажи об "
+            "этом отдельно и по-человечески; если задача без исполнителя, предложи проверяющему ответить, кому её отдать "
+            "(человеку или тебе). Скажи, что пока никому ничего не "
             "отправлял и отправишь после его согласия: согласиться можно ответом прямо в этом чате, а править текст и "
             f"состав задач можно в панели. Поставь ровно один маркер {LINK} там, где уместно дать ссылку на панель. "
             'JSON: {"text": "...", "covered_task_ids": [id всех задач, о которых написал]}.')
@@ -117,13 +122,14 @@ def for_reviewer(meeting, link: str) -> str:
     return _with_link(out["text"], link)
 
 
-def for_assignee(meeting, employee, tasks, first_contact: bool) -> str:
+def for_assignee(meeting, employee, tasks, already_talking: bool) -> str:
     """A personal message to one employee about the tasks assigned to them at the meeting."""
     facts = meeting_facts(meeting, tasks)
     facts["recipient"] = {"name": employee.name, "position": employee.position or None}
-    facts["first_message_to_this_person"] = first_contact
-    task = ("Ты пишешь одному сотруднику о задачах, которые ему назначили на совещании. Поздоровайся по имени "
-            "и сразу к делу, без представления и без рассказа о том, кто ты. Скажи, "
+    facts["already_talking"] = already_talking
+    task = ("Ты пишешь одному сотруднику о задачах, которые ему назначили на совещании. Если already_talking=false, поздоровайся по имени "
+            "и сразу к делу; если true, вы уже общались сегодня: не здоровайся заново, просто переходи к делу. Без "
+            "представления и без рассказа о том, кто ты. Скажи, "
             "что его задачи прозвучали на совещании «название», и объясни каждую так, чтобы было ясно, что именно "
             "сделать и к какому сроку; опирайся на цитаты, не придумывай деталей. Если у задачи нет срока, спроси, к "
             "какому сроку он реально успеет. Не пересказывай совещание целиком и не используй нумерованные отчёты. "
@@ -147,6 +153,14 @@ def for_unassigned(meeting, tasks) -> str:
             "не указан Telegram. Перечисли их по-человечески и предложи, что сделать (назначить в панели, добавить "
             'контакт в справочник). JSON: {"text": "...", "covered_task_ids": [id задач, о которых написал]}.')
     return _ask(system_prompt(task), facts, [t.id for t in tasks])["text"]
+
+
+def for_assistant_failure(title: str, reason: str) -> str:
+    """Tells the reviewer that a task the assistant took on could not be done."""
+    task = ("Ты пишешь проверяющему, что ассистент не смог выполнить взятую на себя задачу. Скажи по-человечески, какую "
+            "задачу и почему не вышло, и предложи, что можно сделать (дать недостающие данные или поручить человеку, "
+            'для этого достаточно ответить в этом чате). JSON: {"text": "..."}.')
+    return _ask(system_prompt(task), {"task": title, "reason": reason})["text"]
 
 
 def today() -> str:

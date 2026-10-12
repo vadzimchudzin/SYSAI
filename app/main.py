@@ -19,7 +19,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import accounts, agent, bitrix, config, deadlines, pipeline, progress_board, render, report_archive, settings_store, telegram, userbot
 from .analyze import mmss
 from .ui_icons import ICONS
-from .db import (ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -332,7 +332,21 @@ def meeting_view(request: Request, mid: int):
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
         employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
-    return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees)
+        artifacts = [{"id": a.id, "title": a.title, "filename": a.filename, "svg": a.svg or ""} for a in
+                     s.query(Artifact).filter_by(meeting_id=mid).order_by(Artifact.id.desc()).all()]
+    return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts)
+
+
+@app.get("/artifacts/{aid}")
+def artifact_download(request: Request, aid: int):
+    """A document the AI employee made itself (chart, report)."""
+    guard(request)
+    with SessionLocal() as s:
+        artifact = s.get(Artifact, aid)
+        if artifact is None or artifact.data is None:
+            raise HTTPException(404, "Материал не найден")
+        data, mime, name = bytes(artifact.data), artifact.mime, artifact.filename
+    return Response(data, media_type=mime, headers={"Content-Disposition": "inline; filename*=UTF-8''" + quote(name)})
 
 
 @app.get("/meetings/{mid}/status")
@@ -380,7 +394,10 @@ def _apply_form(mid: int, form, approve=False):
             t.title = (form.get(f"title_{t.id}") or t.title).strip()
             t.description = form.get(f"desc_{t.id}", t.description)
             a = form.get(f"assignee_{t.id}", "")
-            t.assignee_id = int(a) if a else None
+            if a or t.executor != "assistant":  # an empty choice keeps a task the assistant does itself
+                t.assignee_id = int(a) if a else None
+            if a:
+                t.executor = "person"
             dl = form.get(f"deadline_{t.id}", "")
             new = dt.date.fromisoformat(dl) if dl else None
             if new != t.deadline:
@@ -629,7 +646,7 @@ async def settings_save(request: Request):
               "bitrix_enabled", "ai_employee"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
-    for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids"):
+    for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids"):
         if k in f or k + "_extra" in f or f.get("present_" + k) == "1":
             updates[k] = _chat_ids(f, k)
     for k in ("transcribe_model", "report_model", "conversation_model", "conversation_tone",
@@ -671,7 +688,7 @@ async def settings_save(request: Request):
             raise HTTPException(400, "Неизвестное действие с ключом")
     ai_after = bool(updates["ai_employee"]) if "ai_employee" in updates else userbot.ai_mode()
     if ai_after:  # in AI-employee mode people are addressed by @username, +phone or numeric id
-        for k in ("approver_chat_ids", "report_chat_ids"):
+        for k in ("approver_chat_ids", "report_chat_ids", "full_access_chat_ids"):
             if k in updates:
                 try:
                     updates[k] = [userbot.normalize_ref(x) for x in updates[k]]

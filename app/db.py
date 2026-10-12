@@ -173,7 +173,8 @@ class Task(Base):
     priority = Column(String(10), default="medium")
     source_quote = Column(Text, default="")
     source_time = Column(String(20), default="")
-    status = Column(String(30), default="draft")  # draft | sent | awaiting_deadline | no_recipient
+    status = Column(String(30), default="draft")  # draft | sent | awaiting_deadline | no_recipient | in_progress | blocked | done | assistant_todo | assistant_done | assistant_failed
+    executor = Column(String(12), default="person")  # person | assistant (the AI employee does it itself)
     bitrix_task_id = Column(String(40), default="")
     meeting = relationship("Meeting", back_populates="tasks")
     assignee = relationship("Employee")
@@ -268,6 +269,43 @@ def wait_for_db(attempts: int = 6, delay: float = 3.0):
             time.sleep(delay * attempt)
 
 
+class Note(Base):
+    """What people said and did, one fact per row: the AI employee's notebook and the source for "who does what"."""
+    __tablename__ = "notes"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True)
+    kind = Column(String(20), default="fact")  # fact | status | commitment | done | system
+    text = Column(Text, nullable=False)
+    source = Column(String(20), default="conversation")  # conversation | meeting | system | manual
+    author = Column(String(80), default="")
+    created_at = Column(DateTime(timezone=True), default=now, index=True)
+
+
+class PersonMemory(Base):
+    """A rolling summary of everything the AI employee knows about one person it talks to (key: Telegram user id)."""
+    __tablename__ = "person_memory"
+    chat_id = Column(String(40), primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    summary = Column(Text, default="")
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class Artifact(Base):
+    """A document the AI employee produced itself (chart, report): kept for the panel and sent to the reviewer."""
+    __tablename__ = "artifacts"
+    id = Column(Integer, primary_key=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    title = Column(String(300), default="")
+    filename = Column(String(200), default="")
+    mime = Column(String(60), default="application/pdf")
+    data = Column(LargeBinary, nullable=True)
+    svg = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
 def _add_column_if_missing(table: str, column: str, ddl: str):
     """Lightweight migration for databases created by earlier versions."""
     from sqlalchemy import inspect
@@ -295,6 +333,7 @@ def init_db():
     Base.metadata.create_all(engine)
     _add_column_if_missing("meetings", "options", "options JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
 
 

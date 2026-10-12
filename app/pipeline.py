@@ -8,9 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func
 
-from . import (analyze, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive, settings_store, telegram,
+from . import (analyze, assistant, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive, settings_store, telegram,
                transcribe, userbot, voice)
-from .db import DeadlineRequest, Delivery, Employee, Meeting, SessionLocal, Task, TelegramChat, now
+from .db import (ConversationMessage, DeadlineRequest, Delivery, Employee, Meeting, SessionLocal, Task, TelegramChat,
+                 now)
 
 log = logging.getLogger("sysai.pipeline")
 POOL = ThreadPoolExecutor(max_workers=config.WORKERS, thread_name_prefix="sysai-job")
@@ -210,7 +211,7 @@ def _save_report(meeting_id: int, report: dict, settings: dict):
             if not d and settings["deadline_mode"] == "default":
                 d, src = deadlines.add_business_days(deadlines.today(), int(settings["default_deadline_days"])), "default"
             m.tasks.append(Task(title=t["title"], description=t.get("description", ""), assignee_id=t.get("employee_id"),
-                                assignee_name=t.get("assignee_name", ""), deadline=d, deadline_source=src,
+                                assignee_name=t.get("assignee_name", ""), executor=t.get("executor") or "person", deadline=d, deadline_source=src,
                                 deadline_quote=t.get("deadline_quote", ""), priority=t.get("priority", "medium"),
                                 source_quote=t.get("quote", ""), source_time=t.get("time", "")))
         s.commit()
@@ -311,6 +312,20 @@ def deliver(meeting_id: int):
         if not rows:
             m.status, m.progress, m.sent_at = "ready", "Отчёт готов; получатели рассылки не выбраны", None
         s.commit()
+    if userbot.ai_mode():
+        assistant.schedule(meeting_id)
+
+
+_TALKING_HOURS = 8
+
+
+def _already_talking(s, employee) -> bool:
+    """Was there any message with this person in the last hours? Then a new message does not start with a greeting."""
+    if employee is None or not employee.telegram_user_id:
+        return False
+    since = now() - dt.timedelta(hours=_TALKING_HOURS)
+    return s.query(ConversationMessage).filter(ConversationMessage.chat_id == employee.telegram_user_id,
+                                               ConversationMessage.created_at > since).count() > 0
 
 
 def _plan_delivery_ai(m, settings):
@@ -324,6 +339,8 @@ def _plan_delivery_ai(m, settings):
                              document=archived.pdf)
         orphan, by_chat = [], {}
         for t in meeting.tasks:
+            if t.executor == "assistant":  # the AI employee does these itself, see assistant.py
+                continue
             chat = t.assignee.telegram_chat_id if t.assignee else ""
             if settings["send_tasks_to_assignees"] and chat:
                 by_chat.setdefault(chat, []).append(t)
@@ -336,9 +353,9 @@ def _plan_delivery_ai(m, settings):
                 except Exception as e:  # noqa: BLE001
                     log.warning("bitrix task failed: %s", e)
         for chat, tasks in by_chat.items():
-            first = s.query(Delivery).filter_by(chat_id=str(chat), status="sent").count() == 0
+            talking = _already_talking(s, tasks[0].assignee)
             delivery.enqueue(s, m.id, "final", "tasks", chat,
-                             lambda: {"text": voice.for_assignee(meeting, tasks[0].assignee, tasks, first)},
+                             lambda: {"text": voice.for_assignee(meeting, tasks[0].assignee, tasks, talking)},
                              task_ids=[t.id for t in tasks])
         if orphan:
             for chat in settings.get("approver_chat_ids") or []:
@@ -695,16 +712,30 @@ def mic_scan():
             submit(create_meeting(f.name, str(dst), source="microphone"))
 
 
+_WAKE = threading.Event()
+_ACTIVITY = [time.time()]
+
+
+def poke():
+    """Something happened (a recording, a message): the background loop works at full speed for a while."""
+    _ACTIVITY[0] = time.time()
+    _WAKE.set()
+
+
 def start_background():
     from . import agent, conversations
     resume_jobs()
     conversations.recover()
+    assistant.recover()
+
     def loop():
         while True:
-            for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending):
+            for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
+                       assistant.run_pending, userbot.watchdog):
                 try:
                     fn()
                 except Exception:
                     log.exception("%s failed", fn.__name__)
-            time.sleep(30)
+            _WAKE.wait(30 if time.time() - _ACTIVITY[0] < 900 else 120)  # quieter when nothing has happened for a while
+            _WAKE.clear()
     threading.Thread(target=loop, daemon=True, name="sysai-bg").start()

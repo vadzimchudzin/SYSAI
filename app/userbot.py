@@ -97,6 +97,7 @@ class TelethonBackend:
         self._thread = None
         self._client = None
         self._on_message = None
+        self._watch = None
         self._guard = threading.Lock()
 
     # plumbing
@@ -189,7 +190,9 @@ class TelethonBackend:
             self._on_message = on_message
             client.add_event_handler(self._handle, events.NewMessage(incoming=True))
             self._client = client
-            asyncio.ensure_future(self._watch_unread())
+            if self._watch is not None:
+                self._watch.cancel()
+            self._watch = asyncio.ensure_future(self._watch_unread())
             return {"id": me.id, "name": " ".join(x for x in (me.first_name, me.last_name) if x),
                     "first_name": me.first_name or "", "username": me.username or "", "phone": me.phone or ""}
         return self._run(go())
@@ -278,9 +281,22 @@ class TelethonBackend:
             return telegram.TelegramError("Получатель не принимает сообщения от этого аккаунта", retryable=False)
         return None
 
+    def is_connected(self) -> bool:
+        return self._client is not None and bool(self._client.is_connected())
+
+    def _online(self):
+        if self._client is None:
+            raise telegram.TelegramError("Аккаунт Telegram сейчас не подключён", retryable=True, retry_after=20)
+        return self._client
+
+    @staticmethod
+    def _user_id(entity):
+        _, _, _, _, _, types = TelethonBackend._telethon()
+        return entity.id if isinstance(entity, types.User) else None
+
     def send(self, ref, text, reply_to=None, typing=0.0):
         async def go():
-            client = self._client
+            client = self._online()
             entity = await self._entity(client, ref)
             try:
                 await client.send_read_acknowledge(entity)
@@ -290,17 +306,17 @@ class TelethonBackend:
                 async with client.action(entity, "typing"):
                     await asyncio.sleep(typing)
             message = await client.send_message(entity, text, reply_to=reply_to, link_preview=False)
-            return {"message_id": message.id}
+            return {"message_id": message.id, "user_id": self._user_id(entity)}
         return self._call(go)
 
     def send_file(self, ref, filename, content, caption=""):
         async def go():
-            client = self._client
+            client = self._online()
             entity = await self._entity(client, ref)
             data = io.BytesIO(content)
             data.name = filename
             message = await client.send_file(entity, data, caption=caption or None, force_document=True)
-            return {"message_id": message.id}
+            return {"message_id": message.id, "user_id": self._user_id(entity)}
         return self._call(go)
 
     def _call(self, go):
@@ -395,8 +411,35 @@ def start(on_message=None) -> bool:
     return True
 
 
+_booting = threading.Lock()
+
+
+def _boot(on_message=None):
+    if _booting.acquire(blocking=False):  # one connection attempt at a time
+        try:
+            start(on_message)
+        finally:
+            _booting.release()
+
+
 def start_in_background(on_message=None):
-    threading.Thread(target=start, args=(on_message,), daemon=True, name="tg-userbot-start").start()
+    threading.Thread(target=_boot, args=(on_message,), daemon=True, name="tg-userbot-start").start()
+
+
+def watchdog(on_message=None) -> None:
+    """Keeps the account online: connects when it never came up and reconnects when the connection dropped."""
+    if not (ai_mode() and configured()):
+        return
+    if ready():
+        try:
+            alive = getattr(_backend(), "is_connected", lambda: True)()
+        except Exception:  # noqa: BLE001
+            alive = False
+        if alive:
+            return
+        _state["connected"] = False
+        log.warning("Telegram account lost its connection, reconnecting")
+    _boot(on_message)
 
 
 def stop():

@@ -1,0 +1,46 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><style>
+@page { size: A4; margin: 18mm 16mm; @bottom-right { content: counter(page); font: 9pt Arial; color: #9aa0a6; } }
+* { box-sizing: border-box; }
+body { font-family: "DejaVu Sans", Arial, sans-serif; color: #1f2328; font-size: 10.5pt; line-height: 1.5; }
+h1 { font-size: 20pt; margin: 0 0 4pt; }
+h2 { font-size: 13pt; margin: 18pt 0 6pt; border-bottom: 2px solid {{ accent }}; padding-bottom: 3pt; }
+.meta { color: #6b7280; font-size: 9pt; margin-bottom: 14pt; }
+.chart { margin: 10pt 0; page-break-inside: avoid; }
+.chart svg { width: 100%; height: auto; }
+ul { margin: 6pt 0 6pt 16pt; padding: 0; }
+.pill { display: inline-block; padding: 1pt 7pt; border-radius: 9pt; font-size: 8.5pt; background: #eef0f3; color: #374151; }
+.red { background: #fde4e4; color: #a12b2b; } .green { background: #e0f4ea; color: #1d6b45; } .amber { background: #fdf1d6; color: #8a5a00; }
+table { width: 100%; border-collapse: collapse; margin: 6pt 0 10pt; font-size: 9.5pt; }
+th { text-align: left; background: #f4f5f7; padding: 5pt 7pt; font-size: 8.5pt; color: #4b5563; }
+td { padding: 5pt 7pt; border-top: 1px solid #e5e7eb; vertical-align: top; }
+.card { border: 1px solid #e5e7eb; border-radius: 8pt; padding: 8pt 12pt; margin: 8pt 0; page-break-inside: avoid; }
+.stats { display: table; width: 100%; margin: 8pt 0 14pt; } .stat { display: table-cell; text-align: center; padding: 8pt; background: #f8f9fb; border-radius: 8pt; }
+.stat b { display: block; font-size: 20pt; color: {{ accent }}; }
+.muted { color: #6b7280; }
+</style></head><body>
+<h1>{% if only %}Кто что делает: {{ only }}{% else %}Кто что делает{% endif %}</h1>
+<div class="meta">{% if company %}{{ company }} · {% endif %}состояние на {{ today }}, данные из базы SYSAI</div>
+<div class="stats">
+  <div class="stat"><b>{{ totals.open }}</b>в работе</div>
+  <div class="stat"><b>{{ totals.blocked }}</b>заблокировано</div>
+  <div class="stat"><b>{{ totals.done }}</b>выполнено</div>
+  <div class="stat"><b>{{ totals.overdue }}</b>просрочено</div>
+</div>
+{% for c in charts %}<div class="chart">{{ c|safe }}</div>{% endfor %}
+<h2>По людям</h2>
+{% if not rows %}<p class="muted">В справочнике нет активных сотрудников.</p>{% endif %}
+{% for r in rows %}
+<div class="card">
+  <b>{{ r.name }}</b>{% if r.position %} <span class="muted">{{ r.position }}</span>{% endif %}
+  <span class="pill">в работе {{ r.counts[0] }}</span> {% if r.counts[1] %}<span class="pill amber">заблокировано {{ r.counts[1] }}</span> {% endif %}<span class="pill green">выполнено {{ r.counts[2] }}</span>{% if r.counts[3] %} <span class="pill red">просрочено {{ r.counts[3] }}</span>{% endif %}
+  {% if r.open %}<table><tr><th>Задача</th><th>Статус</th><th>Срок</th></tr>
+  {% for t in r.open %}<tr><td>{{ t.title }}{% if t.meeting %}<div class="muted" style="font-size:8.5pt">{{ t.meeting }}</div>{% endif %}</td>
+    <td>{{ {'sent':'отправлена','draft':'поставлена','awaiting_deadline':'ждёт срока','in_progress':'в работе','blocked':'заблокирована'}.get(t.status, t.status) }}</td>
+    <td>{% if t.overdue %}<span class="pill red">{{ t.deadline }}</span>{% else %}{{ t.deadline }}{% endif %}</td></tr>{% endfor %}</table>{% else %}<p class="muted">Открытых задач нет.</p>{% endif %}
+  {% if r.done %}<div class="muted" style="font-size:9pt">Сделано: {{ r.done|join('; ') }}</div>{% endif %}
+  {% if r.notes %}<div style="font-size:9pt;margin-top:4pt"><span class="muted">Заметки:</span> {{ r.notes|join(' · ') }}</div>{% endif %}
+</div>
+{% endfor %}
+{% if assistant_tasks %}<h2>Задачи ассистента</h2><table><tr><th>Задача</th><th>Статус</th></tr>
+{% for t in assistant_tasks %}<tr><td>{{ t.title }}</td><td>{{ {'assistant_todo':'в очереди','assistant_running':'выполняется','assistant_done':'сделано','assistant_failed':'не удалось','draft':'ждёт одобрения'}.get(t.status, t.status) }}</td></tr>{% endfor %}</table>{% endif %}
+</body></html>

@@ -23,6 +23,10 @@ SYSTEM = """Ты — опытный секретарь руководителя.
 - Срок: если назван («до пятницы», «к 15-му», «через неделю») — переведи в дату YYYY-MM-DD относительно даты
   совещания {meeting_date} ({weekday}) и процитируй в deadline_quote. Если срок не назван — deadline null.
 - Для задач и тем укажи время в записи (MM:SS) и короткую цитату-основание.
+- Исполнитель-ассистент: если поручение отдали ИИ, ассистенту, боту или секретарю (в том числе по имени ассистента),
+  либо это работа, которую сам делает ИИ-ассистент (построить график или диаграмму, свести данные в сводку или
+  таблицу, подготовить отчёт по цифрам, напомнить, узнать у человека статус), поставь executor="assistant",
+  employee_id null и assignee_name "ассистент". Все остальные задачи: executor="person".
 - Решения — то, о чём договорились. Открытые вопросы — что осталось нерешённым. Риски — проблемы и опасения.
 - Участники: сопоставь метки говорящих («Спикер 1») с людьми, если это понятно из разговора.
 Справочник сотрудников (JSON): {employees}
@@ -34,6 +38,7 @@ SYSTEM = """Ты — опытный секретарь руководителя.
  "decisions": [{{"text": str, "time": "MM:SS"}}],
  "tasks": [{{"title": str, "description": str, "employee_id": int|null, "assignee_name": str|null,
             "deadline": "YYYY-MM-DD"|null, "deadline_quote": str|null, "priority": "high"|"medium"|"low",
+            "executor": "person"|"assistant",
             "time": "MM:SS", "quote": str}}],
  "open_questions": [str], "risks": [str], "notes": [str], "next_meeting": str|null}}"""
 
@@ -252,6 +257,8 @@ def _validate_report(report, employees, transcript, duration, meeting_date, requ
             raise llm.LLMError("Задаче не хватает названия")
         if not isinstance(task.get("assignee_name"), (str, type(None))):
             raise llm.LLMError("Некорректный assignee_name задачи")
+        if task.get("executor") not in (None, "person", "assistant"):
+            raise llm.LLMError("Некорректный executor задачи")
         eid = task.get("employee_id")
         if eid is not None and (not isinstance(eid, int) or isinstance(eid, bool)):
             raise llm.LLMError("Некорректный employee_id задачи")
@@ -532,15 +539,18 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
             eid = int(eid) if eid is not None else None
         except (TypeError, ValueError):
             eid = None
-        if eid not in ids:
+        executor = "assistant" if t.get("executor") == "assistant" else "person"
+        if executor == "assistant":
+            eid = None
+        elif eid not in ids:
             matched = match_employee(t.get("assignee_name"), employees)
             eid = matched.id if matched else None
         d = None
         if t.get("deadline"):
             d = normalize_deadline(t["deadline"], meeting_date)
         tasks.append({"title": str(t["title"]).strip(), "description": str(t.get("description") or "").strip(),
-                      "employee_id": eid if eid in ids else None,
-                      "assignee_name": (t.get("assignee_name") or "").strip(),
+                      "employee_id": eid if eid in ids else None, "executor": executor,
+                      "assignee_name": ((t.get("assignee_name") or "").strip() or ("ассистент" if executor == "assistant" else "")),
                       "deadline": d.isoformat() if d else None, "deadline_quote": t.get("deadline_quote") or "",
                       "priority": t.get("priority") if t.get("priority") in ("high", "medium", "low") else "medium",
                       "time": t.get("time") or "", "quote": t.get("quote") or ""})

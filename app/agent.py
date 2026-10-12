@@ -1,10 +1,16 @@
 """The AI employee's side of every conversation.
 
-People write to the Telegram account; the model answers in its own words and may ask for a few actions. Code decides
+People write to the Telegram account; the model answers in its own words and may ask for checked actions. Code decides
 whether an action is allowed (who the sender is, which task or meeting it concerns) and applies it. Only directory
-employees and reviewers get answers: the account may also be a person's private one, everyone else is ignored.
-A reply is never a fixed phrase. When the model is unavailable the message waits and is retried; nobody receives a
-made-up answer.
+employees, reviewers and contacts with full access get answers: the account may also be a private one, everyone else is
+ignored and their texts are not even stored. A reply is never a fixed phrase. When the model is unavailable the message
+waits and is retried; nobody receives a made-up answer.
+
+Who may do what
+- employee: sees only their own tasks; sets a deadline, reports progress, writes notes about their own work, asks the
+  reviewer.
+- full access (a setting): additionally sees the whole team, every task and note, asks for reports, writes notes.
+- reviewer: all of it, plus approves or rejects meetings, answers employees' questions and assigns tasks.
 """
 import collections
 import concurrent.futures
@@ -16,13 +22,17 @@ import threading
 from sqlalchemy.exc import IntegrityError
 
 from . import bitrix, deadlines, llm, settings_store, userbot, voice
-from .db import ConversationEscalation, ConversationMessage, Employee, Meeting, SessionLocal, Task, now
+from .db import (ConversationEscalation, ConversationMessage, Employee, Meeting, Note, PersonMemory, SessionLocal,
+                 Task, now)
 
 log = logging.getLogger("sysai.agent")
 
-HISTORY = 20
+HISTORY = 40            # messages of one conversation the model sees
 MAX_ATTEMPTS = 3
-RETRY_AFTER = 20  # seconds before a waiting message is picked up again
+RETRY_AFTER = 20        # seconds before a waiting message is picked up again
+TALKING_HOURS = 8       # within this time a conversation is "going on": no new greeting
+MAX_REPLY = 3500
+OPEN_STATUSES = ("draft", "sent", "awaiting_deadline", "in_progress", "blocked")
 POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent")
 _locks = collections.defaultdict(threading.Lock)
 
@@ -31,9 +41,20 @@ class AgentError(RuntimeError):
     """The model's decision cannot be carried out; the message is retried or given up, never answered."""
 
 
+def _testing() -> bool:
+    from . import config
+    return config.TESTING
+
+
+def _aware(moment):
+    if moment is not None and moment.tzinfo is None:
+        return moment.replace(tzinfo=dt.timezone.utc)
+    return moment
+
+
 # ----------------------------------------------------------------------------- who is writing
-def _is_reviewer(msg: dict) -> bool:
-    return any(userbot.same_person(ref, msg) for ref in settings_store.get("approver_chat_ids") or [])
+def _in_refs(setting: str, msg: dict) -> bool:
+    return any(userbot.same_person(ref, msg) for ref in settings_store.get(setting) or [])
 
 
 def _find_employee(s, msg: dict):
@@ -63,31 +84,49 @@ def handle_incoming(msg: dict) -> None:
     if _testing():
         process(row_id)
     else:
+        from . import pipeline
+        pipeline.poke()
         POOL.submit(process, row_id)
-
-
-def _testing() -> bool:
-    from . import config
-    return config.TESTING
 
 
 def _accept(msg: dict):
     chat = str(msg["user_id"])
     with SessionLocal() as s:
-        reviewer = _is_reviewer(msg)
+        reviewer = _in_refs("approver_chat_ids", msg)
+        full = reviewer or _in_refs("full_access_chat_ids", msg)
         employee = _find_employee(s, msg)
-        status = "agent_pending" if (reviewer or employee) else "agent_ignored"
-        row = ConversationMessage(chat_id=chat, message_id=msg["message_id"], role="user", status=status,
-                                  text=str(msg["text"]).strip()[:4000],
-                                  result={"attempts": 0, "name": msg.get("name", ""), "reviewer": reviewer,
-                                          "employee_id": employee.id if employee else None})
+        wanted = bool(full or employee)
+        row = ConversationMessage(
+            chat_id=chat, message_id=msg["message_id"], role="user",
+            status="agent_pending" if wanted else "agent_ignored",
+            text=str(msg["text"]).strip()[:4000] if wanted else "",  # a stranger's words are not kept
+            result={"attempts": 0, "name": msg.get("name", "") if wanted else "", "reviewer": reviewer,
+                    "full_access": full, "employee_id": employee.id if employee else None})
         s.add(row)
         try:
             s.commit()
         except IntegrityError:
             s.rollback()
             return None  # already seen (the unread scan hands messages over again)
-        return row.id if status == "agent_pending" else None
+        return row.id if wanted else None
+
+
+def record_outgoing(ref: str, text: str, message_id, user_id) -> None:
+    """Everything the account sends to a person (task messages, drafts, files) becomes part of that conversation, so
+    the next reply knows what was said. Also teaches the directory the person's numeric Telegram id."""
+    if not user_id or message_id is None:
+        return
+    chat = str(user_id)
+    with SessionLocal() as s:
+        employee = s.query(Employee).filter_by(telegram_chat_id=str(ref)).first()
+        if employee is not None and not employee.telegram_user_id:
+            employee.telegram_user_id = chat
+        s.add(ConversationMessage(chat_id=chat, message_id=message_id, role="assistant", status="agent_done",
+                                  text=str(text)[:4000], result={}))
+        try:
+            s.commit()
+        except IntegrityError:
+            s.rollback()
 
 
 def run_pending() -> None:
@@ -100,7 +139,7 @@ def run_pending() -> None:
             ConversationMessage.role == "user", ConversationMessage.status == "agent_pending",
             ConversationMessage.created_at < limit).order_by(ConversationMessage.id).all()]
     for row_id in ids:
-        POOL.submit(process, row_id) if not _testing() else process(row_id)
+        process(row_id) if _testing() else POOL.submit(process, row_id)
 
 
 def process(row_id: int) -> None:
@@ -125,40 +164,97 @@ def process(row_id: int) -> None:
                     s.commit()
 
 
-# ----------------------------------------------------------------------------- context for the model
-def _task_view(task) -> dict:
-    return {"id": task.id, "title": task.title, "description": (task.description or "")[:500],
-            "deadline": task.deadline.isoformat() if task.deadline else None,
+# ----------------------------------------------------------------------------- what the model gets to see
+def _task_view(task, employee_view: bool) -> dict:
+    view = {"id": task.id, "title": task.title, "description": (task.description or "")[:400],
+            "status": task.status, "deadline": task.deadline.isoformat() if task.deadline else None,
             "can_set_deadline": task.deadline is None, "priority": task.priority,
-            "quote": (task.source_quote or "")[:250], "meeting": task.meeting.title if task.meeting else ""}
+            "meeting": task.meeting.title if task.meeting else "", "meeting_id": task.meeting_id}
+    if employee_view:
+        view["quote"] = (task.source_quote or "")[:250]
+    return view
 
 
-def _context(s, row, msg_like: dict, employee, reviewer: bool) -> dict:
+def _meeting_view(meeting, brief: bool = False) -> dict:
+    report = meeting.report if isinstance(meeting.report, dict) else {}
+    view = {"id": meeting.id, "title": meeting.title or "", "status": meeting.status,
+            "date": (meeting.meeting_date.isoformat() if meeting.meeting_date else None),
+            "summary": str(report.get("summary") or "")[: (300 if brief else 700)]}
+    if not brief:
+        view["decisions"] = [x.get("text") if isinstance(x, dict) else x for x in report.get("decisions") or []][:6]
+    return view
+
+
+def _notes_view(s, employee_id=None, limit=15) -> list:
+    query = s.query(Note).order_by(Note.id.desc())
+    if employee_id is not None:
+        query = query.filter(Note.employee_id == employee_id)
+    names = {}
+    out = []
+    for note in query.limit(limit).all():
+        if note.employee_id not in names:
+            owner = s.get(Employee, note.employee_id) if note.employee_id else None
+            names[note.employee_id] = owner.name if owner else None
+        out.append({"about": names[note.employee_id], "kind": note.kind, "text": note.text[:300],
+                    "when": _aware(note.created_at).date().isoformat() if note.created_at else None})
+    out.reverse()
+    return out
+
+
+def _context(s, row, result: dict, employee, reviewer: bool, full: bool) -> dict:
     chat = row.chat_id
     history = (s.query(ConversationMessage).filter(
         ConversationMessage.chat_id == chat, ConversationMessage.role.in_(("user", "assistant")),
         ConversationMessage.status.in_(("agent_pending", "agent_done")), ConversationMessage.id < row.id)
         .order_by(ConversationMessage.id.desc()).limit(HISTORY).all())
     history.reverse()
-    ctx = {"today": deadlines.today().isoformat(), "sender_name": msg_like.get("name") or None,
-           "roles": [r for r, on in (("employee", employee is not None), ("reviewer", reviewer)) if on],
-           "history": [{"from": "человек" if h.role == "user" else "ты", "text": h.text[:800]} for h in history]}
+    last = _aware(history[-1].created_at) if history and history[-1].created_at else None
+    minutes = int((now() - last).total_seconds() // 60) if last else None
+    memory = s.get(PersonMemory, chat)
+    ctx = {"today": deadlines.today().isoformat(), "sender_name": result.get("name") or None,
+           "roles": [r for r, on in (("employee", employee is not None), ("full_access", full and not reviewer),
+                                     ("reviewer", reviewer)) if on],
+           "conversation": {"already_talking": minutes is not None and minutes < TALKING_HOURS * 60,
+                            "minutes_since_last_message": minutes, "messages_so_far": len(history)},
+           "memory": (memory.summary if memory else "") or None,
+           "history": [{"from": "человек" if h.role == "user" else "ты", "text": h.text[:900]} for h in history]}
     if employee is not None:
-        tasks = (s.query(Task).filter(Task.assignee_id == employee.id, Task.status.in_(("sent", "awaiting_deadline")))
+        tasks = (s.query(Task).filter(Task.assignee_id == employee.id, Task.status.in_(OPEN_STATUSES + ("done",)))
                  .order_by(Task.id.desc()).limit(30).all())
+        mine = [t for t in tasks if t.status in OPEN_STATUSES and t.status != "draft"]
         ctx["employee"] = {"name": employee.name, "position": employee.position or None,
-                           "tasks": [_task_view(t) for t in tasks]}
-        waiting = s.query(ConversationEscalation).filter_by(chat_id=chat, status="open").all()
-        ctx["waiting_for_reviewer"] = [{"id": e.id, "question": e.reason} for e in waiting]
+                           "tasks": [_task_view(t, True) for t in mine],
+                           "done_recently": [t.title for t in tasks if t.status == "done"][:5]}
+        meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks))[:4]
+        ctx["meetings"] = [_meeting_view(m) for m in (s.get(Meeting, i) for i in meeting_ids) if m]
+        ctx["waiting_for_reviewer"] = [{"id": e.id, "question": e.reason} for e in
+                                       s.query(ConversationEscalation).filter_by(chat_id=chat, status="open").all()]
+        ctx["notes"] = _notes_view(s, employee.id)
+    if full:
+        people = s.query(Employee).filter_by(active=True).order_by(Employee.name).all()
+        tasks = s.query(Task).order_by(Task.id.desc()).limit(300).all()
+        by_person = collections.defaultdict(list)
+        for task in tasks:
+            if task.assignee_id and task.executor != "assistant":
+                by_person[task.assignee_id].append(task)
+        ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None,
+                        "open_tasks": [_task_view(t, False) for t in by_person[p.id] if t.status in OPEN_STATUSES][:8],
+                        "done": sum(t.status == "done" for t in by_person[p.id]),
+                        "blocked": sum(t.status == "blocked" for t in by_person[p.id])} for p in people]
+        ctx["unassigned_tasks"] = [_task_view(t, False) for t in tasks if t.assignee_id is None
+                                   and t.executor != "assistant" and t.status in ("draft", "no_recipient")][:15]
+        ctx["assistant_tasks"] = [{"id": t.id, "title": t.title, "status": t.status, "meeting_id": t.meeting_id}
+                                  for t in tasks if t.executor == "assistant"][:15]
+        ctx["notes"] = _notes_view(s, None, 25)
+        ctx["recent_meetings"] = [_meeting_view(m, True) for m in
+                                  s.query(Meeting).order_by(Meeting.id.desc()).limit(4).all()]
     if reviewer:
-        meetings = s.query(Meeting).filter_by(status="awaiting_approval").order_by(Meeting.id.desc()).limit(5).all()
-        ctx["meetings_awaiting_approval"] = [
-            {"id": m.id, "title": m.title or "", "tasks": len(m.tasks), "summary": str((m.report or {}).get("summary") or "")[:400]}
-            for m in meetings]
-        open_questions = s.query(ConversationEscalation).filter_by(status="open").order_by(ConversationEscalation.id).limit(10).all()
+        waiting = s.query(Meeting).filter_by(status="awaiting_approval").order_by(Meeting.id.desc()).limit(5).all()
+        ctx["meetings_awaiting_approval"] = [{**_meeting_view(m, True), "tasks": len(m.tasks)} for m in waiting]
+        questions = s.query(ConversationEscalation).filter_by(status="open").order_by(ConversationEscalation.id).limit(10).all()
         ctx["open_questions_from_employees"] = [
-            {"id": e.id, "employee": _name_for_chat(s, e.chat_id), "question": e.reason,
-             "task": s.get(Task, e.task_id).title if e.task_id and s.get(Task, e.task_id) else None} for e in open_questions]
+            {"id": q.id, "employee": _name_for_chat(s, q.chat_id), "question": q.reason,
+             "task": (s.get(Task, q.task_id).title if q.task_id and s.get(Task, q.task_id) else None)} for q in questions]
     return ctx
 
 
@@ -168,25 +264,44 @@ def _name_for_chat(s, chat: str) -> str:
 
 
 ACTIONS_HELP = (
-    'Формат ответа: {"reply": "что написать человеку или пустая строка", "actions": [...]}. Доступные действия: '
-    '{"type":"set_deadline","task_id":ID,"date":"ГГГГ-ММ-ДД"} (сотрудник назвал конкретную дату, а у задачи ещё нет срока); '
-    '{"type":"ask_reviewer","task_id":ID или null,"question":"суть вопроса","message":"точный текст, который ты напишешь проверяющему"} '
-    "(сотруднику нужен ответ, которого нет в данных); "
-    '{"type":"relay_answer","question_id":ID,"message":"точный текст, который ты напишешь сотруднику с ответом проверяющего"} '
-    "(проверяющий ответил на вопрос сотрудника); "
-    '{"type":"approve_meeting","meeting_id":ID} и {"type":"reject_meeting","meeting_id":ID} (проверяющий прямо согласился '
-    "отправить именно это совещание или отклонил его; если совещаний несколько и неясно какое, спроси). "
-    "Используй действие только когда намерение человека ясно. Действия проверяются кодом: ID бери только из данных.")
+    'Формат ответа: {"reply": "что написать человеку или пустая строка", "actions": [...], "memory": "необязательно"}. '
+    "Действия (ID бери только из данных; код проверяет права и ID): "
+    '{"type":"set_deadline","task_id":ID,"date":"ГГГГ-ММ-ДД"}: сотрудник назвал конкретную дату, а у его задачи нет срока; '
+    '{"type":"task_status","task_id":ID,"status":"in_progress|done|blocked","note":"что сделано или что мешает"}: '
+    "человек сообщил, как идёт задача; "
+    '{"type":"note","text":"...","employee_id":ID или null,"task_id":ID или null,"kind":"fact|status|commitment|done"}: '
+    "запомнить факт о том, кто что сделал, пообещал или сказал (для себя, не для пересылки); "
+    '{"type":"ask_reviewer","task_id":ID или null,"question":"суть","message":"точный текст проверяющему"}: сотруднику нужен '
+    "ответ, которого нет в данных; "
+    '{"type":"relay_answer","question_id":ID,"message":"точный текст сотруднику"}: проверяющий ответил на вопрос сотрудника; '
+    '{"type":"approve_meeting","meeting_id":ID} и {"type":"reject_meeting","meeting_id":ID}: проверяющий прямо согласился '
+    "отправить именно это совещание или отклонил его (если совещаний несколько и неясно какое, спроси); "
+    '{"type":"assign_task","task_id":ID,"to":ID сотрудника или "assistant","message":"текст сотруднику, если совещание уже '
+    'отправлено"}: проверяющий решил, кто делает задачу (to="assistant" значит, что задачу выполнишь ты сам: график, '
+    "таблица, сводка, отчёт, напоминание, запрос статуса; так же повторяют задачу ассистента со статусом "
+    "assistant_failed); "
+    '{"type":"team_report","scope":"all или ID сотрудника"}: человек с полным доступом просит отчёт о том, кто что делает '
+    "(код соберёт красивый PDF из базы и пришлёт после твоего ответа, в reply коротко скажи главное). "
+    "Поле memory: если узнал что-то важное о человеке или его работе, верни обновлённую краткую память (до 1200 символов, "
+    "сохрани важное из прошлой памяти), иначе не добавляй поле.")
 
 
-def _system(ctx: dict) -> str:
+def _system() -> str:
     task = (
-        "Тебе пишет человек в личные сообщения. Ответь как внимательный коллега: коротко, по делу, своими словами. "
-        "На короткие реплики вроде «ок», «понял», «спасибо» ответ может быть совсем коротким, а если отвечать не нужно, "
-        "оставь reply пустым. Не пиши «не понял», если смысл можно угадать по истории; если неясно, задай один "
-        "конкретный вопрос. Не выдумывай статусы, сроки и обещания. Если сотрудник спрашивает то, чего нет в данных, "
-        "используй ask_reviewer и скажи ему, что уточняешь. Если ты уже ждёшь ответа проверяющего (waiting_for_reviewer), "
-        "честно скажи, что ждёшь его ответа и вернёшься, когда он ответит. Не раскрывай задачи и данные других людей. "
+        "Тебе пишет человек в личные сообщения. Веди живой разговор, как внимательный коллега, своими словами. "
+        "Приветствие: здоровайся только когда знакомство начинается или после долгого перерыва "
+        "(conversation.already_talking=false). Если already_talking=true, не здоровайся и не представляйся, "
+        "продолжай с того места, где остановились, как в живой переписке. Не повторяй то, что уже говорил. "
+        "Ты можешь вести долгие содержательные разговоры: обсуждать задачи, подход, сроки, риски, помогать думать вслух, "
+        "задавать уточняющие вопросы по делу. Опирайся на историю, память (memory), заметки (notes) и данные о задачах. "
+        "Короткие реплики вроде «ок», «понял», «спасибо» не требуют вопросов: отвечай коротко и естественно или "
+        "оставь reply пустым. Не пиши «не понял», если смысл ясен из истории; если неясно, задай один конкретный вопрос. "
+        "Не выдумывай статусы, сроки и обещания. Не обещай то, чего нет среди действий: любое обещание "
+        "«сделаю», «передам», «поставлю» должно быть действием в actions, иначе не обещай. "
+        "Если сотрудник спрашивает то, чего нет в данных, используй ask_reviewer и скажи, что уточняешь. Если ты уже "
+        "ждёшь ответа проверяющего (waiting_for_reviewer), честно скажи об этом и что вернёшься с ответом. "
+        "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих и "
+        "людей с полным доступом. "
         + ACTIONS_HELP)
     return voice.system_prompt(task)
 
@@ -195,21 +310,31 @@ def _decide(system: str, ctx: dict, text: str, feedback: str = "") -> dict:
     user = ("<data>" + json.dumps(ctx, ensure_ascii=False) + "</data>\nСообщение человека:\n<data>" + text + "</data>" + feedback)
     try:
         raw = llm.chat(voice.model(), [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                       json_mode=True, temperature=0.6, max_tokens=1200, timeout=90)
+                       json_mode=True, temperature=0.6, max_tokens=1800, timeout=90)
         data = llm.parse_json(raw)
     except llm.LLMError as exc:
         raise AgentError(f"модель недоступна: {str(exc)[:200]}") from exc
     if not isinstance(data, dict):
         raise AgentError("модель вернула не объект")
-    reply = data.get("reply")
-    actions = data.get("actions") or []
-    if (reply is not None and not isinstance(reply, str)) or not isinstance(actions, list):
+    reply, actions, memory = data.get("reply"), data.get("actions") or [], data.get("memory")
+    if (reply is not None and not isinstance(reply, str)) or not isinstance(actions, list) \
+            or (memory is not None and not isinstance(memory, str)):
         raise AgentError("модель вернула ответ в неверной форме")
-    return {"reply": (reply or "").strip(), "actions": [a for a in actions if isinstance(a, dict)]}
+    return {"reply": (reply or "").strip()[:MAX_REPLY], "actions": [a for a in actions if isinstance(a, dict)],
+            "memory": (memory or "").strip()[:1200]}
 
 
-# ----------------------------------------------------------------------------- checking actions
-def _check(s, action: dict, ctx: dict, employee, reviewer: bool) -> str:
+# ----------------------------------------------------------------------------- checking actions (no database here)
+def _known_task_ids(ctx: dict, *, own_only: bool = False) -> set:
+    ids = {t["id"] for t in (ctx.get("employee") or {}).get("tasks", [])}
+    if not own_only:
+        for person in ctx.get("team", []):
+            ids |= {t["id"] for t in person["open_tasks"]}
+        ids |= {t["id"] for t in ctx.get("unassigned_tasks", [])}
+    return ids
+
+
+def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str:
     """Returns an error text or "" when the action may run."""
     kind = action.get("type")
     if kind == "set_deadline":
@@ -222,8 +347,25 @@ def _check(s, action: dict, ctx: dict, employee, reviewer: bool) -> str:
             date = dt.date.fromisoformat(str(action.get("date")))
         except ValueError:
             return "set_deadline: дата должна быть в формате ГГГГ-ММ-ДД"
-        if date < deadlines.today():
-            return "set_deadline: дата уже прошла"
+        return "" if date >= deadlines.today() else "set_deadline: дата уже прошла"
+    if kind == "task_status":
+        if action.get("status") not in ("in_progress", "done", "blocked"):
+            return "task_status: статус in_progress, done или blocked"
+        ids = _known_task_ids(ctx, own_only=not full)
+        return "" if action.get("task_id") in ids else "task_status: задача не найдена среди доступных"
+    if kind == "note":
+        if not str(action.get("text") or "").strip():
+            return "note: нужен text"
+        if action.get("kind", "fact") not in ("fact", "status", "commitment", "done"):
+            return "note: kind fact, status, commitment или done"
+        employee_id = action.get("employee_id")
+        if employee is not None and not full:
+            if employee_id not in (None, employee.id):
+                return "note: сотрудник может писать заметки только о себе"
+            if action.get("task_id") is not None and action["task_id"] not in _known_task_ids(ctx, own_only=True):
+                return "note: задача не найдена среди задач сотрудника"
+        elif employee_id is not None and employee_id not in {p["id"] for p in ctx.get("team", [])}:
+            return "note: сотрудник не найден в команде"
         return ""
     if kind == "ask_reviewer":
         if employee is None:
@@ -235,14 +377,11 @@ def _check(s, action: dict, ctx: dict, employee, reviewer: bool) -> str:
         task_ids = {t["id"] for t in ctx["employee"]["tasks"]}
         if action.get("task_id") is not None and action.get("task_id") not in task_ids:
             return "ask_reviewer: задача не найдена среди задач сотрудника"
-        if not task_ids:
-            return "ask_reviewer: у сотрудника нет задач, вопрос не к чему привязать"
-        return ""
+        return "" if task_ids else "ask_reviewer: у сотрудника нет задач, вопрос не к чему привязать"
     if kind == "relay_answer":
         if not reviewer:
             return "relay_answer доступно только проверяющему"
-        ids = {q["id"] for q in ctx.get("open_questions_from_employees", [])}
-        if action.get("question_id") not in ids:
+        if action.get("question_id") not in {q["id"] for q in ctx.get("open_questions_from_employees", [])}:
             return "relay_answer: вопрос не найден среди открытых"
         return "" if str(action.get("message") or "").strip() else "relay_answer: нужен message"
     if kind in ("approve_meeting", "reject_meeting"):
@@ -250,100 +389,207 @@ def _check(s, action: dict, ctx: dict, employee, reviewer: bool) -> str:
             return f"{kind} доступно только проверяющему"
         ids = {m["id"] for m in ctx.get("meetings_awaiting_approval", [])}
         return "" if action.get("meeting_id") in ids else f"{kind}: совещание не ждёт проверки"
+    if kind == "assign_task":
+        if not reviewer:
+            return "assign_task доступно только проверяющему"
+        task = next((t for t in ctx.get("unassigned_tasks", []) if t["id"] == action.get("task_id")), None)
+        if task is None:
+            task = next((t for person in ctx.get("team", []) for t in person["open_tasks"] if t["id"] == action.get("task_id")), None)
+        again = next((t for t in ctx.get("assistant_tasks", []) if t["id"] == action.get("task_id")
+                      and t["status"] in ("assistant_failed", "assistant_done")), None)
+        if task is None and again is None:
+            return "assign_task: задача не найдена среди доступных"
+        target = action.get("to")
+        if target != "assistant" and target not in {p["id"] for p in ctx.get("team", [])}:
+            return 'assign_task: to должен быть ID сотрудника из команды или "assistant"'
+        if target != "assistant" and task is not None and task.get("status") in ("sent", "in_progress", "blocked", "awaiting_deadline") \
+                and not str(action.get("message") or "").strip():
+            return "assign_task: совещание уже отправлено, нужен message сотруднику"
+        return ""
+    if kind == "team_report":
+        if not full:
+            return "team_report доступно только проверяющему и людям с полным доступом"
+        scope = action.get("scope")
+        return "" if scope == "all" or scope in {p["id"] for p in ctx.get("team", [])} else "team_report: scope all или ID сотрудника"
     return f"неизвестное действие {kind!r}"
 
 
-def _apply(s, row, action: dict, employee) -> None:
-    from . import pipeline
+# ----------------------------------------------------------------------------- applying actions (short sessions)
+def _remember(s, text: str, *, employee_id=None, task_id=None, meeting_id=None, kind="fact", source="conversation", author=""):
+    s.add(Note(employee_id=employee_id, task_id=task_id, meeting_id=meeting_id, kind=kind, text=str(text).strip()[:800],
+               source=source, author=author[:80]))
+
+
+def _employee_ref(s, chat: str):
+    employee = s.query(Employee).filter_by(telegram_user_id=chat).first()
+    return (employee.telegram_chat_id if employee and employee.telegram_chat_id else chat)
+
+
+def _apply(action: dict, chat: str, employee_id, author: str) -> None:
+    from . import assistant, pipeline
     kind = action["type"]
-    if kind == "set_deadline":
-        task = s.get(Task, action["task_id"])
-        task.deadline, task.deadline_source = dt.date.fromisoformat(action["date"]), "asked"
-        if task.status == "awaiting_deadline":
-            task.status = "sent"
-        if task.bitrix_task_id:
-            try:
-                bitrix.update_deadline(task)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("bitrix update failed: %s", exc)
+    with SessionLocal() as s:
+        if kind == "set_deadline":
+            task = s.get(Task, action["task_id"])
+            task.deadline, task.deadline_source = dt.date.fromisoformat(action["date"]), "asked"
+            if task.status == "awaiting_deadline":
+                task.status = "sent"
+            if task.bitrix_task_id:
+                try:
+                    bitrix.update_deadline(task)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("bitrix update failed: %s", exc)
+            _remember(s, f"Срок по задаче «{task.title}»: {action['date']}", employee_id=task.assignee_id, task_id=task.id,
+                      kind="commitment", author=author)
+            s.commit()
+        elif kind == "task_status":
+            task = s.get(Task, action["task_id"])
+            task.status = action["status"]
+            note = str(action.get("note") or "").strip()
+            label = {"in_progress": "в работе", "done": "выполнена", "blocked": "заблокирована"}[action["status"]]
+            _remember(s, f"Задача «{task.title}»: {label}" + (f". {note}" if note else ""), employee_id=task.assignee_id,
+                      task_id=task.id, kind="done" if action["status"] == "done" else "status", author=author)
+            s.commit()
+        elif kind == "note":
+            target = action.get("employee_id") if action.get("employee_id") is not None else employee_id
+            _remember(s, action["text"], employee_id=target, task_id=action.get("task_id"),
+                      kind=action.get("kind", "fact"), author=author)
+            s.commit()
+        elif kind == "ask_reviewer":
+            task = s.get(Task, action["task_id"]) if action.get("task_id") is not None else None
+            meeting_id = task.meeting_id if task else (
+                s.query(Task).filter(Task.assignee_id == employee_id).order_by(Task.id.desc()).first().meeting_id)
+            s.add(ConversationEscalation(meeting_id=meeting_id, task_id=task.id if task else None, chat_id=chat,
+                                         reason=str(action["question"]).strip()[:1000], status="open"))
+            _remember(s, f"Вопрос проверяющему: {str(action['question']).strip()}", employee_id=employee_id,
+                      task_id=task.id if task else None, kind="status", source="system", author=author)
+            s.commit()
+            delivered = 0
+            for ref in settings_store.get("approver_chat_ids") or []:
+                try:
+                    userbot.send_message(ref, str(action["message"]).strip())
+                    delivered += 1
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("question for reviewer %s not delivered: %s", ref, exc)
+            if not delivered:
+                raise AgentError("вопрос не дошёл ни до одного проверяющего")
+        elif kind == "relay_answer":
+            question = s.get(ConversationEscalation, action["question_id"])
+            target = _employee_ref(s, question.chat_id)
+            employee_chat = question.chat_id
+            text = str(action["message"]).strip()
+            sent = userbot.send_message(target, text)
+            s.add(ConversationMessage(chat_id=employee_chat, message_id=sent["message_id"], role="assistant",
+                                      status="agent_done", text=text[:4000], result={}))
+            question.status = "resolved"
+            _remember(s, f"Ответ проверяющего на вопрос «{question.reason[:120]}»: {text}", employee_id=employee_id,
+                      kind="status", source="system", author=author)
+            s.commit()
+        elif kind in ("approve_meeting", "reject_meeting"):
+            meeting = s.get(Meeting, action["meeting_id"])
+            revision = int((meeting.options or {}).get("approval_revision", 1))
+            meeting_id = meeting.id
+            s.commit()
+            if kind == "approve_meeting":
+                if not pipeline.submit_deliver(meeting_id, allowed=("awaiting_approval",), revision=revision):
+                    raise AgentError("совещание уже обработано")
+            else:
+                pipeline.reject(meeting_id, revision=revision)
+        elif kind == "assign_task":
+            task = s.get(Task, action["task_id"])
+            target = action["to"]
+            delivered = task.status in ("sent", "in_progress", "blocked", "awaiting_deadline")
+            meeting_id = task.meeting_id
+            if target == "assistant":
+                task.executor, task.assignee_id, task.assignee_name = "assistant", None, "ассистент"
+                task.status = "assistant_todo"
+                _remember(s, f"Задача «{task.title}» поручена ассистенту", task_id=task.id, meeting_id=meeting_id,
+                          kind="commitment", source="system", author=author)
+                s.commit()
+                assistant.schedule(meeting_id)
+            else:
+                person = s.get(Employee, target)
+                task.executor, task.assignee_id, task.assignee_name = "person", person.id, person.name
+                ref = person.telegram_chat_id
+                if delivered or task.status.startswith("assistant_"):
+                    task.status = "sent"
+                _remember(s, f"Задача «{task.title}» поручена: {person.name}", employee_id=person.id, task_id=task.id,
+                          meeting_id=meeting_id, kind="commitment", source="system", author=author)
+                s.commit()
+                message = str(action.get("message") or "").strip()
+                if message and ref:
+                    userbot.send_message(ref, message)
+
+
+def _save_memory(chat: str, employee_id, summary: str) -> None:
+    if not summary:
+        return
+    with SessionLocal() as s:
+        memory = s.get(PersonMemory, chat) or PersonMemory(chat_id=chat)
+        memory.summary, memory.employee_id = summary, employee_id
+        s.merge(memory)
         s.commit()
-    elif kind == "ask_reviewer":
-        task = s.get(Task, action["task_id"]) if action.get("task_id") is not None else None
-        meeting_id = task.meeting_id if task else (
-            s.query(Task).filter(Task.assignee_id == employee.id).order_by(Task.id.desc()).first().meeting_id)
-        s.add(ConversationEscalation(meeting_id=meeting_id, task_id=task.id if task else None, chat_id=row.chat_id,
-                                     reason=str(action["question"]).strip()[:1000], status="open"))
-        s.commit()
-        delivered = 0
-        for ref in settings_store.get("approver_chat_ids") or []:
-            try:
-                userbot.send_message(ref, str(action["message"]).strip())
-                delivered += 1
-            except Exception as exc:  # noqa: BLE001
-                log.warning("question for reviewer %s not delivered: %s", ref, exc)
-        if not delivered:
-            raise AgentError("вопрос не дошёл ни до одного проверяющего")
-    elif kind == "relay_answer":
-        question = s.get(ConversationEscalation, action["question_id"])
-        employee_row = s.query(Employee).filter_by(telegram_user_id=question.chat_id).first()
-        target = (employee_row.telegram_chat_id if employee_row and employee_row.telegram_chat_id else question.chat_id)
-        sent = userbot.send_message(target, str(action["message"]).strip())
-        s.add(ConversationMessage(chat_id=question.chat_id, message_id=sent["message_id"], role="assistant",
-                                  status="agent_done", text=str(action["message"]).strip()[:4000]))
-        question.status = "resolved"
-        s.commit()
-    elif kind == "approve_meeting":
-        meeting = s.get(Meeting, action["meeting_id"])
-        revision = int((meeting.options or {}).get("approval_revision", 1))
-        if not pipeline.submit_deliver(meeting.id, allowed=("awaiting_approval",), revision=revision):
-            raise AgentError("совещание уже обработано")
-    elif kind == "reject_meeting":
-        meeting = s.get(Meeting, action["meeting_id"])
-        pipeline.reject(meeting.id, revision=int((meeting.options or {}).get("approval_revision", 1)))
 
 
 # ----------------------------------------------------------------------------- one message
-def _process(row_id: int) -> None:
+def _store(row_id: int, result: dict) -> None:
     with SessionLocal() as s:
+        s.get(ConversationMessage, row_id).result = dict(result)
+        s.commit()
+
+
+def _process(row_id: int) -> None:
+    from . import assistant
+    with SessionLocal() as s:  # 1. read, then let go of the connection while the model thinks
         row = s.get(ConversationMessage, row_id)
-        result = dict(row.result or {})
-        msg_like = {"name": result.get("name", "")}
-        # Roles were decided when the message arrived (the sender's @username is only known then).
+        result, chat, text = dict(row.result or {}), row.chat_id, row.text
         employee = s.get(Employee, result["employee_id"]) if result.get("employee_id") else None
         if employee is not None and not employee.active:
             employee = None
-        reviewer = bool(result.get("reviewer"))
-        if employee is None and not reviewer:
+        reviewer, full = bool(result.get("reviewer")), bool(result.get("full_access"))
+        if employee is None and not full:
             row.status = "agent_ignored"
             s.commit()
             return
-        ctx = _context(s, row, msg_like, employee, reviewer)
+        employee_id = employee.id if employee else None
+        author = result.get("name") or (employee.name if employee else "")
         decision = result.get("decision")
-        if decision is None:
-            system = _system(ctx)
-            feedback = ""
-            for attempt in (1, 2):
-                decision = _decide(system, ctx, row.text, feedback)
-                errors = [e for e in (_check(s, a, ctx, employee, reviewer) for a in decision["actions"]) if e]
-                if not errors:
-                    break
-                if attempt == 2:
-                    raise AgentError("; ".join(errors)[:300])
-                feedback = "\nПрошлый ответ нельзя выполнить: " + "; ".join(errors) + ". Исправь ответ."
-            result["decision"] = decision
-            row.result = result
-            s.commit()
-        if not result.get("actions_done"):
-            for action in decision["actions"]:
-                _apply(s, row, action, employee)
-            result["actions_done"] = True
-            row.result = dict(result)
-            s.commit()
-        if decision["reply"] and not result.get("reply_sent"):
-            sent = userbot.send_message(row.chat_id, decision["reply"])
-            s.add(ConversationMessage(chat_id=row.chat_id, message_id=sent["message_id"], role="assistant",
-                                      status="agent_done", text=decision["reply"][:4000]))
-            result["reply_sent"] = True
-            row.result = dict(result)
-        row.status, row.error = "agent_done", ""
+        ctx = _context(s, row, result, employee, reviewer, full) if decision is None else None
+    if decision is None:  # 2. decide (checked actions; a bad answer is explained to the model once)
+        system, feedback = _system(), ""
+        for attempt in (1, 2):
+            decision = _decide(system, ctx, text, feedback)
+            errors = [e for e in (_check(a, ctx, employee, reviewer, full) for a in decision["actions"]) if e]
+            if not errors:
+                break
+            if attempt == 2:
+                raise AgentError("; ".join(errors)[:300])
+            feedback = "\nПрошлый ответ нельзя выполнить: " + "; ".join(errors) + ". Исправь ответ."
+        result["decision"] = decision
+        _store(row_id, result)
+    if not result.get("actions_done"):  # 3. act
+        for action in decision["actions"]:
+            _apply(action, chat, employee_id, author)
+        _save_memory(chat, employee_id, decision.get("memory", ""))
+        result["actions_done"] = True
+        _store(row_id, result)
+    if decision["reply"] and not result.get("reply_sent"):  # 4. answer
+        sent = userbot.send_message(chat, decision["reply"])
+        with SessionLocal() as s:
+            s.add(ConversationMessage(chat_id=chat, message_id=sent["message_id"], role="assistant", status="agent_done",
+                                      text=decision["reply"][:4000], result={}))
+            try:
+                s.commit()
+            except IntegrityError:
+                s.rollback()
+        result["reply_sent"] = True
+        _store(row_id, result)
+    for action in decision["actions"]:  # 5. things that follow the reply
+        if action["type"] == "team_report" and not result.get("sent_team_report"):
+            assistant.send_team_report(chat, action["scope"])
+            result["sent_team_report"] = True
+            _store(row_id, result)
+    with SessionLocal() as s:
+        row = s.get(ConversationMessage, row_id)
+        row.status, row.error, row.result = "agent_done", "", dict(result)
         s.commit()

@@ -10,6 +10,7 @@ POSITIONS = ["Директор", "Заместитель директора", "�
 DEFAULTS = {
     # AI employee: writes from a Telegram account instead of a bot
     "ai_employee": False,
+    "full_access_chat_ids": [],      # contacts (besides the reviewers) who may ask "who does what" and get reports
     "persona": "",                   # how the AI employee talks; empty = built-in default
     "agent_model": "google/gemini-2.5-flash",
     "userbot_api_id": "", "userbot_api_hash": "", "userbot_session": "", "userbot_phone": "",  # sealed, see userbot.py
