@@ -165,3 +165,26 @@ def for_assistant_failure(title: str, reason: str) -> str:
 
 def today() -> str:
     return deadlines.today().isoformat()
+
+
+def for_reminder(topic: str, details: str, requested_by: str, recipient_name: str, to_self: bool, already_talking: bool) -> str:
+    """A reminder to one person: about a meeting, a call, anything somebody asked the AI employee to remind of."""
+    facts = {"topic": topic, "details": details or None, "requested_by": requested_by or None,
+             "recipient": {"name": recipient_name or None, "asked_for_themselves": to_self},
+             "already_talking": already_talking, "now": today()}
+    task = ("Ты напоминаешь человеку о том, о чём тебя попросили напомнить (topic, details). Напиши короткое сообщение "
+            "в одну-три фразы: что именно и когда, если это есть в данных. Используй только topic и details, не придумывай "
+            "время, место и повестку. Если asked_for_themselves=true, человек сам просил напомнить: просто напомни. Если "
+            "напомнить просил другой человек (requested_by), можно одной фразой назвать его, только если это звучит "
+            "естественно. Если already_talking=false и есть имя, поздоровайся по имени; если true, не здоровайся. Без "
+            'представления и без рассказа о том, кто ты. JSON: {"text": "..."}.')
+    return _ask(system_prompt(task), facts)["text"]
+
+
+def for_reminder_report(topic: str, delivered: list, failed: list) -> str:
+    """Tells the person who asked for a reminder who got it and who did not."""
+    facts = {"topic": topic, "delivered_to": delivered, "not_delivered_to": failed}
+    task = ("Ты отчитываешься перед тем, кто просил напомнить: кому ты напомнил (delivered_to) и кому не получилось "
+            "(not_delivered_to, у каждого коротко причина). Одна-две фразы, по-человечески. Если не получилось ни у кого, "
+            'скажи об этом прямо и предложи написать им самому. JSON: {"text": "..."}.')
+    return _ask(system_prompt(task), facts)["text"]

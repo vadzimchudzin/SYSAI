@@ -28,6 +28,8 @@ log = logging.getLogger("sysai.userbot")
 PAUSE_RANGE = (2.0, 6.0)        # seconds between two outgoing messages (looks like a person, protects the account)
 DAILY_LIMIT = 150               # outgoing messages per rolling 24 hours; the real load is 20-100 a week
 TYPING_MAX = 6.0                # seconds of the "typing..." indicator before a long message
+MAX_VOICE_SECONDS = 600            # longer voice messages are not recognised (cost, and a meeting belongs in the panel)
+MAX_VOICE_BYTES = 15 * 1024 * 1024
 PEER_FLOOD_PAUSE = 6 * 3600     # after Telegram's PeerFlood answer nothing is sent for this long
 LEASE_TTL = 90                  # seconds a running instance keeps the account to itself (renewed every watchdog tick)
 INSTANCE = secrets.token_hex(4)  # this process; during a deploy the old and the new instance run side by side
@@ -209,15 +211,41 @@ class TelethonBackend:
         sender = await event.get_sender()
         await self._dispatch(sender, event.message)
 
+    @staticmethod
+    def _voice_of(message):
+        """A voice message, an audio note or a round video as a small description with a lazy download, else None.
+        The download happens only when the app asks for it (strangers and repeats never cost anything)."""
+        file = getattr(message, "file", None)
+        if file is None or not (getattr(message, "voice", None) or getattr(message, "audio", None)
+                                or getattr(message, "video_note", None)):
+            return None
+        seconds = float(getattr(file, "duration", 0) or 0)
+        size = int(getattr(file, "size", 0) or 0)
+        mime = str(getattr(file, "mime_type", "") or "")
+        if seconds > MAX_VOICE_SECONDS or size > MAX_VOICE_BYTES:
+            return {"too_long": True, "seconds": seconds, "mime": mime}
+        loop = asyncio.get_running_loop()
+
+        def fetch():  # called from a worker thread of the app
+            return asyncio.run_coroutine_threadsafe(message.download_media(file=bytes), loop).result(120)
+        return {"fetch": fetch, "seconds": seconds, "mime": mime}
+
     async def _dispatch(self, sender, message):
         text = (message.raw_text or "").strip()
-        if sender is None or getattr(sender, "bot", False) or not text:
+        if sender is None or getattr(sender, "bot", False):
             return
+        voice = None
+        if not text:
+            voice = self._voice_of(message)
+            if voice is None:
+                return
         msg = {"user_id": sender.id, "username": sender.username or "", "phone": getattr(sender, "phone", "") or "",
                "name": " ".join(x for x in (sender.first_name, sender.last_name) if x), "text": text,
                "message_id": message.id}
         if not await self._served(sender):
             return
+        if voice is not None:
+            msg["voice"] = voice
         await asyncio.get_running_loop().run_in_executor(None, self._on_message, msg)
 
     async def _served(self, person) -> bool:
@@ -649,11 +677,11 @@ def logout() -> None:
 
 
 # ----------------------------------------------------------------------------- sending
-def _guard_send():
+def _guard_send(urgent: bool = False):
     now = time.time()
     if now < _paused_until[0]:
         raise telegram.TelegramError("Telegram ограничил отправку с аккаунта. Сообщения не уходят, пока не закончится пауза.")
-    until = quiet_until()
+    until = None if urgent else quiet_until()  # a message somebody asked for at a given time is not held back
     if until is not None:
         raise QuietHours((until - dt.datetime.now(dt.timezone.utc)).total_seconds())
     if not ready():
@@ -685,10 +713,11 @@ def _flood(exc: PeerFlood):
     log.error("PeerFlood: sending paused for %s hours", PEER_FLOOD_PAUSE // 3600)
 
 
-def send_message(chat_id, text: str, buttons=None, reply_to=None) -> dict:
-    """Same shape as telegram.send_message. Buttons do not exist for a personal account and are ignored."""
+def send_message(chat_id, text: str, buttons=None, reply_to=None, urgent: bool = False) -> dict:
+    """Same shape as telegram.send_message. Buttons do not exist for a personal account and are ignored.
+    `urgent` skips the quiet hours (reminders that were asked for at a given time)."""
     with _send_lock:
-        _guard_send()
+        _guard_send(urgent)
         try:
             result = _backend().send(str(chat_id), text, reply_to=reply_to, typing=_pace(len(text)))
         except PeerFlood as exc:

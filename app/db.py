@@ -45,6 +45,26 @@ class Setting(Base):
     value = Column(Text, nullable=False)  # JSON
 
 
+class Reminder(Base):
+    """A reminder the AI employee writes to people at a given moment. Asked in a chat, usually by voice:
+    "напомни всем, что сегодня совещание". One row per request, delivery is tracked per recipient."""
+    __tablename__ = "reminders"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    chat_id = Column(String(40), default="")         # Telegram user id of the person who asked
+    requested_by = Column(String(120), default="")
+    due_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    topic = Column(String(300), nullable=False)
+    details = Column(Text, default="")
+    recipients = Column(JSON, default=list)          # [{"ref": "@ivan", "name": "Иван", "employee_id": 3}]
+    delivered = Column(JSON, default=list)          # refs that already got the message
+    status = Column(String(20), default="pending", index=True)  # pending | sending | sent | failed | cancelled
+    attempts = Column(Integer, default=0)
+    error = Column(Text, default="")
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base):
     """Panel accounts. Sign-up requests start as "pending" and cannot sign in until a superuser approves them."""
     __tablename__ = "users"

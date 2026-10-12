@@ -22,7 +22,7 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import bitrix, deadlines, llm, settings_store, userbot, voice
+from . import bitrix, deadlines, llm, reminders, settings_store, transcribe, userbot, voice
 from .db import (ConversationEscalation, ConversationMessage, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
@@ -99,11 +99,44 @@ def wants(msg: dict) -> bool:
 
 
 # ----------------------------------------------------------------------------- intake
+def _seen(msg: dict) -> bool:
+    with SessionLocal() as s:
+        return s.query(ConversationMessage.id).filter_by(chat_id=str(msg["user_id"]), message_id=msg["message_id"]).first() is not None
+
+
+def _with_transcript(msg: dict):
+    """A voice message becomes text before anything else: strangers' voices are never downloaded, a message the unread scan
+    hands over again is not transcribed twice. The text of a voice that could not be understood is a note of the system
+    (the model is told, and answers the person in its own words)."""
+    voice_info = msg["voice"]
+    if not wants(msg) or _seen(msg):
+        return None
+    out = {k: v for k, v in msg.items() if k != "voice"}
+    problem = None
+    if voice_info.get("too_long"):
+        text, problem = f"(голосовое сообщение длиннее {userbot.MAX_VOICE_SECONDS // 60} минут, распознавать не стал)", "too_long"
+    else:
+        try:
+            text = transcribe.voice_text(voice_info["fetch"](), voice_info.get("mime", ""), voice_info.get("seconds", 0)).strip()
+            if not text:
+                text, problem = "(в голосовом сообщении нет речи)", "empty"
+        except Exception as exc:  # noqa: BLE001
+            log.warning("voice message %s of %s not recognised: %s", msg["message_id"], msg["user_id"], exc)
+            text, problem = "(голосовое сообщение, речь распознать не удалось)", "failed"
+    out["text"] = text
+    out["voice_info"] = {"seconds": voice_info.get("seconds", 0), "problem": problem}
+    return out
+
+
 def handle_incoming(msg: dict) -> None:
-    """Called by the Telegram account for each private text message. Safe to call twice with the same message."""
+    """Called by the Telegram account for each private text or voice message. Safe to call twice with the same message."""
     if not userbot.ai_mode():
         return
     try:
+        if msg.get("voice") is not None:
+            msg = _with_transcript(msg)
+            if msg is None:
+                return
         row_id = _accept(msg)
     except Exception:  # noqa: BLE001
         log.exception("incoming message dropped")
@@ -132,7 +165,9 @@ def _accept(msg: dict):
             status="agent_pending" if wanted else "agent_ignored",
             text=str(msg["text"]).strip()[:4000] if wanted else "",  # a stranger's words are not kept
             result={"attempts": 0, "name": msg.get("name", "") if wanted else "", "reviewer": reviewer,
-                    "full_access": full, "employee_id": employee.id if employee else None})
+                    "full_access": full, "employee_id": employee.id if employee else None,
+                    "voice": bool(msg.get("voice_info")), "voice_problem": (msg.get("voice_info") or {}).get("problem"),
+                    "username": msg.get("username", "") if wanted else "", "phone": msg.get("phone", "") if wanted else ""})
         s.add(row)
         try:
             s.commit()
@@ -244,7 +279,8 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool) -> dict
     last = _aware(history[-1].created_at) if history and history[-1].created_at else None
     minutes = int((now() - last).total_seconds() // 60) if last else None
     memory = s.get(PersonMemory, chat)
-    ctx = {"today": deadlines.today().isoformat(), "sender_name": result.get("name") or None,
+    ctx = {"today": deadlines.today().isoformat(), "now": reminders.now_view(), "sender_name": result.get("name") or None,
+           "voice_message": bool(result.get("voice")), "voice_problem": result.get("voice_problem") or None,
            "roles": [r for r, on in (("employee", employee is not None), ("full_access", full and not reviewer),
                                      ("reviewer", reviewer)) if on],
            "conversation": {"already_talking": minutes is not None and minutes < TALKING_HOURS * 60,
@@ -270,7 +306,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool) -> dict
         for task in tasks:
             if task.assignee_id and task.executor != "assistant":
                 by_person[task.assignee_id].append(task)
-        ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None,
+        ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None, "reachable": reminders.reachable(p),
                         "open_tasks": [_task_view(t, False) for t in by_person[p.id] if t.status in OPEN_STATUSES][:8],
                         "done": sum(t.status == "done" for t in by_person[p.id]),
                         "blocked": sum(t.status == "blocked" for t in by_person[p.id])} for p in people]
@@ -281,6 +317,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool) -> dict
         ctx["notes"] = _notes_view(s, None, 25)
         ctx["recent_meetings"] = [_meeting_view(m, True) for m in
                                   s.query(Meeting).order_by(Meeting.id.desc()).limit(4).all()]
+    ctx["reminders_pending"] = reminders.pending_view(s, chat, full)
     if reviewer:
         waiting = s.query(Meeting).filter_by(status="awaiting_approval").order_by(Meeting.id.desc()).limit(5).all()
         ctx["meetings_awaiting_approval"] = [{**_meeting_view(m, True), "tasks": len(m.tasks)} for m in waiting]
@@ -315,6 +352,14 @@ ACTIONS_HELP = (
     "assistant_failed); "
     '{"type":"team_report","scope":"all или ID сотрудника"}: человек с полным доступом просит отчёт о том, кто что делает '
     "(код соберёт красивый PDF из базы и пришлёт после твоего ответа, в reply коротко скажи главное). "
+    '{"type":"remind","to":"me" или "all" или "reviewers" или [ID сотрудников из команды],"at":"ГГГГ-ММ-ДД ЧЧ:ММ" или null,'
+    '"topic":"о чём напомнить, коротко","details":"время и место, что подготовить, если назвали"}: человек просит '
+    "кому-то напомнить (например, о совещании). at это время напоминания по now.local (сегодня в 15:00, за час до "
+    "совещания, завтра утром считай сам от now), null значит сразу. to=me: себе, это может любой; остальным (all это "
+    "все сотрудники из справочника, reviewers это проверяющие) напоминают только проверяющий и люди с полным доступом. "
+    "Текст напоминания потом напишешь сам, в reply скажи кому и когда напомнишь; если неясно кому, когда или о чём, "
+    'сначала спроси; '
+    '{"type":"cancel_reminder","reminder_id":ID}: отменить напоминание из reminders_pending. '
     "Поле memory: если узнал что-то важное о человеке или его работе, верни обновлённую краткую память (до 1200 символов, "
     "сохрани важное из прошлой памяти), иначе не добавляй поле.")
 
@@ -335,6 +380,11 @@ def _system() -> str:
         "ждёшь ответа проверяющего (waiting_for_reviewer), честно скажи об этом и что вернёшься с ответом. "
         "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих и "
         "людей с полным доступом. "
+        "Если voice_message=true, текст это автоматическая расшифровка голосового сообщения: возможны ошибки в именах, "
+        "числах и времени. Когда от точности зависит действие (кому писать, во сколько напомнить), назови в reply, что "
+        "именно ты понял и сделал, чтобы человек мог поправить. Если voice_problem задан (too_long, failed, empty), текст "
+        "в скобках это пометка системы, а не слова человека: скажи по-человечески, что голосовое не удалось разобрать, и "
+        "попроси повторить или написать. "
         + ACTIONS_HELP)
     return voice.system_prompt(task)
 
@@ -439,6 +489,37 @@ def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str
                 and not str(action.get("message") or "").strip():
             return "assign_task: совещание уже отправлено, нужен message сотруднику"
         return ""
+    if kind == "remind":
+        if not str(action.get("topic") or "").strip():
+            return "remind: нужен topic (о чём напомнить)"
+        to = action.get("to")
+        if to != "me":
+            if not full:
+                return 'remind: сотрудник может попросить напомнить только себе (to: "me")'
+            team = {p["id"]: p for p in ctx.get("team", [])}
+            if to == "all":
+                if not any(p.get("reachable") for p in team.values()):
+                    return "remind: ни у кого из сотрудников нет Telegram-контакта в справочнике"
+            elif to == "reviewers":
+                if not (settings_store.get("approver_chat_ids") or []):
+                    return "remind: проверяющие не указаны в настройках"
+            elif isinstance(to, list) and to and all(isinstance(x, int) and not isinstance(x, bool) for x in to):
+                missing = [x for x in to if x not in team]
+                if missing:
+                    return f"remind: сотрудники {missing} не найдены в команде"
+                silent = [team[x]["name"] for x in to if not team[x].get("reachable")]
+                if silent:
+                    return f"remind: у {', '.join(silent)} нет Telegram-контакта в справочнике, написать нельзя"
+            else:
+                return 'remind: to это "me", "all", "reviewers" или список ID сотрудников'
+        try:
+            reminders.parse_when(action.get("at"))
+        except reminders.WhenError as exc:
+            return f"remind: {exc}"
+        return ""
+    if kind == "cancel_reminder":
+        ids = {r["id"] for r in ctx.get("reminders_pending", [])}
+        return "" if action.get("reminder_id") in ids else "cancel_reminder: напоминание не найдено среди ожидающих"
     if kind == "team_report":
         if not full:
             return "team_report доступно только проверяющему и людям с полным доступом"
@@ -458,7 +539,7 @@ def _employee_ref(s, chat: str):
     return (employee.telegram_chat_id if employee and employee.telegram_chat_id else chat)
 
 
-def _apply(action: dict, chat: str, employee_id, author: str) -> None:
+def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | None = None) -> None:
     from . import assistant, pipeline
     kind = action["type"]
     with SessionLocal() as s:
@@ -528,6 +609,22 @@ def _apply(action: dict, chat: str, employee_id, author: str) -> None:
                     raise AgentError("совещание уже обработано")
             else:
                 pipeline.reject(meeting_id, revision=revision)
+        elif kind == "remind":
+            people = reminders.recipients_for(s, action["to"], chat, sender)
+            if not people:
+                raise AgentError("некому напоминать: у адресатов нет контактов или это сам автор просьбы")
+            due = max(reminders.parse_when(action.get("at")), now() + dt.timedelta(seconds=reminders.SEND_DELAY))
+            reminders.create(s, chat=chat, requested_by=author, due=due, topic=str(action["topic"]),
+                             details=str(action.get("details") or ""), recipients=people)
+            names = ", ".join(p["name"] or p["ref"] for p in people)
+            _remember(s, f"Напоминание «{str(action['topic']).strip()[:120]}» для: {names}, на {reminders.local_text(due)}",
+                      employee_id=employee_id, kind="commitment", source="system", author=author)
+            s.commit()
+            pipeline.poke()
+        elif kind == "cancel_reminder":
+            if not reminders.cancel(s, action["reminder_id"]):
+                raise AgentError("напоминание уже отправлено или отменено")
+            s.commit()
         elif kind == "assign_task":
             task = s.get(Task, action["task_id"])
             target = action["to"]
@@ -602,7 +699,8 @@ def _process(row_id: int) -> None:
         _store(row_id, result)
     if not result.get("actions_done"):  # 3. act
         for action in decision["actions"]:
-            _apply(action, chat, employee_id, author)
+            _apply(action, chat, employee_id, author,
+                   {"user_id": chat, "username": result.get("username", ""), "phone": result.get("phone", "")})
         _save_memory(chat, employee_id, decision.get("memory", ""))
         result["actions_done"] = True
         _store(row_id, result)
