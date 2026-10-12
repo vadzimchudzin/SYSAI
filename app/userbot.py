@@ -14,6 +14,7 @@ import json
 import logging
 import random
 import re
+import secrets
 import threading
 import time
 import zoneinfo
@@ -28,6 +29,8 @@ PAUSE_RANGE = (2.0, 6.0)        # seconds between two outgoing messages (looks l
 DAILY_LIMIT = 150               # outgoing messages per rolling 24 hours; the real load is 20-100 a week
 TYPING_MAX = 6.0                # seconds of the "typing..." indicator before a long message
 PEER_FLOOD_PAUSE = 6 * 3600     # after Telegram's PeerFlood answer nothing is sent for this long
+LEASE_TTL = 90                  # seconds a running instance keeps the account to itself (renewed every watchdog tick)
+INSTANCE = secrets.token_hex(4)  # this process; during a deploy the old and the new instance run side by side
 
 
 class LoginError(RuntimeError):
@@ -100,6 +103,7 @@ class TelethonBackend:
         self._client = None
         self._on_message = None
         self._watch = None
+        self.wants = None  # optional pre-filter: only messages from people the app serves are handed over
         self._guard = threading.Lock()
 
     # plumbing
@@ -212,19 +216,37 @@ class TelethonBackend:
         msg = {"user_id": sender.id, "username": sender.username or "", "phone": getattr(sender, "phone", "") or "",
                "name": " ".join(x for x in (sender.first_name, sender.last_name) if x), "text": text,
                "message_id": message.id}
+        if not await self._served(sender):
+            return
         await asyncio.get_running_loop().run_in_executor(None, self._on_message, msg)
+
+    async def _served(self, person) -> bool:
+        """Strangers are dropped before anything touches the database (the account may also be a private one)."""
+        if self.wants is None:
+            return True
+        probe = {"user_id": person.id, "username": getattr(person, "username", "") or "",
+                 "phone": getattr(person, "phone", "") or ""}
+        try:
+            return bool(await asyncio.get_running_loop().run_in_executor(None, self.wants, probe))
+        except Exception:  # noqa: BLE001
+            log.exception("sender check failed, handing the message over anyway")
+            return True
 
     async def _scan_unread(self):
         """After a sleep or reconnect messages may have arrived unseen: hand unread private texts over again.
         The receiver ignores duplicates by message id."""
         client = self._client
-        async for dialog in client.iter_dialogs(limit=60):
+        async for dialog in client.iter_dialogs(limit=40):
             if dialog.is_user and dialog.unread_count and not getattr(dialog.entity, "bot", False):
+                if not await self._served(dialog.entity):
+                    continue  # nobody we work with: do not even fetch their messages
                 for message in reversed(await client.get_messages(dialog.entity, limit=min(dialog.unread_count, 20))):
                     if not message.out:
                         await self._dispatch(dialog.entity, message)
+                await asyncio.sleep(0.5)  # gentle on the account and on a small instance
 
     async def _watch_unread(self):
+        await asyncio.sleep(30)  # the first scan waits: the connection and the web server settle first
         while self._client is not None:
             try:
                 await self._scan_unread()
@@ -432,6 +454,39 @@ def status() -> dict:
             "phone": phone, "paused": time.time() < _paused_until[0]}
 
 
+def take_lease() -> bool:
+    """Only one running instance may use the account: Telegram revokes a session that two machines use at once, and
+    during a deploy the old and the new instance overlap. The holder renews the lease; a stopped one releases it."""
+    from .db import SessionLocal, Setting
+    from sqlalchemy.exc import IntegrityError
+    stamp = time.time()
+    with SessionLocal() as s:
+        row = s.get(Setting, "userbot_lease", with_for_update=True)
+        current = json.loads(row.value) if row else {}
+        if current.get("id") not in (None, INSTANCE) and float(current.get("until") or 0) > stamp:
+            return False
+        value = json.dumps({"id": INSTANCE, "until": stamp + LEASE_TTL})
+        if row:
+            row.value = value
+        else:
+            s.add(Setting(key="userbot_lease", value=value))
+        try:
+            s.commit()
+        except IntegrityError:  # another instance created the row first: it wins this round
+            s.rollback()
+            return False
+    return True
+
+
+def release_lease() -> None:
+    from .db import SessionLocal, Setting
+    with SessionLocal() as s:
+        row = s.get(Setting, "userbot_lease", with_for_update=True)
+        if row and json.loads(row.value).get("id") == INSTANCE:
+            row.value = json.dumps({"id": INSTANCE, "until": 0})
+            s.commit()
+
+
 def start(on_message=None) -> bool:
     """Connect with the stored session. Returns True when the account is online."""
     global _on_message
@@ -440,6 +495,14 @@ def start(on_message=None) -> bool:
     api_id, api_hash, session = _credentials()
     if not (api_id and api_hash and session):
         return False
+    if not take_lease():
+        _state.update(connected=False, error="Аккаунт сейчас занят предыдущей копией сервиса (идёт обновление). Подключусь сам, как только она остановится.")
+        return False
+    try:
+        from . import agent
+        _backend().wants = agent.wants  # the account may be a private one: only the people the app serves get through
+    except AttributeError:
+        pass
     try:
         info = _backend().connect(api_id, api_hash, session, _on_message or _default_handler)
     except LoginError as exc:
@@ -475,6 +538,10 @@ def watchdog(on_message=None) -> None:
     if not (ai_mode() and configured()):
         return
     if ready():
+        if not take_lease():  # somebody else holds the account (should not happen): step aside, never fight over it
+            log.warning("Another instance took the Telegram account, disconnecting here")
+            stop()
+            return
         try:
             alive = getattr(_backend(), "is_connected", lambda: True)()
         except Exception:  # noqa: BLE001
@@ -493,6 +560,10 @@ def stop():
         except Exception:  # noqa: BLE001
             log.exception("disconnect failed")
     _state["connected"] = False
+    try:
+        release_lease()
+    except Exception:  # noqa: BLE001
+        log.exception("could not release the account lease")
 
 
 def sync(on_message=None):

@@ -28,6 +28,9 @@ def database_url(value: str | None, data_dir: pathlib.Path) -> str:
 
 
 DATABASE_URL = database_url(os.getenv("DATABASE_URL"), DATA_DIR)
+# Seconds after boot before the heavy background work (Telegram account, queues) starts: the platform's port and health
+# checks must pass first, a free instance has a tenth of a CPU and 512 MB (Telethon alone takes ~130 MB to import).
+STARTUP_DELAY = int(os.getenv("STARTUP_DELAY", "20"))
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "SYSAI")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "SYSAI")

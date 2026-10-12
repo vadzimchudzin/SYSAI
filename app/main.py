@@ -6,6 +6,7 @@ import os
 import pathlib
 import secrets
 import shutil
+import threading
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode
@@ -31,6 +32,7 @@ BASE = pathlib.Path(__file__).parent
 async def lifespan(_app):
     startup()
     yield
+    shutdown()
 
 
 app = FastAPI(title="SYSAI", lifespan=lifespan)
@@ -56,7 +58,11 @@ def startup():
         return
     pipeline.start_background()
     if userbot.ai_mode():
-        userbot.sync(agent.handle_incoming)  # the AI employee answers from the Telegram account, the bot webhook stays off
+        # The AI employee answers from the Telegram account, the bot webhook stays off. The connection waits a little so
+        # the platform's port check passes before the heavy Telegram library loads.
+        timer = threading.Timer(config.STARTUP_DELAY, userbot.sync, args=(agent.handle_incoming,))
+        timer.daemon = True
+        timer.start()
     elif config.telegram_enabled():
         try:
             if config.TELEGRAM_MODE == "polling":
@@ -65,6 +71,17 @@ def startup():
                 telegram.set_webhook()
         except Exception as e:  # noqa: BLE001
             log.warning("Telegram setup failed: %s", e)
+
+
+def shutdown():
+    """The platform stops the old instance after the new one is up: hand the Telegram account over cleanly so the
+    new instance can take it at once instead of waiting for the lease to run out."""
+    if config.TESTING:
+        return
+    try:
+        userbot.stop()
+    except Exception:  # noqa: BLE001
+        log.exception("shutdown: could not stop the Telegram account")
 
 
 def current_user(request: Request) -> dict | None:
@@ -138,9 +155,21 @@ def logout(request: Request):
     return RedirectResponse("/login", 303)
 
 
+STARTED = time.time()
+
+
 @app.get("/health")
-def health():
-    return {"ok": True, "llm": config.llm_enabled(), "telegram": config.telegram_enabled()}
+async def health():
+    """No database and no thread pool: the platform's port and health checks must pass even while Neon wakes up or
+    Telegram is slow. `commit` says which version really runs (Render sets RENDER_GIT_COMMIT)."""
+    return {"ok": True, "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7], "uptime_s": int(time.time() - STARTED),
+            "telegram_account": userbot.ready()}
+
+
+@app.get("/health/details")
+def health_details():
+    return {"ok": True, "llm": config.llm_enabled(), "telegram": config.telegram_enabled(),
+            "telegram_account": userbot.ready(), "database": config.DATABASE_URL.split(":")[0].split("+")[0]}
 
 
 # ----------------------------------------------------------------------------- meetings

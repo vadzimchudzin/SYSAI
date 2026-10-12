@@ -748,6 +748,7 @@ def start_background():
     assistant.recover()
 
     def loop():
+        time.sleep(config.STARTUP_DELAY)  # let the web server answer the platform's checks first
         while True:
             for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
                        assistant.run_pending, userbot.watchdog):

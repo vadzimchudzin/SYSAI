@@ -18,6 +18,7 @@ import datetime as dt
 import json
 import logging
 import threading
+import time
 
 from sqlalchemy.exc import IntegrityError
 
@@ -67,6 +68,34 @@ def _find_employee(s, msg: dict):
                 s.commit()
             return employee
     return None
+
+
+ROSTER_TTL = 20  # seconds the list of people we serve is kept in memory
+_ROSTER = {"at": 0.0, "refs": (), "employees": ()}
+
+
+def invalidate_roster() -> None:
+    _ROSTER["at"] = 0.0
+
+
+def _roster() -> dict:
+    if time.time() - _ROSTER["at"] > ROSTER_TTL:
+        with SessionLocal() as s:
+            people = tuple((u or "", c or "") for u, c in
+                           s.query(Employee.telegram_user_id, Employee.telegram_chat_id).filter_by(active=True).all())
+        refs = tuple(settings_store.get("approver_chat_ids") or []) + tuple(settings_store.get("full_access_chat_ids") or [])
+        _ROSTER.update(at=time.time(), refs=refs, employees=people)
+    return _ROSTER
+
+
+def wants(msg: dict) -> bool:
+    """Cheap pre-check for the Telegram account (same rule as `_accept`, but from memory): does the app serve this sender?
+    Strangers are dropped before any database work, which also keeps a private account's other chats untouched."""
+    roster = _roster()
+    if any(userbot.same_person(ref, msg) for ref in roster["refs"]):
+        return True
+    uid = str(msg["user_id"])
+    return any((known and known == uid) or userbot.same_person(chat, msg) for known, chat in roster["employees"])
 
 
 # ----------------------------------------------------------------------------- intake
