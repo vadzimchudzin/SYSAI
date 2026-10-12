@@ -46,7 +46,7 @@ DEFAULTS = {
     "glossary": "SYSAI, Bitrix24, Telegram, OpenRouter, CRM, KPI, roadmap, deadline",  # mocked terms for now
     # look
     "company_name": "Компания",
-    "accent_color": "#d97757",
+    "accent_color": "#c98179",
     # integrations (keys pasted in the panel; environment variables are the fallback)
     "bitrix_enabled": False,
     "openrouter_api_key": "",

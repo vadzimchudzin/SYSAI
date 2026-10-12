@@ -1,47 +1,75 @@
 {% from "_logo.html" import logo %}<!doctype html>
-<html lang="ru"><head>{% include "_head.html" %}<title>SYSAI — протоколы совещаний и задачи</title>
-<meta name="description" content="SYSAI превращает запись совещания в протокол, задачи и рассылку в Telegram."></head>
-<body><div class="landing">
+<html lang="ru"><head>{% include "_head.html" %}<title>SYSAI: протоколы совещаний и задачи</title>
+<meta name="description" content="SYSAI превращает запись совещания в протокол, задачи и рассылку: Telegram, Битрикс24, руководителю на проверку."></head>
+<body><div class="aura" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="landing">
   <header class="l-top">
-    {{ logo('md') }}
+    <a href="/">{{ logo('md') }}</a>
     <nav><a href="#how" class="hide-m">Как это работает</a>
       {% if authed %}<a class="btn sm primary" href="/app">Открыть кабинет</a>{% else %}<a class="btn sm" href="/login">Войти</a>{% endif %}</nav>
   </header>
+
   <section class="hero">
     <div class="notes">
-      <span class="note-pill"><b>Новое:</b> уточнение сроков у исполнителя прямо в Telegram <span class="tag">MVP</span></span>
-      <span class="note-pill">Скоро — задачи в Bitrix24 и звонки с уточнениями <span class="tag">soon</span></span>
+      <span class="note-pill"><b>Новое:</b> ассистент сам уточняет сроки у исполнителя в Telegram <span class="tag">MVP</span></span>
+      <span class="note-pill">Скоро: задачи в Битрикс24 и звонки с уточнениями <span class="tag">скоро</span></span>
     </div>
-    {{ logo('xl', animate=True) }}
-    <h1>Каждое совещание —<br>в <em>протокол</em>, задачи и сроки</h1>
-    <p class="lead">Загрузите запись или подключите микрофон. SYSAI расшифрует разговор по голосам, соберёт решения, назначит задачи и разошлёт их нужным людям.</p>
+
+    <div class="wm-wrap">
+      <div class="wm" aria-label="SYSAI">
+        <span class="s"><i style="animation-delay:.25s">S</i></span><span class="s"><i style="animation-delay:.33s">Y</i></span><span class="s"><i style="animation-delay:.41s">S</i></span>
+        <span class="sp"></span>
+        <span class="a"><i style="animation-delay:.52s">A</i></span><span class="a"><i style="animation-delay:.6s">I</i></span>
+      </div>
+      <canvas class="voice" id="voice"></canvas>
+      <div class="voice-meta"><span>00:00</span><span>два голоса · Директор и Иван</span><span>45:12</span></div>
+    </div>
+
+    <h1>Каждое совещание в&nbsp;<em>протокол</em>,<br>задачи и сроки</h1>
+    <p class="lead">Загрузите запись или включите микрофон. SYSAI расшифрует разговор по голосам, соберёт решения, назначит задачи и разошлёт их нужным людям.</p>
     <div class="chips-row">
       <span class="chip-lg"><i></i>Расшифровка по голосам</span><span class="chip-lg"><i></i>Протокол и решения</span>
       <span class="chip-lg"><i></i>Задачи с исполнителями</span><span class="chip-lg"><i></i>Telegram</span>
-      <span class="chip-lg"><i></i>PDF-отчёт</span><span class="chip-lg soon"><i></i>Bitrix24</span><span class="chip-lg soon"><i></i>Звонки</span>
+      <span class="chip-lg"><i></i>PDF-отчёт</span><span class="chip-lg soon"><i></i>Битрикс24</span>
     </div>
     <div class="cta">
       <a class="btn primary btn-hero" href="{{ '/app' if authed else '/login' }}">{{ 'Открыть кабинет' if authed else 'Войти в кабинет' }}</a>
-      <span class="small muted">Доступ по логину и паролю от администратора</span>
+      <span class="small muted">Доступ по заявке, одобряет администратор · <a href="/register">Оставить заявку</a></span>
     </div>
 
-    <div class="demo-card">
-      <div><h4>Запись · 45:12</h4>
-        <div class="wave">{% for i in range(46) %}<span style="--d:{{ i }}"></span>{% endfor %}</div>
-        <p class="line-t"><span class="ts">03:15</span><b>Директор:</b> Иван, ошибки с оплатой закрыть до пятницы.</p>
-        <p class="line-t"><span class="ts">03:22</span><b>Иван:</b> Принято, до пятницы закрою и прогоню регресс.</p>
-        <p class="line-t"><span class="ts">07:40</span><b>Мария:</b> Креативы подготовлю после брифа с дизайнером.</p></div>
-      <div><h4>Задачи → Telegram</h4>
-        <div class="task-row"><span>Исправить ошибки оплаты<br><small>Иван Петров</small></span><span class="pill clay">пт, 09.10</span></div>
-        <div class="task-row"><span>Подготовить креативы<br><small>Мария Смирнова</small></span><span class="pill amber">срок уточняется</span></div>
-        <div class="task-row"><span>Найти нового подрядчика<br><small>не назначен</small></span><span class="pill gray">на проверке</span></div></div>
+    <div class="flow" id="how">
+      <div class="flow-h"><h4>Как запись становится задачами</h4><span id="clock">00:00</span></div>
+      <div class="board">
+        <svg viewBox="0 0 1200 560" preserveAspectRatio="none">
+          <path class="wire" id="w0" d="M280,280 C390,280 390,280 500,280"/>
+          <path class="wire" id="w1" d="M700,280 C800,280 790,70 900,70"/>
+          <path class="wire" id="w2" d="M700,280 C800,280 790,175 900,175"/>
+          <path class="wire" id="w3" d="M700,280 C800,280 790,280 900,280"/>
+          <path class="wire" id="w4" d="M700,280 C800,280 790,385 900,385"/>
+          <path class="wire" id="w5" d="M700,280 C800,280 790,490 900,490"/>
+          <g id="flows"></g>
+        </svg>
+        <div class="node src"><div class="lbl">Запись совещания</div><div class="bars" id="bars"></div>
+          <div class="meta"><span>планёрка_пн.m4a</span><span>45:12</span></div></div>
+        <div class="node core" id="core"><div class="w"><span class="s">SYS</span><span class="a">AI</span></div>
+          <div class="step" id="step">ждёт запись</div><div class="dots"><i></i><i></i><i></i></div></div>
+        <div class="node dst" style="top:6.8%"><span class="ico r">Тг</span><div class="t"><b>Иван Петров</b><span>Исправить ошибки оплаты · пт, 16.10</span></div><span class="ok">✓</span></div>
+        <div class="node dst" style="top:25.5%"><span class="ico r">Тг</span><div class="t"><b>Мария Смирнова</b><span>Креативы · срок уточняю у Марии</span></div><span class="ok">✓</span></div>
+        <div class="node dst" style="top:44.3%"><span class="ico b">Б24</span><div class="t"><b>Битрикс24</b><span>3 задачи в проекте «Продажи»</span></div><span class="ok">✓</span></div>
+        <div class="node dst" style="top:63%"><span class="ico b">PDF</span><div class="t"><b>Руководителю</b><span>Протокол на проверку · 4 стр.</span></div><span class="ok">✓</span></div>
+        <div class="node dst" style="top:81.8%"><span class="ico r">Тг</span><div class="t"><b>Чат отдела</b><span>Итоги планёрки и решения</span></div><span class="ok">✓</span></div>
+        <div class="cap" id="cap">запись получена</div>
+        <div class="legend"><span class="lr">люди</span><span class="lb">системы</span></div>
+      </div>
     </div>
 
-    <div class="steps" id="how">
-      <div class="step"><div class="n">01</div><h3>Запись</h3><p>Файл через форму или автоподхват с умного микрофона.</p></div>
-      <div class="step"><div class="n">02</div><h3>Протокол</h3><p>Расшифровка по голосам, резюме, решения, задачи, риски — и красивый PDF.</p></div>
-      <div class="step"><div class="n">03</div><h3>Рассылка</h3><p>Черновик на проверку, затем отчёт в чаты и задачи каждому исполнителю.</p></div>
+    <div class="steps">
+      <div class="step"><div class="n">01</div><h3>Запись</h3><p>Файл через кабинет или запись с микрофона прямо в браузере.</p></div>
+      <div class="step"><div class="n">02</div><h3>Протокол</h3><p>Расшифровка по голосам, резюме, решения, задачи, риски и PDF.</p></div>
+      <div class="step"><div class="n">03</div><h3>Рассылка</h3><p>Каждый получает своё. Ассистент сам уточняет сроки и напоминает.</p></div>
     </div>
   </section>
-  <footer class="l-foot"><span>© {{ year }} SYSAI</span><span><a href="/login">Вход</a><a href="https://github.com/VadimChudin/SYSAI">GitHub</a></span></footer>
-</div></body></html>
+  <footer class="l-foot"><span>© {{ year }} SYSAI · SysAT</span><span><a href="/login">Вход</a><a href="/register">Заявка на доступ</a></span></footer>
+</div>
+<script src="/static/landing.js" defer></script>
+</body></html>

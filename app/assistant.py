@@ -189,7 +189,7 @@ def _document(meeting, data: dict, svg: str) -> bytes:
     html_text = render.TPL.get_template("assistant_report.html").render(
         title=str(data.get("title") or (data.get("chart") or {}).get("title") or "Материал ассистента"),
         meeting=meeting, svg=svg, notes=data.get("notes") or [], sections=data.get("sections") or [],
-        company=settings.get("company_name") or "", accent=settings.get("accent_color") or "#d97757",
+        company=settings.get("company_name") or "", accent=settings.get("accent_color") or "#c98179",
         generated=dt.datetime.now(dt.timezone.utc).astimezone().strftime("%d.%m.%Y %H:%M"))
     return _pdf(html_text)
 
@@ -312,7 +312,7 @@ def team_report(scope="all") -> tuple:
     settings = settings_store.all_settings()
     html_text = render.TPL.get_template("team_report.html").render(
         rows=rows, totals=totals, charts=charts, assistant_tasks=assistant_tasks, today=deadlines.fmt(today),
-        company=settings.get("company_name") or "", accent=settings.get("accent_color") or "#d97757",
+        company=settings.get("company_name") or "", accent=settings.get("accent_color") or "#c98179",
         only=(rows[0]["name"] if scope != "all" and rows else ""))
     return f"Кто_что_делает_{today.isoformat()}.pdf", _pdf(html_text)
 

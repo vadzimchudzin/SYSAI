@@ -9,7 +9,7 @@ import html
 import math
 
 TYPES = ("bar", "hbar", "pie", "line")
-PALETTE = ("#d97757", "#4a7bd0", "#3fa37a", "#b06ad4", "#e0a526", "#d0586e", "#52a9c4", "#7a8793")
+PALETTE = ("#c98179", "#6f8fc4", "#3fa37a", "#b06ad4", "#e0a526", "#d0586e", "#52a9c4", "#7a8793")
 MAX_LABELS = 30
 MAX_SERIES = 4
 FONT = "Inter, Arial, Helvetica, sans-serif"

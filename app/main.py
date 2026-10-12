@@ -2,6 +2,7 @@
 import datetime as dt
 import hmac
 import logging
+import mimetypes
 import os
 import pathlib
 import secrets
@@ -25,6 +26,7 @@ from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("sysai")
+mimetypes.add_type("font/woff2", ".woff2")  # slim images lack it: fonts are served by us, not Google
 BASE = pathlib.Path(__file__).parent
 
 
