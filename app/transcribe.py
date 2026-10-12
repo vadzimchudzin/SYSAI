@@ -113,20 +113,28 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     maximum_minutes = settings.get("chunk_minutes")
-    total, chunks = audio.prepare_chunks(path, None, overlap_seconds=OVERLAP_SECONDS,
-                                        max_chunk_minutes=maximum_minutes)
+    total, plan = audio.plan_chunks(path, None, overlap_seconds=OVERLAP_SECONDS, max_chunk_minutes=maximum_minutes)
     step = audio.chunk_seconds(total, maximum_minutes)
+    workdir: list = []  # made on the first cut: a run where every part is already saved cuts nothing and makes no folder
+
+    def cut(offset, seconds, name):
+        if not workdir:
+            workdir.append(pathlib.Path(tempfile.mkdtemp(prefix="sysai_")))
+        destination = workdir[0] / name
+        audio.extract(path, destination, offset, seconds)
+        return destination
     segments: list = []
     base = {"version": 5, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
             "language": settings.get("language", "ru"), "glossary": settings.get("glossary", ""),
             "step": step, "short_audio_seconds": SHORT_AUDIO_SECONDS}
 
-    def part(chunk, offset, length, index, context):
+    def part(get_chunk, offset, length, index, context):
         key = checkpoints.fingerprint(dict(base, offset=offset, length=length, context=context))
         cached = checkpoint.get("transcribe", index, key) if checkpoint else None
         if cached is not None:
             progress(f"Восстановлен фрагмент {index}")
             return cached
+        chunk = get_chunk()  # only now: a recognised part never needs its audio
         prompt = _prompt(settings, length, context)
         try:
             text = llm.chat(settings["transcribe_model"], [{"role": "user", "content": [
@@ -150,21 +158,22 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
                 left, right = chunk.parent / f"{index}_left.mp3", chunk.parent / f"{index}_right.mp3"
                 audio.extract(chunk, left, 0, half + overlap)
                 audio.extract(chunk, right, half, length - half)
-                result = part(left, offset, half + overlap, f"{index}L", context)
-                second = part(right, offset + half, length - half, f"{index}R", _context(result))
+                result = part(lambda: left, offset, half + overlap, f"{index}L", context)
+                second = part(lambda: right, offset + half, length - half, f"{index}R", _context(result))
                 _merge(result, second, offset + half)
         if checkpoint:
             checkpoint.put("transcribe", index, key, result)
         return result
 
     try:
-        for i, (offset, chunk) in enumerate(chunks):
-            progress(f"Расшифровка {i + 1} из {len(chunks)}")
-            result = part(chunk, offset, min(step + OVERLAP_SECONDS, total - offset), str(i), _context(segments))
+        for i, (offset, seconds) in enumerate(plan):
+            progress(f"Расшифровка {i + 1} из {len(plan)}")
+            result = part(lambda offset=offset, seconds=seconds, i=i: cut(offset, seconds, f"chunk_{i:03d}.mp3"),
+                          offset, min(step + OVERLAP_SECONDS, total - offset), str(i), _context(segments))
             _merge(segments, result, offset)
     finally:
-        if chunks:
-            shutil.rmtree(chunks[0][1].parent)
+        if workdir:
+            shutil.rmtree(workdir[0], ignore_errors=True)
     segments = [s for s in segments if s["text"]]
     if not segments:
         raise llm.LLMError("Речь в записи не распознана. Проверьте аудио; рассылка не запускалась.")

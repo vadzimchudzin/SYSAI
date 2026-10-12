@@ -579,3 +579,107 @@ def test_durationless_audio_decode_failure_is_not_silently_accepted(monkeypatch)
     with pytest.raises(subprocess.CalledProcessError):
         audio.duration("broken.webm")
     assert len(calls) == 2
+
+
+# ----------------------------------------------------------------------------- parts already recognised are never cut again
+def test_plan_chunks_matches_prepare_chunks_and_cuts_nothing(tmp_path, monkeypatch):
+    source = make_audio(tmp_path / "source.wav", 130)
+    total, chunks = audio.prepare_chunks(str(source), chunk_minutes=1, overlap_seconds=8)
+    shutil.rmtree(chunks[0][1].parent)
+    monkeypatch.setattr(audio, "extract", lambda *a, **kw: pytest.fail("a plan must not cut audio"))
+    monkeypatch.setattr(audio.tempfile, "mkdtemp", lambda **kw: pytest.fail("a plan must not make a folder"))
+    plan_total, plan = audio.plan_chunks(str(source), chunk_minutes=1, overlap_seconds=8)
+    assert plan_total == pytest.approx(total, abs=0.001)
+    assert [start for start, _ in plan] == [offset for offset, _ in chunks] == [0, 60, 120]
+    assert [seconds for _, seconds in plan] == pytest.approx([68, 68, total - 120])
+
+
+@pytest.mark.parametrize("minutes, overlap", [(0, 0), (-1, 0), (float("nan"), 0), (1, -1), (1, float("inf"))])
+def test_plan_chunks_rejects_invalid_parameters(tmp_path, minutes, overlap):
+    source = make_audio(tmp_path / "source.wav", 2)
+    with pytest.raises(ValueError):
+        audio.plan_chunks(str(source), minutes, overlap)
+
+
+def watch_cuts(monkeypatch):
+    cuts, workdirs = [], []
+    real_extract, real_mkdtemp = audio.extract, audio.tempfile.mkdtemp
+
+    def tracked_extract(source_path, destination, start, seconds):
+        cuts.append(round(start))
+        return real_extract(source_path, destination, start, seconds)
+
+    def tracked_mkdtemp(*args, **kwargs):
+        workdirs.append(real_mkdtemp(*args, **kwargs))
+        return workdirs[-1]
+
+    monkeypatch.setattr(audio, "extract", tracked_extract)
+    monkeypatch.setattr(audio.tempfile, "mkdtemp", tracked_mkdtemp)
+    return cuts, workdirs
+
+
+def new_meeting():
+    with SessionLocal() as session:
+        meeting = Meeting(title="resume")
+        session.add(meeting)
+        session.commit()
+        return meeting.id
+
+
+def test_a_second_run_with_every_part_saved_cuts_nothing(tmp_path, monkeypatch):
+    source = make_long_mp3(tmp_path / "clip.mp3", 200)
+    checkpoint = checkpoints.Store(new_meeting())
+    monkeypatch.setattr(config, "llm_enabled", lambda: True)
+    calls = []
+
+    def chat(*args, **kwargs):
+        calls.append(1)
+        return json.dumps({"segments": [{"speaker": "A", "start": 5, "text": f"part {len(calls)}"}]})
+
+    monkeypatch.setattr(llm, "chat", chat)
+    _, first = transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+    assert len(calls) == 3
+    cuts, workdirs = watch_cuts(monkeypatch)
+    _, second = transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+    assert len(calls) == 3 and cuts == [] and workdirs == []        # no model call, no ffmpeg run, no folder
+    assert [s["text"] for s in second] == [s["text"] for s in first]
+
+
+def test_only_the_part_that_failed_is_cut_again(tmp_path, monkeypatch):
+    source = make_long_mp3(tmp_path / "clip.mp3", 200)
+    checkpoint = checkpoints.Store(new_meeting())
+    monkeypatch.setattr(config, "llm_enabled", lambda: True)
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 3:
+            raise llm.LLMError("the model is down")
+        return json.dumps({"segments": [{"speaker": "A", "start": 5, "text": f"part {len(calls)}"}]})
+
+    monkeypatch.setattr(llm, "chat", flaky)
+    with pytest.raises(llm.LLMError, match="the model is down"):
+        transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+    cuts, workdirs = watch_cuts(monkeypatch)
+    monkeypatch.setattr(llm, "chat", lambda *a, **kw: json.dumps(
+        {"segments": [{"speaker": "A", "start": 5, "text": "the last part"}]}))
+    _, segments = transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+    assert cuts == [180]                                             # parts 0 and 1 came from the saved results
+    assert len(workdirs) == 1 and not pathlib.Path(workdirs[0]).exists()
+    assert [s["text"] for s in segments] == ["part 1", "part 2", "the last part"]
+
+
+def test_a_run_that_cuts_cleans_its_folder_even_when_a_cut_fails(tmp_path, monkeypatch):
+    source = make_audio(tmp_path / "source.wav", 5)
+    monkeypatch.setattr(config, "llm_enabled", lambda: True)
+    _, workdirs = watch_cuts(monkeypatch)
+    real_extract = audio.extract
+
+    def broken(*args, **kwargs):
+        real_extract(*args, **kwargs)
+        raise RuntimeError("ffmpeg died")
+
+    monkeypatch.setattr(audio, "extract", broken)
+    with pytest.raises(RuntimeError, match="ffmpeg died"):
+        transcribe.transcribe(str(source), settings())
+    assert len(workdirs) == 1 and not pathlib.Path(workdirs[0]).exists()

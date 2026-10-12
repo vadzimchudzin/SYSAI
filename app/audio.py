@@ -48,9 +48,13 @@ def chunk_seconds(total: float, maximum_minutes: float | None = None) -> float:
     return step
 
 
-def prepare_chunks(path: str, chunk_minutes: float | None = 30, overlap_seconds: float = 0,
-                   max_chunk_minutes: float | None = None) -> tuple[float, list[tuple[float, pathlib.Path]]]:
-    """Return measured duration and chunks; None selects adaptive part lengths."""
+def plan_chunks(path: str, chunk_minutes: float | None = 30, overlap_seconds: float = 0,
+                max_chunk_minutes: float | None = None) -> tuple[float, list[tuple[float, float]]]:
+    """Measured duration and the cut plan [(start, seconds)], without cutting anything.
+
+    Cutting a part costs an ffmpeg run (minutes for a long recording on a small server) and a part whose text is already
+    saved does not need its audio at all, so the caller cuts only the parts it still has to recognise.
+    """
     total = duration(path)
     if not math.isfinite(overlap_seconds) or overlap_seconds < 0:
         raise ValueError("Некорректное перекрытие частей аудио")
@@ -60,17 +64,25 @@ def prepare_chunks(path: str, chunk_minutes: float | None = 30, overlap_seconds:
         if not math.isfinite(chunk_minutes) or chunk_minutes <= 0:
             raise ValueError("Некорректная длина части аудио")
         step = max(15, chunk_minutes * 60)
+    plan = []
+    start = 0.0
+    while start < total:
+        plan.append((start, min(step + overlap_seconds, total - start)))
+        start += step
+    return total, plan
+
+
+def prepare_chunks(path: str, chunk_minutes: float | None = 30, overlap_seconds: float = 0,
+                   max_chunk_minutes: float | None = None) -> tuple[float, list[tuple[float, pathlib.Path]]]:
+    """Return measured duration and chunks, all cut at once; None selects adaptive part lengths."""
+    total, plan = plan_chunks(path, chunk_minutes, overlap_seconds, max_chunk_minutes)
     work = pathlib.Path(tempfile.mkdtemp(prefix="sysai_"))
     chunks = []
-    start = 0.0
-    i = 0
     try:
-        while start < total:
+        for i, (start, seconds) in enumerate(plan):
             dst = work / f"chunk_{i:03d}.mp3"
-            extract(path, dst, start, min(step + overlap_seconds, total - start))
+            extract(path, dst, start, seconds)
             chunks.append((start, dst))
-            start += step
-            i += 1
     except Exception:
         shutil.rmtree(work)
         raise
