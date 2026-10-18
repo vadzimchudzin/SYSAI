@@ -25,10 +25,15 @@ SYSTEM = """Ты — опытный секретарь руководителя.
 - Срок: если назван («до пятницы», «к 15-му», «через неделю») — переведи в дату YYYY-MM-DD относительно даты
   совещания {meeting_date} ({weekday}) и процитируй в deadline_quote. Если срок не назван — deadline null.
 - Для задач и тем укажи время в записи (MM:SS) и короткую цитату-основание.
-- Исполнитель-ассистент: если поручение отдали ИИ, ассистенту, боту или секретарю (в том числе по имени ассистента),
-  либо это работа, которую сам делает ИИ-ассистент (построить график или диаграмму, свести данные в сводку или
-  таблицу, подготовить отчёт по цифрам, напомнить, узнать у человека статус), поставь executor="assistant",
-  employee_id null и assignee_name "ассистент". Все остальные задачи: executor="person".
+- Исполнитель-ассистент: если поручение отдали ИИ, ассистенту, боту или секретарю, либо это работа, которую
+  ассистент реально может выполнить сам (график, сводка, отчёт, напоминание или сообщение сотруднику через Telegram),
+  поставь executor="assistant", employee_id=null и assignee_name="ассистент".
+- Важно различать исполнителя и адресата сообщения. «Нужно написать Андрею и спросить…» — действие ассистента:
+  target_employee_name="Андрей", target_employee_id — ID однозначно найденного адресата из справочника.
+  «Андрей, напиши Ивану…» — поручение Андрею: executor="person", employee_id — Андрей, target_employee_id=null.
+  Для assistant-задачи, которая требует написать конкретному сотруднику, укажи target_employee_name и target_employee_id.
+  Используй только сотрудника с has_contact=true. Если адресат неоднозначен, target_employee_id=null — не угадывай.
+  Для обычных задач человеку target_employee_id=null.
 - Решения — то, о чём договорились. Открытые вопросы — что осталось нерешённым. Риски — проблемы и опасения.
 - Участники: сопоставь метки говорящих («Спикер 1») с людьми, если это понятно из разговора.
 Справочник сотрудников (JSON): {employees}
@@ -56,7 +61,8 @@ def transcript_text(segments: list) -> str:
 
 def employees_json(employees) -> str:
     return json.dumps([{"employee_id": e.id, "name": e.name, "aliases": e.alias_list(), "position": e.position,
-                        "responsibilities": getattr(e, "responsibilities", "") or ""}
+                        "responsibilities": getattr(e, "responsibilities", "") or "",
+                        "has_contact": bool(getattr(e, "telegram_chat_id", ""))}
                        for e in employees], ensure_ascii=False)
 
 
@@ -262,6 +268,11 @@ def _validate_report(report, employees, transcript, duration, meeting_date, requ
             raise llm.LLMError("Некорректный assignee_name задачи")
         if task.get("executor") not in (None, "person", "assistant"):
             raise llm.LLMError("Некорректный executor задачи")
+        if task.get("target_employee_name") is not None and not isinstance(task.get("target_employee_name"), str):
+            raise llm.LLMError("Некорректный target_employee_name")
+        target_id = task.get("target_employee_id")
+        if target_id is not None and (not isinstance(target_id, int) or isinstance(target_id, bool)):
+            raise llm.LLMError("Некорректный target_employee_id")
         eid = task.get("employee_id")
         if eid is not None and (not isinstance(eid, int) or isinstance(eid, bool)):
             raise llm.LLMError("Некорректный employee_id задачи")
@@ -576,9 +587,22 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         except (TypeError, ValueError):
             eid = None
         executor = "assistant" if t.get("executor") == "assistant" else "person"
+        target_name = (t.get("target_employee_name") or "").strip()
+        target_id = t.get("target_employee_id")
+        try:
+            target_id = int(target_id) if target_id is not None else None
+        except (TypeError, ValueError):
+            target_id = None
         if executor == "assistant":
             eid = None
+            if target_name:
+                context = " ".join(str(t.get(key) or "") for key in ("title", "description", "quote"))
+                target = match_task_employee(target_name, context, employees) or match_employee(target_name, employees)
+                target_id = target.id if target and getattr(target, "telegram_chat_id", "") else None
+            elif target_id not in ids:
+                target_id = None
         else:
+            target_id, target_name = None, ""
             context = " ".join(str(t.get(key) or "") for key in ("title", "description", "quote"))
             spoken_name = (t.get("assignee_name") or "").strip()
             matched = match_task_employee(spoken_name, context, employees)
@@ -595,6 +619,8 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         tasks.append({"title": str(t["title"]).strip(), "description": str(t.get("description") or "").strip(),
                       "employee_id": eid if eid in ids else None, "executor": executor,
                       "assignee_name": ((t.get("assignee_name") or "").strip() or ("ассистент" if executor == "assistant" else "")),
+                      "target_employee_id": target_id if target_id in ids else None,
+                      "target_employee_name": target_name,
                       "deadline": d.isoformat() if d else None, "deadline_quote": t.get("deadline_quote") or "",
                       "priority": t.get("priority") if t.get("priority") in ("high", "medium", "low") else "medium",
                       "time": t.get("time") or "", "quote": t.get("quote") or ""})
