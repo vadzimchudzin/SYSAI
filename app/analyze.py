@@ -218,9 +218,9 @@ def _quote_matches_at_time(quote, seconds, segments):
 
 def _quote_numbers(text):
     """Numbers explicitly present in evidence; chart values may not be invented or derived."""
-    compact = re.sub(r"(?<=\\d)[ \\u00a0](?=\\d{3}(?:\\D|$))", "", str(text or ""))
+    compact = re.sub(r"(?<=\d)[ \u00a0](?=\d{3}(?:\D|$))", "", str(text or ""))
     values = set()
-    for token in re.findall(r"(?<!\\w)-?\\d+(?:[.,]\\d+)?", compact):
+    for token in re.findall(r"(?<!\w)-?\d+(?:[.,]\d+)?", compact):
         try:
             values.add(float(token.replace(",", ".")))
         except ValueError:
