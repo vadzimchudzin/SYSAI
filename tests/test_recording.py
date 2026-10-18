@@ -194,3 +194,15 @@ def test_active_recordings_include_legacy_owner_only_when_explicitly_requested()
     rec = recording.start("legacy-session-unique", "audio/webm", "Old browser session")
     assert recording.list_active("user:99") == []
     assert [item["id"] for item in recording.list_active("user:99", "legacy-session-unique")] == [rec["id"]]
+
+def test_elapsed_time_freezes_when_recording_is_terminal():
+    from types import SimpleNamespace
+
+    started = dt.datetime(2026, 10, 18, 12, 0, tzinfo=dt.timezone.utc)
+    ended = started + dt.timedelta(seconds=73)
+    item = SimpleNamespace(
+        id="recording-test", next_sequence=4, size_bytes=1024, status="finished",
+        mime_type="audio/webm", title="Тест", device_label="iPhone · Safari",
+        created_at=started, updated_at=ended, meeting_id=None,
+    )
+    assert recording._recording_dict(item)["elapsed_seconds"] == 73
