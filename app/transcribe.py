@@ -1,9 +1,8 @@
-"""Speech to text with speaker separation.
+"""Chunked transcription through OpenRouter STT with a separate speaker-label fallback.
 
-Providers:
-  openrouter - an audio-capable model on OpenRouter (default google/gemini-2.5-flash), chunked
-  mock       - explicit demo helper; real uploads never fall back to demo data
-The interface is small so ElevenLabs / Deepgram / WhisperX can be added later.
+The dedicated transcription endpoint supplies the authoritative words and timestamps when supported.
+An audio-capable chat model only assigns speakers if the STT provider does not return speaker labels.
+Mock transcription remains an explicit demo helper; real uploads never fall back to demo data.
 """
 import base64
 import json
