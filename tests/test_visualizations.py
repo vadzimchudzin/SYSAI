@@ -59,3 +59,19 @@ def test_chart_values_must_be_present_in_the_cited_numbers():
 
 def test_number_parser_supports_thousands_separated_by_spaces():
     assert analyze._quote_numbers("Бюджет составит 1 500 рублей") == {1500.0}
+
+def test_report_prompt_formats_with_selected_style():
+    prompt = analyze.SYSTEM.format(
+        meeting_date="2026-10-18", weekday="воскресенье", employees="[]",
+        glossary="", style_instruction="подробный",
+    )
+    assert "подробный" in prompt
+    assert '"visualizations"' in prompt
+
+
+def test_report_style_invalidates_cached_analysis_fingerprint():
+    segments = [{"start": 0, "end": 5, "speaker": "Спикер 1", "text": TRANSCRIPT}]
+    date = dt.date(2026, 10, 18)
+    balanced = analyze._fingerprint(segments, [], {"report_model": "test", "report_style": "balanced"}, date)
+    detailed = analyze._fingerprint(segments, [], {"report_model": "test", "report_style": "detailed"}, date)
+    assert balanced != detailed
