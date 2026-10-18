@@ -542,6 +542,8 @@ async def meeting_recipients_save(request: Request, mid: int):
             raise HTTPException(404, "Совещание не найдено")
         if meeting.source != "segment" or meeting.parent_meeting_id is None:
             raise HTTPException(400, "Получателей отдельно настраивают только для сегментов записи")
+        if s.query(Delivery).filter_by(meeting_id=mid, phase="final", status="sent").first():
+            raise HTTPException(409, "Получателей нельзя менять после успешной отправки отчёта")
         known = {str(chat.chat_id) for chat in s.query(TelegramChat).filter(TelegramChat.active.is_(True)).all()}
         for value in selected:
             custom_numeric = value.lstrip("-").isdigit() and len(value) <= 40
