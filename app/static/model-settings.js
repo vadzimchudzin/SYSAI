@@ -12,7 +12,7 @@
   };
   let loading = false;
   function fill(select, models, predicate, options = {}) {
-    const current = select.dataset.current || select.value;
+    const current = select.value || select.dataset.current;
     const filtered = models.filter(predicate);
     const seen = new Set();
     select.replaceChildren();
