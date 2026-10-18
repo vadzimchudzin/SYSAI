@@ -480,3 +480,16 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .person .who small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rm-card .edit-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
 @media (max-width: 640px) { .rm-card { grid-template-columns: 1fr; } .rm-side { flex-direction: row; align-items: center; } .rm-time { text-align: left; display: flex; align-items: baseline; gap: 10px; padding: 6px 12px; } }
+
+/* Shared microphone recording status */
+.active-recordings-list { display: grid; gap: 10px; }
+.active-recording { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line); }
+.active-recording > div { min-width: 0; }
+.active-recording b { display: block; overflow-wrap: anywhere; }
+.active-recording .small { margin-top: 4px; }
+#recording-monitor .stats { margin: 18px 0; }
+#recording-monitor .stat b { font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .active-recording { align-items: flex-start; flex-direction: column; }
+  .active-recording .btn { align-self: flex-start; }
+}
