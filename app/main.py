@@ -515,10 +515,39 @@ async def meeting_save(request: Request, mid: int):
     return RedirectResponse(f"/meetings/{mid}?saved=1", 303)
 
 
+@app.post("/meetings/{mid}/recipients")
+async def meeting_recipients_save(request: Request, mid: int):
+    """Store recipient choices for a detected meeting segment before approval."""
+    guard_admin(request)
+    form = await request.form()
+    selected = _chat_ids(form, "report_chat_ids")
+    with SessionLocal() as s:
+        meeting = s.get(Meeting, mid)
+        if meeting is None:
+            raise HTTPException(404, "Совещание не найдено")
+        if meeting.source != "segment" or meeting.parent_meeting_id is None:
+            raise HTTPException(400, "Получателей отдельно настраивают только для сегментов записи")
+        known = {str(chat.chat_id) for chat in s.query(TelegramChat).filter(TelegramChat.active.is_(True)).all()}
+        for value in selected:
+            custom_numeric = value.lstrip("-").isdigit() and len(value) <= 40
+            custom_username = value.startswith("@") and 3 <= len(value) <= 33 and value[1:].replace("_", "").isalnum()
+            if value not in known and not (custom_numeric or custom_username):
+                raise HTTPException(400, "Укажите известный Telegram-чат, числовой chat ID или @username")
+        meeting.options = dict(meeting.options or {}, report_chat_ids=selected, approval_required=True)
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}", 303)
+
+
 @app.post("/meetings/{mid}/approve")
 async def meeting_approve(request: Request, mid: int):
     """Saves the edited draft and sends it."""
     guard(request)
+    with SessionLocal() as s:
+        meeting = s.get(Meeting, mid)
+        if meeting is None:
+            raise HTTPException(404, "Совещание не найдено")
+        if meeting.source == "segment" and not (meeting.options or {}).get("report_chat_ids"):
+            raise HTTPException(400, "Перед утверждением выберите получателей отчёта для этого совещания")
     form = await request.form()
     if form:
         if _apply_form(mid, form, approve=True):
