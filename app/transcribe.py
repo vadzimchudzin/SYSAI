@@ -139,7 +139,7 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         audio.extract(path, destination, offset, seconds)
         return destination
     segments: list = []
-    base = {"version": 5, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
+    base = {"version": 6, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
             "language": settings.get("language", "ru"), "glossary": settings.get("glossary", ""),
             "step": step, "short_audio_seconds": SHORT_AUDIO_SECONDS}
 
