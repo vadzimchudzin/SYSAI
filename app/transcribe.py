@@ -104,7 +104,7 @@ def _merge(segments, new, boundary):
         text = normalise(current["text"])
         if not text or current["start"] > boundary + OVERLAP_SECONDS:
             continue
-        tolerance = 2 if len(text.split()) >= 2 else 0.3
+        tolerance = 2 if len(text.split()) >= 3 else 0.3
         matches = [old for old in previous if normalise(old["text"]) == text
                    and abs(current["start"] - old["start"]) <= tolerance]
         if len(matches) != 1:
