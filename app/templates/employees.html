@@ -5,6 +5,7 @@
   <label class="f">Имя и фамилия <input name="name" required value="{{ e.name if e }}" placeholder="Иван Петров"></label>
   <label class="f">Как называют на совещаниях <input name="aliases" value="{{ e.aliases if e }}" placeholder="Ваня, Иван Сергеевич, Петров"></label>
   <label class="f">Должность <input name="position" list="positions" value="{{ e.position if e }}" placeholder="Выберите или впишите свою"></label>
+  <label class="f">Чем занимается / компетенции <textarea name="responsibilities" rows="3" maxlength="4000" placeholder="Например: закупки оборудования, подбор поставщиков, технические чертежи">{{ e.responsibilities if e }}</textarea><small class="muted">Помогает ИИ различать сотрудников с одинаковыми именами и выбирать исполнителя по сути задачи.</small></label>
   <label class="f">Куда писать <select name="channel"><option value="telegram">Telegram</option></select></label>
   {% if ai %}<label class="f">Telegram <input name="telegram_manual" placeholder="@username или +375291234567" value="{{ e.telegram_chat_id if e }}"></label>
   {% else %}
@@ -29,6 +30,7 @@
   <div class="emp {{ '' if e.active else 'off' }}">
     <div class="row between"><div><b>{{ e.name }}</b> <span class="muted">{{ e.position }}</span>
       <div class="small muted">{{ e.aliases }}</div>
+      {% if e.responsibilities %}<div class="small">{{ e.responsibilities }}</div>{% endif %}
       <div class="small">{% if e.telegram_chat_id %}<span class="pill green">Telegram</span>{% else %}<span class="pill red">нет Telegram</span>{% endif %}</div></div>
       <div class="actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Изменить</a>
         <form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">×</button></form></div></div>
