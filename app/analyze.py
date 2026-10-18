@@ -538,6 +538,13 @@ _TASK_ENDINGS = ("ирования", "ирование", "ировать", "ен
 
 def _task_stems(word: str) -> set:
     stems = set(_stems(word))
+    # Russian adjective endings are important for department qualifiers:
+    # «технического отдела» must match «Технический отдел».
+    adjective_endings = ("ого", "его", "ому", "ему", "ыми", "ими", "ых", "их",
+                         "ая", "яя", "ое", "ее", "ый", "ий", "ой", "ую", "юю", "ым", "им")
+    for ending in adjective_endings:
+        if word.endswith(ending) and len(word) - len(ending) >= 3:
+            stems.add(word[:-len(ending)])
     for ending in _TASK_ENDINGS:
         if word.endswith(ending) and len(word) - len(ending) >= 3:
             stems.add(word[:-len(ending)])
@@ -547,11 +554,18 @@ def _task_stems(word: str) -> set:
 def match_task_employee(name, task_context, employees):
     """Resolve a spoken assignee only when name + task context uniquely identify one employee.
 
-    A single weak overlap (especially a generic position or department name) is not enough to
-    disambiguate people with the same name. Prefer concrete responsibilities, and require both
-    a minimum evidence score and a meaningful margin over the next candidate.
+    A department qualifier in the spoken phrase (for example, «Татьяне из технического отдела»)
+    is context, not part of the person's name. Weak or close-scoring matches stay unassigned.
     """
-    spoken = _words(name)
+    raw_name = str(name or "")
+    qualifier = ""
+    qualifier_match = re.search(
+        r"\\b(?:из|в|во)\\s+(?:(?:отдела|отделе|департамента|департаменте|подразделения|подразделении|команды|команде)\\s+)?(.+)$",
+        raw_name, flags=re.IGNORECASE)
+    if qualifier_match:
+        qualifier = qualifier_match.group(1).strip()
+        raw_name = raw_name[:qualifier_match.start()].strip()
+    spoken = _words(raw_name)
     if not spoken:
         return None
     candidates = []
@@ -565,7 +579,7 @@ def match_task_employee(name, task_context, employees):
         return None
 
     context_words = set()
-    for word in _words(task_context):
+    for word in _words(str(task_context or "") + " " + qualifier):
         context_words.update(_task_stems(word))
     scored = []
     for employee in candidates:
@@ -599,8 +613,6 @@ def match_task_employee(name, task_context, employees):
     ranked = sorted(scored, key=lambda item: item[0], reverse=True)
     best_score, best_duty_hits, best_employee = ranked[0]
     second_score = ranked[1][0]
-    # Do not turn a weak lexical coincidence into an assignment. When two people are close,
-    # preserve ambiguity for human review rather than guessing.
     if best_score < 3 or best_score - second_score < 2:
         return None
     if best_duty_hits == 0 and best_score < 4:
