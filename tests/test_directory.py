@@ -63,6 +63,11 @@ def test_a_wrong_id_from_the_model_is_replaced_by_the_spoken_name():
     assert out["tasks"][0]["employee_id"] == 3
 
 
+def test_boolean_employee_id_is_not_coerced_to_employee_one():
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": True, "assignee_name": ""}]}, TEAM)
+    assert out["tasks"][0]["employee_id"] is None
+
+
 def test_a_conflicting_valid_model_id_is_overridden_by_the_spoken_name():
     out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Анне"}]}, TEAM)
     assert out["tasks"][0]["employee_id"] == 3
