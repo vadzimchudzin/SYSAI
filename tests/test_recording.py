@@ -187,9 +187,10 @@ def test_active_recordings_are_shared_by_owner_and_include_device_label():
     assert own[0]["status"] == "recording"
     assert own[0]["elapsed_seconds"] >= 0
     assert other == []
+    recording.cancel("user:42", rec["id"])
 
 
 def test_active_recordings_include_legacy_owner_only_when_explicitly_requested():
-    rec = recording.start("legacy-session", "audio/webm", "Old browser session")
-    assert recording.list_active("user:42") == []
-    assert [item["id"] for item in recording.list_active("user:42", "legacy-session")] == [rec["id"]]
+    rec = recording.start("legacy-session-unique", "audio/webm", "Old browser session")
+    assert recording.list_active("user:99") == []
+    assert [item["id"] for item in recording.list_active("user:99", "legacy-session-unique")] == [rec["id"]]
