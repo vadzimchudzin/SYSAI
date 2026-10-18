@@ -6,7 +6,7 @@ from app import transcribe
 
 def test_unique_overlap_utterance_stabilises_speaker_and_is_not_duplicated():
     segments = [
-        {"speaker": "Спикер 1", "start": 59.0, "text": "Продолжим закупку оборудования"},
+        {"speaker": "Спикер 1", "start": 59.0, "text": "Продолжим закупку оборудования."},
         {"speaker": "Спикер 1", "start": 57.0, "text": "Итак, начнем"},
     ]
     new = [
