@@ -61,7 +61,13 @@
         <option value="{{ s.transcribe_model }}">{{ s.transcribe_model }} — текущая</option>
       </select>
     </label>
-    <p class="small muted">Выбирайте модель с поддержкой аудиовхода. После смены нужно сравнить качество на одинаковых русскоязычных записях.</p>
+    <p class="small muted">Это модели с выходной модальностью transcription. После смены сравните качество на одинаковых русскоязычных записях.</p>
+    <label class="f">Разделение говорящих и временная привязка
+      <select name="diarization_model" id="diarization-model" data-current="{{ s.diarization_model }}">
+        <option value="{{ s.diarization_model }}">{{ s.diarization_model }} — текущая</option>
+      </select>
+    </label>
+    <p class="small muted">Используется, если выбранная STT-модель не вернула метки говорящих. Текст распознавания остаётся за STT-моделью; эта модель только распределяет сегменты по голосам.</p>
     <label class="f">Анализ расшифровки и отчёт
       <select name="report_model" id="report-model" data-current="{{ s.report_model }}">
         <option value="{{ s.report_model }}">{{ s.report_model }} — текущая</option>
