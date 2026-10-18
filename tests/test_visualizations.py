@@ -1,7 +1,9 @@
 """Validation tests for numeric visualizations generated from transcript evidence."""
 import datetime as dt
 
-from app import analyze
+import pytest
+
+from app import analyze, llm
 
 
 TRANSCRIPT = "Продажи: январь — 10 тысяч рублей, февраль — 12 тысяч рублей."
@@ -45,9 +47,5 @@ def test_visualization_without_source_evidence_is_removed_and_noted():
 
 def test_visualization_rejects_mismatched_series_lengths():
     chart = {**CHART, "series": [{"name": "Продажи", "values": [10]}]}
-    try:
+    with pytest.raises(llm.LLMError, match="Числа визуализации"):
         analyze._validate_report(report(chart), [], TRANSCRIPT, 60, dt.date(2026, 10, 18))
-    except Exception as exc:
-        assert "подписи" in str(exc) or "серии" in str(exc)
-    else:
-        raise AssertionError("Mismatched chart series should be rejected")
