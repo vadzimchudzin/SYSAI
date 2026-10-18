@@ -152,7 +152,13 @@
       <td><input type="date" name="deadline_{{ t.id }}" value="{{ t.deadline.isoformat() if t.deadline }}">
         <div class="muted small">{{ {'stated':'назван на встрече','default':'по умолчанию','asked':'от исполнителя','manual':'вручную','none':'без срока'}.get(t.deadline_source) }}{% if t.deadline_quote %}: «{{ t.deadline_quote }}»{% endif %}</div></td>
       <td><select name="priority_{{ t.id }}">{% for k, v in priority.items() %}<option value="{{ k }}" {{ 'selected' if t.priority == k }}>{{ v }}</option>{% endfor %}</select></td>
-      <td>{% set ts = {'draft':('черновик','gray'),'sent':('отправлена','green'),'awaiting_deadline':('ждём срок','amber'),'no_recipient':('нет получателя','red'),'delivery_failed':('не доставлено','red'),'assistant_message_sending':('отправляется','blue'),'assistant_message_uncertain':('проверить доставку','amber')}.get(t.status, (t.status,'gray')) %}<span class="pill {{ ts[1] }}">{{ ts[0] }}</span></td>
+      <td>{% set ts = {'draft':('черновик','gray'),'sent':('отправлена','green'),'awaiting_deadline':('ждём срок','amber'),'no_recipient':('нет получателя','red'),'delivery_failed':('не доставлено','red'),'assistant_message_sending':('отправляется','blue'),'assistant_message_uncertain':('проверить доставку','amber')}.get(t.status, (t.status,'gray')) %}<span class="pill {{ ts[1] }}">{{ ts[0] }}</span>
+        {% if t.status == 'assistant_message_uncertain' and t.target_employee_id %}
+        <form method="post" action="/meetings/{{ m.id }}/tasks/{{ t.id }}/retry-assistant-message"
+              onsubmit="return confirm('Сначала проверьте чат адресата. Если сообщение действительно не пришло, повторить отправку?')">
+          <button class="btn sm" style="margin-top:6px">Повторить после проверки</button>
+        </form>{% endif %}
+      </td>
       <td><label class="small muted" title="Удалить задачу" style="white-space:nowrap"><input type="checkbox" name="del_{{ t.id }}"> ✕</label></td>
     </tr>
     {% endfor %}
