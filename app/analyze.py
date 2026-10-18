@@ -547,9 +547,15 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         executor = "assistant" if t.get("executor") == "assistant" else "person"
         if executor == "assistant":
             eid = None
-        elif eid not in ids:
+        else:
+            # A spoken directory name is stronger evidence than the model's proposed ID.
+            # Correct a conflicting ID deterministically; leave role/competency-based IDs intact
+            # when the transcript contains no uniquely matching employee name.
             matched = match_employee(t.get("assignee_name"), employees)
-            eid = matched.id if matched else None
+            if matched is not None:
+                eid = matched.id
+            elif eid not in ids:
+                eid = None
         d = None
         if t.get("deadline"):
             d = normalize_deadline(t["deadline"], meeting_date)
