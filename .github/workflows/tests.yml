@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Keep only the newest test run for a branch; rapid follow-up fixes should not queue stale runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
