@@ -68,10 +68,12 @@ def test_a_conflicting_valid_model_id_is_overridden_by_the_spoken_name():
     assert out["tasks"][0]["employee_id"] == 3
 
 
-def test_ambiguous_spoken_name_clears_model_employee_id_instead_of_guessing():
+def test_ambiguous_spoken_name_clears_model_employee_id_and_flags_review():
     twins = [person(1, "Вадим Чудин"), person(2, "Вадим Орлов")]
     out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Вадиму"}]}, twins)
     assert out["tasks"][0]["employee_id"] is None
+    assert out["requires_review"] is True
+    assert any("Уточните исполнителя" in note and "Смета" in note for note in out["notes"])
 
 
 def test_unique_full_name_resolves_even_when_first_name_is_ambiguous():
