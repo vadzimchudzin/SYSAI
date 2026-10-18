@@ -10,6 +10,7 @@
     <a class="nav {{ 'on' if path.startswith('/meetings') }}" href="/meetings">{{ icon('list') }} Совещания</a>
     {% if me and me.role == 'superuser' %}
     <a class="nav {{ 'on' if path.startswith('/employees') }}" href="/employees">{{ icon('users') }} Сотрудники</a>
+    <a class="nav {{ 'on' if path.startswith('/departments') }}" href="/departments">{{ icon('users') }} Подразделения</a>
     <a class="nav {{ 'on' if path.startswith('/reminders') }}" href="/reminders">{{ icon('bell') }} Напоминания</a>
     <a class="nav {{ 'on' if path.startswith('/admin/users') }}" href="/admin/users">{{ icon('key') }} Пользователи{% if pending_users %} <span class="pill red">{{ pending_users }}</span>{% endif %}</a>
     <a class="nav {{ 'on' if path.startswith('/settings') }}" href="/settings">{{ icon('gear') }} Настройки</a>
