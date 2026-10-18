@@ -299,7 +299,7 @@ def _options(form) -> dict:
     return {"approval_required": bool(form.get("approval_required")),
             "send_tasks_to_assignees": bool(form.get("send_tasks_to_assignees")),
             "include_transcript_in_pdf": bool(form.get("include_transcript_in_pdf")),
-            **({"report_style": form.get("report_style")} if form.get("report_style") in ("executive", "detailed", "technical") else {}),
+            **({"report_style": form.get("report_style")} if form.get("report_style") in ("balanced", "executive", "detailed", "technical") and form.get("report_style") != settings_store.get("report_style", "balanced") else {}),
             "deadline_mode": form.get("deadline_mode", "default"),
             "report_chat_ids": _chat_ids(form, "report_chat_ids")}
 
