@@ -30,6 +30,23 @@
   </div>
 </div>
 
+{% if r.segments %}
+<section class="card" id="detected-meetings">
+  <h2>Отдельные совещания в исходной записи</h2>
+  <p class="small muted">Исходное аудио сохранено. Отчёты разделены; получатели должны быть проверены отдельно перед отправкой.</p>
+  <ul>
+    {% for segment in r.segments %}
+    <li style="margin:8px 0">
+      <a href="/meetings/{{ segment.meeting_id }}"><b>{{ segment.title }}</b></a>
+      · {{ segment.start_label }}–{{ segment.end_label }}
+      {% if segment.reason %}<div class="small muted">{{ segment.reason }}</div>{% endif %}
+      <div class="small muted">Уверенность границ: {{ (segment.confidence * 100)|round|int }}%</div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
 {% if m.report %}{% include '_progress_board.html' %}{% endif %}
 
 <div id="meeting-live-status">
