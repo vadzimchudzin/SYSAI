@@ -24,7 +24,7 @@
       <span class="pill {{ st[1] }}" id="status-pill" data-status="{{ m.status }}" data-id="{{ m.id }}">{{ st[0] }}</span>
       <span id="progress" class="small">{{ m.progress }}</span></p></div>
   <div class="actions">
-    {% if m.report %}<a class="btn" href="/meetings/{{ m.id }}/pdf" target="_blank">PDF</a><a class="btn" href="/meetings/{{ m.id }}/pdf?download=1">Скачать PDF</a>{% endif %}
+    {% if m.report and m.status != 'segmented' %}<a class="btn" href="/meetings/{{ m.id }}/pdf" target="_blank">PDF</a><a class="btn" href="/meetings/{{ m.id }}/pdf?download=1">Скачать PDF</a>{% endif %}
     {% if m.transcript and m.status in ('awaiting_approval','rejected','error') %}<form method="post" action="/meetings/{{ m.id }}/reanalyze"><button class="btn" title="Пересобрать отчёт из расшифровки">Пересобрать</button></form>{% endif %}
     <form method="post" action="/meetings/{{ m.id }}/delete" onsubmit="return confirm('Удалить совещание?')"><button class="btn danger">Удалить</button></form>
   </div>
@@ -34,6 +34,7 @@
 <section class="card" id="detected-meetings">
   <h2>Отдельные совещания в исходной записи</h2>
   <p class="small muted">Исходное аудио сохранено. Отчёты разделены; получатели должны быть проверены отдельно перед отправкой.</p>
+  {% if m.audio_path %}<audio controls preload="metadata" style="width:100%;margin:10px 0" src="/meetings/{{ m.id }}/audio"></audio>{% endif %}
   <ul>
     {% for segment in r.segments %}
     <li style="margin:8px 0">
