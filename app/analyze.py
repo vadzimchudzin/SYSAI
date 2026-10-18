@@ -499,19 +499,22 @@ def _aliases(employee) -> list:
         return [a.strip() for a in str(getattr(employee, "aliases", "") or "").split(",") if a.strip()]
 
 
-def match_employee(name, employees):
-    """The one directory employee a spoken name points at, or None (unknown or ambiguous: never guess).
-
-    The model is told to map names itself but plays safe and leaves employee_id empty; this catches the cases where
-    the name, an alias or a surname from the directory was plainly said, in any grammatical case."""
+def _employee_matches(name, employees):
+    """Return all directory employees consistent with a spoken name or alias."""
     spoken = _words(name)
     if not spoken:
-        return None
+        return []
     hits = []
     for employee in employees:
         known = [w for phrase in [getattr(employee, "name", "")] + _aliases(employee) for w in _words(phrase)]
         if all(any(_same_word(s, k) for k in known) for s in spoken):
             hits.append(employee)
+    return hits
+
+
+def match_employee(name, employees):
+    """Return a unique match; unknown or ambiguous names are never guessed."""
+    hits = _employee_matches(name, employees)
     return hits[0] if len(hits) == 1 else None
 
 
@@ -549,11 +552,13 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
             eid = None
         else:
             # A spoken directory name is stronger evidence than the model's proposed ID.
-            # Correct a conflicting ID deterministically; leave role/competency-based IDs intact
-            # when the transcript contains no uniquely matching employee name.
-            matched = match_employee(t.get("assignee_name"), employees)
-            if matched is not None:
-                eid = matched.id
+            # Correct a conflicting ID deterministically. If the spoken name matches multiple
+            # directory entries, clear the ID rather than silently accepting the model's guess.
+            candidates = _employee_matches(t.get("assignee_name"), employees)
+            if len(candidates) == 1:
+                eid = candidates[0].id
+            elif len(candidates) > 1:
+                eid = None
             elif eid not in ids:
                 eid = None
         d = None
