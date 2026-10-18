@@ -545,7 +545,12 @@ def _task_stems(word: str) -> set:
 
 
 def match_task_employee(name, task_context, employees):
-    """Resolve a spoken assignee only when name + task context uniquely identify one employee."""
+    """Resolve a spoken assignee only when name + task context uniquely identify one employee.
+
+    A single weak overlap (especially a generic position or department name) is not enough to
+    disambiguate people with the same name. Prefer concrete responsibilities, and require both
+    a minimum evidence score and a meaningful margin over the next candidate.
+    """
     spoken = _words(name)
     if not spoken:
         return None
@@ -564,30 +569,43 @@ def match_task_employee(name, task_context, employees):
         context_words.update(_task_stems(word))
     scored = []
     for employee in candidates:
-        duties = set()
+        responsibility_words = set()
         for word in _words(getattr(employee, "responsibilities", "") or ""):
-            duties.update(_task_stems(word))
-        department_names = set()
+            responsibility_words.update(_task_stems(word))
+        department_words = set()
         for membership in (getattr(employee, "department_memberships", []) or []):
             department = getattr(membership, "department", None)
             if department is not None and not getattr(department, "active", True):
                 continue
             if department is not None:
                 for word in _words(getattr(department, "name", "") or ""):
-                    department_names.update(_task_stems(word))
+                    department_words.update(_task_stems(word))
             for phrase in (getattr(membership, "role", "") or "",
                            getattr(membership, "responsibilities", "") or ""):
                 for word in _words(phrase):
-                    duties.update(_task_stems(word))
-        position = set()
+                    responsibility_words.update(_task_stems(word))
+        position_words = set()
         for word in _words(getattr(employee, "position", "") or ""):
-            position.update(_task_stems(word))
-        score = 3 * len(context_words & duties) + 2 * len(context_words & department_names) + len(context_words & position)
-        scored.append((score, employee))
-    best = max(score for score, _ in scored)
-    winners = [employee for score, employee in scored if score == best]
-    return winners[0] if best > 0 and len(winners) == 1 else None
+            position_words.update(_task_stems(word))
 
+        # Concrete responsibilities carry the most weight; department names are useful context,
+        # while a generic job title is supporting evidence only.
+        duty_hits = len(context_words & responsibility_words)
+        department_hits = len(context_words & department_words)
+        position_hits = len(context_words & position_words)
+        score = 3 * duty_hits + 2 * department_hits + position_hits
+        scored.append((score, duty_hits, employee))
+
+    ranked = sorted(scored, key=lambda item: item[0], reverse=True)
+    best_score, best_duty_hits, best_employee = ranked[0]
+    second_score = ranked[1][0]
+    # Do not turn a weak lexical coincidence into an assignment. When two people are close,
+    # preserve ambiguity for human review rather than guessing.
+    if best_score < 3 or best_score - second_score < 2:
+        return None
+    if best_duty_hits == 0 and best_score < 4:
+        return None
+    return best_employee
 
 def normalize(r: dict, employees, meeting_date=None) -> dict:
     ids = {e.id for e in employees}
