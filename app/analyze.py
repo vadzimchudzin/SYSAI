@@ -578,12 +578,17 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         executor = "assistant" if t.get("executor") == "assistant" else "person"
         if executor == "assistant":
             eid = None
-        elif eid not in ids:
+        else:
             context = " ".join(str(t.get(key) or "") for key in ("title", "description", "quote"))
-            matched = match_task_employee(t.get("assignee_name"), context, employees)
+            spoken_name = (t.get("assignee_name") or "").strip()
+            matched = match_task_employee(spoken_name, context, employees)
             if matched is None:
-                matched = match_employee(t.get("assignee_name"), employees)
-            eid = matched.id if matched else None
+                matched = match_employee(spoken_name, employees)
+            if matched is not None:
+                # A unique directory match beats a conflicting model ID; ambiguous names stay unassigned.
+                eid = matched.id
+            elif spoken_name or eid not in ids:
+                eid = None
         d = None
         if t.get("deadline"):
             d = normalize_deadline(t["deadline"], meeting_date)
