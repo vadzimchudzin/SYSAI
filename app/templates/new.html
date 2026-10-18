@@ -47,6 +47,15 @@
     {{ toggle('approval_required', s.approval_required, 'Проверить черновик перед отправкой', 'Если выключить, отчёт отправится выбранным получателям сразу после обработки.') }}
     {{ toggle('send_tasks_to_assignees', s.send_tasks_to_assignees, 'Отправить исполнителям их задачи', 'Нужны подключённый Telegram и привязанные сотрудники.') }}
     {{ toggle('include_transcript_in_pdf', s.include_transcript_in_pdf, 'Добавить полную расшифровку в PDF') }}
+    <h3>Стиль протокола</h3>
+    <label class="f">Как оформить итог
+      <select name="report_style">
+        {% for value, label in [('balanced','Стандартный'),('executive','Для руководителя'),('detailed','Подробный'),('technical','Технический')] %}
+        <option value="{{ value }}" {{ 'selected' if s.report_style == value }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="small muted">Стиль меняет структуру и степень детализации, но не факты и не критерии проверки задач.</p>
     <h3>Сроки, если на встрече их не назвали</h3>
     {{ deadline_modes(s.deadline_mode) }}
     <h3>Получатели полного отчёта</h3>
