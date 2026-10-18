@@ -64,7 +64,7 @@ def employees_json(employees) -> str:
 
 def _fingerprint(segments, employees, settings, meeting_date):
     payload = {
-        "analysis_version": 5, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
+        "analysis_version": 8, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
         "model": settings.get("report_model"), "report_style": settings.get("report_style", "balanced"),
         "glossary": settings.get("glossary", ""),
         "employees": employees_json(employees), "meeting_date": meeting_date.isoformat(),
