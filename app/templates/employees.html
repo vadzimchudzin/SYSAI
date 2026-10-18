@@ -13,13 +13,29 @@
   </select><input name="telegram_manual" placeholder="или chat_id вручную" value="{{ e.telegram_chat_id if e and e.telegram_chat_id not in chats|map(attribute='chat_id')|list }}"></label>
   {% endif %}
   <label class="f">ID в Bitrix24 <small class="muted">(позже)</small><input name="bitrix_user_id" value="{{ e.bitrix_user_id if e }}"></label>
+  {% if departments %}
+  <fieldset class="f" style="grid-column:1/-1;border:1px solid var(--line);border-radius:12px;padding:12px">
+    <legend>Подразделения и роль в каждом</legend>
+    <p class="small muted">Сотрудник может состоять в нескольких подразделениях. Роль задаётся отдельно для каждого.</p>
+    {% for d in departments %}
+      {% set membership = memberships_by_employee.get(e.id, {}).get(d.id) if e else none %}
+      <label class="check" style="display:flex;gap:10px;align-items:center;margin:8px 0">
+        <input type="checkbox" name="department_ids" value="{{ d.id }}" {{ 'checked' if membership }}>
+        <span style="min-width:150px">{{ d.name }}</span>
+        <input name="department_role_{{ d.id }}" value="{{ membership.role if membership else (e.position if e else '') }}"
+               placeholder="Роль в подразделении" aria-label="Роль в подразделении {{ d.name }}">
+      </label>
+    {% endfor %}
+    <a class="small" href="/departments">Управлять структурой подразделений →</a>
+  </fieldset>
+  {% else %}<p class="small muted">Сначала создайте подразделения в разделе <a href="/departments">«Подразделения»</a>.</p>{% endif %}
   {% if e %}<label class="check"><input type="checkbox" name="active" {{ 'checked' if e.active }}> Активен</label>{% endif %}
   <button class="btn primary">{{ 'Сохранить' if e else 'Добавить' }}</button>
 </form>
 {% endmacro %}
 {% block body %}
 <datalist id="positions">{% for p in positions %}<option value="{{ p }}">{% endfor %}</datalist>
-<div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div></div>
+<div class="page-h"><div><h1>Сотрудники</h1><p>Единый справочник людей, роли и членство в подразделениях.</p></div><a class="btn" href="/departments">Структура подразделений →</a></div>
 {% if ai %}<div class="card note">ИИ-сотрудник пишет с подключённого аккаунта. Укажите @username сотрудника или его номер телефона. Если по номеру человека не найти, добавьте его в контакты аккаунта или укажите @username.</div>{% else %}<div class="card note">Чтобы бот мог писать сотруднику, тот должен один раз открыть бота и нажать <b>/start</b> — после этого он появится в списке «Telegram».</div>{% endif %}
 <div class="grid2">
 <section class="card"><h2>Добавить сотрудника</h2>{{ form(None) }}</section>
