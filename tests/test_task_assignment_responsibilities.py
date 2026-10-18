@@ -4,11 +4,11 @@ from types import SimpleNamespace
 from app import analyze
 
 
-def person(i, name, position, responsibilities):
+def person(i, name, position, responsibilities, telegram_chat_id=""):
     aliases = ""
     return SimpleNamespace(
         id=i, name=name, aliases=aliases, position=position, responsibilities=responsibilities,
-        alias_list=lambda: [],
+        telegram_chat_id=telegram_chat_id, alias_list=lambda: [],
     )
 
 
@@ -78,3 +78,51 @@ def test_ambiguous_name_is_not_assigned_even_if_model_guesses_an_id():
     }
     normalized = analyze.normalize(report, [a, b])
     assert normalized["tasks"][0]["employee_id"] is None
+
+def test_assistant_message_target_is_resolved_separately_from_task_owner():
+    marketing = person(1, "Татьяна Иванова", "Маркетолог", "тендеры, продвижение", "@tanya_marketing")
+    technical = person(2, "Татьяна Петрова", "Технический специалист", "закупки оборудования, подбор поставщиков",
+                       "@tanya_technical")
+    report = {
+        "tasks": [{
+            "title": "Написать Татьяне и уточнить закупку оборудования",
+            "description": "Уточнить поставщика и сроки поставки",
+            "employee_id": None,
+            "assignee_name": "ассистент",
+            "executor": "assistant",
+            "target_employee_id": 1,
+            "target_employee_name": "Татьяне",
+            "deadline": None,
+            "deadline_quote": "",
+            "priority": "medium",
+            "time": "01:00",
+            "quote": "Нужно написать Татьяне и уточнить закупку оборудования",
+        }]
+    }
+    normalized = analyze.normalize(report, [marketing, technical])
+    task = normalized["tasks"][0]
+    assert task["executor"] == "assistant"
+    assert task["employee_id"] is None
+    assert task["target_employee_id"] == 2
+    assert task["target_employee_name"] == "Татьяне"
+
+
+def test_assistant_message_target_without_telegram_contact_is_not_routable():
+    person_without_contact = person(9, "Андрей Орлов", "Инженер", "чертежи")
+    normalized = analyze.normalize({
+        "tasks": [{
+            "title": "Написать Андрею",
+            "description": "Уточнить детали",
+            "employee_id": None,
+            "assignee_name": "ассистент",
+            "executor": "assistant",
+            "target_employee_id": 9,
+            "target_employee_name": "Андрею",
+            "deadline": None,
+            "deadline_quote": "",
+            "priority": "medium",
+            "time": "00:10",
+            "quote": "Написать Андрею и уточнить детали",
+        }]
+    }, [person_without_contact])
+    assert normalized["tasks"][0]["target_employee_id"] is None
