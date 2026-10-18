@@ -299,6 +299,10 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         mine = [t for t in tasks if t.status in OPEN_STATUSES and t.status != "draft"]
         ctx["employee"] = {"name": employee.name, "position": employee.position or None,
                            "responsibilities": getattr(employee, "responsibilities", "") or None,
+                           "departments": [{"name": m.department.name, "role": m.role or "",
+                                            "responsibilities": m.responsibilities or ""}
+                                           for m in employee.department_memberships
+                                           if m.department is not None and m.department.active],
                            "tasks": [_task_view(t, True) for t in mine],
                            "done_recently": [t.title for t in tasks if t.status == "done"][:5]}
         meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks))[:4]
@@ -315,6 +319,10 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                 by_person[task.assignee_id].append(task)
         ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None,
                         "responsibilities": getattr(p, "responsibilities", "") or None,
+                        "departments": [{"name": m.department.name, "role": m.role or "",
+                                         "responsibilities": m.responsibilities or ""}
+                                        for m in p.department_memberships
+                                        if m.department is not None and m.department.active],
                         "reachable": reminders.reachable(p),
                         "open_tasks": [_task_view(t, False) for t in by_person[p.id] if t.status in OPEN_STATUSES][:8],
                         "done": sum(t.status == "done" for t in by_person[p.id]),
