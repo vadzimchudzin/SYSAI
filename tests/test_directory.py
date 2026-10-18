@@ -129,10 +129,24 @@ def test_employee_assignment_profile_is_included_in_analysis_directory():
 
 def test_directory_names_help_the_recogniser_and_the_analyst():
     with SessionLocal() as s:
-        s.add_all([Employee(name="Вадим Чудин", aliases="Вадя, Чудин"), Employee(name="Иван Петров", aliases="Вадя"),
-                   Employee(name="Бывший Сотрудник", active=False)])
+        s.add_all([
+            Employee(name="Вадим Чудин", aliases="Вадя, Чудин"),
+            Employee(name="Иван Петров", aliases="Вадя"),
+            Employee(name="Татьяна Смирнова", position="Инженер КИПиА", department="Технический отдел",
+                     competencies="промышленные насосы, частотный преобразователь",
+                     responsibilities="диагностика датчиков; закупка запчастей"),
+            Employee(name="Бывший Сотрудник", active=False, competencies="неактуальный термин"),
+        ])
         s.commit()
-    assert pipeline._directory_terms() == ["Вадим Чудин", "Вадя", "Чудин", "Иван Петров"]
+    terms = pipeline._directory_terms()
+    assert terms[:4] == ["Вадим Чудин", "Вадя", "Чудин", "Иван Петров"]
+    assert "Инженер КИПиА" in terms
+    assert "Технический отдел" in terms
+    assert "промышленные насосы" in terms
+    assert "частотный преобразователь" in terms
+    assert "диагностика датчиков" in terms
+    assert "закупка запчастей" in terms
+    assert "неактуальный термин" not in terms
 
 
 # ----------------------------------------------------------------------------- the first message is not an introduction
