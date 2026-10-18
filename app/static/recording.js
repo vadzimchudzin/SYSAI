@@ -91,7 +91,12 @@
       const data = new FormData(form);
       data.set('title', form.elements.mic_title.value);
       data.set('meeting_date', form.elements.mic_date.value);
-      data.set('mime_type', mime); data.delete('file');
+      data.set('mime_type', mime);
+      const ua = navigator.userAgent || '';
+      const platform = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Браузер';
+      const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Web';
+      data.set('device_label', `${platform} · ${browser}`);
+      data.delete('file');
       lock(true);
       const session = await request('/recordings', { method: 'POST', body: data });
       id = session.id; active = true; startedAt = Date.now();
