@@ -1,0 +1,46 @@
+{% extends "base.html" %}{% block title %}Подразделения — SYSAI{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>Подразделения</h1><p>Иерархия отделов и вложенных команд. Один сотрудник может состоять в нескольких подразделениях.</p></div><a class="btn" href="/employees">К сотрудникам →</a></div>
+<div class="grid2">
+  <section class="card">
+    <h2>Создать подразделение</h2>
+    <form method="post" action="/departments" class="emp-form">
+      <label class="f">Название <input name="name" required maxlength="160" placeholder="Например, AI Agents"></label>
+      <label class="f">Родительское подразделение
+        <select name="parent_id"><option value="">— верхний уровень —</option>
+        {% for d in departments|sort(attribute='name') %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="f" style="grid-column:1/-1">Описание <textarea name="description" rows="3" placeholder="Зона ответственности"></textarea></label>
+      <button class="btn primary">Создать</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Структура ({{ departments|length }})</h2>
+    {% if not departments %}<p class="muted">Подразделений пока нет. Создайте первое слева.</p>{% endif %}
+    {% for d in departments|sort(attribute='name') if not d.parent_id %}
+      <div class="emp">
+        <div class="row between"><div><b>{{ d.name }}</b><div class="small muted">{{ d.description }}</div></div>
+          <form method="post" action="/departments/{{ d.id }}/delete" onsubmit="return confirm('Архивировать подразделение? Его участники останутся в справочнике.')"><button class="btn sm danger">Архивировать</button></form>
+        </div>
+        {% for child in departments|sort(attribute='name') if child.parent_id == d.id %}
+          <div style="margin:12px 0 0 18px;padding-left:12px;border-left:2px solid var(--line)">
+            <div class="row between"><div><b>{{ child.name }}</b><div class="small muted">{{ child.description }}</div></div>
+              <form method="post" action="/departments/{{ child.id }}/delete" onsubmit="return confirm('Архивировать подразделение?')"><button class="btn sm danger">Архивировать</button></form>
+            </div>
+            {% for member in members_by_department.get(child.id, []) %}
+              <div class="small muted" style="margin-top:5px">{{ member.employee.name }}{% if member.role %} · {{ member.role }}{% endif %}</div>
+            {% endfor %}
+          </div>
+        {% endfor %}
+        {% for member in members_by_department.get(d.id, []) %}
+          <div class="small muted" style="margin-top:7px">{{ member.employee.name }}{% if member.role %} · {{ member.role }}{% endif %}</div>
+        {% endfor %}
+      </div>
+    {% endfor %}
+    {% for d in departments|sort(attribute='name') if d.parent_id and d.parent_id not in departments|map(attribute='id')|list %}
+      <div class="emp"><b>{{ d.name }}</b> <span class="small muted">— родительское подразделение отсутствует</span></div>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}
