@@ -55,3 +55,27 @@ def test_department_specific_duties_resolve_same_name_employee():
         chosen = analyze.match_task_employee("Татьяне", "закупить техническое оборудование", people)
         assert chosen is not None
         assert chosen.id == second.id
+
+def test_routing_matches_russian_inflections_of_duties():
+    suffix = uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        marketing = Department(name=f"Группа А {suffix}")
+        technical = Department(name=f"Группа Б {suffix}")
+        first = Employee(name="Татьяна Иванова", position="Специалист")
+        second = Employee(name="Татьяна Петрова", position="Специалист")
+        session.add_all([marketing, technical, first, second])
+        session.flush()
+        session.add_all([
+            EmployeeDepartment(employee_id=first.id, department_id=marketing.id,
+                               role="Маркетолог", responsibilities="продвижение"),
+            EmployeeDepartment(employee_id=second.id, department_id=technical.id,
+                               role="Закупки", responsibilities="закупки"),
+        ])
+        session.flush()
+        people = session.query(Employee).order_by(Employee.id).all()
+        for employee in people:
+            for membership in employee.department_memberships:
+                _ = membership.department.name
+        chosen = analyze.match_task_employee("Татьяне", "закупить", people)
+        assert chosen is not None
+        assert chosen.id == second.id
