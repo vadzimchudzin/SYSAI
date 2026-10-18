@@ -23,7 +23,7 @@ from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, 
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, ConversationEscalation, Delivery, Department, Employee, EmployeeDepartment, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -916,15 +916,16 @@ def employees_view(request: Request, edit: int = 0):
     guard_admin(request)
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
+        departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
-                positions=settings_store.POSITIONS, edit=edit)
+                departments=departments, positions=settings_store.POSITIONS, edit=edit)
 
 
 @app.post("/employees")
-def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
+async def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
                   position: str = Form(""), responsibilities: str = Form(""), channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
                   telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
     guard_admin(request)
@@ -944,8 +945,67 @@ def employee_save(request: Request, id: int = Form(0), name: str = Form(...), al
         e.bitrix_user_id = bitrix_user_id.strip()
         e.active = bool(active) if id else True
         s.add(e)
+        s.flush()
+        form = await request.form()
+        try:
+            selected_ids = {int(value) for value in form.getlist("department_ids")}
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Некорректное подразделение") from None
+        departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []
+        if {department.id for department in departments} != selected_ids:
+            raise HTTPException(400, "Одно из подразделений не найдено")
+        s.query(EmployeeDepartment).filter_by(employee_id=e.id).delete(synchronize_session=False)
+        for department in departments:
+            role = str(form.get(f"department_role_{department.id}") or "").strip()[:200]
+            duties = str(form.get(f"department_responsibilities_{department.id}") or "").strip()[:4000]
+            s.add(EmployeeDepartment(employee_id=e.id, department_id=department.id, role=role,
+                                    responsibilities=duties))
         s.commit()
     return RedirectResponse("/employees", 303)
+
+
+# ----------------------------------------------------------------------------- departments
+@app.get("/departments", response_class=HTMLResponse)
+def departments_view(request: Request, edit: int = 0, msg: str = ""):
+    guard_admin(request)
+    with SessionLocal() as s:
+        departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+    return page(request, "departments.html", departments=departments, edit=edit, msg=msg)
+
+
+@app.post("/departments")
+def department_save(request: Request, id: int = Form(0), name: str = Form(...),
+                    description: str = Form(""), active: str = Form("")):
+    guard_admin(request)
+    clean_name = name.strip()[:100]
+    if not clean_name:
+        raise HTTPException(400, "Укажите название подразделения")
+    with SessionLocal() as s:
+        duplicate = s.query(Department).filter(Department.name.ilike(clean_name))
+        if id:
+            duplicate = duplicate.filter(Department.id != id)
+        if duplicate.first():
+            raise HTTPException(409, "Подразделение с таким названием уже существует")
+        department = s.get(Department, id) if id else Department()
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        department.name = clean_name
+        department.description = description.strip()[:1000]
+        department.active = bool(active) if id else True
+        s.add(department)
+        s.commit()
+    return RedirectResponse("/departments", 303)
+
+
+@app.post("/departments/{department_id}/delete")
+def department_delete(request: Request, department_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        if department:
+            s.delete(department)
+            s.commit()
+    return RedirectResponse("/departments", 303)
 
 
 # ----------------------------------------------------------------------------- meeting reminders
@@ -996,6 +1056,7 @@ def employee_delete(request: Request, eid: int):
     with SessionLocal() as s:
         for t in s.query(Task).filter_by(assignee_id=eid):
             t.assignee_id = None
+        s.query(Task).filter_by(target_employee_id=eid).update({Task.target_employee_id: None}, synchronize_session=False)
         e = s.get(Employee, eid)
         if e:
             s.delete(e)
