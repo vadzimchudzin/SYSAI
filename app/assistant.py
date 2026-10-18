@@ -62,6 +62,8 @@ def run_pending() -> None:
 def recover() -> None:
     with SessionLocal() as s:
         s.query(Task).filter(Task.status == "assistant_running").update({Task.status: "assistant_todo"})
+        # A process may stop after beginning an external send. Never automatically resend an uncertain message.
+        s.query(Task).filter(Task.status == "assistant_message_sending").update({Task.status: "assistant_message_uncertain"})
         s.commit()
 
 
@@ -230,6 +232,17 @@ def _tell_reviewers(message: str, filename=None, pdf=None) -> int:
     return delivered
 
 
+def _notify_reviewers_text(message: str) -> None:
+    if userbot.ai_mode():
+        _tell_reviewers(message)
+        return
+    for ref in settings_store.get("approver_chat_ids") or []:
+        try:
+            telegram.send_message(ref, render.e(message))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reviewer %s did not get assistant task update: %s", ref, exc)
+
+
 def run_task(task_id: int) -> None:
     if userbot.quiet_until() is not None:
         return  # started after the quiet hours, see run_pending
@@ -267,24 +280,39 @@ def run_task(task_id: int) -> None:
                 target_ref, target_name = target.telegram_chat_id, target.name
             message_text = data["message_to_send"]
             if userbot.ai_mode():
-                sent = userbot.send_message(target_ref, message_text)
-            else:
-                if not config.telegram_enabled():
-                    raise AssistantError("Telegram не подключён, сообщение не отправлено")
-                sent = telegram.send_message(target_ref, render.e(message_text))
-            from . import agent
-            sent_user_id = sent.get("user_id") or (sent.get("chat") or {}).get("id")
-            agent.record_outgoing(target_ref, message_text, sent.get("message_id"), sent_user_id)
+                if not userbot.ready():
+                    raise AssistantError("Telegram-аккаунт ИИ-сотрудника не подключён")
+            elif not config.telegram_enabled():
+                raise AssistantError("Telegram не подключён, сообщение не отправлено")
+            # Persist the sending state before the external side effect. If the process crashes now,
+            # recovery marks it uncertain instead of sending the same message twice.
+            with SessionLocal() as s:
+                task = s.get(Task, task_id)
+                task.status = "assistant_message_sending"
+                s.commit()
+            try:
+                if userbot.ai_mode():
+                    sent = userbot.send_message(target_ref, message_text)
+                else:
+                    sent = telegram.send_message(target_ref, render.e(message_text))
+            except Exception as exc:  # noqa: BLE001
+                reason = f"Не удалось подтвердить доставку сообщения {target_name}: {str(exc)[:220]}. Проверьте чат перед повтором."
+                _finish(task_id, "assistant_message_uncertain", reason)
+                _notify_reviewers_text(reason)
+                return
+            if not isinstance(sent, dict) or not sent.get("message_id"):
+                reason = f"Статус доставки сообщения {target_name} неизвестен. Проверьте чат перед повтором."
+                _finish(task_id, "assistant_message_uncertain", reason)
+                _notify_reviewers_text(reason)
+                return
             _finish(task_id, "assistant_done", f"Ассистент написал {target_name} по поручению «{title}»")
-            reviewer_note = f"Сообщение отправлено {target_name} по поручению «{title}»."
-            if userbot.ai_mode():
-                _tell_reviewers(reviewer_note)
-            else:
-                for ref in settings_store.get("approver_chat_ids") or []:
-                    try:
-                        telegram.send_message(ref, render.e(reviewer_note))
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("reviewer %s did not get assistant message result: %s", ref, exc)
+            try:
+                from . import agent
+                sent_user_id = sent.get("user_id") or (sent.get("chat") or {}).get("id")
+                agent.record_outgoing(target_ref, message_text, sent.get("message_id"), sent_user_id)
+            except Exception:  # noqa: BLE001
+                log.exception("message was sent but could not be added to conversation history for task %s", task_id)
+            _notify_reviewers_text(f"Сообщение отправлено {target_name} по поручению «{title}».")
             return
         svg = visuals.svg(data["chart"]) if data["kind"] == "chart" else ""
         with SessionLocal() as s:
