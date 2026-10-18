@@ -63,13 +63,20 @@ def transcript_text(segments: list) -> str:
 def employees_json(employees) -> str:
     return json.dumps([{"employee_id": e.id, "name": e.name, "aliases": e.alias_list(), "position": e.position,
                         "responsibilities": getattr(e, "responsibilities", "") or "",
+                        "departments": [
+                            {"name": membership.department.name,
+                             "role": membership.role or "",
+                             "responsibilities": membership.responsibilities or ""}
+                            for membership in (getattr(e, "department_memberships", []) or [])
+                            if getattr(membership, "department", None) is not None and membership.department.active
+                        ],
                         "has_contact": bool(getattr(e, "telegram_chat_id", ""))}
                        for e in employees], ensure_ascii=False)
 
 
 def _fingerprint(segments, employees, settings, meeting_date):
     payload = {
-        "analysis_version": 6, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
+        "analysis_version": 7, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
         "model": settings.get("report_model"), "glossary": settings.get("glossary", ""),
         "employees": employees_json(employees), "meeting_date": meeting_date.isoformat(),
         "transcript": transcript_text(segments),
@@ -548,10 +555,22 @@ def match_task_employee(name, task_context, employees):
         duties = set()
         for word in _words(getattr(employee, "responsibilities", "") or ""):
             duties.update(_stems(word))
+        department_names = set()
+        for membership in (getattr(employee, "department_memberships", []) or []):
+            department = getattr(membership, "department", None)
+            if department is not None and not getattr(department, "active", True):
+                continue
+            if department is not None:
+                for word in _words(getattr(department, "name", "") or ""):
+                    department_names.update(_stems(word))
+            for phrase in (getattr(membership, "role", "") or "",
+                           getattr(membership, "responsibilities", "") or ""):
+                for word in _words(phrase):
+                    duties.update(_stems(word))
         position = set()
         for word in _words(getattr(employee, "position", "") or ""):
             position.update(_stems(word))
-        score = 3 * len(context_words & duties) + len(context_words & position)
+        score = 3 * len(context_words & duties) + 2 * len(context_words & department_names) + len(context_words & position)
         scored.append((score, employee))
     best = max(score for score, _ in scored)
     winners = [employee for score, employee in scored if score == best]
