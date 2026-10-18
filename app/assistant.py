@@ -250,14 +250,17 @@ def _tell_reviewers(message: str, filename=None, pdf=None) -> int:
 
 
 def _notify_reviewers_text(message: str) -> None:
-    if userbot.ai_mode():
-        _tell_reviewers(message)
-        return
-    for ref in settings_store.get("approver_chat_ids") or []:
-        try:
-            telegram.send_message(ref, render.e(message))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("reviewer %s did not get assistant task update: %s", ref, exc)
+    try:
+        if userbot.ai_mode():
+            _tell_reviewers(message)
+            return
+        for ref in settings_store.get("approver_chat_ids") or []:
+            try:
+                telegram.send_message(ref, render.e(message))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("reviewer %s did not get assistant task update: %s", ref, exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not notify reviewers about assistant task update: %s", exc)
 
 
 def run_task(task_id: int) -> None:
