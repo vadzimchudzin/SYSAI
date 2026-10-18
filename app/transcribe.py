@@ -8,6 +8,7 @@ The interface is small so ElevenLabs / Deepgram / WhisperX can be added later.
 import base64
 import json
 import hashlib
+import logging
 import math
 import pathlib
 import re
@@ -16,6 +17,8 @@ import tempfile
 
 from . import audio, checkpoints, config, llm, settings_store
 
+log = logging.getLogger("sysai.transcribe")
+LEGACY_CHAT_MODEL = "google/gemini-2.5-flash"
 DEMO = pathlib.Path(__file__).resolve().parent.parent / "samples" / "demo_transcript.json"
 SHORT_AUDIO_SECONDS = 10  # Includes codec padding around 1–5 second recordings.
 OVERLAP_SECONDS = 4
@@ -91,6 +94,105 @@ def _validate(data, offset, length):
     return sorted(result, key=lambda s: s["start"]), truncated
 
 
+def _word_tokens(text):
+    return re.findall(r"[a-zа-яё0-9]+", str(text or "").casefold().replace("ё", "е"))
+
+
+def _assign_speakers(path, segments, settings, context):
+    """Use an audio-capable chat model only to map STT segments to speaker labels; never rewrite their words."""
+    if not segments:
+        return []
+    model = settings.get("diarization_model") or LEGACY_CHAT_MODEL
+    payload = [{"index": index, "start": item["start"], "text": item["text"]} for index, item in enumerate(segments)]
+    prompt = (
+        "Прослушай приложенный аудиофрагмент и присвой каждому уже распознанному сегменту метку говорящего. "
+        "Текст сегментов — авторитетный результат STT: не исправляй и не переписывай его. "
+        "Используй стабильные метки «Спикер 1», «Спикер 2» и т. д.; один голос должен иметь одну метку. "
+        "Если предыдущий контекст указан, по возможности продолжай уже известные метки. "
+        "Верни JSON строго вида {\"speakers\":[{\"index\":0,\"speaker\":\"Спикер 1\"}]} для каждого индекса. "
+        "Если говорящего нельзя отличить, используй Спикер 1.\n"
+        + context + "\nСегменты: " + json.dumps(payload, ensure_ascii=False)
+    )
+    raw = llm.chat(model, [{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "input_audio", "input_audio": {"data": base64.b64encode(path.read_bytes()).decode("ascii"), "format": "mp3"}},
+    ]}], json_mode=True, temperature=0, max_tokens=3000, timeout=120)
+    data = llm.parse_json(raw)
+    labels = data.get("speakers") if isinstance(data, dict) else None
+    if not isinstance(labels, list):
+        raise llm.IncompleteResponse("Модель не вернула метки говорящих")
+    by_index = {}
+    for item in labels:
+        if not isinstance(item, dict) or not isinstance(item.get("index"), int) or isinstance(item.get("index"), bool):
+            raise llm.IncompleteResponse("Некорректный индекс говорящего")
+        speaker = item.get("speaker")
+        if not isinstance(speaker, str) or not speaker.strip():
+            raise llm.IncompleteResponse("Пустая метка говорящего")
+        by_index[item["index"]] = speaker.strip()
+    if set(by_index) != set(range(len(segments))):
+        raise llm.IncompleteResponse("Не для всех сегментов определён говорящий")
+    return [dict(item, speaker=by_index[index]) for index, item in enumerate(segments)]
+
+
+def _align_plain_transcript(path, text, settings, length, context):
+    """Fallback for STT providers that return text but no timestamped segments."""
+    prompt = (
+        "Сегментируй аудио по говорящим и времени, используя следующий STT-текст как единственный источник слов. "
+        "Не добавляй, не удаляй и не исправляй слова; если невозможно надёжно выровнять речь, верни один сегмент с текстом целиком. "
+        f"Длительность фрагмента {length:.3f} секунд. Верни JSON {{\"segments\":[{{\"speaker\":\"Спикер 1\",\"start\":0.0,\"text\":\"...\"}}]}}.\n"
+        f"STT-текст: {text}\n{context}"
+    )
+    try:
+        raw = llm.chat(settings.get("diarization_model") or LEGACY_CHAT_MODEL, [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "input_audio", "input_audio": {"data": base64.b64encode(path.read_bytes()).decode("ascii"), "format": "mp3"}},
+        ]}], json_mode=True, temperature=0, max_tokens=6000, timeout=120)
+        data = llm.parse_json(raw)
+        segments = data.get("segments") if isinstance(data, dict) else None
+        if isinstance(segments, list):
+            tokens = [word for item in segments if isinstance(item, dict) for word in _word_tokens(item.get("text", ""))]
+            if tokens == _word_tokens(text):
+                return {"segments": segments, "truncated": False}
+    except llm.LLMError:
+        log.warning("Could not align STT text to segment timestamps; keeping the exact transcript as one segment")
+    return {"segments": [{"speaker": "Спикер 1", "start": 0.0, "text": text}], "truncated": False}
+
+
+def _transcribe_stt_chunk(path, settings, length, context):
+    result = llm.transcribe_audio(path.read_bytes(), settings["transcribe_model"],
+                                  path.suffix.lstrip(".") or "mp3", settings.get("language", "ru"))
+    raw_segments = result.get("segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        text = str(result.get("text") or "").strip()
+        if not text:
+            return {"segments": [], "truncated": False}
+        return _align_plain_transcript(path, text, settings, length, context)
+
+    segments = []
+    raw_speakers = [item.get("speaker") for item in raw_segments if isinstance(item, dict)]
+    has_speakers = len(raw_speakers) == len(raw_segments) and all(value is not None for value in raw_speakers)
+    speaker_map = {}
+    for item in raw_segments:
+        if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+            continue
+        segment = {"start": item.get("start"), "text": str(item["text"]).strip()}
+        if has_speakers:
+            raw_speaker = str(item.get("speaker"))
+            speaker_map.setdefault(raw_speaker, f"Спикер {len(speaker_map) + 1}")
+            segment["speaker"] = speaker_map[raw_speaker]
+        segments.append(segment)
+    if not segments:
+        text = str(result.get("text") or "").strip()
+        return {"segments": [{"speaker": "Спикер 1", "start": 0.0, "text": text}], "truncated": False} if text else {"segments": [], "truncated": False}
+    if not has_speakers:
+        try:
+            segments = _assign_speakers(path, segments, settings, context)
+        except llm.LLMError as exc:
+            log.warning("Speaker separation unavailable for chunk: %s", exc)
+            segments = [dict(item, speaker="Спикер 1") for item in segments]
+    return {"segments": segments, "truncated": False}
+
+
 def _merge(segments, new, boundary):
     previous = [old for old in segments if boundary - 2 <= old["start"] <= boundary + OVERLAP_SECONDS]
     for s in new:
@@ -113,6 +215,11 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     maximum_minutes = settings.get("chunk_minutes")
+    if settings.get("transcribe_model") != LEGACY_CHAT_MODEL:
+        try:
+            maximum_minutes = min(float(maximum_minutes or 5), 5)
+        except (TypeError, ValueError):
+            maximum_minutes = 5
     total, plan = audio.plan_chunks(path, None, overlap_seconds=OVERLAP_SECONDS, max_chunk_minutes=maximum_minutes)
     step = audio.chunk_seconds(total, maximum_minutes)
     workdir: list = []  # made on the first cut: a run where every part is already saved cuts nothing and makes no folder
@@ -124,7 +231,8 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         audio.extract(path, destination, offset, seconds)
         return destination
     segments: list = []
-    base = {"version": 6, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
+    base = {"version": 7, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
+            "diarization_model": settings.get("diarization_model", LEGACY_CHAT_MODEL),
             "language": settings.get("language", "ru"), "glossary": settings.get("glossary", ""),
             "step": step, "short_audio_seconds": SHORT_AUDIO_SECONDS}
 
@@ -137,14 +245,17 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         chunk = get_chunk()  # only now: a recognised part never needs its audio
         prompt = _prompt(settings, length, context)
         try:
-            text = llm.chat(settings["transcribe_model"], [{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "input_audio", "input_audio": {"data": base64.b64encode(chunk.read_bytes()).decode(), "format": "mp3"}},
-            ]}], json_mode=True, temperature=0, max_tokens=8000)
-            try:
-                data = llm.parse_json(text)
-            except llm.LLMError as exc:
-                raise llm.IncompleteResponse("Модель вернула незавершённый JSON") from exc
+            if settings["transcribe_model"] == LEGACY_CHAT_MODEL:
+                text = llm.chat(settings["transcribe_model"], [{"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "input_audio", "input_audio": {"data": base64.b64encode(chunk.read_bytes()).decode(), "format": "mp3"}},
+                ]}], json_mode=True, temperature=0, max_tokens=8000)
+                try:
+                    data = llm.parse_json(text)
+                except llm.LLMError as exc:
+                    raise llm.IncompleteResponse("Модель вернула незавершённый JSON") from exc
+            else:
+                data = _transcribe_stt_chunk(chunk, settings, length, context)
             result, truncated = _validate(data, offset, length)
             if truncated:
                 raise llm.IncompleteResponse("Ответ обрезан, нужен меньший фрагмент")
