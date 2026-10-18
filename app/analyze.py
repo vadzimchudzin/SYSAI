@@ -539,6 +539,7 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
     out["next_meeting"] = r.get("next_meeting")
     out["requires_review"] = bool(r.get("requires_review", False))
     tasks = []
+    assignment_review_notes = []
     for t in out["tasks"]:
         if not isinstance(t, dict) or not t.get("title"):
             continue
@@ -559,6 +560,11 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
                 eid = candidates[0].id
             elif len(candidates) > 1:
                 eid = None
+                spoken_name = (t.get("assignee_name") or "").strip() or "указанное имя"
+                assignment_review_notes.append(
+                    f"Уточните исполнителя задачи «{str(t.get('title') or '').strip()}»: "
+                    f"имя «{spoken_name}» соответствует нескольким сотрудникам."
+                )
             elif eid not in ids:
                 eid = None
         d = None
@@ -571,6 +577,9 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
                       "priority": t.get("priority") if t.get("priority") in ("high", "medium", "low") else "medium",
                       "time": t.get("time") or "", "quote": t.get("quote") or ""})
     out["tasks"] = tasks
+    if assignment_review_notes:
+        out["notes"] = [*out["notes"], *assignment_review_notes]
+        out["requires_review"] = True
     return out
 
 
