@@ -126,3 +126,26 @@ def test_assistant_message_target_without_telegram_contact_is_not_routable():
         }]
     }, [person_without_contact])
     assert normalized["tasks"][0]["target_employee_id"] is None
+
+
+def test_assistant_target_id_alone_is_not_trusted_without_a_resolved_name():
+    person_with_contact = person(11, "Андрей Орлов", "Инженер", "чертежи", "@andrey")
+    normalized = analyze.normalize({
+        "tasks": [{
+            "title": "Написать сотруднику",
+            "description": "Уточнить детали",
+            "employee_id": None,
+            "assignee_name": "ассистент",
+            "executor": "assistant",
+            "target_employee_id": 11,
+            "target_employee_name": None,
+            "deadline": None,
+            "deadline_quote": "",
+            "priority": "medium",
+            "time": "00:10",
+            "quote": "Нужно написать сотруднику и уточнить детали",
+        }]
+    }, [person_with_contact])
+    task = normalized["tasks"][0]
+    assert task["executor"] == "assistant"
+    assert task["target_employee_id"] is None
