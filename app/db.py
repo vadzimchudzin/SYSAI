@@ -118,6 +118,7 @@ class Employee(Base):
     name = Column(String(200), nullable=False)
     aliases = Column(String(500), default="")  # comma separated: "Ваня, Иван Петрович"
     position = Column(String(200), default="")
+    responsibilities = Column(Text, default="")  # practical duties and expertise used to resolve task ownership
     channel = Column(String(20), default="telegram")  # only telegram in MVP
     telegram_chat_id = Column(String(40), default="")  # bot chat id; in AI-employee mode @username, +phone or id
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
@@ -386,6 +387,7 @@ def init_db():
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
+    _add_column_if_missing("employees", "responsibilities", "responsibilities TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_at", "consent_at TIMESTAMP")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
 
