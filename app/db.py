@@ -158,6 +158,9 @@ class EmployeeDepartment(Base):
 class Meeting(Base):
     __tablename__ = "meetings"
     id = Column(Integer, primary_key=True)
+    parent_meeting_id = Column(Integer, ForeignKey("meetings.id"), nullable=True, index=True)
+    segment_start_sec = Column(Float, nullable=True)
+    segment_end_sec = Column(Float, nullable=True)
     title = Column(String(300), default="")
     source = Column(String(20), default="web")  # web | microphone | demo | api
     filename = Column(String(300), default="")
