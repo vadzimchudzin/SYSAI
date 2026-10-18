@@ -8,6 +8,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from . import config, deadlines
 from .analyze import mmss
+from .transcript_sections import group_transcript
 
 TPL = Environment(loader=FileSystemLoader(pathlib.Path(__file__).parent / "templates"),
                   autoescape=select_autoescape(["html"]))
@@ -24,7 +25,8 @@ def context(meeting, settings: dict) -> dict:
     r = meeting.report or {}
     return dict(m=meeting, r=r, tasks=meeting.tasks, s=settings, mmss=mmss, fmt=deadlines.fmt,
                 priority=PRIORITY, generated=dt.datetime.now(zoneinfo.ZoneInfo(config.TIMEZONE)).strftime("%d.%m.%Y %H:%M"),
-                include_transcript=settings.get("include_transcript_in_pdf"), segments=meeting.transcript or [])
+                include_transcript=settings.get("include_transcript_in_pdf"), segments=meeting.transcript or [],
+                transcript_sections=group_transcript(meeting.transcript or [], r.get("topics") or []))
 
 
 def report_html(meeting, settings: dict) -> str:

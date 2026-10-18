@@ -187,8 +187,16 @@
 {% endif %}
 
 {% if m.transcript %}
-<details class="card"><summary><b>Расшифровка</b> <span class="muted">· {{ m.transcript|length }} реплик</span></summary>
-  <div class="transcript" style="margin-top:12px">{% for sg in m.transcript %}<p><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}:</b> {{ sg.text }}</p>{% endfor %}</div>
+<details class="card" id="meeting-transcript"><summary><b>Расшифровка по подразделам</b> <span class="muted">· {{ m.transcript|length }} реплик · {{ group_transcript(m.transcript, r.topics or [])|length }} разделов</span></summary>
+  <div class="transcript" style="margin-top:12px">
+  {% for section in group_transcript(m.transcript, r.topics or []) %}
+    <section class="topic transcript-section">
+      <h3 style="margin:0 0 8px">{% if section.time %}<span class="t">{{ section.time }}</span> · {% endif %}{{ section.title }}</h3>
+      {% for sg in section.segments %}<p><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}:</b> {{ sg.text }}</p>{% endfor %}
+    </section>
+  {% endfor %}
+  </div>
+  <p class="small muted">Подразделы привязаны к времени начала тем из протокола. Все реплики сохранены в исходном порядке; если темы не определены, показывается единая расшифровка.</p>
 </details>
 {% endif %}
 {% endblock %}

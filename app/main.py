@@ -21,6 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, pipeline, progress_board, render, report_archive,
                settings_store, telegram, userbot)
 from .analyze import mmss
+from .transcript_sections import group_transcript
 from .ui_icons import ICONS
 from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
@@ -42,7 +43,7 @@ app = FastAPI(title="SYSAI", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=config.SECRET_KEY, max_age=14 * 86400)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 tpl = Jinja2Templates(directory=BASE / "templates")
-tpl.env.globals.update(mmss=mmss, fmt=deadlines.fmt, priority=render.PRIORITY, config=config)
+tpl.env.globals.update(mmss=mmss, fmt=deadlines.fmt, priority=render.PRIORITY, config=config, group_transcript=group_transcript)
 
 STATUS = {"queued": ("В очереди", "gray"), "transcribing": ("Расшифровка", "blue"), "analyzing": ("Анализ", "blue"),
           "awaiting_approval": ("Ждёт проверки", "amber"), "sending": ("Отправка", "blue"), "done": ("Отправлено", "green"),

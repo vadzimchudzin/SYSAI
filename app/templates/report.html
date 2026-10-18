@@ -107,6 +107,11 @@ ul { margin: 4px 0 0 0; padding-left: 16px; } li { margin: 2px 0; }
 
 {% if include_transcript and segments %}
 <h2 style="page-break-before: always">Расшифровка</h2>
-{% for sg in segments %}<p class="seg"><span class="t">[{{ mmss(sg.start) }}]</span> <b>{{ sg.speaker }}:</b> {{ sg.text }}</p>{% endfor %}
+{% for section in transcript_sections %}
+<h3 style="font-size:10.5pt;margin:12px 0 5px;border-bottom:1px solid #e2e8f0;padding-bottom:3px">
+  {% if section.time %}<span class="t">{{ section.time }}</span> · {% endif %}{{ section.title }}
+</h3>
+{% for sg in section.segments %}<p class="seg"><span class="t">[{{ mmss(sg.start) }}]</span> <b>{{ sg.speaker }}:</b> {{ sg.text }}</p>{% endfor %}
+{% endfor %}
 {% endif %}
 </body></html>
