@@ -216,6 +216,18 @@ def _quote_matches_at_time(quote, seconds, segments):
     return False
 
 
+def _quote_numbers(text):
+    """Numbers explicitly present in evidence; chart values may not be invented or derived."""
+    compact = re.sub(r"(?<=\\d)[ \\u00a0](?=\\d{3}(?:\\D|$))", "", str(text or ""))
+    values = set()
+    for token in re.findall(r"(?<!\\w)-?\\d+(?:[.,]\\d+)?", compact):
+        try:
+            values.add(float(token.replace(",", ".")))
+        except ValueError:
+            pass
+    return values
+
+
 def _validate_report(report, employees, transcript, duration, meeting_date, require_tasks=True,
                      source_segments=None, quarantine_tasks=False):
     if not isinstance(report, dict):
@@ -301,10 +313,16 @@ def _validate_report(report, employees, transcript, duration, meeting_date, requ
     verified_visualizations = []
     visualization_notes = []
     for chart in visualizations:
-        if _evidence_text(chart["source_quote"]) in canonical_transcript:
+        quote = chart["source_quote"]
+        numbers = _quote_numbers(quote)
+        chart_values = [value for line in chart["series"] for value in line["values"]]
+        quote_exists = _evidence_text(quote) in canonical_transcript
+        values_supported = all(any(abs(value - seen) < 1e-9 for seen in numbers) for value in chart_values)
+        if quote_exists and values_supported:
             verified_visualizations.append(chart)
         else:
-            visualization_notes.append(f"График «{chart['title']}» исключён: цитата с исходными числами не найдена в расшифровке.")
+            reason = "цитата с исходными числами не найдена в расшифровке" if not quote_exists else "значения графика не подтверждаются числами в цитате"
+            visualization_notes.append(f"График «{chart['title']}» исключён: {reason}.")
     for task in tasks:
         try:
             _validate_task_evidence(task, canonical_transcript, duration, meeting_date, source_segments)
