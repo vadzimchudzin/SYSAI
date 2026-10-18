@@ -31,4 +31,4 @@ def test_ambiguous_overlap_does_not_force_a_speaker_mapping():
     transcribe._merge(segments, new, 60.0)
 
     assert len(segments) == 3
-    assert segments[-1]["speaker"] == "Спикер 2"
+    assert next(s for s in segments if s["start"] == 60.0)["speaker"] == "Спикер 2"
