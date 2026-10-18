@@ -2,6 +2,7 @@
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 
 from . import config, deadlines, llm
@@ -71,17 +72,23 @@ def detect_meeting_sections(segments: list, settings: dict) -> list:
             start = float(segment.get("start", 0))
         except (TypeError, ValueError):
             return []
+        if not math.isfinite(start) or start < 0:
+            return []
         starts.append(start)
         compact.append({"index": index, "start": round(start, 1),
                         "speaker": str(segment.get("speaker") or "")[:40],
                         "text": str(segment.get("text") or "")[:240]})
+    if any(starts[index] < starts[index - 1] for index in range(1, len(starts))):
+        return []
     ends = []
     for index, segment in enumerate(segments):
         try:
             end = float(segment.get("end", starts[index + 1] if index + 1 < len(starts) else starts[index]))
         except (TypeError, ValueError):
             end = starts[index + 1] if index + 1 < len(starts) else starts[index]
-        ends.append(max(starts[index], end))
+        if not math.isfinite(end) or end < starts[index]:
+            end = starts[index + 1] if index + 1 < len(starts) else starts[index]
+        ends.append(end)
     if ends[-1] - starts[0] < 600:
         return []
 
@@ -122,7 +129,7 @@ def detect_meeting_sections(segments: list, settings: dict) -> list:
         title = str(item.get("title") or "").strip()[:160]
         reason = str(item.get("reason") or "").strip()[:400]
         if (start_index != expected_start or end_index <= start_index or end_index > len(segments)
-                or end_index - start_index < 5 or not title or not reason or confidence < 0.85):
+                or end_index - start_index < 5 or not title or not reason or not (0.85 <= confidence <= 1.0)):
             return []
         duration = ends[end_index - 1] - starts[start_index]
         if duration < 60:
