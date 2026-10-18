@@ -235,6 +235,14 @@ def process(row_id: int) -> None:
 
 
 # ----------------------------------------------------------------------------- what the model gets to see
+def _department_view(employee) -> list[dict]:
+    memberships = getattr(employee, "department_memberships", []) or []
+    return [{"name": membership.department.name, "role": membership.role or None,
+             "responsibilities": membership.responsibilities or None}
+            for membership in memberships
+            if getattr(membership, "department", None) is not None and membership.department.active]
+
+
 def _task_view(task, employee_view: bool) -> dict:
     view = {"id": task.id, "title": task.title, "description": (task.description or "")[:400],
             "status": task.status, "deadline": task.deadline.isoformat() if task.deadline else None,
@@ -299,6 +307,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         mine = [t for t in tasks if t.status in OPEN_STATUSES and t.status != "draft"]
         ctx["employee"] = {"name": employee.name, "position": employee.position or None,
                            "responsibilities": getattr(employee, "responsibilities", "") or None,
+                           "departments": _department_view(employee),
                            "tasks": [_task_view(t, True) for t in mine],
                            "done_recently": [t.title for t in tasks if t.status == "done"][:5]}
         meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks))[:4]
@@ -315,6 +324,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                 by_person[task.assignee_id].append(task)
         ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None,
                         "responsibilities": getattr(p, "responsibilities", "") or None,
+                        "departments": _department_view(p),
                         "reachable": reminders.reachable(p),
                         "open_tasks": [_task_view(t, False) for t in by_person[p.id] if t.status in OPEN_STATUSES][:8],
                         "done": sum(t.status == "done" for t in by_person[p.id]),
