@@ -35,6 +35,17 @@ def test_two_people_with_the_same_first_name_stay_ambiguous():
     assert analyze.match_employee("Вадиму Орлову", twins).id == 2
 
 
+def test_ambiguous_participant_name_does_not_keep_model_id():
+    twins = [person(1, "Вадим Чудин"), person(2, "Вадим Орлов")]
+    out = analyze.normalize({
+        "participants": [{"name": "Вадим", "employee_id": 1}],
+        "tasks": [],
+    }, twins)
+    assert out["participants"][0]["employee_id"] is None
+    assert out["requires_review"] is True
+    assert any("Уточните участника" in note for note in out["notes"])
+
+
 def test_a_surname_does_not_match_a_longer_surname():
     assert analyze.match_employee("Иван", [person(1, "Сергей Иванов")]) is None
 
