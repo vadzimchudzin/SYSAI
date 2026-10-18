@@ -1,11 +1,35 @@
 {% extends "base.html" %}{% block title %}Сотрудники — SYSAI{% endblock %}
-{% macro form(e) %}
+{% macro form(e, departments) %}
 <form method="post" action="/employees" class="emp-form">
   <input type="hidden" name="id" value="{{ e.id if e else 0 }}">
   <label class="f">Имя и фамилия <input name="name" required value="{{ e.name if e }}" placeholder="Иван Петров"></label>
   <label class="f">Как называют на совещаниях <input name="aliases" value="{{ e.aliases if e }}" placeholder="Ваня, Иван Сергеевич, Петров"></label>
   <label class="f">Должность <input name="position" list="positions" value="{{ e.position if e }}" placeholder="Выберите или впишите свою"></label>
   <label class="f">Чем занимается / компетенции <textarea name="responsibilities" rows="3" maxlength="4000" placeholder="Например: закупки оборудования, подбор поставщиков, технические чертежи">{{ e.responsibilities if e }}</textarea><small class="muted">Помогает ИИ различать сотрудников с одинаковыми именами и выбирать исполнителя по сути задачи.</small></label>
+  <details class="department-memberships">
+    <summary>Подразделения, роли и обязанности</summary>
+    <p class="small muted">Один сотрудник может состоять в нескольких подразделениях. Укажите его роль и реальные обязанности отдельно для каждого.</p>
+    {% if not departments %}<p class="small muted">Сначала <a href="/departments">создайте подразделение</a>.</p>{% endif %}
+    {% for d in departments %}
+      {% set ns = namespace(membership=None) %}
+      {% if e %}
+        {% for membership in e.department_memberships %}
+          {% if membership.department_id == d.id %}{% set ns.membership = membership %}{% endif %}
+        {% endfor %}
+      {% endif %}
+      <div class="department-membership-row">
+        <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {{ 'checked' if ns.membership }}>
+          {{ d.name }}{% if not d.active %} (неактивно){% endif %}
+        </label>
+        <label class="f">Роль в подразделении
+          <input name="department_role_{{ d.id }}" maxlength="200" value="{{ ns.membership.role if ns.membership else '' }}" placeholder="Например: специалист по закупкам">
+        </label>
+        <label class="f">Обязанности в подразделении
+          <textarea name="department_responsibilities_{{ d.id }}" rows="2" maxlength="4000" placeholder="Например: закупает техническое оборудование, сравнивает поставщиков">{{ ns.membership.responsibilities if ns.membership else '' }}</textarea>
+        </label>
+      </div>
+    {% endfor %}
+  </details>
   <label class="f">Куда писать <select name="channel"><option value="telegram">Telegram</option></select></label>
   {% if ai %}<label class="f">Telegram <input name="telegram_manual" placeholder="@username или +375291234567" value="{{ e.telegram_chat_id if e }}"></label>
   {% else %}
@@ -20,10 +44,10 @@
 {% endmacro %}
 {% block body %}
 <datalist id="positions">{% for p in positions %}<option value="{{ p }}">{% endfor %}</datalist>
-<div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div></div>
+<div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div><a class="btn" href="/departments">Подразделения</a></div>
 {% if ai %}<div class="card note">ИИ-сотрудник пишет с подключённого аккаунта. Укажите @username сотрудника или его номер телефона. Если по номеру человека не найти, добавьте его в контакты аккаунта или укажите @username.</div>{% else %}<div class="card note">Чтобы бот мог писать сотруднику, тот должен один раз открыть бота и нажать <b>/start</b> — после этого он появится в списке «Telegram».</div>{% endif %}
 <div class="grid2">
-<section class="card"><h2>Добавить сотрудника</h2>{{ form(None) }}</section>
+<section class="card"><h2>Добавить сотрудника</h2>{{ form(None, departments) }}</section>
 <section class="card"><h2>Справочник ({{ employees|length }})</h2>
   {% if not employees %}<p class="muted">Пока пусто.</p>{% endif %}
   {% for e in employees %}
@@ -31,10 +55,13 @@
     <div class="row between"><div><b>{{ e.name }}</b> <span class="muted">{{ e.position }}</span>
       <div class="small muted">{{ e.aliases }}</div>
       {% if e.responsibilities %}<div class="small">{{ e.responsibilities }}</div>{% endif %}
+      {% for membership in e.department_memberships %}
+        <div class="small"><span class="pill gray">{{ membership.department.name }}</span> {{ membership.role }}{% if membership.responsibilities %} — {{ membership.responsibilities }}{% endif %}</div>
+      {% endfor %}
       <div class="small">{% if e.telegram_chat_id %}<span class="pill green">Telegram</span>{% else %}<span class="pill red">нет Telegram</span>{% endif %}</div></div>
       <div class="actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Изменить</a>
         <form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">×</button></form></div></div>
-    {% if edit == e.id %}<div class="edit-box">{{ form(e) }}</div>{% endif %}
+    {% if edit == e.id %}<div class="edit-box">{{ form(e, departments) }}</div>{% endif %}
   </div>
   {% endfor %}
 </section>
