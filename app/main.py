@@ -48,7 +48,7 @@ tpl.env.globals.update(mmss=mmss, fmt=deadlines.fmt, priority=render.PRIORITY, c
 STATUS = {"queued": ("В очереди", "gray"), "transcribing": ("Расшифровка", "blue"), "analyzing": ("Анализ", "blue"),
           "awaiting_approval": ("Ждёт проверки", "amber"), "sending": ("Отправка", "blue"), "done": ("Отправлено", "green"),
           "error": ("Ошибка", "red"), "rejected": ("Отклонено", "gray"),
-          "segmented": ("Разделено на совещания", "purple")}
+          "segmented": ("Разделено на совещания", "clay")}
 STATUS.update(delivery_queued=("В очереди отправки", "blue"), delivery_retry=("Повтор доставки", "amber"),
               delivery_failed=("Ошибка доставки", "red"), ready=("Отчёт готов", "green"))
 tpl.env.globals.update(STATUS=STATUS, ICONS=ICONS)
