@@ -917,6 +917,11 @@ def employees_view(request: Request, edit: int = 0):
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        for employee in emps:
+            for membership in employee.department_memberships:
+                _ = membership.department.name if membership.department else ""
+        for department in departments:
+            _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
