@@ -13,7 +13,7 @@ import logging
 import pathlib
 import re
 
-from . import analyze, config, deadlines, llm, render, report_archive, settings_store, userbot, visuals, voice
+from . import analyze, config, deadlines, llm, render, report_archive, settings_store, telegram, userbot, visuals, voice
 from .db import Artifact, Employee, Meeting, Note, SessionLocal, Task
 
 log = logging.getLogger("sysai.assistant")
@@ -62,7 +62,23 @@ def run_pending() -> None:
 def recover() -> None:
     with SessionLocal() as s:
         s.query(Task).filter(Task.status == "assistant_running").update({Task.status: "assistant_todo"})
+        # A process may stop after beginning an external send. Never automatically resend an uncertain message.
+        s.query(Task).filter(Task.status == "assistant_message_sending").update({Task.status: "assistant_message_uncertain"})
         s.commit()
+
+def retry_uncertain_message(task_id: int, meeting_id: int) -> bool:
+    """Explicit, reviewer-confirmed retry; ordinary recovery never repeats an uncertain external send."""
+    with SessionLocal() as s:
+        task = s.get(Task, task_id)
+        meeting = s.get(Meeting, meeting_id)
+        if (task is None or meeting is None or task.meeting_id != meeting_id or task.executor != "assistant"
+                or task.status != "assistant_message_uncertain" or not task.target_employee_id
+                or meeting.status not in report_archive.APPROVED_STATUSES):
+            return False
+        task.status = "assistant_todo"
+        s.commit()
+    run_task(task_id) if _testing() else POOL.submit(run_task, task_id)
+    return True
 
 
 # ----------------------------------------------------------------------------- facts for the model
@@ -126,9 +142,13 @@ def _task_facts(s, task, meeting) -> dict:
     segments = meeting.transcript or []
     computed = computed_numbers(meeting)
     excerpt = _excerpt(segments, _seconds(task.source_time))
+    target = s.get(Employee, task.target_employee_id) if getattr(task, "target_employee_id", None) else None
+    target_info = ({"id": target.id, "name": target.name, "reachable": bool(target.telegram_chat_id)}
+                   if target is not None else None)
     return {"task": {"title": task.title, "description": task.description or "", "quote": task.source_quote or "",
                      "quote_time": task.source_time or None},
-            "meeting": voice.meeting_facts(meeting), "computed": computed, "transcript_excerpt": excerpt,
+            "target_employee": target_info, "meeting": voice.meeting_facts(meeting),
+            "computed": computed, "transcript_excerpt": excerpt,
             "_allowed": _allowed_numbers(computed, analyze.transcript_text(segments))}
 
 
@@ -136,10 +156,15 @@ def _task_facts(s, task, meeting) -> dict:
 def _ask(facts: dict, feedback: str = "") -> dict:
     task = ("Ты сам выполняешь задачу, которую ассистент взял на себя на совещании: сделай то, что просили, по данным "
             "совещания. Если просят график или диаграмму, составь spec; для сводки или отчёта дай разделы. "
+            "Если task требует написать сотруднику, это явно указано в target_employee: сформулируй короткое сообщение по сути поручения "
+            "и верни kind=message и message_to_send. Это действие отправляет сообщение сразу: если в поручении явно указан будущий момент "
+            "(например, «напомнить завтра», «написать через час»), не отправляй его сейчас — верни kind=cannot и объясни, что требуется "
+            "запланированная отправка. Не используй это действие для звонков, email или иных каналов. "
+            "Не отправляй сообщение, если target_employee отсутствует или reachable=false; верни kind=cannot и объясни, чего не хватает. "
+            "Не утверждай, что написал человеку до фактической отправки. "
             "Числа в графике бери только из computed или из того, что названо вслух в тексте совещания, ничего не выдумывай; "
-            "если данных не хватает, верни kind=cannot и скажи, каких данных нужно. В message своими словами коротко "
-            "напиши проверяющему, что сделал и что видно в результате (один-три абзаца, без отчётных списков). "
-            'JSON: {"kind":"chart|report|cannot","title":"...","message":"...",'
+            "если данных не хватает, верни kind=cannot. В message своими словами коротко напиши проверяющему, что сделал. "
+            'JSON: {"kind":"chart|report|message|cannot","title":"...","message":"...", "message_to_send":"...",'
             '"chart":{"type":"bar|hbar|pie|line","title":"...","unit":"","labels":[...],"series":[{"name":"","values":[...]}]} или null,'
             '"notes":["вывод по графику, до 4"],"sections":[{"heading":"...","text":"..."}] или [],"reason":"..."}.')
     public = {k: v for k, v in facts.items() if not k.startswith("_")}
@@ -150,7 +175,7 @@ def _ask(facts: dict, feedback: str = "") -> dict:
         data = llm.parse_json(raw)
     except llm.LLMError as exc:
         raise AssistantError(f"модель недоступна: {str(exc)[:200]}") from exc
-    if not isinstance(data, dict) or data.get("kind") not in ("chart", "report", "cannot"):
+    if not isinstance(data, dict) or data.get("kind") not in ("chart", "report", "message", "cannot"):
         raise AssistantError("модель вернула ответ в неверной форме")
     return data
 
@@ -159,6 +184,17 @@ def _validated(data: dict, facts: dict) -> dict:
     if not str(data.get("message") or "").strip():
         raise AssistantError("в ответе нет текста сообщения")
     if data["kind"] == "cannot":
+        return data
+    if data["kind"] == "message":
+        target = facts.get("target_employee")
+        message = str(data.get("message_to_send") or "").strip()
+        if not target or not target.get("reachable"):
+            raise AssistantError("у задачи нет однозначного адресата с привязанным Telegram")
+        if not message:
+            raise AssistantError("модель не подготовила текст сообщения сотруднику")
+        if len(message) > 3500:
+            raise AssistantError("сообщение сотруднику превышает допустимую длину")
+        data["message_to_send"] = message
         return data
     if data["kind"] == "chart":
         try:
@@ -213,6 +249,20 @@ def _tell_reviewers(message: str, filename=None, pdf=None) -> int:
     return delivered
 
 
+def _notify_reviewers_text(message: str) -> None:
+    try:
+        if userbot.ai_mode():
+            _tell_reviewers(message)
+            return
+        for ref in settings_store.get("approver_chat_ids") or []:
+            try:
+                telegram.send_message(ref, render.e(message))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("reviewer %s did not get assistant task update: %s", ref, exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not notify reviewers about assistant task update: %s", exc)
+
+
 def run_task(task_id: int) -> None:
     if userbot.quiet_until() is not None:
         return  # started after the quiet hours, see run_pending
@@ -240,6 +290,52 @@ def run_task(task_id: int) -> None:
         if data["kind"] == "cannot":
             _finish(task_id, "assistant_failed", f"Не удалось выполнить «{title}»: {data.get('reason') or 'не хватает данных'}")
             _tell_reviewers(data["message"].strip())
+            return
+        if data["kind"] == "message":
+            with SessionLocal() as s:
+                task = s.get(Task, task_id)
+                target = s.get(Employee, task.target_employee_id) if task and task.target_employee_id else None
+                if target is None or not target.telegram_chat_id:
+                    raise AssistantError("у адресата нет привязанного Telegram")
+                target_ref, target_name = target.telegram_chat_id, target.name
+            message_text = data["message_to_send"]
+            if userbot.ai_mode():
+                if not userbot.ready():
+                    raise AssistantError("Telegram-аккаунт ИИ-сотрудника не подключён")
+            else:
+                if not config.telegram_enabled():
+                    raise AssistantError("Telegram не подключён, сообщение не отправлено")
+                if not str(target_ref).lstrip("-").isdigit():
+                    raise AssistantError("В режиме обычного бота для адресата нужен числовой Telegram chat ID")
+            # Persist the sending state before the external side effect. If the process crashes now,
+            # recovery marks it uncertain instead of sending the same message twice.
+            with SessionLocal() as s:
+                task = s.get(Task, task_id)
+                task.status = "assistant_message_sending"
+                s.commit()
+            try:
+                if userbot.ai_mode():
+                    sent = userbot.send_message(target_ref, message_text)
+                else:
+                    sent = telegram.send_message(target_ref, render.e(message_text))
+            except Exception as exc:  # noqa: BLE001
+                reason = f"Не удалось подтвердить доставку сообщения {target_name}: {str(exc)[:220]}. Проверьте чат перед повтором."
+                _finish(task_id, "assistant_message_uncertain", reason)
+                _notify_reviewers_text(reason)
+                return
+            if not isinstance(sent, dict) or not sent.get("message_id"):
+                reason = f"Статус доставки сообщения {target_name} неизвестен. Проверьте чат перед повтором."
+                _finish(task_id, "assistant_message_uncertain", reason)
+                _notify_reviewers_text(reason)
+                return
+            _finish(task_id, "assistant_done", f"Ассистент написал {target_name} по поручению «{title}»")
+            try:
+                from . import agent
+                sent_user_id = sent.get("user_id") or (sent.get("chat") or {}).get("id")
+                agent.record_outgoing(target_ref, message_text, sent.get("message_id"), sent_user_id)
+            except Exception:  # noqa: BLE001
+                log.exception("message was sent but could not be added to conversation history for task %s", task_id)
+            _notify_reviewers_text(f"Сообщение отправлено {target_name} по поручению «{title}».")
             return
         svg = visuals.svg(data["chart"]) if data["kind"] == "chart" else ""
         with SessionLocal() as s:

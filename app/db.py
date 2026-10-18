@@ -118,6 +118,7 @@ class Employee(Base):
     name = Column(String(200), nullable=False)
     aliases = Column(String(500), default="")  # comma separated: "Ваня, Иван Петрович"
     position = Column(String(200), default="")
+    responsibilities = Column(Text, default="")  # practical duties and expertise used to resolve task ownership
     channel = Column(String(20), default="telegram")  # only telegram in MVP
     telegram_chat_id = Column(String(40), default="")  # bot chat id; in AI-employee mode @username, +phone or id
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
@@ -208,6 +209,8 @@ class Task(Base):
     description = Column(Text, default="")
     assignee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     assignee_name = Column(String(200), default="")  # as heard in the meeting
+    target_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True, index=True)
+    target_employee_name = Column(String(200), default="")  # person the assistant must contact, not the task owner
     deadline = Column(Date, nullable=True)
     deadline_source = Column(String(20), default="none")  # stated | default | asked | manual | none
     deadline_quote = Column(String(500), default="")
@@ -218,7 +221,8 @@ class Task(Base):
     executor = Column(String(12), default="person")  # person | assistant (the AI employee does it itself)
     bitrix_task_id = Column(String(40), default="")
     meeting = relationship("Meeting", back_populates="tasks")
-    assignee = relationship("Employee")
+    assignee = relationship("Employee", foreign_keys=[assignee_id])
+    target_employee = relationship("Employee", foreign_keys=[target_employee_id])
 
 
 class DeadlineRequest(Base):
@@ -385,7 +389,10 @@ def init_db():
     _add_column_if_missing("meetings", "options", "options JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
+    _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")
+    _add_column_if_missing("tasks", "target_employee_name", "target_employee_name VARCHAR(200) DEFAULT ''")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
+    _add_column_if_missing("employees", "responsibilities", "responsibilities TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_at", "consent_at TIMESTAMP")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
 

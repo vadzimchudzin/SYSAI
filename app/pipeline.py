@@ -145,15 +145,23 @@ def _process(meeting_id: int):
 
 
 def _directory_terms(limit: int = 80) -> list:
-    """Names and nicknames of active employees, each once, in the order of the directory."""
+    """Names, aliases, roles and concise duty phrases that can improve spelling without inventing speech."""
     with SessionLocal() as s:
         people = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.id).all()
-        found = []
+        found, seen = [], set()
         for person in people:
-            for term in [person.name] + person.alias_list():
-                if term.strip() and term.strip() not in found:
-                    found.append(term.strip())
-        return found[:limit]
+            candidates = [person.name, *person.alias_list(), person.position]
+            for raw in (person.responsibilities or "").replace("\n", ";").replace(",", ";").split(";"):
+                candidates.append(raw)
+            for raw in candidates:
+                term = str(raw or "").strip(" \t-•")
+                key = term.casefold()
+                if term and key not in seen:
+                    found.append(term)
+                    seen.add(key)
+                    if len(found) >= limit:
+                        return found
+        return found
 
 
 def review_plan(meeting, settings: dict) -> dict:
@@ -230,7 +238,9 @@ def _save_report(meeting_id: int, report: dict, settings: dict):
             if not d and settings["deadline_mode"] == "default":
                 d, src = deadlines.add_business_days(deadlines.today(), int(settings["default_deadline_days"])), "default"
             m.tasks.append(Task(title=t["title"], description=t.get("description", ""), assignee_id=t.get("employee_id"),
-                                assignee_name=t.get("assignee_name", ""), executor=t.get("executor") or "person", deadline=d, deadline_source=src,
+                                assignee_name=t.get("assignee_name", ""), target_employee_id=t.get("target_employee_id"),
+                                target_employee_name=t.get("target_employee_name", ""),
+                                executor=t.get("executor") or "person", deadline=d, deadline_source=src,
                                 deadline_quote=t.get("deadline_quote", ""), priority=t.get("priority", "medium"),
                                 source_quote=t.get("quote", ""), source_time=t.get("time", "")))
         s.commit()
