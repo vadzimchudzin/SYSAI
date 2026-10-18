@@ -64,7 +64,8 @@ def employees_json(employees) -> str:
 
 def _fingerprint(segments, employees, settings, meeting_date):
     payload = {
-        "analysis_version": 3, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
+        # Bump when prompt/normalization semantics change so old checkpoints cannot bypass new safeguards.
+        "analysis_version": 4, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
         "model": settings.get("report_model"), "glossary": settings.get("glossary", ""),
         "employees": employees_json(employees), "meeting_date": meeting_date.isoformat(),
         "transcript": transcript_text(segments),
