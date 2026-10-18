@@ -63,6 +63,11 @@ def test_a_wrong_id_from_the_model_is_replaced_by_the_spoken_name():
     assert out["tasks"][0]["employee_id"] == 3
 
 
+def test_a_conflicting_valid_model_id_is_overridden_by_the_spoken_name():
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Анне"}]}, TEAM)
+    assert out["tasks"][0]["employee_id"] == 3
+
+
 def test_the_analyst_is_told_that_the_id_is_required_for_a_named_person():
     assert "employee_id" in analyze.SYSTEM and "в любом падеже" in analyze.SYSTEM and "обязателен" in analyze.SYSTEM
 
