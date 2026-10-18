@@ -135,6 +135,10 @@ def _process(meeting_id: int):
              progress="Составление отчёта и задач")
         with SessionLocal() as s:
             employees = s.query(Employee).filter(Employee.active.is_(True)).all()
+            # Analysis runs after this session closes; load department memberships and departments now.
+            for employee in employees:
+                for membership in employee.department_memberships:
+                    _ = membership.department.name if membership.department else ""
         report = analyze.mock_report(employees, mdate) if source == "demo" else analyze.analyze(
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
         _save_report(meeting_id, report, settings)
