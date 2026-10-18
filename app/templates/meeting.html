@@ -47,6 +47,26 @@
 </section>
 {% endif %}
 
+{% if m.source == 'segment' and m.parent_meeting_id %}
+<section class="card" id="segment-recipients">
+  <div class="row between">
+    <h2>Получатели этого совещания</h2>
+    <a class="btn sm" href="/meetings/{{ m.parent_meeting_id }}">Исходная запись</a>
+  </div>
+  <p class="small muted">Получатели не назначаются автоматически, чтобы не отправить протокол другой группе.
+    Укажите известные Telegram chat ID или @username через запятую.</p>
+  <form method="post" action="/meetings/{{ m.id }}/recipients">
+    <label for="segment-report-chat-extra">Получатели</label>
+    <textarea id="segment-report-chat-extra" name="report_chat_ids_extra" rows="3"
+              placeholder="-1001234567890, @technical_team">{{ selected_report_chats|join(', ') }}</textarea>
+    <div class="row between" style="margin-top:12px">
+      <span class="small muted">Перед утверждением нужно выбрать хотя бы одного получателя.</span>
+      <button class="btn primary">Сохранить получателей</button>
+    </div>
+  </form>
+</section>
+{% endif %}
+
 {% if m.report %}{% include '_progress_board.html' %}{% endif %}
 
 <div id="meeting-live-status">
