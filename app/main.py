@@ -680,8 +680,26 @@ def meeting_delete(request: Request, mid: int):
                 raise HTTPException(409, "Дождитесь завершения обработки")
             if s.query(Delivery).filter(Delivery.meeting_id == mid, Delivery.status.in_(("pending", "sending"))).first():
                 raise HTTPException(409, "Нельзя удалить совещание с незавершённой доставкой")
+            if m.parent_meeting_id:
+                parent = s.get(Meeting, m.parent_meeting_id)
+                if parent and isinstance(parent.report, dict):
+                    parent.report = dict(parent.report, segments=[
+                        item for item in parent.report.get("segments", [])
+                        if item.get("meeting_id") != mid
+                    ])
+            else:
+                children = s.query(Meeting).filter_by(parent_meeting_id=mid).all()
+                for child in children:
+                    if child.status in ("queued", "transcribing", "analyzing", "sending", "delivery_queued", "delivery_retry"):
+                        raise HTTPException(409, "Сначала дождитесь обработки отдельных совещаний")
+                    if s.query(Delivery).filter(Delivery.meeting_id == child.id,
+                                                Delivery.status.in_(("pending", "sending"))).first():
+                        raise HTTPException(409, "Нельзя удалить исходную запись с незавершённой доставкой")
+                    if child.audio_path:
+                        pathlib.Path(child.audio_path).unlink(missing_ok=True)
+                    s.delete(child)
             if m.audio_path:
-                pathlib.Path(m.audio_path).unlink(missing_ok=True)
+                pathlib.Path(m.audio_path).unlink(m.audio_path, missing_ok=True)
             s.delete(m)
             s.commit()
     return RedirectResponse("/meetings", 303)
