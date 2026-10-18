@@ -917,12 +917,13 @@ def employees_view(request: Request, edit: int = 0):
 
 @app.post("/employees")
 def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
-                  position: str = Form(""), channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
+                  position: str = Form(""), responsibilities: str = Form(""), channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
                   telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
     guard_admin(request)
     with SessionLocal() as s:
         e = s.get(Employee, id) if id else Employee()
-        e.name, e.aliases, e.position, e.channel = name.strip(), aliases.strip(), position.strip(), channel
+        e.name, e.aliases, e.position, e.responsibilities, e.channel = (name.strip(), aliases.strip(), position.strip(),
+                                                                        responsibilities.strip()[:4000], channel)
         ref = (telegram_manual.strip() or telegram_chat_id).strip()
         if ref and userbot.ai_mode():
             try:
