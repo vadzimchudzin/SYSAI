@@ -56,6 +56,8 @@
   </div>
   <p class="small muted">Получатели не назначаются автоматически, чтобы не отправить протокол другой группе.
     Укажите известные Telegram chat ID или @username через запятую.</p>
+  <audio controls preload="metadata" style="width:100%;margin:10px 0"
+         src="/meetings/{{ m.parent_meeting_id }}/audio#t={{ m.segment_start_sec }}"></audio>
   <form method="post" action="/meetings/{{ m.id }}/recipients">
     <label for="segment-report-chat-extra">Получатели</label>
     <textarea id="segment-report-chat-extra" name="report_chat_ids_extra" rows="3"
