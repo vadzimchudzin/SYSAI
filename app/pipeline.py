@@ -2,6 +2,7 @@
 import datetime as dt
 import logging
 import pathlib
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -145,14 +146,21 @@ def _process(meeting_id: int):
 
 
 def _directory_terms(limit: int = 80) -> list:
-    """Names and nicknames of active employees, each once, in the order of the directory."""
+    """Names plus concise job-domain terms from active employee profiles, each once."""
     with SessionLocal() as s:
         people = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.id).all()
         found = []
         for person in people:
-            for term in [person.name] + person.alias_list():
-                if term.strip() and term.strip() not in found:
-                    found.append(term.strip())
+            candidates = [person.name, *person.alias_list()]
+            # Profile vocabulary can improve recognition of technical terms used in meetings.
+            # Split free-form lists into phrases; do not feed arbitrary context prose to ASR.
+            for field in ("position", "department", "competencies", "responsibilities"):
+                value = str(getattr(person, field, "") or "")
+                candidates.extend(re.split(r"[,;\\n]+", value))
+            for raw in candidates:
+                term = str(raw or "").strip()
+                if term and len(term) <= 100 and term not in found:
+                    found.append(term)
         return found[:limit]
 
 
