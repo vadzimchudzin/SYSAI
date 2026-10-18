@@ -483,7 +483,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 
 /* Evidence-backed interactive charts in meeting reports */
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 14px; }
-.chart-card { min-width: 0; border: 1px solid var(--line); border-radius: 16px; padding: 14px; background: var(--surface2); }
+.chart-card { min-width: 0; border: 1px solid var(--line); border-radius: 16px; padding: 14px; background: var(--card2); }
 .chart-card h3 { font-size: 15px; margin: 0; }
 .interactive-chart { display: block; width: 100%; height: auto; margin-top: 8px; overflow: visible; }
 .chart-grid-line { stroke: var(--line); stroke-width: 1; }
@@ -503,3 +503,12 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .chart-evidence { border-top: 1px solid var(--line); padding-top: 8px; color: var(--muted); font-size: 12px; }
 .chart-evidence summary { cursor: pointer; }
 .chart-evidence p { margin: 8px 0 0; color: var(--soft); }
+
+.chart-line.chart-series-0 { fill: none; stroke: var(--clay); }
+.chart-line.chart-series-1 { fill: none; stroke: var(--sblue); }
+.chart-line.chart-series-2 { fill: none; stroke: var(--green); }
+.chart-line.chart-series-3 { fill: none; stroke: var(--amber); }
+.chart-swatch.chart-series-0 { background: var(--clay); }
+.chart-swatch.chart-series-1 { background: var(--sblue); }
+.chart-swatch.chart-series-2 { background: var(--green); }
+.chart-swatch.chart-series-3 { background: var(--amber); }
