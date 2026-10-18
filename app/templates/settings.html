@@ -49,6 +49,37 @@
     <button type="submit" class="btn sm" formaction="/settings/test-openrouter" formnovalidate>Проверить сохранённый ключ</button>
     {% endif %}
   </section>
+  <section class="card setup-step" id="model-settings">
+    <h2>Модели ИИ</h2>
+    <p class="small muted">Модели выбираются отдельно: распознавание аудио, анализ и протокол, ИИ-сотрудник. Каталог загружается из OpenRouter; выбранные значения сохраняются в настройках.</p>
+    <div class="row between">
+      <span id="model-catalog-status" class="small muted" role="status">Каталог ещё не загружен</span>
+      <button type="button" class="btn sm" id="model-catalog-refresh">Обновить каталог</button>
+    </div>
+    <label class="f">Распознавание речи (STT)
+      <select name="transcribe_model" id="transcribe-model" data-current="{{ s.transcribe_model }}">
+        <option value="{{ s.transcribe_model }}">{{ s.transcribe_model }} — текущая</option>
+      </select>
+    </label>
+    <p class="small muted">Выбирайте модель с поддержкой аудиовхода. После смены нужно сравнить качество на одинаковых русскоязычных записях.</p>
+    <label class="f">Анализ расшифровки и отчёт
+      <select name="report_model" id="report-model" data-current="{{ s.report_model }}">
+        <option value="{{ s.report_model }}">{{ s.report_model }} — текущая</option>
+      </select>
+    </label>
+    <label class="f">ИИ-сотрудник
+      <select name="agent_model" id="agent-model" data-current="{{ s.agent_model }}">
+        <option value="{{ s.agent_model }}">{{ s.agent_model }} — текущая</option>
+      </select>
+    </label>
+    <label class="f">Модель переписки (бесплатная)
+      <select name="conversation_model" id="conversation-model" data-current="{{ s.conversation_model }}">
+        <option value="{{ s.conversation_model }}">{{ s.conversation_model }} — текущая</option>
+      </select>
+    </label>
+    <p class="small muted">После сохранения новые запросы используют выбранные модели. Уже запущенная обработка совещания сохраняет прежние параметры.</p>
+    <script src="{{ asset('model-settings.js') }}" defer></script>
+  </section>
   <section class="card setup-step">
     <h2>Расходы и тихие часы</h2>
     <label class="f">Дневной лимит расходов на ИИ, $ <input type="number" min="0" step="0.5" name="daily_budget_usd" value="{{ s.daily_budget_usd }}"></label>
