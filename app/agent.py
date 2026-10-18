@@ -310,7 +310,12 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         for task in tasks:
             if task.assignee_id and task.executor != "assistant":
                 by_person[task.assignee_id].append(task)
-        ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None, "reachable": reminders.reachable(p),
+        ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None,
+                        "department": getattr(p, "department", "") or None,
+                        "competencies": getattr(p, "competencies", "") or None,
+                        "responsibilities": getattr(p, "responsibilities", "") or None,
+                        "context": getattr(p, "context", "") or None,
+                        "reachable": reminders.reachable(p),
                         "open_tasks": [_task_view(t, False) for t in by_person[p.id] if t.status in OPEN_STATUSES][:8],
                         "done": sum(t.status == "done" for t in by_person[p.id]),
                         "blocked": sum(t.status == "blocked" for t in by_person[p.id])} for p in people]
@@ -339,6 +344,7 @@ def _name_for_chat(s, chat: str) -> str:
 
 ACTIONS_HELP = (
     'Формат ответа: {"reply": "что написать человеку или пустая строка", "actions": [...], "memory": "необязательно"}. '
+    "При назначении задачи сначала учитывай прямое указание директора; если исполнителя не назвали, сравнивай смысл задачи с department, competencies, responsibilities и context каждого сотрудника. Не выбирай только по имени или должности. Если подходят несколько сотрудников либо данных мало, задай директору один конкретный уточняющий вопрос и не создавай назначение наугад. Не выдумывай компетенции и загрузку. " 
     "Действия (ID бери только из данных; код проверяет права и ID): "
     '{"type":"set_deadline","task_id":ID,"date":"ГГГГ-ММ-ДД"}: сотрудник назвал конкретную дату, а у его задачи нет срока; '
     '{"type":"task_status","task_id":ID,"status":"in_progress|done|blocked","note":"что сделано или что мешает"}: '
