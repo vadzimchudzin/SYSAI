@@ -151,10 +151,10 @@ def _directory_terms(limit: int = 80) -> list:
         found, seen = [], set()
         for person in people:
             candidates = [person.name, *person.alias_list(), person.position]
-            for raw in (person.responsibilities or "").replace("\\n", ";").replace(",", ";").split(";"):
+            for raw in (person.responsibilities or "").replace("\n", ";").replace(",", ";").split(";"):
                 candidates.append(raw)
             for raw in candidates:
-                term = str(raw or "").strip(" \\t-•")
+                term = str(raw or "").strip(" \t-•")
                 key = term.casefold()
                 if term and key not in seen:
                     found.append(term)
