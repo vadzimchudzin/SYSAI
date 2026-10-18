@@ -544,10 +544,14 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         if not isinstance(t, dict) or not t.get("title"):
             continue
         eid = t.get("employee_id")
-        try:
-            eid = int(eid) if eid is not None else None
-        except (TypeError, ValueError):
+        if isinstance(eid, bool):
+            # bool is a subclass of int in Python; never treat True as employee ID 1.
             eid = None
+        else:
+            try:
+                eid = int(eid) if eid is not None else None
+            except (TypeError, ValueError):
+                eid = None
         executor = "assistant" if t.get("executor") == "assistant" else "person"
         if executor == "assistant":
             eid = None
