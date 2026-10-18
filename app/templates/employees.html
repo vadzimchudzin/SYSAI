@@ -5,6 +5,10 @@
   <label class="f">Имя и фамилия <input name="name" required value="{{ e.name if e }}" placeholder="Иван Петров"></label>
   <label class="f">Как называют на совещаниях <input name="aliases" value="{{ e.aliases if e }}" placeholder="Ваня, Иван Сергеевич, Петров"></label>
   <label class="f">Должность <input name="position" list="positions" value="{{ e.position if e }}" placeholder="Выберите или впишите свою"></label>
+  <label class="f">Подразделение <input name="department" value="{{ e.department if e }}" placeholder="Например, технический отдел"></label>
+  <label class="f">Компетенции <textarea name="competencies" rows="2" placeholder="Закупки оборудования, насосы, подрядчики">{{ e.competencies if e }}</textarea></label>
+  <label class="f">Обязанности <textarea name="responsibilities" rows="3" placeholder="За что отвечает сотрудник">{{ e.responsibilities if e }}</textarea></label>
+  <label class="f">Дополнительный контекст <textarea name="context" rows="2" placeholder="Уточнения для выбора исполнителя">{{ e.context if e }}</textarea></label>
   <label class="f">Куда писать <select name="channel"><option value="telegram">Telegram</option></select></label>
   {% if ai %}<label class="f">Telegram <input name="telegram_manual" placeholder="@username или +375291234567" value="{{ e.telegram_chat_id if e }}"></label>
   {% else %}
@@ -29,6 +33,9 @@
   <div class="emp {{ '' if e.active else 'off' }}">
     <div class="row between"><div><b>{{ e.name }}</b> <span class="muted">{{ e.position }}</span>
       <div class="small muted">{{ e.aliases }}</div>
+      {% if e.department %}<div class="small">{{ e.department }}</div>{% endif %}
+      {% if e.competencies %}<div class="small muted">Компетенции: {{ e.competencies }}</div>{% endif %}
+      {% if e.responsibilities %}<div class="small muted">Обязанности: {{ e.responsibilities }}</div>{% endif %}
       <div class="small">{% if e.telegram_chat_id %}<span class="pill green">Telegram</span>{% else %}<span class="pill red">нет Telegram</span>{% endif %}</div></div>
       <div class="actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Изменить</a>
         <form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">×</button></form></div></div>
