@@ -60,6 +60,88 @@ def transcript_text(segments: list) -> str:
     return "\n".join(f"[{mmss(s['start'])}] {s['speaker']}: {s['text']}" for s in segments)
 
 
+def detect_meeting_sections(segments: list, settings: dict) -> list:
+    """Suggest independent meetings only when boundaries have explicit or long-pause evidence."""
+    if len(segments) < 12:
+        return []
+    starts = []
+    compact = []
+    for index, segment in enumerate(segments):
+        try:
+            start = float(segment.get("start", 0))
+        except (TypeError, ValueError):
+            return []
+        starts.append(start)
+        compact.append({"index": index, "start": round(start, 1),
+                        "speaker": str(segment.get("speaker") or "")[:40],
+                        "text": str(segment.get("text") or "")[:240]})
+    ends = []
+    for index, segment in enumerate(segments):
+        try:
+            end = float(segment.get("end", starts[index + 1] if index + 1 < len(starts) else starts[index]))
+        except (TypeError, ValueError):
+            end = starts[index + 1] if index + 1 < len(starts) else starts[index]
+        ends.append(max(starts[index], end))
+    if ends[-1] - starts[0] < 600:
+        return []
+
+    prompt = (
+        "Определи, содержит ли расшифровка ДВА ИЛИ БОЛЕЕ самостоятельных совещания, а не просто смену темы. "
+        "Разделяй только при явных признаках: участники завершили одну встречу и начали другую, есть фраза "
+        "о следующем/новом совещании либо длительная пауза между частями вместе со сменой контекста. "
+        "Не дели обычное совещание на темы. Индексы start_index включительный, end_index исключительный. "
+        "Секции должны покрывать все индексы подряд без пропусков и пересечений. Каждая секция — не менее 5 реплик "
+        "и 60 секунд. Если доказательств недостаточно, верни {\"sections\": []}. "
+        "Верни только JSON вида {\"sections\":[{\"start_index\":0,\"end_index\":12,\"title\":\"...\","
+        "\"reason\":\"...\",\"confidence\":0.95}]}.\n"
+        "Текст и индексы:\n" + json.dumps(compact, ensure_ascii=False)
+    )
+    raw = llm.chat(settings["report_model"], [
+        {"role": "system", "content": "Ты определяешь границы самостоятельных совещаний. Не выдумывай границы."},
+        {"role": "user", "content": prompt},
+    ], json_mode=True, temperature=0.0, max_tokens=1800)
+    data = llm.parse_json(raw)
+    proposed = data.get("sections") if isinstance(data, dict) else None
+    if not isinstance(proposed, list) or len(proposed) < 2 or len(proposed) > 6:
+        return []
+
+    transition_phrases = (
+        "следующее совещание", "новое совещание", "закончим совещание", "совещание завершено",
+        "на этом совещание закончим", "следующая встреча", "новая встреча", "начинаем следующую встречу",
+        "вторая встреча", "на сегодня всё",
+    )
+    validated, expected_start = [], 0
+    for item in proposed:
+        if not isinstance(item, dict):
+            return []
+        try:
+            start_index, end_index = int(item["start_index"]), int(item["end_index"])
+            confidence = float(item.get("confidence", 0))
+        except (KeyError, TypeError, ValueError):
+            return []
+        title = str(item.get("title") or "").strip()[:160]
+        reason = str(item.get("reason") or "").strip()[:400]
+        if (start_index != expected_start or end_index <= start_index or end_index > len(segments)
+                or end_index - start_index < 5 or not title or not reason or confidence < 0.85):
+            return []
+        duration = ends[end_index - 1] - starts[start_index]
+        if duration < 60:
+            return []
+        if start_index:
+            gap = starts[start_index] - ends[start_index - 1]
+            boundary_text = " ".join(str(segments[i].get("text") or "")
+                                     for i in range(max(0, start_index - 2), min(len(segments), start_index + 3))).casefold()
+            if gap < 45 and not any(phrase in boundary_text for phrase in transition_phrases):
+                return []
+        validated.append({"start_index": start_index, "end_index": end_index,
+                          "start": starts[start_index], "end": ends[end_index - 1],
+                          "title": title, "reason": reason, "confidence": confidence})
+        expected_start = end_index
+    if expected_start != len(segments):
+        return []
+    return validated
+
+
 def employees_json(employees) -> str:
     return json.dumps([{"employee_id": e.id, "name": e.name, "aliases": e.alias_list(), "position": e.position,
                         "responsibilities": getattr(e, "responsibilities", "") or "",
