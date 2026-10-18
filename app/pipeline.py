@@ -156,7 +156,7 @@ def _directory_terms(limit: int = 80) -> list:
             # Split free-form lists into phrases; do not feed arbitrary context prose to ASR.
             for field in ("position", "department", "competencies", "responsibilities"):
                 value = str(getattr(person, field, "") or "")
-                candidates.extend(re.split(r"[,;\\n]+", value))
+                candidates.extend(re.split(r"[,;\n]+", value))
             for raw in candidates:
                 term = str(raw or "").strip()
                 if term and len(term) <= 100 and term not in found:
