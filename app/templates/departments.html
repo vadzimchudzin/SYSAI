@@ -1,0 +1,35 @@
+{% extends "base.html" %}{% block title %}Подразделения — SYSAI{% endblock %}
+{% macro form(d) %}
+<form method="post" action="/departments" class="department-form">
+  <input type="hidden" name="id" value="{{ d.id if d else 0 }}">
+  <label class="f">Название подразделения
+    <input name="name" required maxlength="100" value="{{ d.name if d else '' }}" placeholder="Технический отдел">
+  </label>
+  <label class="f">Чем занимается подразделение
+    <textarea name="description" rows="2" maxlength="1000" placeholder="Основные задачи и зона ответственности">{{ d.description if d else '' }}</textarea>
+  </label>
+  {% if d %}<label class="check"><input type="checkbox" name="active" {{ 'checked' if d.active }}> Активно</label>{% endif %}
+  <button class="btn primary">{{ 'Сохранить' if d else 'Создать подразделение' }}</button>
+</form>
+{% endmacro %}
+{% block body %}
+<div class="page-h"><div><h1>Подразделения</h1><p>Сотрудник может состоять в нескольких подразделениях, иметь разную роль и отдельные обязанности в каждом.</p></div><a class="btn" href="/employees">Сотрудники</a></div>
+{% if msg %}<div class="card note">{{ msg }}</div>{% endif %}
+<div class="grid2">
+  <section class="card"><h2>Новое подразделение</h2>{{ form(None) }}</section>
+  <section class="card"><h2>Справочник ({{ departments|length }})</h2>
+    {% if not departments %}<p class="muted">Подразделений пока нет.</p>{% endif %}
+    {% for d in departments %}
+      <article class="department-card {{ '' if d.active else 'off' }}">
+        <div class="row between"><div><b>{{ d.name }}</b> <span class="pill {{ 'green' if d.active else 'gray' }}">{{ 'активно' if d.active else 'неактивно' }}</span>
+          {% if d.description %}<p class="small muted">{{ d.description }}</p>{% endif %}
+          <p class="small muted">Сотрудников: {{ d.memberships|length }}</p></div>
+          <div class="actions"><a class="btn sm" href="/departments?edit={{ d.id }}">Изменить</a>
+            <form method="post" action="/departments/{{ d.id }}/delete" onsubmit="return confirm('Удалить подразделение и его членства? Сотрудники останутся в справочнике.')"><button class="btn sm danger">×</button></form></div>
+        </div>
+        {% if edit == d.id %}<div class="edit-box">{{ form(d) }}</div>{% endif %}
+      </article>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}
