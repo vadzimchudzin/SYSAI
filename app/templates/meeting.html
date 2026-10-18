@@ -31,6 +31,15 @@
 </div>
 
 {% if m.report %}{% include '_progress_board.html' %}{% endif %}
+{% if r.visualizations %}
+<section class="card" id="meeting-visualizations">
+  <div class="row between"><h2>Графики и показатели</h2><span class="pill blue">{{ r.visualizations|length }} граф.</span></div>
+  <p class="small muted">Графики строятся только по числам из расшифровки. Наведите курсор или выберите точку/столбец, чтобы увидеть значение и исходную цитату.</p>
+  <div id="meeting-charts" class="chart-grid"></div>
+  <script type="application/json" id="meeting-visualization-data">{{ r.visualizations|tojson }}</script>
+  <script src="{{ asset('visualizations.js') }}" defer></script>
+</section>
+{% endif %}
 
 <div id="meeting-live-status">
 {% if m.status in ('error','delivery_failed') %}<div class="card err">Ошибка: {{ m.error }}
