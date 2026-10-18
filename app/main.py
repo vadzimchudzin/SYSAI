@@ -624,6 +624,14 @@ def meeting_reanalyze(request: Request, mid: int):
     return RedirectResponse(f"/meetings/{mid}", 303)
 
 
+@app.post("/meetings/{mid}/tasks/{task_id}/retry-assistant-message")
+def retry_assistant_message(request: Request, mid: int, task_id: int):
+    guard_admin(request)
+    if not assistant.retry_uncertain_message(task_id, mid):
+        raise HTTPException(409, "Повтор невозможен: задача не требует проверки доставки или совещание не подтверждено")
+    return RedirectResponse(f"/meetings/{mid}", status_code=303)
+
+
 @app.post("/meetings/{mid}/delete")
 def meeting_delete(request: Request, mid: int):
     guard(request)
