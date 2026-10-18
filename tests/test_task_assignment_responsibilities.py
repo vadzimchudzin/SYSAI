@@ -149,3 +149,23 @@ def test_assistant_target_id_alone_is_not_trusted_without_a_resolved_name():
     task = normalized["tasks"][0]
     assert task["executor"] == "assistant"
     assert task["target_employee_id"] is None
+
+def test_one_generic_position_match_is_not_enough_to_disambiguate():
+    marketing = person(1, "Татьяна Иванова", "Технический специалист", "")
+    technical = person(2, "Татьяна Петрова", "Специалист", "")
+    assert analyze.match_task_employee("Татьяне", "обсудить техническую работу", [marketing, technical]) is None
+
+
+def test_close_duty_and_department_scores_remain_ambiguous():
+    procurement = person(1, "Татьяна Иванова", "Специалист", "закупки")
+    marketing = person(2, "Татьяна Петрова", "Специалист", "")
+    # One duty overlap scores 3, while one department-name overlap scores 2: too close to guess.
+    membership = SimpleNamespace(
+        role="",
+        responsibilities="",
+        department=SimpleNamespace(name="маркетинг", active=True),
+    )
+    marketing.department_memberships = [membership]
+    procurement.department_memberships = []
+    assert analyze.match_task_employee("Татьяне", "закупки маркетинг", [procurement, marketing]) is None
+
