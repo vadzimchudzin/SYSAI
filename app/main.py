@@ -959,6 +959,9 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
         departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []
         if {department.id for department in departments} != selected_ids:
             raise HTTPException(400, "Одно из подразделений не найдено")
+        existing_membership_ids = {membership.department_id for membership in e.department_memberships}
+        if any(not department.active and department.id not in existing_membership_ids for department in departments):
+            raise HTTPException(400, "Нельзя добавить сотрудника в неактивное подразделение")
         s.query(EmployeeDepartment).filter_by(employee_id=e.id).delete(synchronize_session=False)
         for department in departments:
             role = str(form.get(f"department_role_{department.id}") or "").strip()[:200]
