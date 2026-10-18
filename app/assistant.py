@@ -66,6 +66,20 @@ def recover() -> None:
         s.query(Task).filter(Task.status == "assistant_message_sending").update({Task.status: "assistant_message_uncertain"})
         s.commit()
 
+def retry_uncertain_message(task_id: int, meeting_id: int) -> bool:
+    """Explicit, reviewer-confirmed retry; ordinary recovery never repeats an uncertain external send."""
+    with SessionLocal() as s:
+        task = s.get(Task, task_id)
+        meeting = s.get(Meeting, meeting_id)
+        if (task is None or meeting is None or task.meeting_id != meeting_id or task.executor != "assistant"
+                or task.status != "assistant_message_uncertain" or not task.target_employee_id
+                or meeting.status not in report_archive.APPROVED_STATUSES):
+            return False
+        task.status = "assistant_todo"
+        s.commit()
+    run_task(task_id) if _testing() else POOL.submit(run_task, task_id)
+    return True
+
 
 # ----------------------------------------------------------------------------- facts for the model
 def _seconds(stamp: str):
