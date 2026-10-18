@@ -936,6 +936,8 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
     guard_admin(request)
     with SessionLocal() as s:
         e = s.get(Employee, id) if id else Employee()
+        if e is None:
+            raise HTTPException(404, "Сотрудник не найден")
         e.name, e.aliases, e.position, e.responsibilities, e.channel = (name.strip(), aliases.strip(), position.strip(),
                                                                         responsibilities.strip()[:4000], channel)
         ref = (telegram_manual.strip() or telegram_chat_id).strip()
@@ -978,6 +980,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = ""):
     guard_admin(request)
     with SessionLocal() as s:
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        for department in departments:
+            _ = len(department.memberships)
     return page(request, "departments.html", departments=departments, edit=edit, msg=msg)
 
 
