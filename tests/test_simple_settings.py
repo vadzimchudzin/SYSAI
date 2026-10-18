@@ -44,8 +44,9 @@ def test_rendered_settings_are_minimal_and_never_echo_secrets(client):
             assert attrs["type"] == "password"
             assert not attrs.get("value")
         # these controls are not drawn at all any more: the page keeps only the mode, the key and the recipients
-        assert name not in ("transcribe_model", "report_model", "conversation_model", "bitrix_webhook_url",
-                            "deadline_mode", "glossary", "accent_color")
+        if name in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model"):
+            assert tag == "select"
+        assert name not in ("bitrix_webhook_url", "deadline_mode", "glossary", "accent_color")
         if name in ("approval_required", "openrouter_api_key"):
             assert depth == 0
     assert "<details" not in html  # nothing is hidden behind folds any more

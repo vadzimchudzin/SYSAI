@@ -33,7 +33,7 @@ def make_long_mp3(path, seconds):
 
 
 def settings(**overrides):
-    return {"transcribe_model": "test/model", **overrides}
+    return {"transcribe_model": transcribe.LEGACY_CHAT_MODEL, **overrides}
 
 
 @pytest.mark.parametrize("duration,tail", [(122.4, 2.4), (120.35, 0.35)])
@@ -293,11 +293,11 @@ def test_checkpoint_retry_reuses_successful_part_and_invalidates_on_settings_cha
     assert len(calls) == 3
     assert [item["text"] for item in retried] == ["part 1", "part 3"]
 
-    changed_model = settings(glossary="alpha", transcribe_model="test/other", chunk_minutes=1)
+    changed_model = settings(glossary="alpha", language="en", chunk_minutes=1)
     transcribe.transcribe(str(source), changed_model, checkpoint=checkpoint)
     assert len(calls) == 5
 
-    changed_glossary = settings(glossary="beta", transcribe_model="test/other", chunk_minutes=1)
+    changed_glossary = settings(glossary="beta", language="en", chunk_minutes=1)
     transcribe.transcribe(str(source), changed_glossary, checkpoint=checkpoint)
     assert len(calls) == 7
 

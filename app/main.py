@@ -5,10 +5,13 @@ import logging
 import mimetypes
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import threading
 import time
+
+import httpx
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode
 
@@ -711,6 +714,59 @@ def _chat_ids(form, name: str) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+@app.get("/settings/models")
+def settings_models(request: Request):
+    guard_admin(request)
+    headers = {}
+    key = config.openrouter_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models", headers=headers, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+        stt_response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models?output_modalities=transcription",
+                                 headers=headers, timeout=20)
+        stt_response.raise_for_status()
+        stt_payload = stt_response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Could not load OpenRouter model catalog: %s", exc)
+        raise HTTPException(502, "Не удалось загрузить каталог OpenRouter. Проверьте подключение и повторите.") from None
+    items = payload.get("data", []) if isinstance(payload, dict) else []
+    models = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        architecture = item.get("architecture") or {}
+        inputs = architecture.get("input_modalities") or item.get("input_modalities") or []
+        outputs = architecture.get("output_modalities") or item.get("output_modalities") or []
+        pricing = item.get("pricing") or {}
+        models.append({
+            "id": item["id"][:200],
+            "name": str(item.get("name") or item["id"])[:200],
+            "audio_input": "audio" in inputs,
+            "text_input": not inputs or "text" in inputs,
+            "text_output": not outputs or "text" in outputs,
+            "context_length": item.get("context_length"),
+            "prompt_price": pricing.get("prompt"),
+            "completion_price": pricing.get("completion"),
+        })
+    models.sort(key=lambda model: (model["id"].casefold()))
+    stt_items = stt_payload.get("data", []) if isinstance(stt_payload, dict) else []
+    transcription_models = []
+    for item in stt_items:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        pricing = item.get("pricing") or {}
+        transcription_models.append({"id": item["id"][:200],
+                                     "name": str(item.get("name") or item["id"])[:200],
+                                     "prompt_price": pricing.get("prompt"),
+                                     "completion_price": pricing.get("completion")})
+    transcription_models.sort(key=lambda model: model["id"].casefold())
+    return {"models": models, "count": len(models), "transcription_models": transcription_models,
+            "transcription_count": len(transcription_models)}
+
+
 @app.post("/settings")
 async def settings_save(request: Request):
     guard_admin(request)
@@ -730,11 +786,14 @@ async def settings_save(request: Request):
     for k in settings_store.LEGAL_KEYS:
         if k in f:
             updates[k] = str(f[k]).strip()[:300]
-    for k in ("transcribe_model", "report_model", "conversation_model", "conversation_tone",
+    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model", "conversation_tone",
               "company_name", "accent_color", "glossary", "persona"):
         if k in f:
             value = str(f[k]).strip()
             updates[k] = value if k == "glossary" else value or settings_store.DEFAULTS[k]
+    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model"):
+        if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"[A-Za-z0-9._:/-]+", updates[k])):
+            raise HTTPException(400, "Некорректный идентификатор модели")
     if "conversation_tone" in updates:
         updates["conversation_tone"] = updates["conversation_tone"][:1000]
     if "conversation_model" in updates:
