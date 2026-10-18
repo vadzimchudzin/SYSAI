@@ -39,6 +39,7 @@ def create_message_task():
 
 
 def test_assistant_sends_message_to_target_employee(monkeypatch):
+    monkeypatch.setattr(assistant.userbot, "quiet_until", lambda: None)
     task_id = create_message_task()
     sent = []
     monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "fake-token")
@@ -59,6 +60,7 @@ def test_assistant_sends_message_to_target_employee(monkeypatch):
 
 
 def test_uncertain_message_delivery_is_not_automatically_retried(monkeypatch):
+    monkeypatch.setattr(assistant.userbot, "quiet_until", lambda: None)
     task_id = create_message_task()
     monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "fake-token")
     monkeypatch.setattr(assistant, "_ask", lambda facts, feedback="": {
