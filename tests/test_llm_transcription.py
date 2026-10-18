@@ -4,11 +4,11 @@ from types import SimpleNamespace
 from app import config, llm
 
 
-def test_transcribe_audio_retries_without_unsupported_diarization(monkeypatch):
+def test_transcribe_audio_retries_without_unsupported_timestamp_granularity(monkeypatch):
     calls = []
     costs = []
     responses = [
-        SimpleNamespace(status_code=400, text="diarize not supported", json=lambda: {}),
+        SimpleNamespace(status_code=400, text="timestamp_granularities not supported", json=lambda: {}),
         SimpleNamespace(status_code=200, text="", json=lambda: {
             "text": "Проверка связи.", "segments": [{"start": 0.0, "text": "Проверка связи."}],
             "usage": {"cost": 0.01},
@@ -27,7 +27,8 @@ def test_transcribe_audio_retries_without_unsupported_diarization(monkeypatch):
 
     assert result["text"] == "Проверка связи."
     assert len(calls) == 2
-    assert calls[0][1]["diarize"] is True
-    assert "diarize" not in calls[1][1]
+    assert calls[0][1]["timestamp_granularities"] == ["segment"]
+    assert "timestamp_granularities" not in calls[1][1]
+    assert "diarize" not in calls[0][1] and "diarize" not in calls[1][1]
     assert calls[1][1]["language"] == "ru"
     assert costs == [("openai/gpt-4o-transcribe", {"cost": 0.01})]
