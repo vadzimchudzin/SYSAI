@@ -11,7 +11,7 @@
     {% for t in plan.assistant %}<li>Берёт на себя ассистент: {{ t.title }}. Сделает после подтверждения и пришлёт проверяющему.</li>{% endfor %}
     {% for t in plan.unassigned %}<li class="warn small">Без исполнителя: {{ t.title }} (прозвучало: {{ t.said }}). Назначьте выше или отдайте ассистенту.</li>{% endfor %}
   </ul>
-  <p class="small muted">Графики и сводки ассистента строятся только после подтверждения: в черновике их ещё нет.</p>
+  <p class="small muted">Отдельные задачи ассистента выполняются после подтверждения. Графики по числам из расшифровки отображаются в протоколе ниже.</p>
 </section>{% endif %}
 {% if artifacts %}<section class="card"><h2>Материалы ассистента</h2>
   {% for a in artifacts %}<div class="row between"><b>{{ a.title }}</b><a class="btn sm" href="/artifacts/{{ a.id }}" target="_blank" rel="noopener">PDF</a></div>
