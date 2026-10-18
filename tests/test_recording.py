@@ -175,3 +175,21 @@ def test_audio_is_assembled_from_chunks_after_database_reread(webm_audio):
         assert reread.next_sequence == 2 and reread.size_bytes == len(webm_audio)
     path, _ = recording.download("session-1", rec["id"])
     assert path.read_bytes() == webm_audio
+
+def test_active_recordings_are_shared_by_owner_and_include_device_label():
+    rec = recording.start("user:42", "audio/webm", "Quarterly review", dt.date(2026, 10, 18), {},
+                          device_label="iPhone · Safari")
+    own = recording.list_active("user:42")
+    other = recording.list_active("user:43")
+    assert len(own) == 1
+    assert own[0]["id"] == rec["id"]
+    assert own[0]["device_label"] == "iPhone · Safari"
+    assert own[0]["status"] == "recording"
+    assert own[0]["elapsed_seconds"] >= 0
+    assert other == []
+
+
+def test_active_recordings_include_legacy_owner_only_when_explicitly_requested():
+    rec = recording.start("legacy-session", "audio/webm", "Old browser session")
+    assert recording.list_active("user:42") == []
+    assert [item["id"] for item in recording.list_active("user:42", "legacy-session")] == [rec["id"]]
