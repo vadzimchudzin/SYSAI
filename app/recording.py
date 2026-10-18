@@ -77,9 +77,12 @@ def _atomic_write(path: pathlib.Path, data: bytes):
 
 def _recording_dict(recording: Recording) -> dict:
     created = recording.created_at
+    ended = recording.updated_at if recording.status in {"finished", "cancelled", "error"} else now()
     if created is not None and created.tzinfo is None:
         created = created.replace(tzinfo=dt.timezone.utc)
-    elapsed = max(0, int((now() - created).total_seconds())) if created else 0
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=dt.timezone.utc)
+    elapsed = max(0, int((ended - created).total_seconds())) if created and ended else 0
     return {"id": recording.id, "next_sequence": recording.next_sequence,
             "size_bytes": recording.size_bytes, "status": recording.status,
             "mime_type": recording.mime_type, "title": recording.title,
