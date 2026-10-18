@@ -179,6 +179,7 @@ class Recording(Base):
     owner = Column(String(128), nullable=False, index=True)
     mime_type = Column(String(80), nullable=False)
     title = Column(String(300), nullable=False, default="")
+    device_label = Column(String(120), nullable=False, default="")
     meeting_date = Column(Date, nullable=True)
     options = Column(JSON, nullable=False, default=dict)
     status = Column(String(20), nullable=False, default="recording", index=True)
@@ -386,6 +387,7 @@ def init_db():
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
+    _add_column_if_missing("recordings", "device_label", "device_label VARCHAR(120) NOT NULL DEFAULT ''")
     _add_column_if_missing("users", "consent_at", "consent_at TIMESTAMP")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
 
