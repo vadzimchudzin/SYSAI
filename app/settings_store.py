@@ -31,6 +31,7 @@ DEFAULTS = {
     "report_chat_ids": [],           # where the full report goes (people, groups, channels)
     "send_tasks_to_assignees": True,
     "include_transcript_in_pdf": False,
+    "report_style": "balanced",          # balanced | executive | detailed | technical
     # deadlines
     "deadline_mode": "default",      # none | default | ask
     "default_deadline_days": 3,      # business days
@@ -82,7 +83,7 @@ def all_settings() -> dict:
 
 
 MEETING_OPTIONS = ("approval_required", "approver_chat_ids", "deadline_mode", "report_chat_ids", "send_tasks_to_assignees",
-                   "include_transcript_in_pdf")
+                   "include_transcript_in_pdf", "report_style")
 
 
 def for_meeting(options: dict | None) -> dict:
