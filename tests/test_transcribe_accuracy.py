@@ -3,7 +3,7 @@ from app import transcribe
 
 def test_transcription_prompt_prioritizes_verbatim_speech_and_protects_numbers_and_negation():
     prompt = transcribe._prompt({"language": "ru", "glossary": "CRM, SYSAI"}, 30, "")
-    assert "сохраняй отрицания" in prompt
+    assert "Сохраняй отрицания" in prompt
     assert "повторы" in prompt
     assert "не угадывай" in prompt
     assert "не является источником слов для расшифровки" in prompt
