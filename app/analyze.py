@@ -525,6 +525,18 @@ def match_employee(name, employees):
     return hits[0] if len(hits) == 1 else None
 
 
+_TASK_ENDINGS = ("ирования", "ирование", "ировать", "ениями", "иями", "ками", "ями", "ами",
+                 "ать", "ять", "ить", "еть", "уть", "ти", "ть", "ки", "ка", "ку", "ке")
+
+
+def _task_stems(word: str) -> set:
+    stems = set(_stems(word))
+    for ending in _TASK_ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= 3:
+            stems.add(word[:-len(ending)])
+    return stems
+
+
 def match_task_employee(name, task_context, employees):
     """Resolve a spoken assignee only when name + task context uniquely identify one employee."""
     spoken = _words(name)
@@ -542,15 +554,15 @@ def match_task_employee(name, task_context, employees):
 
     context_words = set()
     for word in _words(task_context):
-        context_words.update(_stems(word))
+        context_words.update(_task_stems(word))
     scored = []
     for employee in candidates:
         duties = set()
         for word in _words(getattr(employee, "responsibilities", "") or ""):
-            duties.update(_stems(word))
+            duties.update(_task_stems(word))
         position = set()
         for word in _words(getattr(employee, "position", "") or ""):
-            position.update(_stems(word))
+            position.update(_task_stems(word))
         score = 3 * len(context_words & duties) + len(context_words & position)
         scored.append((score, employee))
     best = max(score for score, _ in scored)
