@@ -68,6 +68,18 @@ def test_a_conflicting_valid_model_id_is_overridden_by_the_spoken_name():
     assert out["tasks"][0]["employee_id"] == 3
 
 
+def test_ambiguous_spoken_name_clears_model_employee_id_instead_of_guessing():
+    twins = [person(1, "Вадим Чудин"), person(2, "Вадим Орлов")]
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Вадиму"}]}, twins)
+    assert out["tasks"][0]["employee_id"] is None
+
+
+def test_unique_full_name_resolves_even_when_first_name_is_ambiguous():
+    twins = [person(1, "Вадим Чудин"), person(2, "Вадим Орлов")]
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Вадиму Орлову"}]}, twins)
+    assert out["tasks"][0]["employee_id"] == 2
+
+
 def test_the_analyst_is_told_that_the_id_is_required_for_a_named_person():
     assert "employee_id" in analyze.SYSTEM and "в любом падеже" in analyze.SYSTEM and "обязателен" in analyze.SYSTEM
 
