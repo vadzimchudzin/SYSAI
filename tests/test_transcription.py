@@ -455,6 +455,37 @@ def test_validation_rejects_boolean_timestamp():
         transcribe._validate({"segments": [{"speaker": "A", "text": "hi", "start": True}]}, 0, 2)
 
 
+def test_validation_preserves_model_estimated_end_timestamp():
+    segments, truncated = transcribe._validate(
+        {"segments": [{"speaker": "A", "start": 1.2, "end": 2.4, "text": "hello"}]},
+        offset=10, length=5,
+    )
+    assert not truncated
+    assert segments == [{"speaker": "A", "start": 11.2, "end": 12.4, "text": "hello"}]
+
+
+@pytest.mark.parametrize("end", [True, "bad", float("nan"), float("inf"), -0.1, 2.1])
+def test_validation_rejects_invalid_end_timestamp(end):
+    with pytest.raises(llm.IncompleteResponse, match="окончания"):
+        transcribe._validate(
+            {"segments": [{"speaker": "A", "start": 0.2, "end": end, "text": "hello"}]},
+            offset=0, length=2,
+        )
+
+
+def test_transcribe_keeps_predicted_end_instead_of_extending_to_next_start(tmp_path, monkeypatch):
+    source = make_audio(tmp_path / "source.wav", 8)
+    monkeypatch.setattr(config, "llm_enabled", lambda: True)
+    monkeypatch.setattr(llm, "chat", lambda *args, **kwargs: json.dumps({
+        "segments": [
+            {"speaker": "A", "start": 1, "end": 1.7, "text": "first"},
+            {"speaker": "A", "start": 4, "end": 4.8, "text": "second"},
+        ]
+    }))
+    _, segments = transcribe.transcribe(str(source), settings())
+    assert [s["end"] for s in segments] == [1.7, 4.8]
+
+
 @pytest.mark.parametrize("minutes,overlap", [(0, 0), (-1, 0), (float("nan"), 0),
                                             (float("inf"), 0), (1, -1), (1, float("nan"))])
 def test_prepare_chunks_rejects_invalid_parameters_before_creating_workdir(tmp_path, monkeypatch, minutes, overlap):
