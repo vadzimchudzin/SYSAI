@@ -326,14 +326,22 @@ def voice_text(data: bytes, mime: str = "", seconds: float = 0.0) -> str:
         source.write_bytes(data)
         total = seconds if seconds and seconds > 0 else audio.duration(str(source))
         audio.extract(source, target, 0, max(1.0, total + 1.0))
-        prompt = VOICE_PROMPT.format(language="русский" if settings.get("language", "ru") == "ru" else settings["language"],
-                                     glossary=glossary or "нет")
-        raw = llm.chat(settings["transcribe_model"], [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "input_audio", "input_audio": {"data": base64.b64encode(target.read_bytes()).decode(), "format": "mp3"}},
-        ]}], json_mode=True, temperature=0, max_tokens=3000, timeout=120)
-        parsed = llm.parse_json(raw)
-        text = parsed.get("text") if isinstance(parsed, dict) else None
+        if settings.get("transcribe_model") != LEGACY_CHAT_MODEL:
+            parsed = llm.transcribe_audio(target.read_bytes(), settings["transcribe_model"], "mp3",
+                                         settings.get("language", "ru"))
+            text = parsed.get("text")
+            if not isinstance(text, str) or not text.strip():
+                parts = parsed.get("segments") or []
+                text = " ".join(str(part.get("text") or "").strip() for part in parts if isinstance(part, dict))
+        else:
+            prompt = VOICE_PROMPT.format(language="русский" if settings.get("language", "ru") == "ru" else settings["language"],
+                                         glossary=glossary or "нет")
+            raw = llm.chat(settings["transcribe_model"], [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "input_audio", "input_audio": {"data": base64.b64encode(target.read_bytes()).decode(), "format": "mp3"}},
+            ]}], json_mode=True, temperature=0, max_tokens=3000, timeout=120)
+            parsed = llm.parse_json(raw)
+            text = parsed.get("text") if isinstance(parsed, dict) else None
         if not isinstance(text, str):
             raise llm.LLMError("Расшифровка голосового не содержит текста")
         return text.strip()
