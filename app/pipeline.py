@@ -149,15 +149,30 @@ def _process(meeting_id: int):
 
 
 def _directory_terms(limit: int = 80) -> list:
-    """Names and nicknames of active employees, each once, in the order of the directory."""
+    """Names, aliases, roles and duty phrases that help spelling without inventing speech."""
     with SessionLocal() as s:
         people = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.id).all()
-        found = []
+        found, seen = [], set()
         for person in people:
-            for term in [person.name] + person.alias_list():
-                if term.strip() and term.strip() not in found:
-                    found.append(term.strip())
-        return found[:limit]
+            candidates = [person.name, *person.alias_list(), person.position]
+            for raw in (person.responsibilities or "").replace("\n", ";").replace(",", ";").split(";"):
+                candidates.append(raw)
+            for membership in person.department_memberships:
+                department = membership.department
+                if department is None or not department.active:
+                    continue
+                candidates.extend([department.name, membership.role])
+                for raw in (membership.responsibilities or "").replace("\n", ";").replace(",", ";").split(";"):
+                    candidates.append(raw)
+            for raw in candidates:
+                term = str(raw or "").strip(" \t-•")
+                key = term.casefold()
+                if term and key not in seen:
+                    found.append(term)
+                    seen.add(key)
+                    if len(found) >= limit:
+                        return found
+        return found
 
 
 def review_plan(meeting, settings: dict) -> dict:
