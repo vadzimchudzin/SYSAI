@@ -106,6 +106,8 @@ def _process(meeting_id: int):
             audio_path, source, mdate = m.audio_path, m.source, m.meeting_date or deadlines.today()
             saved = m.transcript
             saved_report = m.report
+            parent_meeting_id = m.parent_meeting_id
+            meeting_options = dict(m.options or {})
             total = m.duration_sec
         settings = meeting_settings(meeting_id)
         terms = _directory_terms()
@@ -133,6 +135,20 @@ def _process(meeting_id: int):
                                                         progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
              progress="Составление отчёта и задач")
+        if parent_meeting_id is None and source != "demo" and not meeting_options.get("segmentation_checked"):
+            sections = []
+            try:
+                sections = analyze.detect_meeting_sections(segments, settings)
+            except Exception:  # noqa: BLE001 — segmentation must never block a normal report
+                log.exception("meeting %s boundary detection failed; continuing as one meeting", meeting_id)
+            with SessionLocal() as s:
+                parent = s.get(Meeting, meeting_id)
+                if parent:
+                    parent.options = dict(parent.options or {}, segmentation_checked=True)
+                    s.commit()
+            if len(sections) >= 2:
+                _create_segment_meetings(meeting_id, segments, sections)
+                return
         with SessionLocal() as s:
             employees = s.query(Employee).filter(Employee.active.is_(True)).all()
             # Analysis runs after this session closes; load department memberships and departments now.
@@ -146,6 +162,83 @@ def _process(meeting_id: int):
     except Exception as e:  # noqa: BLE001
         log.exception("meeting %s failed", meeting_id)
         _set(meeting_id, status="error", progress="Ошибка", error=str(e)[:2000])
+
+
+def _create_segment_meetings(parent_id: int, segments: list, sections: list) -> None:
+    """Create separate, review-gated reports from validated transcript ranges."""
+    child_ids = []
+    with SessionLocal() as s:
+        parent = s.get(Meeting, parent_id)
+        if parent is None:
+            return
+        base_options = dict(parent.options or {})
+        base_options.update({
+            "segmentation_checked": True,
+            "approval_required": True,
+            "report_chat_ids": [],
+            "send_tasks_to_assignees": False,
+        })
+        segment_links = []
+        for index, section in enumerate(sections, start=1):
+            start_index, end_index = section["start_index"], section["end_index"]
+            subset = [dict(item) for item in segments[start_index:end_index]]
+            if not subset:
+                continue
+            start_sec, end_sec = float(section["start"]), float(section["end"])
+            title = str(section.get("title") or f"Совещание {index}").strip()[:160]
+            child = Meeting(
+                title=title,
+                source="segment",
+                filename=parent.filename,
+                audio_path="",
+                status="queued",
+                progress="Подготовка отдельного отчёта",
+                duration_sec=max(0.0, end_sec - start_sec),
+                meeting_date=parent.meeting_date,
+                transcript=subset,
+                report=None,
+                options=dict(base_options),
+                parent_meeting_id=parent.id,
+                segment_start_sec=start_sec,
+                segment_end_sec=end_sec,
+            )
+            s.add(child)
+            s.flush()
+            child_ids.append(child.id)
+            segment_links.append({
+                "meeting_id": child.id,
+                "title": title,
+                "start": start_sec,
+                "end": end_sec,
+                "start_label": f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}",
+                "end_label": f"{int(end_sec // 60):02d}:{int(end_sec % 60):02d}",
+                "reason": str(section.get("reason") or "")[:300],
+                "confidence": float(section.get("confidence", 0)),
+            })
+        parent.options = dict(parent.options or {}, segmentation_checked=True)
+        parent.status = "segmented"
+        parent.progress = f"Обнаружено самостоятельных совещаний: {len(child_ids)}"
+        parent.error = ""
+        parent.report = {
+            "title": "Запись содержит несколько совещаний",
+            "summary": (
+                f"Автоматически предложено {len(child_ids)} отдельных совещаний. "
+                "Каждый отчёт требует проверки и назначения получателей перед отправкой."
+            ),
+            "participants": [],
+            "topics": [],
+            "decisions": [],
+            "tasks": [],
+            "open_questions": [],
+            "risks": [],
+            "notes": [],
+            "visualizations": [],
+            "segments": segment_links,
+            "requires_review": False,
+        }
+        s.commit()
+    for child_id in child_ids:
+        _process(child_id)
 
 
 def _directory_terms(limit: int = 80) -> list:
