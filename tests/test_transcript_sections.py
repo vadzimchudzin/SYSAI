@@ -24,7 +24,7 @@ def test_group_transcript_ignores_invalid_topics_and_falls_back_to_full_transcri
 
 
 def test_group_transcript_ignores_empty_topic_buckets_and_supports_long_recordings():
-    segments = [segment(3599, "Перед темой"), segment(3605, "После часа")]
+    segments = [segment(10, "Перед темой"), segment(3605, "После часа")]
     topics = [{"title": "Empty topic", "time": "00:30"}, {"title": "После часа", "time": "1:00:02"}]
     result = group_transcript(segments, topics)
     assert [section["title"] for section in result] == ["Начало обсуждения", "После часа"]
