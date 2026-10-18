@@ -47,7 +47,8 @@ tpl.env.globals.update(mmss=mmss, fmt=deadlines.fmt, priority=render.PRIORITY, c
 
 STATUS = {"queued": ("В очереди", "gray"), "transcribing": ("Расшифровка", "blue"), "analyzing": ("Анализ", "blue"),
           "awaiting_approval": ("Ждёт проверки", "amber"), "sending": ("Отправка", "blue"), "done": ("Отправлено", "green"),
-          "error": ("Ошибка", "red"), "rejected": ("Отклонено", "gray")}
+          "error": ("Ошибка", "red"), "rejected": ("Отклонено", "gray"),
+          "segmented": ("Разделено на совещания", "purple")}
 STATUS.update(delivery_queued=("В очереди отправки", "blue"), delivery_retry=("Повтор доставки", "amber"),
               delivery_failed=("Ошибка доставки", "red"), ready=("Отчёт готов", "green"))
 tpl.env.globals.update(STATUS=STATUS, ICONS=ICONS)
@@ -406,13 +407,20 @@ def meeting_view(request: Request, mid: int):
         employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
         artifacts = [{"id": a.id, "title": a.title, "filename": a.filename, "svg": a.svg or ""} for a in
                      s.query(Artifact).filter_by(meeting_id=mid).order_by(Artifact.id.desc()).all()]
+        available_chats = s.query(TelegramChat).filter(TelegramChat.active.is_(True)).order_by(
+            TelegramChat.title, TelegramChat.chat_id).all()
+        selected_report_chats = set(str(x) for x in ((m.options or {}).get("report_chat_ids") or []))
+        known_chat_ids = {str(chat.chat_id) for chat in available_chats}
+        custom_report_chats = [x for x in selected_report_chats if x not in known_chat_ids]
     with SessionLocal() as s:
         loaded = pipeline.load(s, mid)
         plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
                 if userbot.ai_mode() and loaded.status in ("awaiting_approval", "rejected") else None)
     until = userbot.quiet_until()
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
-                plan=plan, quiet_at=userbot.local_time(until) if until is not None else "")
+                available_chats=available_chats, selected_report_chats=selected_report_chats,
+                custom_report_chats=custom_report_chats, plan=plan,
+                quiet_at=userbot.local_time(until) if until is not None else "")
 
 
 @app.get("/artifacts/{aid}")
