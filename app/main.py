@@ -423,6 +423,21 @@ def meeting_view(request: Request, mid: int):
                 quiet_at=userbot.local_time(until) if until is not None else "")
 
 
+@app.get("/meetings/{mid}/audio")
+def meeting_audio(request: Request, mid: int):
+    """Stream the retained source recording for reviewing suggested boundaries."""
+    guard(request)
+    with SessionLocal() as s:
+        meeting = s.get(Meeting, mid)
+        if meeting is None or not meeting.audio_path:
+            raise HTTPException(404, "Исходная запись недоступна")
+        audio_path = pathlib.Path(meeting.audio_path)
+        if not audio_path.is_file():
+            raise HTTPException(404, "Файл исходной записи не найден")
+        media_type = mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream"
+    return FileResponse(audio_path, media_type=media_type)
+
+
 @app.get("/artifacts/{aid}")
 def artifact_download(request: Request, aid: int):
     """A document the AI employee made itself (chart, report)."""
