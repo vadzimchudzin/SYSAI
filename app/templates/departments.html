@@ -29,12 +29,12 @@
               <form method="post" action="/departments/{{ child.id }}/delete" onsubmit="return confirm('Архивировать подразделение?')"><button class="btn sm danger">Архивировать</button></form>
             </div>
             {% for member in members_by_department.get(child.id, []) %}
-              <div class="small muted" style="margin-top:5px">{{ member.employee.name }}{% if member.role %} · {{ member.role }}{% endif %}</div>
+              <div class="small muted" style="margin-top:5px">{{ member.employee_name }}{% if member.role %} · {{ member.role }}{% endif %}</div>
             {% endfor %}
           </div>
         {% endfor %}
         {% for member in members_by_department.get(d.id, []) %}
-          <div class="small muted" style="margin-top:7px">{{ member.employee.name }}{% if member.role %} · {{ member.role }}{% endif %}</div>
+          <div class="small muted" style="margin-top:7px">{{ member.employee_name }}{% if member.role %} · {{ member.role }}{% endif %}</div>
         {% endfor %}
       </div>
     {% endfor %}
