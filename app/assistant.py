@@ -282,8 +282,11 @@ def run_task(task_id: int) -> None:
             if userbot.ai_mode():
                 if not userbot.ready():
                     raise AssistantError("Telegram-аккаунт ИИ-сотрудника не подключён")
-            elif not config.telegram_enabled():
-                raise AssistantError("Telegram не подключён, сообщение не отправлено")
+            else:
+                if not config.telegram_enabled():
+                    raise AssistantError("Telegram не подключён, сообщение не отправлено")
+                if not str(target_ref).lstrip("-").isdigit():
+                    raise AssistantError("В режиме обычного бота для адресата нужен числовой Telegram chat ID")
             # Persist the sending state before the external side effect. If the process crashes now,
             # recovery marks it uncertain instead of sending the same message twice.
             with SessionLocal() as s:
