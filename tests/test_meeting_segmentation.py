@@ -1,5 +1,5 @@
 from app import analyze, llm, pipeline
-from app.db import Meeting, SessionLocal
+from app.db import Meeting, SessionLocal, TelegramChat
 
 
 def transcript_with_two_sessions():
@@ -97,3 +97,34 @@ def test_segment_creation_is_review_gated_and_keeps_source_audio(monkeypatch):
         assert children[0].transcript == segments[:10]
         assert children[1].transcript == segments[10:]
     assert processed == [children[0].id, children[1].id]
+
+
+def test_segment_requires_recipients_before_approval_and_saves_them(client):
+    with SessionLocal() as session:
+        parent = Meeting(title="Исходная запись", filename="source.mp3", audio_path="",
+                         source="web", status="segmented", duration_sec=600, transcript=[])
+        session.add(parent)
+        session.flush()
+        child = Meeting(title="Техническое совещание", filename="source.mp3", audio_path="",
+                        source="segment", status="awaiting_approval", duration_sec=300,
+                        transcript=[], report={"tasks": []},
+                        options={"approval_required": True, "report_chat_ids": []},
+                        parent_meeting_id=parent.id, segment_start_sec=300, segment_end_sec=600)
+        session.add(child)
+        session.add(TelegramChat(chat_id="-100123456", kind="group", title="Технический отдел", active=True))
+        session.commit()
+        child_id = child.id
+
+    blocked = client.post(f"/meetings/{child_id}/approve", follow_redirects=False)
+    assert blocked.status_code == 400
+
+    saved = client.post(
+        f"/meetings/{child_id}/recipients",
+        data={"report_chat_ids_extra": "-100123456"},
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    with SessionLocal() as session:
+        child = session.get(Meeting, child_id)
+        assert child.options["report_chat_ids"] == ["-100123456"]
+        assert child.options["approval_required"] is True
