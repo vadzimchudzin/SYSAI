@@ -725,6 +725,10 @@ def settings_models(request: Request):
         response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models", headers=headers, timeout=20)
         response.raise_for_status()
         payload = response.json()
+        stt_response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models?output_modalities=transcription",
+                                 headers=headers, timeout=20)
+        stt_response.raise_for_status()
+        stt_payload = stt_response.json()
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("Could not load OpenRouter model catalog: %s", exc)
         raise HTTPException(502, "Не удалось загрузить каталог OpenRouter. Проверьте подключение и повторите.") from None
@@ -748,7 +752,19 @@ def settings_models(request: Request):
             "completion_price": pricing.get("completion"),
         })
     models.sort(key=lambda model: (model["id"].casefold()))
-    return {"models": models, "count": len(models)}
+    stt_items = stt_payload.get("data", []) if isinstance(stt_payload, dict) else []
+    transcription_models = []
+    for item in stt_items:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        pricing = item.get("pricing") or {}
+        transcription_models.append({"id": item["id"][:200],
+                                     "name": str(item.get("name") or item["id"])[:200],
+                                     "prompt_price": pricing.get("prompt"),
+                                     "completion_price": pricing.get("completion")})
+    transcription_models.sort(key=lambda model: model["id"].casefold())
+    return {"models": models, "count": len(models), "transcription_models": transcription_models,
+            "transcription_count": len(transcription_models)}
 
 
 @app.post("/settings")
@@ -770,12 +786,12 @@ async def settings_save(request: Request):
     for k in settings_store.LEGAL_KEYS:
         if k in f:
             updates[k] = str(f[k]).strip()[:300]
-    for k in ("transcribe_model", "report_model", "agent_model", "conversation_model", "conversation_tone",
+    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model", "conversation_tone",
               "company_name", "accent_color", "glossary", "persona"):
         if k in f:
             value = str(f[k]).strip()
             updates[k] = value if k == "glossary" else value or settings_store.DEFAULTS[k]
-    for k in ("transcribe_model", "report_model", "agent_model", "conversation_model"):
+    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model"):
         if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"[A-Za-z0-9._:/-]+", updates[k])):
             raise HTTPException(400, "Некорректный идентификатор модели")
     if "conversation_tone" in updates:
