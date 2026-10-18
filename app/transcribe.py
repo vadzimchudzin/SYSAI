@@ -93,7 +93,7 @@ def _validate(data, offset, length):
 
 def _merge(segments, new, boundary):
     def normalise(text):
-        return re.sub(r"\\W+", " ", str(text).casefold()).strip()
+        return re.sub(r"\W+", " ", str(text).casefold()).strip()
 
     previous = [old for old in segments if boundary - 2 <= old["start"] <= boundary + OVERLAP_SECONDS]
     # Some audio models restart speaker numbering at each chunk. Use an exact repeated utterance in
