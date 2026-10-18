@@ -128,8 +128,8 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
     base = {"model": model, "input_audio": {"data": base64.b64encode(audio_bytes).decode("ascii"),
                                              "format": audio_format}, "language": language}
     variants = [
-        {**base, "response_format": "verbose_json", "timestamp_granularities": ["segment"], "diarize": True},
         {**base, "response_format": "verbose_json", "timestamp_granularities": ["segment"]},
+        {**base, "response_format": "verbose_json"},
         {**base, "response_format": "json"},
     ]
     last_error = "неизвестная ошибка"
