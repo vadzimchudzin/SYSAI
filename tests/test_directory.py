@@ -46,6 +46,14 @@ def test_ambiguous_participant_name_does_not_keep_model_id():
     assert any("Уточните участника" in note for note in out["notes"])
 
 
+def test_unique_spoken_participant_name_overrides_conflicting_model_id():
+    out = analyze.normalize({
+        "participants": [{"name": "Анне", "employee_id": 1}],
+        "tasks": [],
+    }, TEAM)
+    assert out["participants"][0]["employee_id"] == 3
+
+
 def test_a_surname_does_not_match_a_longer_surname():
     assert analyze.match_employee("Иван", [person(1, "Сергей Иванов")]) is None
 
