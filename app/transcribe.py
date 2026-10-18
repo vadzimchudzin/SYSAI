@@ -175,7 +175,15 @@ def _transcribe_stt_chunk(path, settings, length, context):
     for item in raw_segments:
         if not isinstance(item, dict) or not str(item.get("text") or "").strip():
             continue
-        segment = {"start": item.get("start"), "text": str(item["text"]).strip()}
+        try:
+            start = float(item.get("start"))
+        except (TypeError, ValueError):
+            fallback_text = str(result.get("text") or " ".join(
+                str(part.get("text") or "") for part in raw_segments if isinstance(part, dict))).strip()
+            return _align_plain_transcript(path, fallback_text, settings, length, context)
+        if not math.isfinite(start) or not 0 <= start <= length:
+            raise llm.IncompleteResponse("STT вернул время сегмента за пределами аудиофрагмента")
+        segment = {"start": start, "text": str(item["text"]).strip()}
         if has_speakers:
             raw_speaker = str(item.get("speaker"))
             speaker_map.setdefault(raw_speaker, f"Спикер {len(speaker_map) + 1}")
