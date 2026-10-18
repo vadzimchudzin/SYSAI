@@ -17,6 +17,10 @@ def ensure(s, meeting, settings, origin="approval", draft_revision=None):
         return existing
     tasks = [{"id": t.id, "title": t.title, "description": t.description,
               "assignee_id": t.assignee_id, "assignee_name": t.assignee.name if t.assignee else t.assignee_name,
+              "executor": getattr(t, "executor", None) or "person",
+              "target_employee_id": getattr(t, "target_employee_id", None),
+              "target_employee_name": (t.target_employee.name if getattr(t, "target_employee", None)
+                                       else getattr(t, "target_employee_name", "")),
               "deadline": t.deadline.isoformat() if t.deadline else None,
               "deadline_source": t.deadline_source, "priority": t.priority,
               "quote": t.source_quote, "time": t.source_time} for t in meeting.tasks]
