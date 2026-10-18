@@ -49,3 +49,13 @@ def test_visualization_rejects_mismatched_series_lengths():
     chart = {**CHART, "series": [{"name": "Продажи", "values": [10]}]}
     with pytest.raises(llm.LLMError, match="Числа визуализации"):
         analyze._validate_report(report(chart), [], TRANSCRIPT, 60, dt.date(2026, 10, 18))
+
+def test_chart_values_must_be_present_in_the_cited_numbers():
+    chart = {**CHART, "series": [{"name": "Продажи", "values": [10, 120]}]}
+    out = analyze._validate_report(report(chart), [], TRANSCRIPT, 60, dt.date(2026, 10, 18))
+    assert out["visualizations"] == []
+    assert any("не подтверждаются" in note for note in out["notes"])
+
+
+def test_number_parser_supports_thousands_separated_by_spaces():
+    assert analyze._quote_numbers("Бюджет составит 1 500 рублей") == {1500.0}
