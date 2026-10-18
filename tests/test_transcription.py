@@ -33,7 +33,7 @@ def make_long_mp3(path, seconds):
 
 
 def settings(**overrides):
-    return {"transcribe_model": "test/model", **overrides}
+    return {"transcribe_model": transcribe.LEGACY_CHAT_MODEL, **overrides}
 
 
 @pytest.mark.parametrize("duration,tail", [(122.4, 2.4), (120.35, 0.35)])
