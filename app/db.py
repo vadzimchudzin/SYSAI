@@ -128,6 +128,34 @@ class Employee(Base):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
 
 
+class Department(Base):
+    """Hierarchical organizational unit. parent_id enables departments and nested subdepartments."""
+    __tablename__ = "departments"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(160), nullable=False)
+    description = Column(Text, default="")
+    parent_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True)
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    parent = relationship("Department", remote_side=[id], backref="children")
+
+
+class DepartmentMembership(Base):
+    """A department-scoped role; one employee may have multiple memberships without duplicate profiles."""
+    __tablename__ = "department_memberships"
+    __table_args__ = (UniqueConstraint("employee_id", "department_id"),)
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(160), nullable=False, default="")
+    supervisor_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    appointed_at = Column(Date, nullable=True)
+    status = Column(String(20), nullable=False, default="active")  # active | inactive
+    employee = relationship("Employee", foreign_keys=[employee_id])
+    department = relationship("Department")
+    supervisor = relationship("Employee", foreign_keys=[supervisor_id])
+
+
 class Meeting(Base):
     __tablename__ = "meetings"
     id = Column(Integer, primary_key=True)
