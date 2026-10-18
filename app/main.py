@@ -908,12 +908,14 @@ def departments_view(request: Request):
     with SessionLocal() as s:
         departments = s.query(Department).filter_by(active=True).order_by(Department.name).all()
         memberships = s.query(DepartmentMembership).filter_by(status="active").all()
-        employees = s.query(Employee).filter_by(active=True).order_by(Employee.name).all()
+        employee_names = {e.id: e.name for e in s.query(Employee).all()}
     members_by_department = {}
     for membership in memberships:
-        members_by_department.setdefault(membership.department_id, []).append(membership)
-    return page(request, "departments.html", departments=departments, members_by_department=members_by_department,
-                employees=employees)
+        members_by_department.setdefault(membership.department_id, []).append({
+            "employee_name": employee_names.get(membership.employee_id, "Сотрудник удалён"),
+            "role": membership.role or "",
+        })
+    return page(request, "departments.html", departments=departments, members_by_department=members_by_department)
 
 
 @app.post("/departments")
