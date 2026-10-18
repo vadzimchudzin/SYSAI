@@ -22,8 +22,8 @@ from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, 
                settings_store, telegram, userbot)
 from .analyze import mmss
 from .ui_icons import ICONS
-from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
-                 init_db, now)
+from .db import (Artifact, ConversationEscalation, Delivery, Department, DepartmentMembership, Employee, Meeting,
+                 ReportVersion, SessionLocal, Task, TelegramChat, User, init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("sysai")
@@ -901,27 +901,104 @@ def telegram_account_logout(request: Request):
     return _tg_step(userbot.logout, "Вышли из аккаунта.")
 
 
-# ----------------------------------------------------------------------------- employees
+# ----------------------------------------------------------------------------- departments and employees
+@app.get("/departments", response_class=HTMLResponse)
+def departments_view(request: Request):
+    guard_admin(request)
+    with SessionLocal() as s:
+        departments = s.query(Department).filter_by(active=True).order_by(Department.name).all()
+        memberships = s.query(DepartmentMembership).filter_by(status="active").all()
+        employees = s.query(Employee).filter_by(active=True).order_by(Employee.name).all()
+    members_by_department = {}
+    for membership in memberships:
+        members_by_department.setdefault(membership.department_id, []).append(membership)
+    return page(request, "departments.html", departments=departments, members_by_department=members_by_department,
+                employees=employees)
+
+
+@app.post("/departments")
+async def department_save(request: Request):
+    guard_admin(request)
+    form = await request.form()
+    name = str(form.get("name") or "").strip()[:160]
+    description = str(form.get("description") or "").strip()[:2000]
+    try:
+        parent_id = int(form.get("parent_id") or 0)
+    except (TypeError, ValueError):
+        parent_id = 0
+    if not name:
+        raise HTTPException(400, "Укажите название подразделения.")
+    with SessionLocal() as s:
+        parent = s.get(Department, parent_id) if parent_id else None
+        if parent_id and (parent is None or not parent.active):
+            raise HTTPException(400, "Родительское подразделение не найдено.")
+        if s.query(Department).filter(Department.name == name, Department.active.is_(True)).first():
+            raise HTTPException(409, "Подразделение с таким названием уже существует.")
+        s.add(Department(name=name, description=description, parent_id=parent.id if parent else None))
+        s.commit()
+    return RedirectResponse("/departments", 303)
+
+
+@app.post("/departments/{department_id}/delete")
+def department_delete(request: Request, department_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        if department is not None:
+            # Preserve the hierarchy and historical records; deleting a parent promotes its children.
+            s.query(Department).filter_by(parent_id=department_id).update(
+                {Department.parent_id: department.parent_id}, synchronize_session=False)
+            s.query(DepartmentMembership).filter_by(department_id=department_id).delete(synchronize_session=False)
+            department.active = False
+            s.commit()
+    return RedirectResponse("/departments", 303)
+
+
 @app.get("/employees", response_class=HTMLResponse)
 def employees_view(request: Request, edit: int = 0):
     guard_admin(request)
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
+        departments = s.query(Department).filter_by(active=True).order_by(Department.name).all()
+        memberships = s.query(DepartmentMembership).filter_by(status="active").all()
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
-    return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
-                positions=settings_store.POSITIONS, edit=edit)
+    memberships_by_employee = {}
+    for membership in memberships:
+        memberships_by_employee.setdefault(membership.employee_id, {})[membership.department_id] = membership
+    return page(request, "employees.html", employees=emps, chats=chats, linked=linked, departments=departments,
+                memberships_by_employee=memberships_by_employee, positions=settings_store.POSITIONS, edit=edit)
 
 
 @app.post("/employees")
-def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
-                  position: str = Form(""), channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
-                  telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
+async def employee_save(request: Request):
     guard_admin(request)
+    form = await request.form()
+    try:
+        employee_id = int(form.get("id") or 0)
+    except (TypeError, ValueError):
+        employee_id = 0
+    name = str(form.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Укажите имя сотрудника.")
+    aliases = str(form.get("aliases") or "").strip()
+    position = str(form.get("position") or "").strip()
+    channel = str(form.get("channel") or "telegram").strip()
+    telegram_chat_id = str(form.get("telegram_chat_id") or "")
+    telegram_manual = str(form.get("telegram_manual") or "")
+    bitrix_user_id = str(form.get("bitrix_user_id") or "")
+    department_ids = set()
+    for value in form.getlist("department_ids"):
+        try:
+            department_ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
     with SessionLocal() as s:
-        e = s.get(Employee, id) if id else Employee()
-        e.name, e.aliases, e.position, e.channel = name.strip(), aliases.strip(), position.strip(), channel
+        e = s.get(Employee, employee_id) if employee_id else Employee()
+        if employee_id and e is None:
+            raise HTTPException(404, "Сотрудник не найден.")
+        e.name, e.aliases, e.position, e.channel = name, aliases, position, channel
         ref = (telegram_manual.strip() or telegram_chat_id).strip()
         if ref and userbot.ai_mode():
             try:
@@ -929,11 +1006,27 @@ def employee_save(request: Request, id: int = Form(0), name: str = Form(...), al
             except userbot.RefError as exc:
                 raise HTTPException(400, str(exc))
         if (e.telegram_chat_id or "") != ref:
-            e.telegram_user_id = ""  # the person behind the address changed, learn the id again
+            e.telegram_user_id = ""
         e.telegram_chat_id = ref
         e.bitrix_user_id = bitrix_user_id.strip()
-        e.active = bool(active) if id else True
+        e.active = bool(form.get("active")) if employee_id else True
         s.add(e)
+        s.flush()
+        valid_departments = {d.id for d in s.query(Department).filter(
+            Department.id.in_(department_ids), Department.active.is_(True)).all()} if department_ids else set()
+        existing = {m.department_id: m for m in s.query(DepartmentMembership).filter_by(employee_id=e.id).all()}
+        for department_id, membership in existing.items():
+            if department_id not in valid_departments:
+                s.delete(membership)
+        for department_id in valid_departments:
+            role = str(form.get(f"department_role_{department_id}") or "").strip()[:160]
+            membership = existing.get(department_id)
+            if membership is None:
+                membership = DepartmentMembership(employee_id=e.id, department_id=department_id, role=role or position)
+                s.add(membership)
+            else:
+                membership.role = role or position
+                membership.status = "active"
         s.commit()
     return RedirectResponse("/employees", 303)
 
