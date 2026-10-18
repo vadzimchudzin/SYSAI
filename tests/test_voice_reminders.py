@@ -159,8 +159,9 @@ def test_a_voice_that_cannot_be_understood_is_flagged_for_the_model(tgacc, model
 
 
 def test_voice_text_sends_the_audio_to_the_model_as_mp3(monkeypatch, tmp_path):
-    from app import config
+    from app import config, settings_store
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "key")
+    settings_store.set_many({"transcribe_model": transcribe.LEGACY_CHAT_MODEL})
     wav = tmp_path / "v.wav"
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=f=300:d=2", str(wav)], check=True)
     seen = {}
