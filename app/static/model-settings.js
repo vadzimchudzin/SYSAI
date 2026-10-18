@@ -49,7 +49,7 @@
       const models = Array.isArray(data.models) ? data.models : [];
       const sttModels = Array.isArray(data.transcription_models) ? data.transcription_models : [];
       fill(fields.transcribe, sttModels, () => true, { preferCatalog: true, preferId: 'openai/gpt-4o-transcribe' });
-      fill(fields.diarization, models, model => model.audio_input);
+      fill(fields.diarization, models, model => model.audio_input && model.text_output);
       fill(fields.report, models, model => model.text_input && model.text_output);
       fill(fields.agent, models, model => model.text_input && model.text_output);
       fill(fields.conversation, models, model => model.id === 'openrouter/free' || model.id.endsWith(':free'));
