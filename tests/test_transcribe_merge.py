@@ -17,7 +17,7 @@ def test_unique_overlap_utterance_stabilises_speaker_and_is_not_duplicated():
     transcribe._merge(segments, new, 60.0)
 
     assert len(segments) == 3
-    assert [s["text"] for s in segments].count("Продолжим закупку оборудования") == 1
+    assert sum(s["text"].rstrip(".") == "Продолжим закупку оборудования" for s in segments) == 1
     assert next(s for s in segments if s["text"] == "Срок до пятницы")["speaker"] == "Спикер 1"
 
 
