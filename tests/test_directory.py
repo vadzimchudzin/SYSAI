@@ -67,6 +67,23 @@ def test_the_analyst_is_told_that_the_id_is_required_for_a_named_person():
     assert "employee_id" in analyze.SYSTEM and "в любом падеже" in analyze.SYSTEM and "обязателен" in analyze.SYSTEM
 
 
+def test_employee_assignment_profile_is_included_in_analysis_directory():
+    specialist = SimpleNamespace(
+        id=7, name="Татьяна Смирнова", aliases="", position="Специалист по закупкам",
+        department="Технический отдел", competencies="промышленные насосы, закупка оборудования",
+        responsibilities="подбор поставщиков и закупка запчастей", context="согласует закупки с главным инженером",
+        alias_list=lambda: [],
+    )
+
+    import json
+    profile = json.loads(analyze.employees_json([specialist]))[0]
+    assert profile["department"] == "Технический отдел"
+    assert "промышленные насосы" in profile["competencies"]
+    assert "закупка запчастей" in profile["responsibilities"]
+    assert "главным инженером" in profile["context"]
+    assert "подразделение, компетенции и обязанности" in analyze.SYSTEM
+
+
 def test_directory_names_help_the_recogniser_and_the_analyst():
     with SessionLocal() as s:
         s.add_all([Employee(name="Вадим Чудин", aliases="Вадя, Чудин"), Employee(name="Иван Петров", aliases="Вадя"),
