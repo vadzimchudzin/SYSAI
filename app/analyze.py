@@ -44,6 +44,7 @@ SYSTEM = """Ты — опытный секретарь руководителя.
  "topics": [{{"title": str, "summary": str, "notes": [str], "time": "MM:SS"}}],
  "decisions": [{{"text": str, "time": "MM:SS"}}],
  "tasks": [{{"title": str, "description": str, "employee_id": int|null, "assignee_name": str|null,
+            "target_employee_id": int|null, "target_employee_name": str|null,
             "deadline": "YYYY-MM-DD"|null, "deadline_quote": str|null, "priority": "high"|"medium"|"low",
             "executor": "person"|"assistant",
             "time": "MM:SS", "quote": str}}],
