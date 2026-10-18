@@ -29,6 +29,7 @@ SYSTEM = """Ты — опытный секретарь руководителя.
   employee_id null и assignee_name "ассистент". Все остальные задачи: executor="person".
 - Решения — то, о чём договорились. Открытые вопросы — что осталось нерешённым. Риски — проблемы и опасения.
 - Участники: сопоставь метки говорящих («Спикер 1») с людьми, если это понятно из разговора.
+При выборе исполнителя учитывай не только имя: должность, подразделение, компетенции и обязанности помогают понять контекст поручения. Не назначай задачу только по совпадению общей темы; если прямого указания и однозначных данных нет, оставь employee_id null и сохрани сказанное в assignee_name.
 Справочник сотрудников (JSON): {employees}
 Термины компании: {glossary}
 Если имя или роль участника неизвестны, укажи пустую строку; не выдумывай имя по голосу.
@@ -53,7 +54,11 @@ def transcript_text(segments: list) -> str:
 
 
 def employees_json(employees) -> str:
-    return json.dumps([{"employee_id": e.id, "name": e.name, "aliases": e.alias_list(), "position": e.position}
+    return json.dumps([{"employee_id": e.id, "name": e.name, "aliases": e.alias_list(),
+                          "position": getattr(e, "position", ""), "department": getattr(e, "department", ""),
+                          "competencies": getattr(e, "competencies", ""),
+                          "responsibilities": getattr(e, "responsibilities", ""),
+                          "context": getattr(e, "context", "")}
                        for e in employees], ensure_ascii=False)
 
 
