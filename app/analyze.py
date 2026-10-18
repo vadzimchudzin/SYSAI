@@ -612,11 +612,9 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
                 context = " ".join(str(t.get(key) or "") for key in ("title", "description", "quote"))
                 target = match_task_employee(target_name, context, employees) or match_employee(target_name, employees)
                 target_id = target.id if target and getattr(target, "telegram_chat_id", "") else None
-            elif target_id in ids:
-                target = next((employee for employee in employees if employee.id == target_id), None)
-                if target is None or not getattr(target, "telegram_chat_id", ""):
-                    target_id = None
             else:
+                # Never route an external message using a model-supplied ID alone. Require a spoken target name
+                # that can be resolved against the current directory and checked for a reachable contact.
                 target_id = None
         else:
             target_id, target_name = None, ""
