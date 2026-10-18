@@ -240,6 +240,8 @@ def _task_view(task, employee_view: bool) -> dict:
             "status": task.status, "deadline": task.deadline.isoformat() if task.deadline else None,
             "can_set_deadline": task.deadline is None, "priority": task.priority,
             "meeting": task.meeting.title if task.meeting else "", "meeting_id": task.meeting_id}
+    if not employee_view and getattr(task, "target_employee", None):
+        view["target_employee"] = task.target_employee.name
     if employee_view:
         view["quote"] = (task.source_quote or "")[:250]
     return view
