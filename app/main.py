@@ -699,7 +699,7 @@ def meeting_delete(request: Request, mid: int):
                         pathlib.Path(child.audio_path).unlink(missing_ok=True)
                     s.delete(child)
             if m.audio_path:
-                pathlib.Path(m.audio_path).unlink(m.audio_path, missing_ok=True)
+                pathlib.Path(m.audio_path).unlink(missing_ok=True)
             s.delete(m)
             s.commit()
     return RedirectResponse("/meetings", 303)
