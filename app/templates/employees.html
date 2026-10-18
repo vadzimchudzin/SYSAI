@@ -18,7 +18,7 @@
         {% endfor %}
       {% endif %}
       <div class="department-membership-row">
-        <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {{ 'checked' if ns.membership }}>
+        <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {{ 'checked' if ns.membership }} {{ 'disabled' if not d.active and not ns.membership }}>
           {{ d.name }}{% if not d.active %} (неактивно){% endif %}
         </label>
         <label class="f">Роль в подразделении
