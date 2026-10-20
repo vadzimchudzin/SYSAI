@@ -339,7 +339,7 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
                 raise llm.IncompleteResponse("Ответ обрезан, нужен меньший фрагмент")
             if voiceprints and result:
                 try:
-                    result = speaker_id.identify_segments(chunk, result, voiceprints, offset=offset)
+                    result = speaker_id.identify_segments(chunk, result, voiceprints, offset=offset, duration=length)
                 except speaker_id.SpeakerIdentityError as exc:
                     # Optional identification must never fail transcription or delivery of the meeting.
                     log.warning("Voice identity failed for chunk %s; keeping anonymous labels: %s", index, exc)

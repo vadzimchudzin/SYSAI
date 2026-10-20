@@ -254,7 +254,7 @@ def _identify_audio(path: str | pathlib.Path, profiles: list[dict]) -> dict:
 
 
 def identify_segments(path: str | pathlib.Path, segments: list[dict], profiles: list[dict],
-                      offset: float = 0.0) -> list[dict]:
+                      offset: float = 0.0, duration: float | None = None) -> list[dict]:
     """Rename only spans explicitly matched to one enrolled template with a score >= threshold."""
     if not segments or not profiles or not config.pyannoteai_key():
         return segments
@@ -293,6 +293,11 @@ def identify_segments(path: str | pathlib.Path, segments: list[dict], profiles: 
         if score is None or score < MATCH_THRESHOLD:
             continue
         spans.append((start, end, profile, score))
+    if len(segments) == 1 and duration is not None and duration > 0:
+        # If ASR returned one fallback segment for an entire chunk, do not label
+        # the whole chunk from a short voice match near its start.
+        minimum_coverage = float(duration) * 0.8
+        spans = [span for span in spans if span[1] - span[0] >= minimum_coverage]
     updated_segments = []
     for segment in segments:
         local_start = float(segment.get("start", 0) or 0) - float(offset or 0)

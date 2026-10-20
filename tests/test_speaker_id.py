@@ -1,4 +1,5 @@
 import datetime as dt
+from urllib.parse import parse_qs, urlsplit
 
 from app import analyze, config, speaker_id
 from app.db import Employee
@@ -140,7 +141,8 @@ def test_voice_sample_enrollment_requires_explicit_consent(client, monkeypatch):
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "согласия" in response.headers["location"].lower()
+    message = parse_qs(urlsplit(response.headers["location"]).query).get("voice_msg", [""])[0].lower()
+    assert "согласия" in message
     with SessionLocal() as session:
         assert session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).count() == 0
 
@@ -165,7 +167,8 @@ def test_voice_sample_enrollment_saves_encrypted_template_and_consent(client, mo
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "создан" in response.headers["location"].lower()
+    message = parse_qs(urlsplit(response.headers["location"]).query).get("voice_msg", [""])[0].lower()
+    assert "создан" in message
     with SessionLocal() as session:
         profile = session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).one()
         assert b"provider-template-secret" not in profile.encrypted_voiceprint
@@ -207,3 +210,20 @@ def test_analysis_transcript_marks_confirmed_voiceprint_identity():
     ])
     assert "[VOICEPRINT_CONFIRMED employee_id=7] Мария Смирнова: Доброе утро." in text
     assert "[VOICEPRINT_CONFIRMED" not in text.splitlines()[1]
+
+
+
+def test_single_long_transcript_segment_is_not_named_from_a_short_voice_match(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "PYANNOTEAI_API_KEY", "fake")
+    monkeypatch.setattr(config, "_panel", lambda _key: "")
+    profiles = [{"label": "employee-7", "employee_id": 7, "employee_name": "Мария", "voiceprint": "one"}]
+    output = {
+        "identification": [{"start": 0, "end": 14, "match": "employee-7"}],
+        "voiceprints": [{"speaker": "SPEAKER_00", "match": "employee-7",
+                         "confidence": {"employee-7": 91}}],
+    }
+    monkeypatch.setattr(speaker_id, "_identify_audio", lambda _path, _profiles: output)
+    segments = [{"start": 0, "speaker": "Спикер 1", "text": "Длинная неразмеченная расшифровка"}]
+    result = speaker_id.identify_segments(tmp_path / "chunk.wav", segments, profiles, duration=60.0)
+    assert result[0]["speaker"] == "Спикер 1"
+    assert "speaker_employee_id" not in result[0]
