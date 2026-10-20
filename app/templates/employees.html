@@ -1,69 +1,94 @@
 {% extends "base.html" %}{% block title %}Сотрудники — SYSAI{% endblock %}
 {% macro form(e) %}
-<form method="post" action="/employees" class="emp-form">
+<form method="post" action="/employees" class="emp-form {% if not e %}employee-quick-form{% endif %}">
   <input type="hidden" name="id" value="{{ e.id if e else 0 }}">
-  <label class="f">Имя и фамилия <input name="name" required value="{{ e.name if e }}" placeholder="Иван Петров"></label>
-  <label class="f">Как называют на совещаниях <input name="aliases" value="{{ e.aliases if e }}" placeholder="Ваня, Иван Сергеевич, Петров"></label>
-  <label class="f">Должность <input name="position" list="positions" value="{{ e.position if e }}" placeholder="Выберите или впишите свою"></label>
-  <label class="f">Подразделение <input name="department" value="{{ e.department if e }}" placeholder="Например, технический отдел"></label>
-  <label class="f">Компетенции <textarea name="competencies" rows="2" placeholder="Навыки, направления, оборудование">{{ e.competencies if e }}</textarea></label>
-  <label class="f">Обязанности <textarea name="responsibilities" rows="3" maxlength="4000" placeholder="За что отвечает сотрудник">{{ e.responsibilities if e }}</textarea><small class="muted">Помогает выбрать исполнителя по смыслу задачи.</small></label>
-  <label class="f">Дополнительный контекст <textarea name="context" rows="2" placeholder="Уточнения для различения одноимённых сотрудников">{{ e.context if e }}</textarea></label>
-  {% if departments %}
-  <details class="department-memberships" {% if e and e.department_memberships %}open{% endif %}>
-    <summary>Подразделения, роли и обязанности</summary>
-    {% for d in departments %}
-      {% set matches = (e.department_memberships | selectattr('department_id', 'equalto', d.id) | list) if e else [] %}
-      {% set m = matches[0] if matches else none %}
-      <div class="department-membership-row">
-        <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {% if m %}checked{% endif %} {% if not d.active and not m %}disabled{% endif %}> {{ d.name }}{% if not d.active %} (неактивно){% endif %}</label>
-        <label class="f">Роль в подразделении
-          <input name="department_role_{{ d.id }}" maxlength="200" value="{{ m.role if m else '' }}" placeholder="Например, специалист по закупкам">
-        </label>
-        <label class="f">Обязанности в этом подразделении
-          <textarea name="department_responsibilities_{{ d.id }}" rows="2" maxlength="4000" placeholder="Что именно выполняет в этом отделе">{{ m.responsibilities if m else '' }}</textarea>
-        </label>
-      </div>
-    {% endfor %}
-  </details>
-  {% endif %}
-  <label class="f">Куда писать <select name="channel"><option value="telegram">Telegram</option></select></label>
-  {% if ai %}<label class="f">Telegram <input name="telegram_manual" placeholder="@username или +375291234567" value="{{ e.telegram_chat_id if e }}"></label>
+  <label class="f">Имя и фамилия
+    <input name="name" required maxlength="200" value="{{ e.name if e else '' }}" placeholder="Иван Петров" autofocus>
+  </label>
+  {% if not e %}
+    <label class="f">Должность <input name="position" list="positions" maxlength="200" placeholder="Можно заполнить позже"></label>
+    <div class="actions"><button class="btn primary" type="submit">Создать карточку</button><a class="btn ghost" href="/employees">Отмена</a></div>
   {% else %}
-  <label class="f">Telegram <select name="telegram_chat_id"><option value="">— не привязан —</option>
-    {% for c in chats %}<option value="{{ c.chat_id }}" {{ 'selected' if e and e.telegram_chat_id == c.chat_id }}>{{ c.title }}{% if c.username %} @{{ c.username }}{% endif %}{% if c.chat_id in linked and not (e and e.telegram_chat_id == c.chat_id) %} (уже привязан){% endif %}</option>{% endfor %}
-  </select><input name="telegram_manual" placeholder="или chat_id вручную" value="{{ e.telegram_chat_id if e and e.telegram_chat_id not in chats|map(attribute='chat_id')|list }}"></label>
+    <div class="employee-profile-grid">
+      <label class="f">Как называют на совещаниях<input name="aliases" maxlength="500" value="{{ e.aliases or '' }}" placeholder="Ваня, Иван Сергеевич"></label>
+      <label class="f">Должность<input name="position" list="positions" maxlength="200" value="{{ e.position or '' }}" placeholder="Должность сотрудника"></label>
+      <label class="f">Старое текстовое подразделение<input name="department" maxlength="200" value="{{ e.department or '' }}" placeholder="Если ещё используется"></label>
+      <label class="f">Компетенции<textarea name="competencies" rows="2" placeholder="Навыки, направления, оборудование">{{ e.competencies or '' }}</textarea></label>
+      <label class="f employee-profile-wide">Общие обязанности<textarea name="responsibilities" rows="3" maxlength="4000" placeholder="За что отвечает в целом">{{ e.responsibilities or '' }}</textarea><small class="muted">Помогают выбрать исполнителя по смыслу задачи.</small></label>
+      <label class="f employee-profile-wide">Дополнительный контекст<textarea name="context" rows="2" placeholder="Уточнения для различения одноимённых сотрудников">{{ e.context or '' }}</textarea></label>
+    </div>
+    {% if departments %}
+    <details class="department-memberships" {% if e.department_memberships %}open{% endif %}>
+      <summary>Подразделения и обязанности в каждом отделе</summary>
+      <div class="employee-membership-fields">
+      {% for d in departments %}
+        {% set matches = (e.department_memberships | selectattr('department_id', 'equalto', d.id) | list) %}
+        {% set m = matches[0] if matches else none %}
+        <section class="employee-membership-field">
+          <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {% if m %}checked{% endif %} {% if not d.active and not m %}disabled{% endif %}><b>{{ d.name }}</b></label>
+          <label class="f">Роль в подразделении<input name="department_role_{{ d.id }}" maxlength="200" value="{{ m.role if m else '' }}" placeholder="Например, начальник смены"></label>
+          <label class="f">Обязанности в этом отделе<textarea name="department_responsibilities_{{ d.id }}" rows="2" maxlength="4000" placeholder="За что отвечает именно здесь">{{ m.responsibilities if m else '' }}</textarea></label>
+        </section>
+      {% endfor %}
+      </div>
+    </details>
+    {% endif %}
+    <div class="employee-profile-grid">
+      <label class="f">Канал связи<select name="channel"><option value="telegram">Telegram</option></select></label>
+      {% if ai %}
+      <label class="f">Telegram<input name="telegram_manual" maxlength="200" placeholder="@username или телефон" value="{{ e.telegram_chat_id or '' }}"></label>
+      {% else %}
+      <label class="f">Telegram
+        <select name="telegram_chat_id"><option value="">— не привязан —</option>
+          {% for c in chats %}<option value="{{ c.chat_id }}" {{ 'selected' if e.telegram_chat_id == c.chat_id }}>{{ c.title }}{% if c.username %} @{{ c.username }}{% endif %}{% if c.chat_id in linked and e.telegram_chat_id != c.chat_id %} (уже привязан){% endif %}</option>{% endfor %}
+        </select>
+        <input name="telegram_manual" maxlength="200" placeholder="Или chat_id вручную" value="{{ e.telegram_chat_id if e.telegram_chat_id not in chats|map(attribute='chat_id')|list else '' }}">
+      </label>
+      {% endif %}
+      <label class="f">ID в Bitrix24<input name="bitrix_user_id" value="{{ e.bitrix_user_id or '' }}" placeholder="При подключении интеграции"></label>
+    </div>
+    <label class="check employee-active-check"><input type="checkbox" name="active" {% if e.active %}checked{% endif %}> Сотрудник активен</label>
+    <div class="actions"><button class="btn primary" type="submit">Сохранить изменения</button><a class="btn ghost" href="/employees">Закрыть</a></div>
   {% endif %}
-  <label class="f">ID в Bitrix24 <small class="muted">(позже)</small><input name="bitrix_user_id" value="{{ e.bitrix_user_id if e }}"></label>
-  {% if e %}<label class="check"><input type="checkbox" name="active" {{ 'checked' if e.active }}> Активен</label>{% endif %}
-  <button class="btn primary">{{ 'Сохранить' if e else 'Добавить' }}</button>
 </form>
 {% endmacro %}
 {% block body %}
 <datalist id="positions">{% for p in positions %}<option value="{{ p }}">{% endfor %}</datalist>
-<div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div><a class="btn" href="/departments">Подразделения</a></div>
-{% if ai %}<div class="card note">ИИ-сотрудник пишет с подключённого аккаунта. Укажите @username сотрудника или его номер телефона. Если по номеру человека не найти, добавьте его в контакты аккаунта или укажите @username.</div>{% else %}<div class="card note">Чтобы бот мог писать сотруднику, тот должен один раз открыть бота и нажать <b>/start</b> — после этого он появится в списке «Telegram».</div>{% endif %}
-<div class="grid2">
-<section class="card"><h2>Добавить сотрудника</h2>{{ form(None) }}</section>
-<section class="card"><h2>Справочник ({{ employees|length }})</h2>
-  {% if not employees %}<p class="muted">Пока пусто.</p>{% endif %}
-  {% for e in employees %}
-  <div class="emp {{ '' if e.active else 'off' }}">
-    <div class="row between"><div><b>{{ e.name }}</b> <span class="muted">{{ e.position }}</span>
-      <div class="small muted">{{ e.aliases }}</div>
-      {% if e.department_memberships %}
-      <div class="department-badges"><span class="small muted">Подразделения:</span>
-        {% for membership in e.department_memberships %}<span class="pill blue" title="{{ membership.role or 'Сотрудник подразделения' }}">{{ membership.department.name }}</span>{% endfor %}
-      </div>
-      {% elif e.department %}<div class="department-badges"><span class="small muted">Подразделение:</span><span class="pill blue">{{ e.department }}</span></div>
-      {% else %}<div class="department-badges"><span class="pill gray">Без подразделения</span></div>{% endif %}
-      {% if e.competencies or e.responsibilities or e.context %}<div class="small muted">{% if e.competencies %}Компетенции: {{ e.competencies }} · {% endif %}{% if e.responsibilities %}Обязанности: {{ e.responsibilities }} · {% endif %}{% if e.context %}{{ e.context }}{% endif %}</div>{% endif %}
-      <div class="small">{% if e.telegram_chat_id %}<span class="pill green">Telegram</span>{% else %}<span class="pill red">нет Telegram</span>{% endif %}</div></div>
-      <div class="actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Изменить</a>
-        <form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">×</button></form></div></div>
-    {% if edit == e.id %}<div class="edit-box">{{ form(e) }}</div>{% endif %}
-  </div>
-  {% endfor %}
-</section>
+<div class="page-h employees-page-head">
+  <div><h1>Сотрудники</h1><p>Единый справочник. Подробные обязанности и роли настраиваются в карточке человека.</p></div>
+  <div class="actions"><a class="btn" href="/departments">Подразделения</a><a class="btn primary" href="/employees?add=1"><span aria-hidden="true">＋</span> Добавить сотрудника</a></div>
 </div>
+{% if ai %}<div class="card note">Для сообщений через подключённый аккаунт Telegram укажите @username или телефон сотрудника в его карточке.</div>{% else %}<div class="card note">Чтобы бот мог написать сотруднику, тот должен открыть бота и нажать <b>/start</b> — после этого он появится в списке Telegram.</div>{% endif %}
+{% if add %}
+<section class="card employee-add-panel"><div class="employee-add-heading"><h2>Новая карточка</h2><p class="muted small">Для начала достаточно имени. Остальное заполните после создания.</p></div>{{ form(None) }}</section>
+{% endif %}
+<section class="card employee-directory">
+  <header class="employee-directory-head"><div><h2>Общий список</h2><p class="muted small">{{ employees|length }} сотрудников</p></div></header>
+  {% if not employees %}
+  <div class="empty-state"><div class="empty-state-icon" aria-hidden="true">♙</div><h3>Справочник пока пуст</h3><p class="muted">Создайте карточку первого сотрудника.</p><a class="btn primary" href="/employees?add=1">＋ Добавить сотрудника</a></div>
+  {% else %}
+  <div class="employee-list">
+  {% for e in employees %}
+    <article class="employee-card {{ '' if e.active else 'off' }}">
+      <div class="employee-row">
+        <div class="employee-main">
+          <div class="employee-name-line"><b>{{ e.name }}</b>{% if e.position %}<span class="muted">{{ e.position }}</span>{% endif %}{% if not e.active %}<span class="pill gray">Неактивен</span>{% endif %}</div>
+          {% if e.aliases %}<div class="small muted">{{ e.aliases }}</div>{% endif %}
+          <div class="department-badges">
+            {% if e.department_memberships %}
+              {% for membership in e.department_memberships %}<span class="pill blue">{% if membership.is_primary %}<span class="manager-star" title="Начальник подразделения">★</span> {% endif %}{{ membership.department.name }}</span>{% endfor %}
+            {% elif e.department %}<span class="pill blue">{{ e.department }}</span>
+            {% else %}<span class="pill gray">Без подразделения</span>{% endif %}
+          </div>
+          {% if e.competencies or e.responsibilities %}<div class="employee-details-line">{% if e.competencies %}<span><b>Компетенции:</b> {{ e.competencies }}</span>{% endif %}{% if e.responsibilities %}<span><b>Обязанности:</b> {{ e.responsibilities }}</span>{% endif %}</div>{% endif %}
+          <div class="employee-status">{% if e.telegram_chat_id %}<span class="pill green">Telegram подключён</span>{% else %}<span class="pill gray">Telegram не привязан</span>{% endif %}</div>
+        </div>
+        <div class="actions employee-actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Настроить</a><form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">Удалить</button></form></div>
+      </div>
+      {% if edit == e.id %}<div class="employee-edit-panel"><div class="employee-edit-heading"><h3>Карточка сотрудника</h3><p class="muted small">Профиль, контакты и обязанности в подразделениях.</p></div>{{ form(e) }}</div>{% endif %}
+    </article>
+  {% endfor %}
+  </div>
+  {% endif %}
+</section>
 {% endblock %}

@@ -999,7 +999,7 @@ def telegram_account_logout(request: Request):
 
 # ----------------------------------------------------------------------------- employees
 @app.get("/employees", response_class=HTMLResponse)
-def employees_view(request: Request, edit: int = 0):
+def employees_view(request: Request, edit: int = 0, add: int = 0):
     guard_admin(request)
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
@@ -1013,7 +1013,7 @@ def employees_view(request: Request, edit: int = 0):
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
-                departments=departments, positions=settings_store.POSITIONS, edit=edit)
+                departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add))
 
 
 @app.post("/employees")
@@ -1080,6 +1080,14 @@ def departments_view(request: Request, edit: int = 0, msg: str = ""):
             for membership in employee.department_memberships:
                 if membership.department is not None:
                     _ = membership.department.name
+        department_heads = {
+            department.id: next(
+                (membership for membership in department.memberships
+                 if membership.is_primary and membership.employee is not None and membership.employee.active),
+                None,
+            )
+            for department in departments
+        }
         member_ids_by_department = {
             department.id: {membership.employee_id for membership in department.memberships}
             for department in departments
@@ -1090,7 +1098,7 @@ def departments_view(request: Request, edit: int = 0, msg: str = ""):
             for department in departments
         }
     return page(request, "departments.html", departments=departments, edit=edit, msg=msg,
-                available_employees_by_department=available_employees_by_department)
+                available_employees_by_department=available_employees_by_department, department_heads=department_heads)
 
 
 @app.post("/departments")
@@ -1115,6 +1123,32 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         s.add(department)
         s.commit()
     return RedirectResponse("/departments", 303)
+
+
+@app.post("/departments/{department_id}/head")
+def department_set_head(request: Request, department_id: int, employee_id: int = Form(0)):
+    guard_admin(request)
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        memberships = s.query(EmployeeDepartment).filter_by(department_id=department_id).all()
+        by_employee = {membership.employee_id: membership for membership in memberships}
+        chosen = by_employee.get(employee_id) if employee_id else None
+        if employee_id and (
+            chosen is None or chosen.employee is None or not chosen.employee.active
+        ):
+            raise HTTPException(400, "Начальника можно выбрать только из активных сотрудников этого подразделения")
+        for membership in memberships:
+            membership.is_primary = bool(chosen and membership.employee_id == chosen.employee_id)
+        department_name = department.name
+        chosen_name = chosen.employee.name if chosen and chosen.employee else ""
+        s.commit()
+    message = (
+        f"Назначен начальник подразделения «{department_name}»: {chosen_name}."
+        if chosen_name else f"Назначение начальника подразделения «{department_name}» снято."
+    )
+    return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
 @app.post("/departments/{department_id}/members")

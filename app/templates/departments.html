@@ -2,93 +2,95 @@
 {% macro form(d) %}
 <form method="post" action="/departments" class="department-form">
   <input type="hidden" name="id" value="{{ d.id if d else 0 }}">
-  <label class="f">Название подразделения
-    <input name="name" required maxlength="100" value="{{ d.name if d else '' }}" placeholder="Технический отдел">
-  </label>
-  <label class="f">Чем занимается подразделение
-    <textarea name="description" rows="2" maxlength="1000" placeholder="Основные задачи и зона ответственности">{{ d.description if d else '' }}</textarea>
-  </label>
-  {% if d %}<label class="check"><input type="checkbox" name="active" {{ 'checked' if d.active }}> Активно</label>{% endif %}
-  <button class="btn primary">{{ 'Сохранить' if d else 'Создать подразделение' }}</button>
+  <label class="f">Название подразделения<input name="name" required maxlength="100" value="{{ d.name if d else '' }}" placeholder="Например, Технический отдел"></label>
+  <label class="f">Зона ответственности<textarea name="description" rows="2" maxlength="1000" placeholder="Основные задачи подразделения">{{ d.description if d else '' }}</textarea></label>
+  {% if d %}<label class="check"><input type="checkbox" name="active" {% if d.active %}checked{% endif %}> Подразделение активно</label>{% endif %}
+  <div class="actions"><button class="btn primary">{{ 'Сохранить изменения' if d else 'Создать подразделение' }}</button>{% if d %}<a class="btn ghost" href="/departments">Отмена</a>{% endif %}</div>
 </form>
 {% endmacro %}
-{% macro membership_form(d, available) %}
-<form method="post" action="/departments/{{ d.id }}/members" class="department-form add-existing-form">
-  <label class="f">Сотрудник из общего справочника
-    <select name="employee_id" required>
-      <option value="">Выберите сотрудника</option>
-      {% for employee in available %}<option value="{{ employee.id }}">{{ employee.name }}{% if employee.position %} — {{ employee.position }}{% endif %}</option>{% endfor %}
-    </select>
+{% macro existing_member_form(d, available) %}
+<form method="post" action="/departments/{{ d.id }}/members" class="department-form">
+  <label class="f">Сотрудник из общего списка
+    <select name="employee_id" required><option value="">Выберите сотрудника</option>{% for employee in available %}<option value="{{ employee.id }}">{{ employee.name }}{% if employee.position %} — {{ employee.position }}{% endif %}</option>{% endfor %}</select>
   </label>
-  <label class="f">Роль в подразделении <input name="role" maxlength="200" placeholder="Например, инженер по оборудованию"></label>
-  <label class="f">Обязанности в подразделении
-    <textarea name="responsibilities" rows="2" maxlength="4000" placeholder="Зона ответственности, задачи и компетенции"></textarea>
-  </label>
-  <button class="btn primary" {% if not available %}disabled{% endif %}>Добавить в подразделение</button>
-  {% if not available %}<small class="muted">Все активные сотрудники уже состоят в этом подразделении либо общий справочник пока пуст.</small>{% endif %}
+  <label class="f">Роль в этом отделе<input name="role" maxlength="200" placeholder="Например, инженер по оборудованию"></label>
+  <label class="f">Обязанности в этом отделе<textarea name="responsibilities" rows="2" maxlength="4000" placeholder="За что отвечает именно здесь"></textarea></label>
+  <button class="btn primary" {% if not available %}disabled{% endif %}>Добавить в состав</button>
+  {% if not available %}<small class="muted">Нет свободных сотрудников. Создайте карточку в общем списке или проверьте состав этого отдела.</small>{% endif %}
 </form>
 {% endmacro %}
 {% macro new_member_form(d) %}
 <form method="post" action="/departments/{{ d.id }}/members/create" class="department-form">
-  <label class="f">Имя и фамилия <input name="name" required maxlength="200" placeholder="Иван Петров"></label>
-  <label class="f">Как называют на совещаниях <input name="aliases" maxlength="500" placeholder="Ваня, Иван Сергеевич"></label>
-  <label class="f">Должность <input name="position" maxlength="200" placeholder="Инженер"></label>
-  <label class="f">Telegram — необязательно <input name="telegram_contact" placeholder="@username, номер или chat_id"></label>
-  <label class="f">Роль в этом подразделении <input name="role" maxlength="200" placeholder="Например, инженер по оборудованию"></label>
-  <label class="f">Обязанности в подразделении
-    <textarea name="responsibilities" rows="2" maxlength="4000" placeholder="Что именно выполняет в отделе"></textarea>
-  </label>
-  <button class="btn primary">Создать сотрудника и добавить</button>
+  <label class="f">Имя и фамилия<input name="name" required maxlength="200" placeholder="Иван Петров"></label>
+  <label class="f">Должность<input name="position" maxlength="200" placeholder="Можно заполнить позже"></label>
+  <details class="advanced-fields"><summary>Дополнительные данные</summary>
+    <label class="f">Псевдонимы<input name="aliases" maxlength="500" placeholder="Ваня, Иван Сергеевич"></label>
+    <label class="f">Telegram<input name="telegram_contact" maxlength="200" placeholder="@username, номер или chat_id"></label>
+  </details>
+  <label class="f">Роль в этом отделе<input name="role" maxlength="200" placeholder="Например, инженер по оборудованию"></label>
+  <label class="f">Обязанности в этом отделе<textarea name="responsibilities" rows="2" maxlength="4000" placeholder="За что отвечает именно здесь"></textarea></label>
+  <button class="btn primary">Создать карточку и добавить в состав</button>
+</form>
+{% endmacro %}
+{% macro head_form(d, head) %}
+<form method="post" action="/departments/{{ d.id }}/head" class="department-head-form">
+  <label class="f">Начальник подразделения<select name="employee_id" {% if not d.memberships %}disabled{% endif %}>
+    <option value="0">Не назначен</option>
+    {% for membership in d.memberships %}{% if membership.employee and membership.employee.active %}<option value="{{ membership.employee_id }}" {% if head and head.employee_id == membership.employee_id %}selected{% endif %}>{{ membership.employee.name }}{% if membership.role %} — {{ membership.role }}{% endif %}</option>{% endif %}{% endfor %}
+  </select></label>
+  <button class="btn" {% if not d.memberships %}disabled{% endif %}>Сохранить</button>
 </form>
 {% endmacro %}
 {% block body %}
-<div class="page-h"><div><h1>Подразделения</h1><p>Добавляйте людей в отделы: каждый новый сотрудник автоматически попадает в общий справочник.</p></div><a class="btn" href="/employees">Общий список сотрудников</a></div>
-{% if msg %}<div class="card note">{{ msg }}</div>{% endif %}
-<div class="grid2">
-  <section class="card"><h2>Новое подразделение</h2>{{ form(None) }}</section>
-  <section class="card"><h2>Подразделения ({{ departments|length }})</h2>
-    {% if not departments %}<p class="muted">Подразделений пока нет.</p>{% endif %}
-    {% for d in departments %}
-      <article class="department-card {{ '' if d.active else 'off' }}">
-        <div class="row between"><div class="department-title">
-          <b>{{ d.name }}</b> <span class="pill {{ 'green' if d.active else 'gray' }}">{{ 'активно' if d.active else 'неактивно' }}</span>
-          {% if d.description %}<p class="small muted">{{ d.description }}</p>{% endif %}
-          <p class="small muted">Сотрудников: {{ d.memberships|length }}</p>
-        </div>
-        <div class="actions"><a class="btn sm" href="/departments?edit={{ d.id }}">Изменить</a>
-          <form method="post" action="/departments/{{ d.id }}/delete" onsubmit="return confirm('Удалить подразделение и его членства? Сотрудники останутся в справочнике.')"><button class="btn sm danger">×</button></form>
-        </div></div>
-        <section class="department-people">
-          <div class="row between"><h3>Состав подразделения</h3><span class="pill blue">{{ d.memberships|length }}</span></div>
-          {% if d.memberships %}
-            {% for membership in d.memberships %}
-              <div class="department-person">
-                <div class="department-person-main">
-                  <div class="department-person-name"><b>{{ membership.employee.name }}</b> <span class="pill blue">{{ d.name }}</span></div>
-                  {% if membership.role %}<div class="small">{{ membership.role }}</div>{% elif membership.employee.position %}<div class="small muted">{{ membership.employee.position }}</div>{% endif %}
-                  {% if membership.responsibilities %}<div class="small muted">{{ membership.responsibilities }}</div>{% endif %}
-                </div>
-                <form method="post" action="/departments/{{ d.id }}/members/{{ membership.employee_id }}/remove" onsubmit="return confirm('Исключить из подразделения? Сотрудник останется в общем справочнике.')"><button class="btn sm danger">Убрать</button></form>
-              </div>
-            {% endfor %}
-          {% else %}
-            <p class="muted small">Пока нет сотрудников в этом подразделении.</p>
-          {% endif %}
-        </section>
-        {% if d.active %}
-          <details class="department-add">
-            <summary>Добавить сотрудника</summary>
-            <div class="department-add-tabs">
-              <section><h4>Существующий сотрудник</h4><p class="small muted">Выберите человека из общего справочника. Новая запись не создаётся.</p>{{ membership_form(d, available_employees_by_department[d.id]) }}</section>
-              <section><h4>Новый сотрудник</h4><p class="small muted">Создаст запись в общем списке и сразу добавит её в этот отдел.</p>{{ new_member_form(d) }}</section>
-            </div>
-          </details>
-        {% else %}
-          <p class="muted small">Чтобы добавлять сотрудников, сначала активируйте подразделение.</p>
-        {% endif %}
-        {% if edit == d.id %}<div class="edit-box">{{ form(d) }}</div>{% endif %}
-      </article>
-    {% endfor %}
-  </section>
+<div class="page-h departments-page-head">
+  <div><h1>Подразделения</h1><p>У каждого отдела свой состав, начальник и обязанности сотрудников.</p></div>
+  <div class="actions"><a class="btn" href="/employees">Общий список сотрудников</a><a class="btn primary" href="#create-department">＋ Создать подразделение</a></div>
 </div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+<section class="card department-create" id="create-department">
+  <details {% if edit == 0 and not departments %}open{% endif %}><summary><span class="create-summary-icon">＋</span><span><b>Создать подразделение</b><small class="muted">Название и зона ответственности</small></span></summary><div class="department-create-form">{{ form(None) }}</div></details>
+</section>
+<section class="departments-list">
+  <header class="departments-list-head"><div><h2>Структура компании</h2><p class="muted small">{{ departments|length }} подразделений</p></div></header>
+  {% if not departments %}<div class="card empty-state"><h3>Подразделений пока нет</h3><p class="muted">Создайте отдел, добавьте сотрудников и выберите начальника.</p></div>{% endif %}
+  {% for d in departments %}
+  <article class="department-card {{ '' if d.active else 'off' }}" id="department-{{ d.id }}">
+    <header class="department-card-header">
+      <div class="department-card-title">
+        <div class="department-title-line"><h3>{{ d.name }}</h3><span class="pill {{ 'green' if d.active else 'gray' }}">{{ 'Активно' if d.active else 'Неактивно' }}</span></div>
+        {% if d.description %}<p>{{ d.description }}</p>{% endif %}
+        <div class="department-meta"><span>{{ d.memberships|length }} сотрудников</span>{% if department_heads[d.id] %}<span class="department-head-chip"><span class="manager-star">★</span> Начальник: {{ department_heads[d.id].employee.name }}</span>{% else %}<span class="muted">Начальник не назначен</span>{% endif %}</div>
+      </div>
+      <div class="actions"><a class="btn sm" href="/departments?edit={{ d.id }}#department-{{ d.id }}">Изменить</a><form method="post" action="/departments/{{ d.id }}/delete" onsubmit="return confirm('Удалить подразделение? Сотрудники останутся в общем справочнике.')"><button class="btn sm danger">Удалить</button></form></div>
+    </header>
+    {% if edit == d.id %}<div class="department-edit-panel">{{ form(d) }}</div>{% endif %}
+    <section class="department-head-area">{{ head_form(d, department_heads[d.id]) }}<p class="small muted">Начальником может быть только активный участник этого подразделения. ★ отмечает его и в общем списке.</p></section>
+    <section class="department-people">
+      <div class="department-section-title"><h4>Состав подразделения</h4><span class="count-chip">{{ d.memberships|length }}</span></div>
+      {% if d.memberships %}
+      <div class="department-members-list">
+        {% for membership in d.memberships %}
+        <div class="department-person">
+          <div class="department-person-main">
+            <div class="department-person-name"><b>{% if membership.is_primary %}<span class="manager-star" title="Начальник подразделения">★</span> {% endif %}{{ membership.employee.name }}</b>{% if membership.employee.position %}<span class="muted small">{{ membership.employee.position }}</span>{% endif %}</div>
+            {% if membership.role %}<div class="small">{{ membership.role }}</div>{% endif %}
+            {% if membership.responsibilities %}<div class="small muted">{{ membership.responsibilities }}</div>{% endif %}
+          </div>
+          <form method="post" action="/departments/{{ d.id }}/members/{{ membership.employee_id }}/remove" onsubmit="return confirm('Убрать из этого отдела? Запись сотрудника сохранится.')"><button class="btn sm danger">Убрать</button></form>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}<div class="department-empty">В этом подразделении пока нет сотрудников.</div>{% endif %}
+    </section>
+    {% if d.active %}
+    <details class="department-add"><summary><span class="create-summary-icon">＋</span> Добавить сотрудника</summary>
+      <div class="department-add-stack">
+        <section class="department-add-option"><h4>Выбрать из общего списка</h4><p class="small muted">Добавится только связь с отделом; карточка сотрудника останется общей.</p>{{ existing_member_form(d, available_employees_by_department[d.id]) }}</section>
+        <details class="department-add-option department-add-new"><summary><h4>Создать нового сотрудника</h4><p class="small muted">Новая карточка появится и здесь, и в общем списке.</p></summary>{{ new_member_form(d) }}</details>
+      </div>
+    </details>
+    {% else %}<p class="muted small">Чтобы менять состав, сначала активируйте подразделение.</p>{% endif %}
+  </article>
+  {% endfor %}
+</section>
 {% endblock %}

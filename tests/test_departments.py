@@ -166,3 +166,60 @@ def test_remove_department_member_keeps_employee_in_general_directory(client):
             employee_id=employee_id, department_id=department_id
         ).count() == 0
     assert "Сохраняемый сотрудник" in client.get("/employees").text
+
+
+
+def test_department_head_is_unique_and_limited_to_active_members(client):
+    with SessionLocal() as session:
+        department = Department(name="Отдел руководителя UI")
+        first = Employee(name="Руководитель первый")
+        second = Employee(name="Руководитель второй")
+        outsider = Employee(name="Сотрудник вне отдела")
+        session.add_all([department, first, second, outsider])
+        session.flush()
+        session.add_all([
+            EmployeeDepartment(employee_id=first.id, department_id=department.id),
+            EmployeeDepartment(employee_id=second.id, department_id=department.id),
+        ])
+        session.commit()
+        department_id, first_id, second_id, outsider_id = department.id, first.id, second.id, outsider.id
+
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(first_id)})
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        assert session.query(EmployeeDepartment).filter_by(department_id=department_id, is_primary=True).one().employee_id == first_id
+
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(second_id)})
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        managers = session.query(EmployeeDepartment).filter_by(department_id=department_id, is_primary=True).all()
+        assert len(managers) == 1
+        assert managers[0].employee_id == second_id
+
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(outsider_id)})
+    assert response.status_code == 400
+
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": "0"})
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        assert session.query(EmployeeDepartment).filter_by(department_id=department_id, is_primary=True).count() == 0
+
+
+def test_department_head_is_marked_in_department_and_employee_pages(client):
+    with SessionLocal() as session:
+        department = Department(name="Отдел визуальной звезды")
+        employee = Employee(name="Руководитель со звездой", position="Инженер")
+        session.add_all([department, employee])
+        session.flush()
+        session.add(EmployeeDepartment(employee_id=employee.id, department_id=department.id))
+        session.commit()
+        department_id, employee_id = department.id, employee.id
+
+    client.post(f"/departments/{department_id}/head", data={"employee_id": str(employee_id)})
+    department_page = client.get("/departments")
+    employee_page = client.get("/employees")
+    assert department_page.status_code == 200
+    assert employee_page.status_code == 200
+    assert "Начальник: Руководитель со звездой" in department_page.text
+    assert "Руководитель со звездой" in employee_page.text
+    assert "★" in department_page.text and "★" in employee_page.text

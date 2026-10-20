@@ -558,3 +558,110 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 @media (max-width: 760px) {
   .department-add-tabs { grid-template-columns: minmax(0, 1fr); }
 }
+
+
+/* Employee directory layout: one create action, edit details per person. */
+.employees-page-head { align-items: center; }
+.employee-add-panel { max-width: 760px; }
+.employee-add-panel h2 { margin: 0; }
+.employee-add-heading { margin-bottom: 14px; }
+.employee-add-heading p { margin: 4px 0 0; }
+.employee-quick-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .7fr); gap: 14px; align-items: end; }
+.employee-quick-form .f { min-width: 0; }
+.employee-quick-form .actions { grid-column: 1 / -1; }
+.employee-directory { padding: 22px; }
+.employee-directory-head { margin-bottom: 14px; }
+.employee-directory-head h2 { margin: 0; }
+.employee-directory-head p { margin: 4px 0 0; }
+.employee-list { display: grid; gap: 12px; }
+.employee-card { border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; background: var(--card2); }
+.employee-card.off { opacity: .62; }
+.employee-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.employee-main { display: grid; gap: 8px; min-width: 0; flex: 1; }
+.employee-name-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+.employee-name-line > b { font-size: 16px; }
+.employee-details-line { display: flex; flex-wrap: wrap; gap: 12px 20px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.employee-status { display: flex; flex-wrap: wrap; gap: 6px; }
+.employee-actions { flex: 0 0 auto; }
+.employee-edit-panel { margin-top: 16px; padding-top: 18px; border-top: 1px solid var(--line); }
+.employee-edit-heading { margin-bottom: 14px; }
+.employee-edit-heading h3 { margin: 0 0 4px; }
+.employee-profile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.employee-profile-grid .f { min-width: 0; }
+.employee-profile-wide { grid-column: 1 / -1; }
+.employee-membership-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.employee-membership-field { display: grid; gap: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--card2); padding: 12px; min-width: 0; }
+.employee-membership-field .f { min-width: 0; }
+.employee-membership-field .check { display: flex; align-items: center; gap: 8px; }
+.employee-active-check { margin: 16px 0; }
+.manager-star { color: #edbb50; font-size: 16px; font-weight: 900; line-height: 1; }
+.empty-state { text-align: center; padding: 36px 20px; }
+.empty-state h3 { margin: 10px 0 5px; }
+.empty-state p { margin: 0 0 16px; }
+.empty-state-icon { font-size: 32px; opacity: .65; }
+
+/* Each department is a separate panel; no overlapping narrow side-by-side forms. */
+.departments-page-head { align-items: center; }
+.department-create { padding: 0; overflow: hidden; }
+.department-create > details > summary { list-style: none; cursor: pointer; display: flex; gap: 12px; align-items: center; padding: 16px 20px; }
+.department-create > details > summary::-webkit-details-marker { display: none; }
+.department-create > details > summary > span:last-child { display: grid; gap: 3px; }
+.department-create > details > summary small { display: block; font-weight: 400; }
+.create-summary-icon { display: inline-grid; place-items: center; width: 34px; height: 34px; flex: 0 0 34px; border-radius: 10px; background: var(--clay-bg); color: var(--clay); font-size: 22px; }
+.department-create-form { border-top: 1px solid var(--line); padding: 20px; }
+.department-create-form .department-form { max-width: 760px; }
+.departments-list-head { margin: 26px 0 14px; }
+.departments-list-head h2 { margin: 0; }
+.departments-list-head p { margin: 4px 0 0; }
+.departments-list { display: grid; gap: 16px; }
+.department-card { display: block; min-width: 0; padding: 22px; margin: 0; border: 1px solid var(--line2); border-radius: 16px; background: var(--card); box-shadow: 0 5px 18px rgba(0,0,0,.10); }
+.department-card.off { opacity: .68; }
+.department-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.department-card-title { min-width: 0; flex: 1; }
+.department-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.department-title-line h3 { margin: 0; font-size: 20px; font-weight: 650; }
+.department-card-title > p { margin: 8px 0 0; color: var(--muted); max-width: 900px; overflow-wrap: anywhere; }
+.department-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 10px; color: var(--muted); font-size: 12.5px; }
+.department-head-chip { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-weight: 600; }
+.department-head-area { margin-top: 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg2); }
+.department-head-form { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.department-head-form .f { flex: 1 1 260px; min-width: 0; }
+.department-head-area > p { margin: 8px 0 0; }
+.department-edit-panel { margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg2); }
+.department-section-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+.department-section-title h4 { margin: 0; font-size: 14px; }
+.count-chip { min-width: 28px; text-align: center; padding: 4px 9px; border-radius: 99px; background: var(--line); color: var(--text); font-size: 12px; }
+.department-people { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
+.department-members-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px; }
+.department-person { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--card2); min-width: 0; }
+.department-person-main { display: grid; gap: 5px; min-width: 0; flex: 1; }
+.department-person-name { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.department-person-name b { font-size: 14px; }
+.department-person-main .small { overflow-wrap: anywhere; }
+.department-person form { margin: 0; flex: 0 0 auto; }
+.department-empty { border: 1px dashed var(--line2); border-radius: 12px; padding: 22px; color: var(--muted); text-align: center; }
+.department-add { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; }
+.department-add > summary { cursor: pointer; display: flex; align-items: center; gap: 10px; list-style: none; font-weight: 650; }
+.department-add > summary::-webkit-details-marker { display: none; }
+.department-add-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding-top: 14px; }
+.department-add-option { min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--card2); padding: 16px; }
+.department-add-option .f { min-width: 0; }
+.department-add-option h4 { margin: 0 0 6px; font-size: 14px; }
+.department-add-option p { margin: 0 0 12px; }
+.department-add-option .btn { margin-top: 5px; }
+.department-add-new > summary { cursor: pointer; list-style: none; }
+.department-add-new > summary::-webkit-details-marker { display: none; }
+.department-add-new > summary h4 { margin: 0 0 5px; }
+.department-add-new > summary p { margin: 0; }
+.advanced-fields { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.advanced-fields > summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+@media (max-width: 800px) {
+  .employee-row, .department-card-header { flex-direction: column; }
+  .employee-actions { width: 100%; }
+  .employee-actions .btn { flex: 1; }
+  .employee-quick-form, .employee-profile-grid, .employee-membership-fields { grid-template-columns: minmax(0, 1fr); }
+  .employee-quick-form .actions { grid-column: 1; }
+  .employee-profile-wide { grid-column: 1; }
+  .department-add-tabs { grid-template-columns: minmax(0, 1fr); }
+  .department-head-form .btn { width: 100%; }
+}
