@@ -2,11 +2,12 @@ name: tests
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "feat/**"]
   push:
     branches:
       - main
       - "fix/**"
+      - "feat/**"
 
 permissions:
   contents: read
