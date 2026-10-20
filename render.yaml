@@ -20,5 +20,13 @@ services:
         value: webhook
       - key: TIMEZONE
         value: Europe/Minsk
+      - key: SYSAI_VOICE_SERVICE_URL
+        value: https://sysai-speaker-id.vercel.app
+      - key: SYSAI_VOICE_SERVICE_TOKEN
+        sync: false
+      - key: SYSAI_VOICE_MATCH_THRESHOLD
+        value: "0.55"
+      - key: SYSAI_VOICE_MATCH_MARGIN
+        value: "0.08"
       - key: DATABASE_URL
         sync: false
