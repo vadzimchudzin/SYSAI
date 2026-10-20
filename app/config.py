@@ -38,6 +38,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+PYANNOTEAI_API_KEY = os.getenv("PYANNOTEAI_API_KEY", "")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "webhook")  # webhook | polling | off
@@ -79,6 +80,11 @@ def _panel(key: str) -> str:
 
 def openrouter_key() -> str:
     return _panel("openrouter_api_key") or OPENROUTER_API_KEY
+
+
+def pyannoteai_key() -> str:
+    """Optional external speaker-identification key, with settings-panel values taking precedence."""
+    return _panel("pyannoteai_api_key") or PYANNOTEAI_API_KEY
 
 
 def telegram_token() -> str:
