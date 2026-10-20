@@ -6,7 +6,6 @@
     <input name="name" required maxlength="200" value="{{ e.name if e else '' }}" placeholder="Иван Петров" autofocus>
   </label>
   {% if not e %}
-    <label class="f">Должность <input name="position" list="positions" maxlength="200" placeholder="Можно заполнить позже"></label>
     <div class="actions"><button class="btn primary" type="submit">Создать карточку</button><a class="btn ghost" href="/employees">Отмена</a></div>
   {% else %}
     <div class="employee-profile-grid">

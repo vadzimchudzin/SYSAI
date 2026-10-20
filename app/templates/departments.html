@@ -13,8 +13,7 @@
   <label class="f">Сотрудник из общего списка
     <select name="employee_id" required><option value="">Выберите сотрудника</option>{% for employee in available %}<option value="{{ employee.id }}">{{ employee.name }}{% if employee.position %} — {{ employee.position }}{% endif %}</option>{% endfor %}</select>
   </label>
-  <label class="f">Роль в этом отделе<input name="role" maxlength="200" placeholder="Например, инженер по оборудованию"></label>
-  <label class="f">Обязанности в этом отделе<textarea name="responsibilities" rows="2" maxlength="4000" placeholder="За что отвечает именно здесь"></textarea></label>
+  <p class="small muted">Роль и обязанности назначаются позже в карточке сотрудника.</p>
   <button class="btn primary" {% if not available %}disabled{% endif %}>Добавить в состав</button>
   {% if not available %}<small class="muted">Нет свободных сотрудников. Создайте карточку в общем списке или проверьте состав этого отдела.</small>{% endif %}
 </form>
@@ -22,13 +21,7 @@
 {% macro new_member_form(d) %}
 <form method="post" action="/departments/{{ d.id }}/members/create" class="department-form">
   <label class="f">Имя и фамилия<input name="name" required maxlength="200" placeholder="Иван Петров"></label>
-  <label class="f">Должность<input name="position" maxlength="200" placeholder="Можно заполнить позже"></label>
-  <details class="advanced-fields"><summary>Дополнительные данные</summary>
-    <label class="f">Псевдонимы<input name="aliases" maxlength="500" placeholder="Ваня, Иван Сергеевич"></label>
-    <label class="f">Telegram<input name="telegram_contact" maxlength="200" placeholder="@username, номер или chat_id"></label>
-  </details>
-  <label class="f">Роль в этом отделе<input name="role" maxlength="200" placeholder="Например, инженер по оборудованию"></label>
-  <label class="f">Обязанности в этом отделе<textarea name="responsibilities" rows="2" maxlength="4000" placeholder="За что отвечает именно здесь"></textarea></label>
+  <p class="small muted">Роль, контакты и обязанности можно заполнить после создания в общем списке сотрудников.</p>
   <button class="btn primary">Создать карточку и добавить в состав</button>
 </form>
 {% endmacro %}
@@ -85,8 +78,8 @@
     {% if d.active %}
     <details class="department-add"><summary><span class="create-summary-icon">＋</span> Добавить сотрудника</summary>
       <div class="department-add-stack">
-        <section class="department-add-option"><h4>Выбрать из общего списка</h4><p class="small muted">Добавится только связь с отделом; карточка сотрудника останется общей.</p>{{ existing_member_form(d, available_employees_by_department[d.id]) }}</section>
-        <details class="department-add-option department-add-new"><summary><h4>Создать нового сотрудника</h4><p class="small muted">Новая карточка появится и здесь, и в общем списке.</p></summary>{{ new_member_form(d) }}</details>
+        <section class="department-add-option"><h4>Выбрать из общего списка</h4><p class="small muted">Добавится только связь с отделом. Обязанности настраиваются позднее в карточке сотрудника.</p>{{ existing_member_form(d, available_employees_by_department[d.id]) }}</section>
+        <details class="department-add-option department-add-new"><summary><h4>Создать нового сотрудника</h4><p class="small muted">Создадим карточку по имени; контакты, должность и обязанности заполните позже.</p></summary>{{ new_member_form(d) }}</details>
       </div>
     </details>
     {% else %}<p class="muted small">Чтобы менять состав, сначала активируйте подразделение.</p>{% endif %}

@@ -665,3 +665,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
   .department-add-tabs { grid-template-columns: minmax(0, 1fr); }
   .department-head-form .btn { width: 100%; }
 }
+
+/* Quick-create uses a single field and an explicit action. */
+.employee-quick-form { grid-template-columns: minmax(0, 1fr); max-width: 600px; }
+.employee-quick-form .actions { grid-column: 1; }
