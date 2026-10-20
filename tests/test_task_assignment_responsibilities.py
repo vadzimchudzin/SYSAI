@@ -254,3 +254,46 @@ def test_ai_employee_does_not_take_work_when_ai_mode_is_disabled():
     result = analyze.route_assistant_tasks(report, [], assistant_enabled=False)
     assert result["tasks"][0]["executor"] == "person"
     assert result["tasks"][0]["employee_id"] is None
+
+
+
+def test_ai_employee_does_not_treat_technical_writing_as_a_message():
+    technical = person(22, "Андрей Орлов", "Инженер-программист", "программирование PLC, разработка управляющих программ", "@andrey")
+    report = {
+        "notes": [],
+        "tasks": [{
+            "title": "Написать программу для PLC контроллера",
+            "description": "Реализовать логику управления сушилкой",
+            "quote": "Нужно написать программу для PLC контроллера",
+            "employee_id": None,
+            "assignee_name": "",
+            "executor": "person",
+            "target_employee_id": None,
+            "target_employee_name": "",
+        }],
+    }
+    result = analyze.route_assistant_tasks(report, [technical], assistant_enabled=True)
+    assert result["tasks"][0]["executor"] == "person"
+    assert result["tasks"][0]["target_employee_id"] is None
+
+
+def test_placeholder_assignee_does_not_block_relevance_assignment():
+    marketing = person(31, "Татьяна Иванова", "Маркетолог", "тендеры, продвижение, рекламные кампании")
+    technical = person(32, "Татьяна Петрова", "Технический специалист", "закупки оборудования, подбор поставщиков")
+    report = {
+        "tasks": [{
+            "title": "Закупить промышленное оборудование",
+            "description": "Подобрать поставщика оборудования",
+            "employee_id": None,
+            "assignee_name": "не назначено",
+            "executor": "person",
+            "deadline": None,
+            "deadline_quote": "",
+            "priority": "medium",
+            "time": "01:00",
+            "quote": "Нужно закупить промышленное оборудование",
+        }]
+    }
+    normalized = analyze.normalize(report, [marketing, technical])
+    assert normalized["tasks"][0]["employee_id"] == 32
+    assert normalized["tasks"][0]["assignee_name"] == "Татьяна Петрова"
