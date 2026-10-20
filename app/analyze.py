@@ -497,7 +497,7 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
         if cached is not None:
             try:
                 _validate_report(cached, employees, transcript, duration, meeting_date, source_segments=segments)
-                return normalize(cached, employees, meeting_date)
+                return normalize(cached, employees, meeting_date, source_segments=segments)
             except llm.LLMError:
                 pass
         if progress:
@@ -505,7 +505,7 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
         report = _request_verified_report(settings["report_model"], system, transcript, employees,
                                           transcript, duration, meeting_date, segments, progress)
         _checkpoint_put(checkpoint, "short", 0, fingerprint, report)
-        return normalize(report, employees, meeting_date)
+        return normalize(report, employees, meeting_date, source_segments=segments)
 
     reports = []
     for index, batch in enumerate(batches):
@@ -529,7 +529,7 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
     combined.update(_merge_metadata(reports))
     combined["requires_review"] = any(report.get("requires_review", False) for report in reports)
     combined["tasks"] = _deduplicate_tasks([task for report in reports for task in report["tasks"]], employees)
-    return normalize(combined, employees, meeting_date)
+    return normalize(combined, employees, meeting_date, source_segments=segments)
 
 
 def _deduplicate_tasks(tasks, employees):
@@ -660,8 +660,23 @@ def match_task_employee(name, task_context, employees):
     return winners[0] if best > 0 and len(winners) == 1 else None
 
 
-def normalize(r: dict, employees, meeting_date=None) -> dict:
+def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> dict:
     ids = {e.id for e in employees}
+    employee_by_id = {employee.id: employee for employee in employees}
+    voice_identity_by_speaker = {}
+    ambiguous_voice_labels = set()
+    for segment in source_segments or []:
+        label = segment.get("speaker")
+        voice_id = segment.get("speaker_employee_id")
+        if (not isinstance(label, str) or not isinstance(voice_id, int)
+                or isinstance(voice_id, bool) or voice_id not in ids):
+            continue
+        if label in voice_identity_by_speaker and voice_identity_by_speaker[label] != voice_id:
+            ambiguous_voice_labels.add(label)
+        else:
+            voice_identity_by_speaker[label] = voice_id
+    for label in ambiguous_voice_labels:
+        voice_identity_by_speaker.pop(label, None)
     out = {k: r.get(k) or [] for k in ("participants", "topics", "decisions", "tasks", "open_questions", "risks", "notes", "visualizations")}
     identity_review_notes = []
     participants = []
@@ -672,7 +687,12 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         raw_id = normalized.get("employee_id")
         eid = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) and raw_id in ids else None
         name = (normalized.get("name") or "").strip()
-        if name:
+        verified_id = voice_identity_by_speaker.get(normalized.get("speaker"))
+        if verified_id in ids:
+            # Provider-confirmed voice identity is stronger than model guesses or same-name ambiguity.
+            eid = verified_id
+            normalized["name"] = employee_by_id[verified_id].name
+        elif name:
             candidates = _employee_matches(name, employees)
             if len(candidates) == 1:
                 eid = candidates[0].id
