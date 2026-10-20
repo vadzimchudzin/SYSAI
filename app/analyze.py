@@ -32,7 +32,7 @@ SYSTEM = """Ты — опытный секретарь руководителя.
 - Для assistant-задачи, требующей написать человеку, укажи target_employee_name и target_employee_id. Используй только сотрудника с has_contact=true. Если адресат неоднозначен, target_employee_id=null — не угадывай. Для обычных задач target_employee_id=null.
 - Решения — то, о чём договорились. Открытые вопросы — что осталось нерешённым. Риски — проблемы и опасения.
 - Участники: сопоставь метки говорящих с людьми. Если рядом с репликой есть маркер [VOICEPRINT_CONFIRMED employee_id=N], имя и employee_id N подтверждены голосовым шаблоном; сохрани эту идентификацию, не заменяй её предположением по тексту.
-При выборе исполнителя учитывай не только имя: должность, подразделение, компетенции и обязанности помогают понять контекст поручения. Не назначай задачу только по совпадению общей темы; если прямого указания и однозначных данных нет, оставь employee_id null и сохрани сказанное в assignee_name.
+При выборе исполнителя учитывай должность, подразделение, компетенции и обязанности. Если человек не назван прямо, не выдумывай employee_id: оставь null — приложение отдельно назначит задачу только при сильном и однозначном совпадении компетенций; при недостатке данных оставь задачу без исполнителя. Лёгкие задачи по материалам встречи (сводка, протокол, перечень поручений, отчёт/таблица по обсуждению) и сообщения сотруднику с однозначно найденным контактом может взять ИИ-сотрудник; технические решения, закупки, подписи и действия с внешними последствиями не делегируй ИИ без прямого указания.
 Справочник сотрудников (JSON): {employees}
 Термины компании: {glossary}
 Если имя или роль участника неизвестны, укажи пустую строку; не выдумывай имя по голосу.
@@ -669,6 +669,170 @@ def match_task_employee(name, task_context, employees):
     return winners[0] if best > 0 and len(winners) == 1 else None
 
 
+
+def _task_context_words(text: str) -> set:
+    words = set()
+    for word in _words(text):
+        words.update(_task_stems(word))
+    return words
+
+
+def recommend_task_employee(task_context: str, employees):
+    """Return an employee only when role/duty evidence is strong and clearly outranks alternatives."""
+    context_words = _task_context_words(task_context)
+    if not context_words:
+        return None
+
+    ranked = []
+    for employee in employees:
+        if getattr(employee, "active", True) is False:
+            continue
+        duty_words, department_words, role_words = set(), set(), set()
+        for field in ("competencies", "responsibilities"):
+            duty_words.update(_task_context_words(getattr(employee, field, "") or ""))
+        role_words.update(_task_context_words(getattr(employee, "position", "") or ""))
+        role_words.update(_task_context_words(getattr(employee, "context", "") or ""))
+
+        for membership in (getattr(employee, "department_memberships", []) or []):
+            department = getattr(membership, "department", None)
+            if department is not None and not getattr(department, "active", True):
+                continue
+            duty_words.update(_task_context_words(getattr(membership, "role", "") or ""))
+            duty_words.update(_task_context_words(getattr(membership, "responsibilities", "") or ""))
+            if department is not None:
+                department_words.update(_task_context_words(getattr(department, "name", "") or ""))
+                department_words.update(_task_context_words(getattr(department, "description", "") or ""))
+
+        # Specific competencies and responsibilities dominate broad department/position labels.
+        matched_duties = context_words & duty_words
+        matched_department = context_words & department_words
+        matched_role = context_words & role_words
+        score = 4 * len(matched_duties) + 2 * len(matched_department) + len(matched_role)
+        if score:
+            ranked.append((score, employee))
+
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_employee = ranked[0]
+    next_score = ranked[1][0] if len(ranked) > 1 else 0
+    # A single high-value overlap can resolve a short task; ties and weak evidence remain unassigned.
+    if best_score < 4 or best_score - next_score < 2:
+        return None
+    return best_employee
+
+
+def _is_message_task(task: dict) -> bool:
+    text = " ".join(str(task.get(key) or "") for key in ("title", "description", "quote")).lower().replace("ё", "е")
+    return any(word in text for word in (
+        "написать", "сообщить", "отправить", "уточнить у", "спросить у",
+        "связаться с", "позвонить", "напомнить", "попросить у", "направить сообщение",
+    ))
+
+
+def _is_assistant_light_task(task: dict) -> bool:
+    """Only classify outputs that the assistant can actually produce from meeting data."""
+    text = " ".join(str(task.get(key) or "") for key in ("title", "description", "quote")).lower().replace("ё", "е")
+    if _is_message_task(task):
+        return True
+    return any(marker in text for marker in (
+        "сводк", "протокол", "итог совещ", "резюме совещ", "обобщить обсуждение",
+        "краткий отчет", "краткий отчёт", "отчет по совещ", "отчёт по совещ",
+        "перечень поруч", "список поруч", "список решений", "оформить решения",
+        "подготовить таблицу по итогам", "таблица по итогам", "график по данным совещ",
+        "диаграмма по данным совещ",
+    ))
+
+
+def _find_message_target(task: dict, employees):
+    """Resolve a message recipient only when one reachable directory employee is unambiguous."""
+    raw_name = str(task.get("target_employee_name") or "").strip()
+    context = " ".join(str(task.get(key) or "") for key in ("title", "description", "quote"))
+
+    if raw_name:
+        candidates = _employee_matches(raw_name, employees)
+        if len(candidates) > 1:
+            matched = match_task_employee(raw_name, context, employees)
+            candidates = [matched] if matched is not None else []
+        candidates = [person for person in candidates if getattr(person, "telegram_chat_id", "")]
+        return candidates[0] if len(candidates) == 1 else None
+
+    text_words = _task_context_words(context)
+    full_name_hits = []
+    partial_name_hits = []
+    for person in employees:
+        if not getattr(person, "telegram_chat_id", "") or getattr(person, "active", True) is False:
+            continue
+        phrases = [getattr(person, "name", "")] + _aliases(person)
+        tokens_for_person = []
+        has_full_phrase = False
+        for phrase in phrases:
+            name_words = _task_context_words(phrase)
+            if not name_words:
+                continue
+            if name_words <= text_words:
+                has_full_phrase = True
+                break
+            tokens_for_person.extend(name_words)
+        if has_full_phrase:
+            full_name_hits.append(person)
+        elif any(any(_same_word(name_word, text_word) for text_word in text_words)
+                 for name_word in tokens_for_person):
+            partial_name_hits.append(person)
+    candidates = full_name_hits if full_name_hits else partial_name_hits
+    unique = {person.id: person for person in candidates}
+    return next(iter(unique.values())) if len(unique) == 1 else None
+
+
+def route_assistant_tasks(report: dict, employees, assistant_enabled: bool) -> dict:
+    """Route clear lightweight work to the AI employee only when that mode is enabled."""
+    routing_notes = []
+    tasks = report.get("tasks") or []
+    for task in tasks:
+        if not isinstance(task, dict) or not task.get("title"):
+            continue
+        context = " ".join(str(task.get(key) or "") for key in ("title", "description", "quote"))
+        name = str(task.get("assignee_name") or "").strip()
+        named_human = bool(name and name.casefold() not in {
+            "ассистент", "ии", "ии-сотрудник", "ai", "не назначен", "не определен", "не определён"
+        })
+        is_message = _is_message_task(task)
+        light_task = _is_assistant_light_task(task)
+        explicit_assistant = task.get("executor") == "assistant" or name.casefold() in {"ассистент", "ии", "ии-сотрудник", "ai"}
+
+        if assistant_enabled and not named_human and light_task:
+            if is_message:
+                target = _find_message_target(task, employees)
+                if target is None:
+                    # Sending a message without one known, reachable recipient is not safe.
+                    task.update(executor="person", employee_id=None, assignee_name="", target_employee_id=None,
+                                target_employee_name="")
+                    routing_notes.append(f"Задача «{task['title']}» осталась без исполнителя: адресат сообщения не определён однозначно или не подключён в Telegram.")
+                    continue
+                task.update(executor="assistant", employee_id=None, assignee_name="ассистент",
+                            target_employee_id=target.id, target_employee_name=target.name)
+            else:
+                task.update(executor="assistant", employee_id=None, assignee_name="ассистент",
+                            target_employee_id=None, target_employee_name="")
+            routing_notes.append(f"ИИ-сотрудник взял задачу «{task['title']}»: она относится к подготовке материала по совещанию.")
+            continue
+
+        if explicit_assistant:
+            # In regular bot mode no assistant worker will run. A message must never be reassigned to its recipient.
+            task.update(executor="person", employee_id=None, assignee_name="", target_employee_id=None,
+                        target_employee_name="")
+            if not is_message:
+                matched = recommend_task_employee(context, employees)
+                if matched is not None:
+                    task.update(employee_id=matched.id, assignee_name=matched.name)
+                    routing_notes.append(f"Задача «{task['title']}» назначена {matched.name} по компетенциям и обязанностям.")
+            continue
+
+    if routing_notes:
+        report["notes"] = [*(report.get("notes") or []), *routing_notes]
+    return report
+
+
 def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> dict:
     ids = {e.id for e in employees}
     employee_by_id = {employee.id: employee for employee in employees}
@@ -688,6 +852,7 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
         voice_identity_by_speaker.pop(label, None)
     out = {k: r.get(k) or [] for k in ("participants", "topics", "decisions", "tasks", "open_questions", "risks", "notes", "visualizations")}
     identity_review_notes = []
+    routing_notes = []
     participants = []
     for participant in out["participants"]:
         if not isinstance(participant, dict):
@@ -727,6 +892,7 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
             except (TypeError, ValueError):
                 eid = None
         executor = "assistant" if t.get("executor") == "assistant" else "person"
+        resolved_assignee_name = (t.get("assignee_name") or "").strip()
         target_name = (t.get("target_employee_name") or "").strip()
         raw_target_id = t.get("target_employee_id")
         if isinstance(raw_target_id, bool):
@@ -738,6 +904,7 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
                 target_id = None
         if executor == "assistant":
             eid = None
+            resolved_assignee_name = "ассистент"
             if target_name:
                 context = " ".join(str(t.get(key) or "") for key in ("title", "description", "quote"))
                 target = match_task_employee(target_name, context, employees) or match_employee(target_name, employees)
@@ -758,15 +925,31 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
                 )
             if matched is not None:
                 eid = matched.id
-            elif spoken_name or eid not in ids:
+                resolved_assignee_name = matched.name
+            elif spoken_name:
                 eid = None
+                resolved_assignee_name = spoken_name
+            elif eid not in ids or _is_assistant_light_task(t):
+                eid = None
+                resolved_assignee_name = ""
+            else:
+                suggested = recommend_task_employee(context, employees)
+                if suggested is None:
+                    eid = None
+                    resolved_assignee_name = ""
+                else:
+                    eid = suggested.id
+                    resolved_assignee_name = suggested.name
+                    routing_notes.append(
+                        f"Исполнитель по задаче «{str(t.get('title') or '').strip()}» подобран автоматически по компетенциям: {suggested.name}."
+                    )
         deadline = normalize_deadline(t["deadline"], meeting_date) if t.get("deadline") else None
         tasks.append({
             "title": str(t["title"]).strip(),
             "description": str(t.get("description") or "").strip(),
             "employee_id": eid if eid in ids else None,
             "executor": executor,
-            "assignee_name": ((t.get("assignee_name") or "").strip() or ("ассистент" if executor == "assistant" else "")),
+            "assignee_name": (resolved_assignee_name or ("ассистент" if executor == "assistant" else "")),
             "target_employee_id": target_id if target_id in ids else None,
             "target_employee_name": target_name,
             "deadline": deadline.isoformat() if deadline else None,
@@ -779,6 +962,8 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
     if identity_review_notes:
         out["notes"] = [*out["notes"], *identity_review_notes]
         out["requires_review"] = True
+    if routing_notes:
+        out["notes"] = [*out["notes"], *routing_notes]
     return out
 
 
