@@ -149,3 +149,108 @@ def test_assistant_target_id_alone_is_not_trusted_without_a_resolved_name():
     task = normalized["tasks"][0]
     assert task["executor"] == "assistant"
     assert task["target_employee_id"] is None
+
+
+def test_unnamed_task_is_assigned_by_unique_relevant_responsibilities():
+    marketing = person(1, "Татьяна Иванова", "Маркетолог", "тендеры, продвижение, рекламные кампании")
+    technical = person(2, "Татьяна Петрова", "Технический специалист", "закупки оборудования, подбор поставщиков")
+    report = {
+        "tasks": [{
+            "title": "Закупить промышленное оборудование для сушилки",
+            "description": "Подобрать поставщика оборудования",
+            "employee_id": 1,  # An ungrounded model guess must not beat stronger duty evidence.
+            "assignee_name": None,
+            "executor": "person",
+            "deadline": None,
+            "deadline_quote": "",
+            "priority": "medium",
+            "time": "01:00",
+            "quote": "Нужно закупить промышленное оборудование и подобрать поставщика",
+        }]
+    }
+    normalized = analyze.normalize(report, [marketing, technical])
+    assert normalized["tasks"][0]["employee_id"] == 2
+    assert normalized["tasks"][0]["assignee_name"] == "Татьяна Петрова"
+
+
+def test_unnamed_task_remains_unassigned_when_relevance_is_tied():
+    a = person(1, "Андрей Орлов", "Инженер", "закупки оборудования, подбор поставщиков")
+    b = person(2, "Иван Петров", "Технический специалист", "закупки оборудования, подбор поставщиков")
+    report = {
+        "tasks": [{
+            "title": "Закупить оборудование",
+            "description": "Подобрать поставщика",
+            "employee_id": 1,
+            "assignee_name": "",
+            "executor": "person",
+            "deadline": None,
+            "deadline_quote": "",
+            "priority": "medium",
+            "time": "01:00",
+            "quote": "Нужно закупить оборудование и подобрать поставщика",
+        }]
+    }
+    normalized = analyze.normalize(report, [a, b])
+    assert normalized["tasks"][0]["employee_id"] is None
+    assert normalized["tasks"][0]["assignee_name"] == ""
+
+
+def test_ai_employee_takes_light_meeting_summary_only_when_enabled():
+    report = {
+        "notes": [],
+        "tasks": [{
+            "title": "Подготовить краткую сводку по итогам совещания",
+            "description": "Собрать основные решения и поручения из обсуждения",
+            "employee_id": None,
+            "assignee_name": "",
+            "executor": "person",
+            "target_employee_id": None,
+            "target_employee_name": "",
+        }],
+    }
+    result = analyze.route_assistant_tasks(report, [], assistant_enabled=True)
+    task = result["tasks"][0]
+    assert task["executor"] == "assistant"
+    assert task["employee_id"] is None
+    assert task["assignee_name"] == "ассистент"
+
+
+def test_ai_employee_message_resolves_one_reachable_recipient():
+    person_with_contact = person(9, "Андрей Орлов", "Инженер", "чертежи", "@andrey")
+    report = {
+        "notes": [],
+        "tasks": [{
+            "title": "Написать Андрею и уточнить срок поставки",
+            "description": "Спросить, когда будет оборудование",
+            "quote": "Нужно написать Андрею и уточнить срок поставки",
+            "employee_id": None,
+            "assignee_name": "",
+            "executor": "person",
+            "target_employee_id": None,
+            "target_employee_name": "",
+        }],
+    }
+    result = analyze.route_assistant_tasks(report, [person_with_contact], assistant_enabled=True)
+    task = result["tasks"][0]
+    assert task["executor"] == "assistant"
+    assert task["employee_id"] is None
+    assert task["target_employee_id"] == 9
+    assert task["target_employee_name"] == "Андрей Орлов"
+
+
+def test_ai_employee_does_not_take_work_when_ai_mode_is_disabled():
+    report = {
+        "notes": [],
+        "tasks": [{
+            "title": "Подготовить краткую сводку по итогам совещания",
+            "description": "Собрать основные решения из обсуждения",
+            "employee_id": None,
+            "assignee_name": "",
+            "executor": "person",
+            "target_employee_id": None,
+            "target_employee_name": "",
+        }],
+    }
+    result = analyze.route_assistant_tasks(report, [], assistant_enabled=False)
+    assert result["tasks"][0]["executor"] == "person"
+    assert result["tasks"][0]["employee_id"] is None
