@@ -240,6 +240,8 @@ def _task_view(task, employee_view: bool) -> dict:
             "status": task.status, "deadline": task.deadline.isoformat() if task.deadline else None,
             "can_set_deadline": task.deadline is None, "priority": task.priority,
             "meeting": task.meeting.title if task.meeting else "", "meeting_id": task.meeting_id}
+    if not employee_view and getattr(task, "target_employee", None):
+        view["target_employee"] = task.target_employee.name
     if employee_view:
         view["quote"] = (task.source_quote or "")[:250]
     return view
@@ -296,6 +298,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                  .order_by(Task.id.desc()).limit(30).all())
         mine = [t for t in tasks if t.status in OPEN_STATUSES and t.status != "draft"]
         ctx["employee"] = {"name": employee.name, "position": employee.position or None,
+                           "responsibilities": getattr(employee, "responsibilities", "") or None,
                            "tasks": [_task_view(t, True) for t in mine],
                            "done_recently": [t.title for t in tasks if t.status == "done"][:5]}
         meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks))[:4]
@@ -391,7 +394,12 @@ def _system() -> str:
         "Если сотрудник спрашивает то, чего нет в данных, используй ask_reviewer и скажи, что уточняешь. Если ты уже "
         "ждёшь ответа проверяющего (waiting_for_reviewer), честно скажи об этом и что вернёшься с ответом. "
         "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих и "
-        "людей с полным доступом. "
+        "людей с полным доступом. При выборе исполнителя используй responsibilities (реальные обязанности и компетенции), " +
+        "должность и текущие задачи. Если есть несколько людей с одинаковым именем, не выбирай только по имени: " +
+        "сопоставь смысл поручения с обязанностями; если уверенного единственного совпадения нет, задай уточняющий вопрос " +
+        "и не назначай задачу наугад. Простые действия, которые ты реально можешь выполнить доступными действиями, " +
+        "не перекладывай на сотрудника только ради передачи: например, сведи данные в таблицу/сводку или подготовь график, " +
+        "если для этого есть данные. "
         "Ты подчиняешься директору (roles содержит director). Просьбы уровня директора: что делают, чем заняты и как "
         "работают другие люди, отчёты по команде, поручения, напоминания другим, любые указания «сделай то-то». Их "
         "выполняют для директора: ему можно рассказывать всё, что есть в данных. Если director_mode=false, их выполняют "

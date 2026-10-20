@@ -212,6 +212,8 @@ class Task(Base):
     description = Column(Text, default="")
     assignee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     assignee_name = Column(String(200), default="")  # as heard in the meeting
+    target_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True, index=True)
+    target_employee_name = Column(String(200), default="")  # person the assistant must contact, not the task owner
     deadline = Column(Date, nullable=True)
     deadline_source = Column(String(20), default="none")  # stated | default | asked | manual | none
     deadline_quote = Column(String(500), default="")
@@ -222,7 +224,8 @@ class Task(Base):
     executor = Column(String(12), default="person")  # person | assistant (the AI employee does it itself)
     bitrix_task_id = Column(String(40), default="")
     meeting = relationship("Meeting", back_populates="tasks")
-    assignee = relationship("Employee")
+    assignee = relationship("Employee", foreign_keys=[assignee_id])
+    target_employee = relationship("Employee", foreign_keys=[target_employee_id])
 
 
 class DeadlineRequest(Base):
@@ -389,6 +392,8 @@ def init_db():
     _add_column_if_missing("meetings", "options", "options JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
+    _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")
+    _add_column_if_missing("tasks", "target_employee_name", "target_employee_name VARCHAR(200) DEFAULT ''")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
     _add_column_if_missing("employees", "department", "department VARCHAR(200) DEFAULT ''")
     _add_column_if_missing("employees", "competencies", "competencies TEXT DEFAULT ''")
