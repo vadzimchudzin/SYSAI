@@ -183,6 +183,7 @@ class Recording(Base):
     owner = Column(String(128), nullable=False, index=True)
     mime_type = Column(String(80), nullable=False)
     title = Column(String(300), nullable=False, default="")
+    device_label = Column(String(120), nullable=False, default="")
     meeting_date = Column(Date, nullable=True)
     options = Column(JSON, nullable=False, default=dict)
     status = Column(String(20), nullable=False, default="recording", index=True)

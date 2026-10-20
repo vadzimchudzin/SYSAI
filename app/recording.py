@@ -76,12 +76,23 @@ def _atomic_write(path: pathlib.Path, data: bytes):
 
 
 def _recording_dict(recording: Recording) -> dict:
+    created = recording.created_at
+    ended = recording.updated_at if recording.status in {"finished", "cancelled", "error"} else now()
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=dt.timezone.utc)
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=dt.timezone.utc)
+    elapsed = max(0, int((ended - created).total_seconds())) if created and ended else 0
     return {"id": recording.id, "next_sequence": recording.next_sequence,
             "size_bytes": recording.size_bytes, "status": recording.status,
-            "mime_type": recording.mime_type, "title": recording.title}
+            "mime_type": recording.mime_type, "title": recording.title,
+            "device_label": recording.device_label or "Неизвестное устройство",
+            "created_at": created.isoformat() if created else None, "elapsed_seconds": elapsed,
+            "meeting_id": recording.meeting_id,
+            "meeting_url": f"/meetings/{recording.meeting_id}" if recording.meeting_id else None}
 
 
-def start(owner: str, mime_type: str, title: str = "", meeting_date=None, options=None) -> dict:
+def start(owner: str, mime_type: str, title: str = "", meeting_date=None, options=None, device_label: str = "") -> dict:
     if not isinstance(owner, str) or not owner or len(owner) > 128:
         _http(400, "Invalid recording owner")
     if not isinstance(mime_type, str):
@@ -100,14 +111,33 @@ def start(owner: str, mime_type: str, title: str = "", meeting_date=None, option
     except (TypeError, ValueError):
         _http(400, "Invalid recording options")
 
+    if not isinstance(device_label, str):
+        _http(400, "Invalid recording device")
     recording = Recording(id=uuid.uuid4().hex, owner=owner, mime_type=mime, title=title,
-                          meeting_date=_date(meeting_date), options=options.copy(), status="recording",
+                          device_label=device_label.strip()[:120], meeting_date=_date(meeting_date),
+                          options=options.copy(), status="recording",
                           next_sequence=0, size_bytes=0)
     with SessionLocal() as session:
         session.add(recording)
         session.commit()
         session.refresh(recording)
         return _recording_dict(recording)
+
+
+def list_active(owner: str, legacy_owner: str | None = None) -> list[dict]:
+    """List recordings owned by this account that are still recording, finishing, or recoverable after an error."""
+    owners = list(dict.fromkeys(value for value in (owner, legacy_owner) if value))
+    with SessionLocal() as session:
+        rows = (session.query(Recording).filter(Recording.owner.in_(owners),
+                    Recording.status.in_(("recording", "finishing", "error")))
+                .order_by(Recording.created_at.desc()).limit(20).all())
+        return [_recording_dict(row) for row in rows]
+
+
+def get_status(owner: str, recording_id: str) -> dict:
+    with SessionLocal() as session:
+        row = _get_owned(session, owner, recording_id)
+        return _recording_dict(row)
 
 
 def append(owner: str, recording_id: str, sequence: int, chunk: bytes) -> dict:

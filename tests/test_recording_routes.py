@@ -23,7 +23,8 @@ def test_recording_routes_real_chunks_finish_settings_and_owner(client, tmp_path
     other_owner = client.cookies.get("session")
     client.cookies.clear()
     client.post("/login", data={"username": "SYSAI", "password": "pw"})
-    assert client.post(f"/recordings/{rid}/finish", headers={"accept": "application/json"}).status_code == 404
+    cross_device = client.get(f"/recordings/{rid}/status").json()
+    assert cross_device["id"] == rid and cross_device["status"] == "recording"
     client.cookies.set("session", other_owner)
     result = client.post(f"/recordings/{rid}/finish").json()
     assert result["url"] == f"/meetings/{result['meeting_id']}"

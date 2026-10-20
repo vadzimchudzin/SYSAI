@@ -2,6 +2,7 @@
 {% block title %}Новое совещание — SYSAI{% endblock %}
 {% block body %}
 <div class="page-h"><div><h1>Новое совещание</h1><p>Загрузите запись или говорите в микрофон. Отчёт и задачи соберутся сами.</p></div></div>
+{% include "_active_recordings.html" %}
 <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form" class="setup">
 <section class="card setup-step">
   <div class="seg-switch" id="src-switch">

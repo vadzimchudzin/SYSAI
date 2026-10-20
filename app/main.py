@@ -23,7 +23,7 @@ from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, 
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, ConversationEscalation, Delivery, Employee, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -311,11 +311,18 @@ async def mic_toggle(request: Request):
     return {"auto_ingest": settings_store.get("auto_ingest")}
 
 
-def recording_owner(request):
+def recording_owner(request, rid=None):
     guard(request)
-    if "recording_owner" not in request.session:
-        request.session["recording_owner"] = secrets.token_hex(24)
-    return request.session["recording_owner"]
+    user = current_user(request)
+    shared_owner = f"user:{user['id']}"
+    # Keep an in-progress recording created before this upgrade working in its original browser session.
+    legacy_owner = request.session.get("recording_owner")
+    if rid and legacy_owner:
+        with SessionLocal() as session:
+            old = session.get(Recording, rid)
+            if old is not None and old.owner == legacy_owner:
+                return legacy_owner
+    return shared_owner
 
 
 @app.post("/recordings")
@@ -327,13 +334,33 @@ async def recording_start(request: Request):
         date = dt.date.fromisoformat(form.get("meeting_date")) if form.get("meeting_date") else deadlines.today()
     except ValueError:
         raise HTTPException(400, "Некорректная дата совещания") from None
-    return recording.start(owner, form.get("mime_type", ""), (form.get("title") or "").strip()[:300], date, _options(form))
+    return recording.start(owner, form.get("mime_type", ""), (form.get("title") or "").strip()[:300], date,
+                           _options(form), (form.get("device_label") or "").strip()[:120])
+
+
+@app.get("/recordings/active")
+def recordings_active(request: Request):
+    from . import recording
+    return {"recordings": recording.list_active(recording_owner(request), request.session.get("recording_owner"))}
+
+
+@app.get("/recordings/{rid}/status")
+def recording_status(request: Request, rid: str):
+    from . import recording
+    return recording.get_status(recording_owner(request, rid), rid)
+
+
+@app.get("/recordings/{rid}/monitor", response_class=HTMLResponse)
+def recording_monitor(request: Request, rid: str):
+    from . import recording
+    data = recording.get_status(recording_owner(request, rid), rid)
+    return page(request, "recording_monitor.html", recording=data)
 
 
 @app.post("/recordings/{rid}/chunks/{sequence}")
 async def recording_chunk(request: Request, rid: str, sequence: int):
     from . import recording
-    owner = recording_owner(request)
+    owner = recording_owner(request, rid)
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > 8 * 1024 * 1024:
@@ -345,19 +372,19 @@ async def recording_chunk(request: Request, rid: str, sequence: int):
 @app.post("/recordings/{rid}/finish")
 def recording_finish(request: Request, rid: str):
     from . import recording
-    return recording.finish(recording_owner(request), rid)
+    return recording.finish(recording_owner(request, rid), rid)
 
 
 @app.post("/recordings/{rid}/cancel")
 def recording_cancel(request: Request, rid: str):
     from . import recording
-    return recording.cancel(recording_owner(request), rid)
+    return recording.cancel(recording_owner(request, rid), rid)
 
 
 @app.get("/recordings/{rid}/audio")
 def recording_download(request: Request, rid: str):
     from . import recording
-    path, mime = recording.audio_file(recording_owner(request), rid)
+    path, mime = recording.audio_file(recording_owner(request, rid), rid)
     return FileResponse(path, media_type=mime, filename=f"recording{path.suffix}")
 
 
