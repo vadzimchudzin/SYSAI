@@ -31,7 +31,7 @@ SYSTEM = """Ты — опытный секретарь руководителя.
 - Различай исполнителя и адресата сообщения. «Нужно написать Андрею и спросить…» — действие ассистента: target_employee_name="Андрей", target_employee_id — ID однозначно найденного адресата. «Андрей, напиши Ивану…» — поручение Андрею: executor="person", employee_id — Андрей, target_employee_id=null.
 - Для assistant-задачи, требующей написать человеку, укажи target_employee_name и target_employee_id. Используй только сотрудника с has_contact=true. Если адресат неоднозначен, target_employee_id=null — не угадывай. Для обычных задач target_employee_id=null.
 - Решения — то, о чём договорились. Открытые вопросы — что осталось нерешённым. Риски — проблемы и опасения.
-- Участники: сопоставь метки говорящих («Спикер 1») с людьми, если это понятно из разговора.
+- Участники: сопоставь метки говорящих с людьми. Если рядом с репликой есть маркер [VOICEPRINT_CONFIRMED employee_id=N], имя и employee_id N подтверждены голосовым шаблоном; сохрани эту идентификацию, не заменяй её предположением по тексту.
 При выборе исполнителя учитывай не только имя: должность, подразделение, компетенции и обязанности помогают понять контекст поручения. Не назначай задачу только по совпадению общей темы; если прямого указания и однозначных данных нет, оставь employee_id null и сохрани сказанное в assignee_name.
 Справочник сотрудников (JSON): {employees}
 Термины компании: {glossary}
@@ -55,7 +55,14 @@ def mmss(sec: float) -> str:
 
 
 def transcript_text(segments: list) -> str:
-    return "\n".join(f"[{mmss(s['start'])}] {s['speaker']}: {s['text']}" for s in segments)
+    lines = []
+    for segment in segments:
+        identity = ""
+        employee_id = segment.get("speaker_employee_id")
+        if segment.get("speaker_source") == "voiceprint" and isinstance(employee_id, int) and not isinstance(employee_id, bool):
+            identity = f" [VOICEPRINT_CONFIRMED employee_id={employee_id}]"
+        lines.append(f"[{mmss(segment['start'])}]{identity} {segment['speaker']}: {segment['text']}")
+    return "\n".join(lines)
 
 
 def employees_json(employees) -> str:
@@ -83,12 +90,14 @@ def employees_json(employees) -> str:
 def _fingerprint(segments, employees, settings, meeting_date):
     payload = {
         # Bump when prompt/normalization semantics change so old checkpoints cannot bypass new safeguards.
-        "analysis_version": 14, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
+        "analysis_version": 15, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
         "model": settings.get("report_model"), "report_style": settings.get("report_style", "balanced"), "glossary": settings.get("glossary", ""),
         "employees": employees_json(employees), "meeting_date": meeting_date.isoformat(),
         "transcript": transcript_text(segments),
         "segments": [{"start": s.get("start"), "end": s.get("end"), "speaker": s.get("speaker"),
-                      "text": s.get("text")} for s in segments],
+                      "text": s.get("text"), "speaker_employee_id": s.get("speaker_employee_id"),
+                      "speaker_source": s.get("speaker_source"), "speaker_confidence": s.get("speaker_confidence")}
+                     for s in segments],
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -497,7 +506,7 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
         if cached is not None:
             try:
                 _validate_report(cached, employees, transcript, duration, meeting_date, source_segments=segments)
-                return normalize(cached, employees, meeting_date)
+                return normalize(cached, employees, meeting_date, source_segments=segments)
             except llm.LLMError:
                 pass
         if progress:
@@ -505,7 +514,7 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
         report = _request_verified_report(settings["report_model"], system, transcript, employees,
                                           transcript, duration, meeting_date, segments, progress)
         _checkpoint_put(checkpoint, "short", 0, fingerprint, report)
-        return normalize(report, employees, meeting_date)
+        return normalize(report, employees, meeting_date, source_segments=segments)
 
     reports = []
     for index, batch in enumerate(batches):
@@ -529,7 +538,7 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
     combined.update(_merge_metadata(reports))
     combined["requires_review"] = any(report.get("requires_review", False) for report in reports)
     combined["tasks"] = _deduplicate_tasks([task for report in reports for task in report["tasks"]], employees)
-    return normalize(combined, employees, meeting_date)
+    return normalize(combined, employees, meeting_date, source_segments=segments)
 
 
 def _deduplicate_tasks(tasks, employees):
@@ -660,8 +669,23 @@ def match_task_employee(name, task_context, employees):
     return winners[0] if best > 0 and len(winners) == 1 else None
 
 
-def normalize(r: dict, employees, meeting_date=None) -> dict:
+def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> dict:
     ids = {e.id for e in employees}
+    employee_by_id = {employee.id: employee for employee in employees}
+    voice_identity_by_speaker = {}
+    ambiguous_voice_labels = set()
+    for segment in source_segments or []:
+        label = segment.get("speaker")
+        voice_id = segment.get("speaker_employee_id")
+        if (not isinstance(label, str) or not isinstance(voice_id, int)
+                or isinstance(voice_id, bool) or voice_id not in ids):
+            continue
+        if label in voice_identity_by_speaker and voice_identity_by_speaker[label] != voice_id:
+            ambiguous_voice_labels.add(label)
+        else:
+            voice_identity_by_speaker[label] = voice_id
+    for label in ambiguous_voice_labels:
+        voice_identity_by_speaker.pop(label, None)
     out = {k: r.get(k) or [] for k in ("participants", "topics", "decisions", "tasks", "open_questions", "risks", "notes", "visualizations")}
     identity_review_notes = []
     participants = []
@@ -672,7 +696,11 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         raw_id = normalized.get("employee_id")
         eid = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) and raw_id in ids else None
         name = (normalized.get("name") or "").strip()
-        if name:
+        verified_id = voice_identity_by_speaker.get(normalized.get("speaker"))
+        if verified_id in ids:
+            eid = verified_id
+            normalized["name"] = employee_by_id[verified_id].name
+        elif name:
             candidates = _employee_matches(name, employees)
             if len(candidates) == 1:
                 eid = candidates[0].id

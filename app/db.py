@@ -129,6 +129,8 @@ class Employee(Base):
     active = Column(Boolean, default=True)
     department_memberships = relationship("EmployeeDepartment", back_populates="employee",
                                           cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
+    voiceprint = relationship("EmployeeVoiceprint", back_populates="employee", uselist=False,
+                              cascade="all, delete-orphan", single_parent=True)
 
     def alias_list(self):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
@@ -156,6 +158,21 @@ class EmployeeDepartment(Base):
     employee = relationship("Employee", back_populates="department_memberships")
     department = relationship("Department", back_populates="memberships")
     __table_args__ = (UniqueConstraint("employee_id", "department_id", name="uq_employee_department"),)
+
+
+class EmployeeVoiceprint(Base):
+    """Encrypted provider voiceprint and consent metadata; raw enrollment audio is not stored."""
+    __tablename__ = "employee_voiceprints"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    encrypted_voiceprint = Column(LargeBinary, nullable=False)
+    provider = Column(String(40), nullable=False, default="pyannoteAI")
+    sample_duration = Column(Float, nullable=False, default=0.0)
+    consent_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    consent_version = Column(String(40), nullable=False, default="voiceprint-consent-v1")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=now, onupdate=now)
+    employee = relationship("Employee", back_populates="voiceprint")
 
 
 class Meeting(Base):

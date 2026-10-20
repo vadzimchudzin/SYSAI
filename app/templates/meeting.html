@@ -207,7 +207,7 @@
   {% for section in group_transcript(m.transcript, r.topics or []) %}
     <section class="topic transcript-section">
       <h3 style="margin:0 0 8px">{% if section.time %}<span class="t">{{ section.time }}</span> · {% endif %}{{ section.title }}</h3>
-      {% for sg in section.segments %}<p><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}:</b> {{ sg.text }}</p>{% endfor %}
+      {% for sg in section.segments %}<p><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}{% if sg.speaker_source == "voiceprint" %} <span class="pill green" title="Сопоставлен с зарегистрированным голосовым шаблоном">голос совпал{% if sg.speaker_confidence is not none %} · {{ sg.speaker_confidence }}%{% endif %}</span>{% endif %}:</b> {{ sg.text }}</p>{% endfor %}
     </section>
   {% endfor %}
   </div>

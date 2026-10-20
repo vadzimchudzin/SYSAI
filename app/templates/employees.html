@@ -57,6 +57,7 @@
   <div><h1>Сотрудники</h1><p>Единый справочник. Подробные обязанности и роли настраиваются в карточке человека.</p></div>
   <div class="actions"><a class="btn" href="/departments">Подразделения</a><a class="btn primary" href="/employees?add=1"><span aria-hidden="true">＋</span> Добавить сотрудника</a></div>
 </div>
+{% if voice_msg %}<div class="card note" role="status">{{ voice_msg }}</div>{% endif %}
 {% if ai %}<div class="card note">Для сообщений через подключённый аккаунт Telegram укажите @username или телефон сотрудника в его карточке.</div>{% else %}<div class="card note">Чтобы бот мог написать сотруднику, тот должен открыть бота и нажать <b>/start</b> — после этого он появится в списке Telegram.</div>{% endif %}
 {% if add %}
 <section class="card employee-add-panel"><div class="employee-add-heading"><h2>Новая карточка</h2><p class="muted small">Для начала достаточно имени. Остальное заполните после создания.</p></div>{{ form(None) }}</section>
@@ -80,11 +81,33 @@
             {% else %}<span class="pill gray">Без подразделения</span>{% endif %}
           </div>
           {% if e.competencies or e.responsibilities %}<div class="employee-details-line">{% if e.competencies %}<span><b>Компетенции:</b> {{ e.competencies }}</span>{% endif %}{% if e.responsibilities %}<span><b>Обязанности:</b> {{ e.responsibilities }}</span>{% endif %}</div>{% endif %}
-          <div class="employee-status">{% if e.telegram_chat_id %}<span class="pill green">Telegram подключён</span>{% else %}<span class="pill gray">Telegram не привязан</span>{% endif %}</div>
+          <div class="employee-status">{% if e.telegram_chat_id %}<span class="pill green">Telegram подключён</span>{% else %}<span class="pill gray">Telegram не привязан</span>{% endif %}{% if e.voiceprint %}<span class="pill green">Голос зарегистрирован</span>{% endif %}</div>
         </div>
         <div class="actions employee-actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Настроить</a><form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">Удалить</button></form></div>
       </div>
-      {% if edit == e.id %}<div class="employee-edit-panel"><div class="employee-edit-heading"><h3>Карточка сотрудника</h3><p class="muted small">Профиль, контакты и обязанности в подразделениях.</p></div>{{ form(e) }}</div>{% endif %}
+      {% if edit == e.id %}
+      <div class="employee-edit-panel">
+        <div class="employee-edit-heading"><h3>Карточка сотрудника</h3><p class="muted small">Профиль, контакты, подразделения и обязанности.</p></div>
+        {{ form(e) }}
+        <section class="card voice-profile">
+          <h3>Образец речи для идентификации</h3>
+          {% if e.voiceprint %}
+            <p class="small"><span class="pill green">Голосовой шаблон активен</span> · {{ e.voiceprint.sample_duration }} сек. · зарегистрирован {{ e.voiceprint.created_at.strftime('%d.%m.%Y') if e.voiceprint.created_at else '' }}</p>
+            <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Удалить голосовой шаблон?')"><button class="btn sm danger">Удалить шаблон</button></form>
+          {% else %}<p class="small muted">Шаблон ещё не зарегистрирован. Для регистрации нужен отдельный образец речи сотрудника.</p>{% endif %}
+          {% if voice_identity_enabled %}
+          <form method="post" action="/employees/{{ e.id }}/voice-sample" enctype="multipart/form-data" class="voice-profile-form">
+            <label class="f">Чистый образец голоса (5–30 секунд)
+              <input type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
+            </label>
+            <p class="small muted">Лучше 10–20 секунд обычной речи только этого человека — без музыки, других голосов и сильного шума. Загрузка нового образца заменит прежний.</p>
+            <label class="check"><input type="checkbox" name="consent" value="yes" required> Подтверждаю, что отдельное согласие сотрудника получено и зафиксировано. Образец и аудиофрагменты совещаний будут обрабатываться внешним сервисом pyannoteAI.</label>
+            <button class="btn primary">Создать / заменить шаблон</button>
+          </form>
+          {% else %}<p class="small muted">Для регистрации нужен ключ pyannoteAI. <a href="/settings#speaker-identification">Настроить ключ →</a></p>{% endif %}
+        </section>
+      </div>
+      {% endif %}
     </article>
   {% endfor %}
   </div>

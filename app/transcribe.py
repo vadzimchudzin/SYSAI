@@ -14,7 +14,7 @@ import re
 import shutil
 import tempfile
 
-from . import audio, checkpoints, config, llm, settings_store
+from . import audio, checkpoints, config, llm, settings_store, speaker_id
 
 log = logging.getLogger("sysai.transcribe")
 LEGACY_CHAT_MODEL = "google/gemini-2.5-flash"
@@ -211,22 +211,27 @@ def _merge(segments, new, boundary):
     targets = {}
     for current in new:
         text = normalise(current["text"])
+        if current.get("speaker_source") == "voiceprint":
+            continue
         if not text or len(text.split()) <= 2 or current["start"] > boundary + OVERLAP_SECONDS:
             continue
         tolerance = 2 if len(text.split()) >= 2 else 0.3
-        matches = [old for old in previous if normalise(old["text"]) == text
+        matches = [old for old in previous if old.get("speaker_source") != "voiceprint"
+                   and normalise(old["text"]) == text
                    and abs(current["start"] - old["start"]) <= tolerance]
         if len(matches) != 1:
             continue
         old = matches[0]
-        reverse = [other for other in new if normalise(other["text"]) == text
+        reverse = [other for other in new if other.get("speaker_source") != "voiceprint"
+                   and normalise(other["text"]) == text
                    and abs(other["start"] - old["start"]) <= tolerance]
         if len(reverse) == 1:
             targets.setdefault(current["speaker"], set()).add(old["speaker"])
     speaker_map = {speaker: next(iter(known)) for speaker, known in targets.items() if len(known) == 1}
 
     for current in new:
-        current["speaker"] = speaker_map.get(current["speaker"], current["speaker"])
+        if current.get("speaker_source") != "voiceprint":
+            current["speaker"] = speaker_map.get(current["speaker"], current["speaker"])
         text = normalise(current["text"])
         tolerance = 2 if len(text.split()) >= 2 else 0.3
         duplicate = current["start"] <= boundary + OVERLAP_SECONDS and any(
@@ -259,10 +264,16 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         destination = workdir[0] / name
         audio.extract(path, destination, offset, seconds)
         return destination
+    try:
+        voiceprints = speaker_id.enrolled_voiceprints()
+    except speaker_id.SpeakerIdentityError as exc:
+        log.warning("Voice identity is unavailable; keeping ordinary speaker labels: %s", exc)
+        voiceprints = []
     segments: list = []
-    base = {"version": 7, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
+    base = {"version": 8, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
             "diarization_model": settings.get("diarization_model", LEGACY_CHAT_MODEL),
             "language": settings.get("language", "ru"), "glossary": settings.get("glossary", ""),
+            "speaker_profiles": speaker_id.profiles_fingerprint(voiceprints),
             "step": step, "short_audio_seconds": SHORT_AUDIO_SECONDS}
 
     def part(get_chunk, offset, length, index, context):
@@ -326,6 +337,12 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
             result, truncated = _validate(data, offset, length)
             if truncated:
                 raise llm.IncompleteResponse("Ответ обрезан, нужен меньший фрагмент")
+            if voiceprints and result:
+                try:
+                    result = speaker_id.identify_segments(chunk, result, voiceprints, offset=offset, duration=length)
+                except speaker_id.SpeakerIdentityError as exc:
+                    # Voice matching is optional. A provider outage must not break basic transcription.
+                    log.warning("Voice identity failed for chunk %s; keeping anonymous labels: %s", index, exc)
         except llm.IncompleteResponse:
             if length <= MIN_SPLIT_SECONDS:
                 raise
