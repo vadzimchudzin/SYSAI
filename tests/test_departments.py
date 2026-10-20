@@ -184,22 +184,22 @@ def test_department_head_is_unique_and_limited_to_active_members(client):
         session.commit()
         department_id, first_id, second_id, outsider_id = department.id, first.id, second.id, outsider.id
 
-    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(first_id)})
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(first_id)}, follow_redirects=False)
     assert response.status_code == 303
     with SessionLocal() as session:
         assert session.query(EmployeeDepartment).filter_by(department_id=department_id, is_primary=True).one().employee_id == first_id
 
-    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(second_id)})
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(second_id)}, follow_redirects=False)
     assert response.status_code == 303
     with SessionLocal() as session:
         managers = session.query(EmployeeDepartment).filter_by(department_id=department_id, is_primary=True).all()
         assert len(managers) == 1
         assert managers[0].employee_id == second_id
 
-    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(outsider_id)})
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": str(outsider_id)}, follow_redirects=False)
     assert response.status_code == 400
 
-    response = client.post(f"/departments/{department_id}/head", data={"employee_id": "0"})
+    response = client.post(f"/departments/{department_id}/head", data={"employee_id": "0"}, follow_redirects=False)
     assert response.status_code == 303
     with SessionLocal() as session:
         assert session.query(EmployeeDepartment).filter_by(department_id=department_id, is_primary=True).count() == 0
