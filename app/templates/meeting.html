@@ -11,7 +11,7 @@
     {% for t in plan.assistant %}<li>Берёт на себя ассистент: {{ t.title }}. Сделает после подтверждения и пришлёт проверяющему.</li>{% endfor %}
     {% for t in plan.unassigned %}<li class="warn small">Без исполнителя: {{ t.title }} (прозвучало: {{ t.said }}). Назначьте выше или отдайте ассистенту.</li>{% endfor %}
   </ul>
-  <p class="small muted">Графики и сводки ассистента строятся только после подтверждения: в черновике их ещё нет.</p>
+  <p class="small muted">Отдельные задачи ассистента выполняются после подтверждения. Графики по числам из расшифровки отображаются в протоколе ниже.</p>
 </section>{% endif %}
 {% if artifacts %}<section class="card"><h2>Материалы ассистента</h2>
   {% for a in artifacts %}<div class="row between"><b>{{ a.title }}</b><a class="btn sm" href="/artifacts/{{ a.id }}" target="_blank" rel="noopener">PDF</a></div>
@@ -31,6 +31,15 @@
 </div>
 
 {% if m.report %}{% include '_progress_board.html' %}{% endif %}
+{% if r.visualizations %}
+<section class="card" id="meeting-visualizations">
+  <div class="row between"><h2>Графики и показатели</h2><span class="pill blue">{{ r.visualizations|length }} граф.</span></div>
+  <p class="small muted">Графики строятся только по числам из расшифровки. Наведите курсор или выберите точку/столбец, чтобы увидеть значение и исходную цитату.</p>
+  <div id="meeting-charts" class="chart-grid"></div>
+  <script type="application/json" id="meeting-visualization-data">{{ r.visualizations|tojson }}</script>
+  <script src="{{ asset('visualizations.js') }}" defer></script>
+</section>
+{% endif %}
 
 <div id="meeting-live-status">
 {% if m.status in ('error','delivery_failed') %}<div class="card err">Ошибка: {{ m.error }}

@@ -2,6 +2,7 @@
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 
 from . import config, deadlines, llm
@@ -222,6 +223,18 @@ def _quote_matches_at_time(quote, seconds, segments):
     return False
 
 
+def _quote_numbers(text):
+    """Numbers explicitly present in evidence; chart values may not be invented or derived."""
+    compact = re.sub(r"(?<=\d)[ \u00a0](?=\d{3}(?:\D|$))", "", str(text or ""))
+    values = set()
+    for token in re.findall(r"(?<!\w)-?\d+(?:[.,]\d+)?", compact):
+        try:
+            values.add(float(token.replace(",", ".")))
+        except ValueError:
+            pass
+    return values
+
+
 def _validate_report(report, employees, transcript, duration, meeting_date, require_tasks=True,
                      source_segments=None, quarantine_tasks=False):
     if not isinstance(report, dict):
@@ -237,6 +250,29 @@ def _validate_report(report, employees, transcript, duration, meeting_date, requ
     questions = _strict_list(report, "open_questions", str)
     risks = _strict_list(report, "risks", str)
     notes = _strict_list(report, "notes", str)
+    visualizations = report.get("visualizations", [])
+    if not isinstance(visualizations, list) or any(not isinstance(chart, dict) for chart in visualizations):
+        raise llm.LLMError("Некорректный формат visualizations")
+    for chart in visualizations:
+        for key in ("title", "type", "unit", "source_quote"):
+            _strict_text(chart.get(key), f"visualizations.{key}")
+        if chart["type"] not in ("bar", "line"):
+            raise llm.LLMError("Неподдерживаемый тип визуализации")
+        labels = chart.get("labels")
+        series = chart.get("series")
+        if not isinstance(labels, list) or not 1 <= len(labels) <= 12 or any(not isinstance(x, str) or not x.strip() for x in labels):
+            raise llm.LLMError("Некорректные подписи визуализации")
+        if not isinstance(series, list) or not 1 <= len(series) <= 4:
+            raise llm.LLMError("Некорректные серии визуализации")
+        for line in series:
+            if not isinstance(line, dict):
+                raise llm.LLMError("Некорректная серия визуализации")
+            _strict_text(line.get("name"), "visualizations.series.name")
+            values = line.get("values")
+            if not isinstance(values, list) or len(values) != len(labels) or any(
+                    not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+                    for value in values):
+                raise llm.LLMError("Числа визуализации не совпадают с подписями")
     for item in participants:
         _strict_text(item.get("speaker"), "participants.speaker")
         # An unidentified voice is normal: models may omit its name/role
@@ -286,6 +322,19 @@ def _validate_report(report, employees, transcript, duration, meeting_date, requ
             raise llm.LLMError("Некорректный приоритет задачи")
     verified, review_notes = [], []
     canonical_transcript = _evidence_text(transcript)
+    verified_visualizations = []
+    visualization_notes = []
+    for chart in visualizations:
+        quote = chart["source_quote"]
+        numbers = _quote_numbers(quote)
+        chart_values = [value for line in chart["series"] for value in line["values"]]
+        quote_exists = _evidence_text(quote) in canonical_transcript
+        values_supported = all(any(abs(value - seen) < 1e-9 for seen in numbers) for value in chart_values)
+        if quote_exists and values_supported:
+            verified_visualizations.append(chart)
+        else:
+            reason = "цитата с исходными числами не найдена в расшифровке" if not quote_exists else "значения графика не подтверждаются числами в цитате"
+            visualization_notes.append(f"График «{chart['title']}» исключён: {reason}.")
     for task in tasks:
         try:
             _validate_task_evidence(task, canonical_transcript, duration, meeting_date, source_segments)
@@ -299,8 +348,13 @@ def _validate_report(report, employees, transcript, duration, meeting_date, requ
             )
         else:
             verified.append(task)
-    if review_notes:
-        report = dict(report, tasks=verified, notes=[*notes, *review_notes], requires_review=True)
+    if review_notes or visualization_notes:
+        report = dict(report, tasks=verified if review_notes else tasks,
+                      visualizations=verified_visualizations,
+                      notes=[*notes, *review_notes, *visualization_notes],
+                      requires_review=bool(report.get("requires_review")) or bool(review_notes))
+    else:
+        report = dict(report, visualizations=verified_visualizations)
     return report
 
 
@@ -397,7 +451,7 @@ def _synthesize(model, reports, checkpoint, fingerprint, employees, meeting_date
 
 
 def _merge_metadata(reports):
-    merged = {key: [] for key in ("participants", "topics", "decisions", "open_questions", "risks", "notes")}
+    merged = {key: [] for key in ("participants", "topics", "decisions", "open_questions", "risks", "notes", "visualizations")}
     seen = {key: set() for key in merged}
     for report in reports:
         for key in merged:
@@ -413,8 +467,16 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
     if not config.llm_enabled():
         raise llm.LLMError("Ключ OpenRouter не задан; для анализа расшифровки он обязателен")
     names = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    styles = {
+        "balanced": "сбалансированный: краткий итог, решения, задачи, вопросы и риски",
+        "executive": "для руководителя: сначала выводы, влияние на сроки/деньги/эффективность, решения и блокеры; минимум повторов",
+        "detailed": "подробный: сохрани ход обсуждения, аргументы, альтернативы и открытые вопросы, не теряя контекст",
+        "technical": "технический: акцент на параметрах, числах, зависимостях, ограничениях и критериях готовности; не додумывай спецификации",
+    }
+    style_instruction = styles.get(settings.get("report_style", "balanced"), styles["balanced"])
     system = SYSTEM.format(meeting_date=meeting_date.isoformat(), weekday=names[meeting_date.weekday()],
-                           employees=employees_json(employees), glossary=settings.get("glossary", ""))
+                           employees=employees_json(employees), glossary=settings.get("glossary", ""),
+                           style_instruction=style_instruction)
     transcript = transcript_text(segments)
     duration = max((float(s.get("end", s.get("start", 0)) or 0) for s in segments), default=0)
     fingerprint = _fingerprint(segments, employees, settings, meeting_date)
@@ -705,5 +767,6 @@ def mock_report(employees, meeting_date: dt.date) -> dict:
         "open_questions": ["Продлевать ли договор с текущим подрядчиком по дизайну?"],
         "risks": ["Перенос релиза сдвигает рекламную кампанию"],
         "notes": ["Следующая планёрка — в понедельник в 10:00"],
+        "visualizations": [],
         "next_meeting": "Понедельник, 10:00",
     }, employees)
