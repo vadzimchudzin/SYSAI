@@ -49,6 +49,11 @@
     <button type="submit" class="btn sm" formaction="/settings/test-openrouter" formnovalidate>Проверить сохранённый ключ</button>
     {% endif %}
   </section>
+  <section class="card setup-step" id="speaker-identification">
+    <h2>Идентификация по голосу</h2>
+    <p class="small muted">Опциональная функция для узнавания зарегистрированных сотрудников по образцам речи. Включается только после добавления ключа pyannoteAI и загрузки образца с отдельным подтверждением согласия. При обработке аудиофрагменты записей передаются pyannoteAI для сопоставления; без ключа и образцов обычная диаризация продолжает работать как раньше.</p>
+    {{ credential('pyannoteai_api_key', 'Ключ pyannoteAI', 'Ключ из кабинета pyannote.ai') }}
+  </section>
   <section class="card setup-step" id="model-settings">
     <h2>Модели ИИ</h2>
     <p class="small muted">Модели выбираются отдельно: распознавание аудио, анализ и протокол, ИИ-сотрудник. Каталог загружается из OpenRouter; выбранные значения сохраняются в настройках.</p>

@@ -43,6 +43,7 @@
 <datalist id="positions">{% for p in positions %}<option value="{{ p }}">{% endfor %}</datalist>
 <div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div><a class="btn" href="/departments">Подразделения</a></div>
 {% if ai %}<div class="card note">ИИ-сотрудник пишет с подключённого аккаунта. Укажите @username сотрудника или его номер телефона. Если по номеру человека не найти, добавьте его в контакты аккаунта или укажите @username.</div>{% else %}<div class="card note">Чтобы бот мог писать сотруднику, тот должен один раз открыть бота и нажать <b>/start</b> — после этого он появится в списке «Telegram».</div>{% endif %}
+{% if voice_msg %}<div class="card note" role="status">{{ voice_msg }}</div>{% endif %}
 <div class="grid2">
 <section class="card"><h2>Добавить сотрудника</h2>{{ form(None) }}</section>
 <section class="card"><h2>Справочник ({{ employees|length }})</h2>
@@ -58,10 +59,37 @@
       {% elif e.department %}<div class="department-badges"><span class="small muted">Подразделение:</span><span class="pill blue">{{ e.department }}</span></div>
       {% else %}<div class="department-badges"><span class="pill gray">Без подразделения</span></div>{% endif %}
       {% if e.competencies or e.responsibilities or e.context %}<div class="small muted">{% if e.competencies %}Компетенции: {{ e.competencies }} · {% endif %}{% if e.responsibilities %}Обязанности: {{ e.responsibilities }} · {% endif %}{% if e.context %}{{ e.context }}{% endif %}</div>{% endif %}
-      <div class="small">{% if e.telegram_chat_id %}<span class="pill green">Telegram</span>{% else %}<span class="pill red">нет Telegram</span>{% endif %}</div></div>
+      <div class="small">{% if e.telegram_chat_id %}<span class="pill green">Telegram</span>{% else %}<span class="pill red">нет Telegram</span>{% endif %}{% if e.voiceprint %} <span class="pill green">Голос зарегистрирован</span>{% endif %}</div></div>
       <div class="actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Изменить</a>
         <form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">×</button></form></div></div>
-    {% if edit == e.id %}<div class="edit-box">{{ form(e) }}</div>{% endif %}
+    {% if edit == e.id %}
+    <div class="edit-box">
+      {{ form(e) }}
+      <section class="card voice-profile">
+        <h3>Образец речи для идентификации</h3>
+        {% if e.voiceprint %}
+          <p class="small"><span class="pill green">Голосовой шаблон активен</span> · {{ e.voiceprint.sample_duration }} сек. · {{ e.voiceprint.created_at.strftime('%d.%m.%Y') if e.voiceprint.created_at else '' }}</p>
+          <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Удалить сохранённый голосовой шаблон?')">
+            <button class="btn sm danger">Удалить шаблон</button>
+          </form>
+        {% else %}
+          <p class="small muted">Шаблон не зарегистрирован. После регистрации он будет использоваться в новых записях, если настроен провайдер идентификации.</p>
+        {% endif %}
+        {% if voice_identity_enabled %}
+        <form method="post" action="/employees/{{ e.id }}/voice-sample" enctype="multipart/form-data" class="voice-profile-form">
+          <label class="f">Чистый образец голоса (5–30 секунд)
+            <input type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
+          </label>
+          <p class="small muted">Рекомендуется 10–20 секунд обычной речи только этого человека, без музыки, других голосов и сильного шума. Новый образец заменит прежний.</p>
+          <label class="check"><input type="checkbox" name="consent" value="yes" required> Подтверждаю, что согласие сотрудника на создание и использование голосового шаблона получено и зафиксировано. Образец и фрагменты записей будут обрабатываться внешним сервисом pyannoteAI.</label>
+          <button class="btn primary">Создать / заменить шаблон</button>
+        </form>
+        {% else %}
+          <p class="small muted">Для функции нужен ключ pyannoteAI. <a href="/settings#speaker-identification">Настроить ключ →</a></p>
+        {% endif %}
+      </section>
+    </div>
+    {% endif %}
   </div>
   {% endfor %}
 </section>

@@ -8,6 +8,7 @@ import pathlib
 import re
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 
@@ -22,11 +23,11 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, pipeline, progress_board, render, report_archive,
-               settings_store, telegram, userbot)
+               settings_store, speaker_id, telegram, userbot)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, ConversationEscalation, Delivery, Department, Employee, EmployeeDepartment, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, ConversationEscalation, Delivery, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -729,8 +730,8 @@ def settings_view(request: Request, msg: str = ""):
     guard_admin(request)
     st = settings_store.all_settings()
     masked = {k: bool(st.get(k)) for k in settings_store.SECRET_KEYS}
-    env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN),
-           "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL)}
+    env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "pyannoteai_api_key": bool(config.PYANNOTEAI_API_KEY),
+           "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN), "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL)}
     for k in settings_store.SECRET_KEYS + settings_store.HIDDEN_KEYS:
         st.pop(k, None)  # secrets never go back to the browser, only a mask
     ai = bool(st.get("ai_employee"))
@@ -999,7 +1000,7 @@ def telegram_account_logout(request: Request):
 
 # ----------------------------------------------------------------------------- employees
 @app.get("/employees", response_class=HTMLResponse)
-def employees_view(request: Request, edit: int = 0):
+def employees_view(request: Request, edit: int = 0, voice_msg: str = ""):
     guard_admin(request)
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
@@ -1007,13 +1008,15 @@ def employees_view(request: Request, edit: int = 0):
         for employee in emps:
             for membership in employee.department_memberships:
                 _ = membership.department.name if membership.department else ""
+            _ = employee.voiceprint.created_at if employee.voiceprint else None
         for department in departments:
             _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
-                departments=departments, positions=settings_store.POSITIONS, edit=edit)
+                departments=departments, positions=settings_store.POSITIONS, edit=edit, voice_msg=voice_msg,
+                voice_identity_enabled=bool(config.pyannoteai_key()))
 
 
 @app.post("/employees")
@@ -1063,6 +1066,90 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
             s.add(EmployeeDepartment(employee_id=e.id, department_id=d.id, role=role, responsibilities=duties))
         s.commit()
     return RedirectResponse("/employees", 303)
+
+
+def _voice_redirect(employee_id: int, message: str):
+    return RedirectResponse(f"/employees?edit={employee_id}&voice_msg={quote(message, safe='')}", 303)
+
+
+@app.post("/employees/{eid}/voice-sample")
+def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(...), consent: str = Form("")):
+    guard_admin(request)
+    if consent not in ("yes", "1", "on", "true"):
+        return _voice_redirect(eid, "Нужна фиксация отдельного согласия сотрудника на создание и использование голосового шаблона.")
+    if not config.pyannoteai_key():
+        return _voice_redirect(eid, "Сначала добавьте ключ pyannoteAI в Настройки → Идентификация по голосу.")
+    if config.weak_secret_key():
+        return _voice_redirect(eid, "Перед сохранением голосового шаблона задайте надёжный SECRET_KEY в настройках сервера.")
+    extension = pathlib.Path(sample.filename or "").suffix.lower()
+    allowed_extensions = {".wav", ".mp3", ".m4a", ".webm", ".ogg", ".flac", ".aac", ".mp4"}
+    if extension not in allowed_extensions:
+        return _voice_redirect(eid, "Поддерживаются WAV, MP3, M4A, WEBM, OGG, FLAC, AAC или MP4.")
+    with SessionLocal() as session:
+        employee = session.get(Employee, eid)
+        if employee is None or not employee.active:
+            return _voice_redirect(eid, "Активный сотрудник не найден.")
+        employee_name = employee.name
+    try:
+        with tempfile.TemporaryDirectory(prefix="sysai_voice_sample_") as tmp:
+            source_path = pathlib.Path(tmp) / ("upload" + extension)
+            normalized_path = pathlib.Path(tmp) / "voice-sample.wav"
+            total = 0
+            with source_path.open("wb") as destination:
+                while True:
+                    block = sample.file.read(1024 * 1024)
+                    if not block:
+                        break
+                    total += len(block)
+                    if total > speaker_id.MAX_SAMPLE_BYTES:
+                        raise speaker_id.SpeakerIdentityError("Файл образца превышает 16 МБ.")
+                    destination.write(block)
+            if total == 0:
+                raise speaker_id.SpeakerIdentityError("Файл образца пуст.")
+            duration = speaker_id.normalize_sample(source_path, normalized_path)
+            template = speaker_id.create_voiceprint(normalized_path, eid)
+            encrypted = speaker_id.encrypt_voiceprint(template)
+        with SessionLocal() as session:
+            employee = session.get(Employee, eid)
+            if employee is None:
+                raise speaker_id.SpeakerIdentityError("Сотрудник был удалён во время регистрации.")
+            profile = session.query(EmployeeVoiceprint).filter_by(employee_id=eid).one_or_none()
+            if profile is None:
+                profile = EmployeeVoiceprint(employee_id=eid)
+            profile.encrypted_voiceprint = encrypted
+            profile.provider = "pyannoteAI"
+            profile.sample_duration = duration
+            profile.consent_at = now()
+            profile.consent_version = speaker_id.CONSENT_VERSION
+            profile.updated_at = now()
+            session.add(profile)
+            session.commit()
+        return _voice_redirect(eid, f"Голосовой шаблон для «{employee_name}» создан. Исходный файл образца в SYSAI не сохранялся.")
+    except speaker_id.SpeakerIdentityError as exc:
+        return _voice_redirect(eid, str(exc)[:300])
+    except Exception:
+        log.exception("Could not enroll voiceprint for employee id %s", eid)
+        return _voice_redirect(eid, "Не удалось создать голосовой шаблон. Проверьте ключ/доступ pyannoteAI и логи сервера.")
+    finally:
+        try:
+            sample.file.close()
+        except Exception:
+            pass
+
+
+@app.post("/employees/{eid}/voice-sample/delete")
+def employee_voice_sample_delete(request: Request, eid: int):
+    guard_admin(request)
+    with SessionLocal() as session:
+        employee = session.get(Employee, eid)
+        if employee is None:
+            return _voice_redirect(eid, "Сотрудник не найден.")
+        profile = session.query(EmployeeVoiceprint).filter_by(employee_id=eid).one_or_none()
+        if profile is not None:
+            session.delete(profile)
+            session.commit()
+        employee_name = employee.name
+    return _voice_redirect(eid, f"Локальный голосовой шаблон «{employee_name}» удалён.")
 
 
 @app.get("/departments", response_class=HTMLResponse)
