@@ -422,6 +422,7 @@ def init_db():
     _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")
     _add_column_if_missing("tasks", "target_employee_name", "target_employee_name VARCHAR(200) DEFAULT ''")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
+    _add_column_if_missing("recordings", "device_label", "device_label VARCHAR(120) NOT NULL DEFAULT ''")
     _add_column_if_missing("employees", "department", "department VARCHAR(200) DEFAULT ''")
     _add_column_if_missing("employees", "competencies", "competencies TEXT DEFAULT ''")
     _add_column_if_missing("employees", "responsibilities", "responsibilities TEXT DEFAULT ''")
