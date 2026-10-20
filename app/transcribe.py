@@ -279,14 +279,22 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
                 })
             progress(f"Фрагмент {index}: делю и продолжаю")
             left_length, right_length = half + overlap, length - half
-            result = part(
-                lambda: cut(offset, left_length, f"chunk_{index}_left.mp3"),
-                offset, left_length, f"{index}L", context,
-            )
-            second = part(
-                lambda: cut(offset + half, right_length, f"chunk_{index}_right.mp3"),
-                offset + half, right_length, f"{index}R", _context(result),
-            )
+            left_name = f"chunk_{index}_left.mp3"
+            right_name = f"chunk_{index}_right.mp3"
+            if state is None:
+                # Preserve the original extraction order for a new split: create both
+                # immediate children before recursively processing either child.
+                # After a restart (state is present), defer extraction until needed so
+                # a checkpointed child can be reused without another FFmpeg pass.
+                left_chunk = cut(offset, left_length, left_name)
+                right_chunk = cut(offset + half, right_length, right_name)
+                get_left = lambda: left_chunk
+                get_right = lambda: right_chunk
+            else:
+                get_left = lambda: cut(offset, left_length, left_name)
+                get_right = lambda: cut(offset + half, right_length, right_name)
+            result = part(get_left, offset, left_length, f"{index}L", context)
+            second = part(get_right, offset + half, right_length, f"{index}R", _context(result))
             _merge(result, second, offset + half)
             return result
 
