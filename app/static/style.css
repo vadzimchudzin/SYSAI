@@ -481,6 +481,16 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .rm-card .edit-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
 @media (max-width: 640px) { .rm-card { grid-template-columns: 1fr; } .rm-side { flex-direction: row; align-items: center; } .rm-time { text-align: left; display: flex; align-items: baseline; gap: 10px; padding: 6px 12px; } }
 
+/* Department and membership editor */
+.department-memberships { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 12px 0; }
+.department-memberships > summary { cursor: pointer; font-weight: 600; }
+.department-membership-row { padding: 12px 0; border-top: 1px solid var(--line); }
+.department-membership-row:first-of-type { margin-top: 10px; }
+.department-membership-row .check { margin-bottom: 8px; }
+.department-card { padding: 14px 0; border-top: 1px solid var(--line); }
+.department-card .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.department-form { display: grid; gap: 10px; }
+
 /* Evidence-backed interactive charts in meeting reports */
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 14px; }
 .chart-card { min-width: 0; border: 1px solid var(--line); border-radius: 16px; padding: 14px; background: var(--card2); }

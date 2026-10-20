@@ -9,6 +9,24 @@
   <label class="f">Компетенции <textarea name="competencies" rows="2" placeholder="Навыки, направления, оборудование">{{ e.competencies if e }}</textarea></label>
   <label class="f">Обязанности <textarea name="responsibilities" rows="3" maxlength="4000" placeholder="За что отвечает сотрудник">{{ e.responsibilities if e }}</textarea><small class="muted">Помогает выбрать исполнителя по смыслу задачи.</small></label>
   <label class="f">Дополнительный контекст <textarea name="context" rows="2" placeholder="Уточнения для различения одноимённых сотрудников">{{ e.context if e }}</textarea></label>
+  {% if departments %}
+  <details class="department-memberships" {% if e and e.department_memberships %}open{% endif %}>
+    <summary>Подразделения, роли и обязанности</summary>
+    {% for d in departments %}
+      {% set matches = (e.department_memberships | selectattr('department_id', 'equalto', d.id) | list) if e else [] %}
+      {% set m = matches[0] if matches else none %}
+      <div class="department-membership-row">
+        <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {% if m %}checked{% endif %} {% if not d.active and not m %}disabled{% endif %}> {{ d.name }}{% if not d.active %} (неактивно){% endif %}</label>
+        <label class="f">Роль в подразделении
+          <input name="department_role_{{ d.id }}" maxlength="200" value="{{ m.role if m else '' }}" placeholder="Например, специалист по закупкам">
+        </label>
+        <label class="f">Обязанности в этом подразделении
+          <textarea name="department_responsibilities_{{ d.id }}" rows="2" maxlength="4000" placeholder="Что именно выполняет в этом отделе">{{ m.responsibilities if m else '' }}</textarea>
+        </label>
+      </div>
+    {% endfor %}
+  </details>
+  {% endif %}
   <label class="f">Куда писать <select name="channel"><option value="telegram">Telegram</option></select></label>
   {% if ai %}<label class="f">Telegram <input name="telegram_manual" placeholder="@username или +375291234567" value="{{ e.telegram_chat_id if e }}"></label>
   {% else %}
@@ -23,7 +41,7 @@
 {% endmacro %}
 {% block body %}
 <datalist id="positions">{% for p in positions %}<option value="{{ p }}">{% endfor %}</datalist>
-<div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div></div>
+<div class="page-h"><div><h1>Сотрудники</h1><p>По этому справочнику SYSAI узнаёт исполнителей на записи.</p></div><a class="btn" href="/departments">Подразделения</a></div>
 {% if ai %}<div class="card note">ИИ-сотрудник пишет с подключённого аккаунта. Укажите @username сотрудника или его номер телефона. Если по номеру человека не найти, добавьте его в контакты аккаунта или укажите @username.</div>{% else %}<div class="card note">Чтобы бот мог писать сотруднику, тот должен один раз открыть бота и нажать <b>/start</b> — после этого он появится в списке «Telegram».</div>{% endif %}
 <div class="grid2">
 <section class="card"><h2>Добавить сотрудника</h2>{{ form(None) }}</section>

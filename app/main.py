@@ -1003,22 +1003,35 @@ def employees_view(request: Request, edit: int = 0):
     guard_admin(request)
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
+        departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        for employee in emps:
+            for membership in employee.department_memberships:
+                _ = membership.department.name if membership.department else ""
+        for department in departments:
+            _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
-                positions=settings_store.POSITIONS, edit=edit)
+                departments=departments, positions=settings_store.POSITIONS, edit=edit)
 
 
 @app.post("/employees")
-def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
+async def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
                   position: str = Form(""), department: str = Form(""), competencies: str = Form(""),
                   responsibilities: str = Form(""), context: str = Form(""),
                   channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
                   telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
     guard_admin(request)
+    form = await request.form()
+    try:
+        selected_ids = {int(value) for value in form.getlist("department_ids")}
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректное подразделение") from None
     with SessionLocal() as s:
         e = s.get(Employee, id) if id else Employee()
+        if e is None:
+            raise HTTPException(404, "Сотрудник не найден")
         e.name, e.aliases, e.position, e.channel = name.strip(), aliases.strip(), position.strip(), channel
         e.department = department.strip()
         e.competencies = competencies.strip()
@@ -1031,13 +1044,70 @@ def employee_save(request: Request, id: int = Form(0), name: str = Form(...), al
             except userbot.RefError as exc:
                 raise HTTPException(400, str(exc))
         if (e.telegram_chat_id or "") != ref:
-            e.telegram_user_id = ""  # the person behind the address changed, learn the id again
+            e.telegram_user_id = ""
         e.telegram_chat_id = ref
         e.bitrix_user_id = bitrix_user_id.strip()
         e.active = bool(active) if id else True
         s.add(e)
+        s.flush()
+        departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []
+        if {d.id for d in departments} != selected_ids:
+            raise HTTPException(400, "Одно из подразделений не найдено")
+        existing_ids = {m.department_id for m in e.department_memberships}
+        if any(not d.active and d.id not in existing_ids for d in departments):
+            raise HTTPException(400, "Нельзя добавить сотрудника в неактивное подразделение")
+        s.query(EmployeeDepartment).filter_by(employee_id=e.id).delete(synchronize_session=False)
+        for d in departments:
+            role = str(form.get(f"department_role_{d.id}") or "").strip()[:200]
+            duties = str(form.get(f"department_responsibilities_{d.id}") or "").strip()[:4000]
+            s.add(EmployeeDepartment(employee_id=e.id, department_id=d.id, role=role, responsibilities=duties))
         s.commit()
     return RedirectResponse("/employees", 303)
+
+
+@app.get("/departments", response_class=HTMLResponse)
+def departments_view(request: Request, edit: int = 0, msg: str = ""):
+    guard_admin(request)
+    with SessionLocal() as s:
+        departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        for department in departments:
+            _ = len(department.memberships)
+    return page(request, "departments.html", departments=departments, edit=edit, msg=msg)
+
+
+@app.post("/departments")
+def department_save(request: Request, id: int = Form(0), name: str = Form(...),
+                    description: str = Form(""), active: str = Form("")):
+    guard_admin(request)
+    clean_name = name.strip()[:100]
+    if not clean_name:
+        raise HTTPException(400, "Укажите название подразделения")
+    with SessionLocal() as s:
+        duplicate = s.query(Department).filter(Department.name.ilike(clean_name))
+        if id:
+            duplicate = duplicate.filter(Department.id != id)
+        if duplicate.first():
+            raise HTTPException(409, "Подразделение с таким названием уже существует")
+        department = s.get(Department, id) if id else Department()
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        department.name = clean_name
+        department.description = description.strip()[:1000]
+        department.active = bool(active) if id else True
+        s.add(department)
+        s.commit()
+    return RedirectResponse("/departments", 303)
+
+
+@app.post("/departments/{department_id}/delete")
+def department_delete(request: Request, department_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        if department:
+            s.delete(department)
+            s.commit()
+    return RedirectResponse("/departments", 303)
 
 
 # ----------------------------------------------------------------------------- meeting reminders
@@ -1088,6 +1158,7 @@ def employee_delete(request: Request, eid: int):
     with SessionLocal() as s:
         for t in s.query(Task).filter_by(assignee_id=eid):
             t.assignee_id = None
+        s.query(Task).filter_by(target_employee_id=eid).update({Task.target_employee_id: None}, synchronize_session=False)
         e = s.get(Employee, eid)
         if e:
             s.delete(e)

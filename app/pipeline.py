@@ -136,6 +136,9 @@ def _process(meeting_id: int):
              progress="Составление отчёта и задач")
         with SessionLocal() as s:
             employees = s.query(Employee).filter(Employee.active.is_(True)).all()
+            for employee in employees:
+                for membership in employee.department_memberships:
+                    _ = membership.department.name if membership.department else ""
         report = analyze.mock_report(employees, mdate) if source == "demo" else analyze.analyze(
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
         _save_report(meeting_id, report, settings)
@@ -146,15 +149,21 @@ def _process(meeting_id: int):
 
 
 def _directory_terms(limit: int = 80) -> list:
-    """Names and concise profile vocabulary to improve spelling without inventing speech."""
+    """Names, aliases, roles and duty phrases that help spelling without inventing speech."""
     with SessionLocal() as s:
         people = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.id).all()
         found, seen = [], set()
         for person in people:
-            candidates = [person.name, *person.alias_list()]
-            for field in ("position", "department", "competencies", "responsibilities"):
+            candidates = [person.name, *person.alias_list(), person.position]
+            for field in ("department", "competencies", "responsibilities"):
                 value = str(getattr(person, field, "") or "")
                 candidates.extend(re.split(r"[,;\n]+", value))
+            for membership in person.department_memberships:
+                department = membership.department
+                if department is None or not department.active:
+                    continue
+                candidates.extend([department.name, membership.role])
+                candidates.extend(re.split(r"[,;\n]+", membership.responsibilities or ""))
             for raw in candidates:
                 term = str(raw or "").strip(" \t-•")
                 key = term.casefold()

@@ -127,9 +127,35 @@ class Employee(Base):
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
     bitrix_user_id = Column(String(40), default="")
     active = Column(Boolean, default=True)
+    department_memberships = relationship("EmployeeDepartment", back_populates="employee",
+                                          cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
 
     def alias_list(self):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
+
+
+class Department(Base):
+    __tablename__ = "departments"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    description = Column(Text, default="")
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    memberships = relationship("EmployeeDepartment", back_populates="department",
+                               cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
+
+
+class EmployeeDepartment(Base):
+    __tablename__ = "employee_departments"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=False, index=True)
+    role = Column(String(200), default="")
+    responsibilities = Column(Text, default="")
+    is_primary = Column(Boolean, default=False)
+    employee = relationship("Employee", back_populates="department_memberships")
+    department = relationship("Department", back_populates="memberships")
+    __table_args__ = (UniqueConstraint("employee_id", "department_id", name="uq_employee_department"),)
 
 
 class Meeting(Base):
