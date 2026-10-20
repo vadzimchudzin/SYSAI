@@ -35,6 +35,25 @@ def test_two_people_with_the_same_first_name_stay_ambiguous():
     assert analyze.match_employee("Вадиму Орлову", twins).id == 2
 
 
+def test_ambiguous_participant_name_does_not_keep_model_id():
+    twins = [person(1, "Вадим Чудин"), person(2, "Вадим Орлов")]
+    out = analyze.normalize({
+        "participants": [{"name": "Вадим", "employee_id": 1}],
+        "tasks": [],
+    }, twins)
+    assert out["participants"][0]["employee_id"] is None
+    assert out["requires_review"] is True
+    assert any("Уточните участника" in note for note in out["notes"])
+
+
+def test_unique_spoken_participant_name_overrides_conflicting_model_id():
+    out = analyze.normalize({
+        "participants": [{"name": "Анне", "employee_id": 1}],
+        "tasks": [],
+    }, TEAM)
+    assert out["participants"][0]["employee_id"] == 3
+
+
 def test_a_surname_does_not_match_a_longer_surname():
     assert analyze.match_employee("Иван", [person(1, "Сергей Иванов")]) is None
 
@@ -63,16 +82,71 @@ def test_a_wrong_id_from_the_model_is_replaced_by_the_spoken_name():
     assert out["tasks"][0]["employee_id"] == 3
 
 
+def test_boolean_employee_id_is_not_coerced_to_employee_one():
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": True, "assignee_name": ""}]}, TEAM)
+    assert out["tasks"][0]["employee_id"] is None
+
+
+def test_a_conflicting_valid_model_id_is_overridden_by_the_spoken_name():
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Анне"}]}, TEAM)
+    assert out["tasks"][0]["employee_id"] == 3
+
+
+def test_ambiguous_spoken_name_clears_model_employee_id_and_flags_review():
+    twins = [person(1, "Вадим Чудин"), person(2, "Вадим Орлов")]
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Вадиму"}]}, twins)
+    assert out["tasks"][0]["employee_id"] is None
+    assert out["requires_review"] is True
+    assert any("Уточните исполнителя" in note and "Смета" in note for note in out["notes"])
+
+
+def test_unique_full_name_resolves_even_when_first_name_is_ambiguous():
+    twins = [person(1, "Вадим Чудин"), person(2, "Вадим Орлов")]
+    out = analyze.normalize({"tasks": [{"title": "Смета", "employee_id": 1, "assignee_name": "Вадиму Орлову"}]}, twins)
+    assert out["tasks"][0]["employee_id"] == 2
+
+
 def test_the_analyst_is_told_that_the_id_is_required_for_a_named_person():
     assert "employee_id" in analyze.SYSTEM and "в любом падеже" in analyze.SYSTEM and "обязателен" in analyze.SYSTEM
 
 
+def test_employee_assignment_profile_is_included_in_analysis_directory():
+    specialist = SimpleNamespace(
+        id=7, name="Татьяна Смирнова", aliases="", position="Специалист по закупкам",
+        department="Технический отдел", competencies="промышленные насосы, закупка оборудования",
+        responsibilities="подбор поставщиков и закупка запчастей", context="согласует закупки с главным инженером",
+        alias_list=lambda: [],
+    )
+
+    import json
+    profile = json.loads(analyze.employees_json([specialist]))[0]
+    assert profile["department"] == "Технический отдел"
+    assert "промышленные насосы" in profile["competencies"]
+    assert "закупка запчастей" in profile["responsibilities"]
+    assert "главным инженером" in profile["context"]
+    assert "подразделение, компетенции и обязанности" in analyze.SYSTEM
+
+
 def test_directory_names_help_the_recogniser_and_the_analyst():
     with SessionLocal() as s:
-        s.add_all([Employee(name="Вадим Чудин", aliases="Вадя, Чудин"), Employee(name="Иван Петров", aliases="Вадя"),
-                   Employee(name="Бывший Сотрудник", active=False)])
+        s.add_all([
+            Employee(name="Вадим Чудин", aliases="Вадя, Чудин"),
+            Employee(name="Иван Петров", aliases="Вадя"),
+            Employee(name="Татьяна Смирнова", position="Инженер КИПиА", department="Технический отдел",
+                     competencies="промышленные насосы, частотный преобразователь",
+                     responsibilities="диагностика датчиков; закупка запчастей"),
+            Employee(name="Бывший Сотрудник", active=False, competencies="неактуальный термин"),
+        ])
         s.commit()
-    assert pipeline._directory_terms() == ["Вадим Чудин", "Вадя", "Чудин", "Иван Петров"]
+    terms = pipeline._directory_terms()
+    assert terms[:4] == ["Вадим Чудин", "Вадя", "Чудин", "Иван Петров"]
+    assert "Инженер КИПиА" in terms
+    assert "Технический отдел" in terms
+    assert "промышленные насосы" in terms
+    assert "частотный преобразователь" in terms
+    assert "диагностика датчиков" in terms
+    assert "закупка запчастей" in terms
+    assert "неактуальный термин" not in terms
 
 
 # ----------------------------------------------------------------------------- the first message is not an introduction

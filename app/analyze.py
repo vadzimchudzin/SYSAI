@@ -29,6 +29,7 @@ SYSTEM = """Ты — опытный секретарь руководителя.
   employee_id null и assignee_name "ассистент". Все остальные задачи: executor="person".
 - Решения — то, о чём договорились. Открытые вопросы — что осталось нерешённым. Риски — проблемы и опасения.
 - Участники: сопоставь метки говорящих («Спикер 1») с людьми, если это понятно из разговора.
+При выборе исполнителя учитывай не только имя: должность, подразделение, компетенции и обязанности помогают понять контекст поручения. Не назначай задачу только по совпадению общей темы; если прямого указания и однозначных данных нет, оставь employee_id null и сохрани сказанное в assignee_name.
 Справочник сотрудников (JSON): {employees}
 Термины компании: {glossary}
 Если имя или роль участника неизвестны, укажи пустую строку; не выдумывай имя по голосу.
@@ -53,13 +54,18 @@ def transcript_text(segments: list) -> str:
 
 
 def employees_json(employees) -> str:
-    return json.dumps([{"employee_id": e.id, "name": e.name, "aliases": e.alias_list(), "position": e.position}
+    return json.dumps([{"employee_id": e.id, "name": e.name, "aliases": e.alias_list(),
+                          "position": getattr(e, "position", ""), "department": getattr(e, "department", ""),
+                          "competencies": getattr(e, "competencies", ""),
+                          "responsibilities": getattr(e, "responsibilities", ""),
+                          "context": getattr(e, "context", "")}
                        for e in employees], ensure_ascii=False)
 
 
 def _fingerprint(segments, employees, settings, meeting_date):
     payload = {
-        "analysis_version": 3, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
+        # Bump when prompt/normalization semantics change so old checkpoints cannot bypass new safeguards.
+        "analysis_version": 4, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
         "model": settings.get("report_model"), "glossary": settings.get("glossary", ""),
         "employees": employees_json(employees), "meeting_date": meeting_date.isoformat(),
         "transcript": transcript_text(segments),
@@ -494,19 +500,22 @@ def _aliases(employee) -> list:
         return [a.strip() for a in str(getattr(employee, "aliases", "") or "").split(",") if a.strip()]
 
 
-def match_employee(name, employees):
-    """The one directory employee a spoken name points at, or None (unknown or ambiguous: never guess).
-
-    The model is told to map names itself but plays safe and leaves employee_id empty; this catches the cases where
-    the name, an alias or a surname from the directory was plainly said, in any grammatical case."""
+def _employee_matches(name, employees):
+    """Return all directory employees consistent with a spoken name or alias."""
     spoken = _words(name)
     if not spoken:
-        return None
+        return []
     hits = []
     for employee in employees:
         known = [w for phrase in [getattr(employee, "name", "")] + _aliases(employee) for w in _words(phrase)]
         if all(any(_same_word(s, k) for k in known) for s in spoken):
             hits.append(employee)
+    return hits
+
+
+def match_employee(name, employees):
+    """Return a unique match; unknown or ambiguous names are never guessed."""
+    hits = _employee_matches(name, employees)
     return hits[0] if len(hits) == 1 else None
 
 
@@ -514,16 +523,25 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
     ids = {e.id for e in employees}
     out = {k: r.get(k) or [] for k in ("participants", "topics", "decisions", "tasks", "open_questions", "risks",
                                        "notes")}
+    identity_review_notes = []
     participants = []
     for participant in out["participants"]:
         if not isinstance(participant, dict):
             continue
         normalized = dict(participant)
         eid = normalized.get("employee_id")
-        normalized["employee_id"] = eid if isinstance(eid, int) and not isinstance(eid, bool) and eid in ids else None
-        if normalized["employee_id"] is None and normalized.get("name"):
-            matched = match_employee(normalized["name"], employees)
-            normalized["employee_id"] = matched.id if matched else None
+        eid = eid if isinstance(eid, int) and not isinstance(eid, bool) and eid in ids else None
+        name = normalized.get("name")
+        if name:
+            candidates = _employee_matches(name, employees)
+            if len(candidates) == 1:
+                eid = candidates[0].id
+            elif len(candidates) > 1:
+                eid = None
+                identity_review_notes.append(
+                    f"Уточните участника «{str(name).strip()}»: имя соответствует нескольким сотрудникам."
+                )
+        normalized["employee_id"] = eid
         participants.append(normalized)
     out["participants"] = participants
     out["title"] = (r.get("title") or "Совещание").strip()
@@ -535,16 +553,33 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
         if not isinstance(t, dict) or not t.get("title"):
             continue
         eid = t.get("employee_id")
-        try:
-            eid = int(eid) if eid is not None else None
-        except (TypeError, ValueError):
+        if isinstance(eid, bool):
+            # bool is a subclass of int in Python; never treat True as employee ID 1.
             eid = None
+        else:
+            try:
+                eid = int(eid) if eid is not None else None
+            except (TypeError, ValueError):
+                eid = None
         executor = "assistant" if t.get("executor") == "assistant" else "person"
         if executor == "assistant":
             eid = None
-        elif eid not in ids:
-            matched = match_employee(t.get("assignee_name"), employees)
-            eid = matched.id if matched else None
+        else:
+            # A spoken directory name is stronger evidence than the model's proposed ID.
+            # Correct a conflicting ID deterministically. If the spoken name matches multiple
+            # directory entries, clear the ID rather than silently accepting the model's guess.
+            candidates = _employee_matches(t.get("assignee_name"), employees)
+            if len(candidates) == 1:
+                eid = candidates[0].id
+            elif len(candidates) > 1:
+                eid = None
+                spoken_name = (t.get("assignee_name") or "").strip() or "указанное имя"
+                identity_review_notes.append(
+                    f"Уточните исполнителя задачи «{str(t.get('title') or '').strip()}»: "
+                    f"имя «{spoken_name}» соответствует нескольким сотрудникам."
+                )
+            elif eid not in ids:
+                eid = None
         d = None
         if t.get("deadline"):
             d = normalize_deadline(t["deadline"], meeting_date)
@@ -555,6 +590,9 @@ def normalize(r: dict, employees, meeting_date=None) -> dict:
                       "priority": t.get("priority") if t.get("priority") in ("high", "medium", "low") else "medium",
                       "time": t.get("time") or "", "quote": t.get("quote") or ""})
     out["tasks"] = tasks
+    if identity_review_notes:
+        out["notes"] = [*out["notes"], *identity_review_notes]
+        out["requires_review"] = True
     return out
 
 
