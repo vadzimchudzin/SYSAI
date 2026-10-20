@@ -33,7 +33,7 @@ def make_long_mp3(path, seconds):
 
 
 def settings(**overrides):
-    return {"transcribe_model": "test/model", **overrides}
+    return {"transcribe_model": transcribe.LEGACY_CHAT_MODEL, **overrides}
 
 
 @pytest.mark.parametrize("duration,tail", [(122.4, 2.4), (120.35, 0.35)])
@@ -293,11 +293,11 @@ def test_checkpoint_retry_reuses_successful_part_and_invalidates_on_settings_cha
     assert len(calls) == 3
     assert [item["text"] for item in retried] == ["part 1", "part 3"]
 
-    changed_model = settings(glossary="alpha", transcribe_model="test/other", chunk_minutes=1)
+    changed_model = settings(glossary="alpha", language="en", chunk_minutes=1)
     transcribe.transcribe(str(source), changed_model, checkpoint=checkpoint)
     assert len(calls) == 5
 
-    changed_glossary = settings(glossary="beta", transcribe_model="test/other", chunk_minutes=1)
+    changed_glossary = settings(glossary="beta", language="en", chunk_minutes=1)
     transcribe.transcribe(str(source), changed_glossary, checkpoint=checkpoint)
     assert len(calls) == 7
 
@@ -683,3 +683,34 @@ def test_a_run_that_cuts_cleans_its_folder_even_when_a_cut_fails(tmp_path, monke
     with pytest.raises(RuntimeError, match="ffmpeg died"):
         transcribe.transcribe(str(source), settings())
     assert len(workdirs) == 1 and not pathlib.Path(workdirs[0]).exists()
+
+
+def test_recursive_split_resume_reuses_saved_child_and_skips_parent_retry(tmp_path, monkeypatch):
+    source = make_long_mp3(tmp_path / "clip.mp3", 50)
+    checkpoint = checkpoints.Store(new_meeting())
+    monkeypatch.setattr(config, "llm_enabled", lambda: True)
+    calls = []
+
+    def flaky(*args, **kwargs):
+        call = len(calls)
+        calls.append(1)
+        if call == 0:
+            raise llm.IncompleteResponse("parent response too large")
+        if call == 2:
+            raise llm.LLMError("right child failed")
+        return json.dumps({"segments": [{"speaker": "A", "start": 1, "text": f"recognized call {call + 1}"}]})
+
+    monkeypatch.setattr(llm, "chat", flaky)
+    with pytest.raises(llm.LLMError, match="right child failed"):
+        transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+    assert len(calls) == 3
+
+    cuts, workdirs = watch_cuts(monkeypatch)
+    monkeypatch.setattr(llm, "chat", lambda *a, **kw: json.dumps(
+        {"segments": [{"speaker": "A", "start": 1, "text": "the last part"}]}))
+    _, segments = transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+
+    assert len(calls) == 3
+    assert cuts == [25]
+    assert len(workdirs) == 1 and not pathlib.Path(workdirs[0]).exists()
+    assert [item["text"] for item in segments] == ["recognized call 2", "the last part"]
