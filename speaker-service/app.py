@@ -350,7 +350,7 @@ async def embed(
         if not (os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")):
             raise HTTPException(status_code=503, detail="Private Vercel Blob storage is not configured")
         try:
-            uploaded = await blob.put_blob(
+            uploaded = await blob.put_async(
                 f"profiles/employee-{employee_id}/{uuid.uuid4().hex}.wav",
                 raw,
                 access="private",
@@ -370,10 +370,6 @@ async def embed(
                 diagnostic += f"; status={status_code}"
             if isinstance(error_code, str) and error_code:
                 diagnostic += f"; code={error_code[:80]}"
-            # AttributeError messages name a missing SDK attribute/object, not credentials or
-            # request contents, and are needed to diagnose SDK-version mismatches.
-            if isinstance(exc, AttributeError) and str(exc):
-                diagnostic += f"; info={str(exc)[:120]}"
             raise HTTPException(
                 status_code=502,
                 detail=f"Could not store the voice sample in private Blob ({diagnostic})",
@@ -436,7 +432,7 @@ async def identify(
             if blob_available and PROFILE_MIN_SECONDS <= clip_duration <= PROFILE_MAX_SECONDS:
                 try:
                     sample_bytes = await asyncio.to_thread(_encode_wav, clip)
-                    uploaded = await blob.put_blob(
+                    uploaded = await blob.put_async(
                         f"candidates/{uuid.uuid4().hex}/{uuid.uuid4().hex}.wav",
                         sample_bytes,
                         access="private",
@@ -467,7 +463,7 @@ async def promote_candidate(
     if not payload.candidate_path.startswith("candidates/") or ".." in payload.candidate_path:
         raise HTTPException(status_code=400, detail="Invalid candidate path")
     try:
-        result = await blob.copy_blob(
+        result = await blob.copy_async(
             payload.candidate_path,
             f"profiles/employee-{payload.employee_id}/{uuid.uuid4().hex}.wav",
             access="private",
@@ -475,7 +471,7 @@ async def promote_candidate(
             add_random_suffix=True,
         )
         try:
-            await blob.delete_blob(payload.candidate_path)
+            await blob.delete_async(payload.candidate_path)
         except Exception:
             log.warning("Promoted candidate but could not remove temporary blob %s", payload.candidate_path)
         return {"sample_blob_path": result.pathname}
@@ -493,7 +489,7 @@ async def delete_candidate(
     if not pathname.startswith("candidates/") or ".." in pathname:
         raise HTTPException(status_code=400, detail="Invalid candidate path")
     try:
-        await blob.delete_blob(pathname)
+        await blob.delete_async(pathname)
     except Exception as exc:
         log.exception("Could not delete temporary speaker candidate")
         raise HTTPException(status_code=502, detail="Could not delete candidate sample") from exc
@@ -515,7 +511,7 @@ async def delete_sample(
     if not payload.pathname.startswith(expected_prefix) or ".." in payload.pathname:
         raise HTTPException(status_code=400, detail="Sample path does not belong to the employee")
     try:
-        await blob.delete_blob(payload.pathname)
+        await blob.delete_async(payload.pathname)
     except Exception as exc:
         log.exception("Could not delete private reference audio for employee id %s", payload.employee_id)
         raise HTTPException(status_code=502, detail="Could not delete the voice sample") from exc
