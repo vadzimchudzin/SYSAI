@@ -79,3 +79,90 @@ def test_routing_matches_russian_inflections_of_duties():
         chosen = analyze.match_task_employee("Татьяне", "закупить", people)
         assert chosen is not None
         assert chosen.id == second.id
+
+
+def test_add_existing_employee_to_department_and_show_badge_in_general_list(client):
+    with SessionLocal() as session:
+        department = Department(name="Отдел приглашений")
+        employee = Employee(name="Иван Проверочный", position="Инженер")
+        session.add_all([department, employee])
+        session.commit()
+        department_id, employee_id = department.id, employee.id
+
+    response = client.post(
+        f"/departments/{department_id}/members",
+        data={"employee_id": str(employee_id), "role": "Инженер проекта",
+              "responsibilities": "Пусконаладка"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "Иван Проверочный" in response.text
+    assert "Отдел приглашений" in response.text
+
+    with SessionLocal() as session:
+        employee = session.get(Employee, employee_id)
+        assert employee is not None
+        assert len(employee.department_memberships) == 1
+        assert employee.department_memberships[0].role == "Инженер проекта"
+
+    employees_page = client.get("/employees")
+    assert employees_page.status_code == 200
+    assert "Иван Проверочный" in employees_page.text
+    assert "Отдел приглашений" in employees_page.text
+
+
+def test_create_department_member_also_creates_general_employee(client):
+    response = client.post(
+        "/departments",
+        data={"name": "Отдел новых людей", "description": "Тест"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        department = session.query(Department).filter_by(name="Отдел новых людей").one()
+        department_id = department.id
+
+    response = client.post(
+        f"/departments/{department_id}/members/create",
+        data={"name": "Новый сотрудник", "aliases": "Новичок", "position": "Аналитик",
+              "telegram_contact": "", "role": "Аналитик отдела", "responsibilities": "Отчёты"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "Новый сотрудник" in response.text
+    assert "Отдел новых людей" in response.text
+
+    with SessionLocal() as session:
+        employee = session.query(Employee).filter_by(name="Новый сотрудник").one()
+        assert employee.position == "Аналитик"
+        assert employee.aliases == "Новичок"
+        assert len(employee.department_memberships) == 1
+        assert employee.department_memberships[0].department.name == "Отдел новых людей"
+
+    employees_page = client.get("/employees")
+    assert employees_page.status_code == 200
+    assert "Новый сотрудник" in employees_page.text
+    assert "Отдел новых людей" in employees_page.text
+
+
+def test_remove_department_member_keeps_employee_in_general_directory(client):
+    with SessionLocal() as session:
+        department = Department(name="Отдел удаления связи")
+        employee = Employee(name="Сохраняемый сотрудник")
+        session.add_all([department, employee])
+        session.flush()
+        session.add(EmployeeDepartment(employee_id=employee.id, department_id=department.id))
+        session.commit()
+        department_id, employee_id = department.id, employee.id
+
+    response = client.post(
+        f"/departments/{department_id}/members/{employee_id}/remove",
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        assert session.get(Employee, employee_id) is not None
+        assert session.query(EmployeeDepartment).filter_by(
+            employee_id=employee_id, department_id=department_id
+        ).count() == 0
+    assert "Сохраняемый сотрудник" in client.get("/employees").text

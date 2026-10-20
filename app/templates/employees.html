@@ -51,7 +51,13 @@
   <div class="emp {{ '' if e.active else 'off' }}">
     <div class="row between"><div><b>{{ e.name }}</b> <span class="muted">{{ e.position }}</span>
       <div class="small muted">{{ e.aliases }}</div>
-      {% if e.department or e.competencies or e.responsibilities or e.context %}<div class="small muted">{% if e.department %}{{ e.department }} · {% endif %}{% if e.competencies %}Компетенции: {{ e.competencies }} · {% endif %}{% if e.responsibilities %}Обязанности: {{ e.responsibilities }} · {% endif %}{% if e.context %}{{ e.context }}{% endif %}</div>{% endif %}
+      {% if e.department_memberships %}
+      <div class="department-badges"><span class="small muted">Подразделения:</span>
+        {% for membership in e.department_memberships %}<span class="pill blue" title="{{ membership.role or 'Сотрудник подразделения' }}">{{ membership.department.name }}</span>{% endfor %}
+      </div>
+      {% elif e.department %}<div class="department-badges"><span class="small muted">Подразделение:</span><span class="pill blue">{{ e.department }}</span></div>
+      {% else %}<div class="department-badges"><span class="pill gray">Без подразделения</span></div>{% endif %}
+      {% if e.competencies or e.responsibilities or e.context %}<div class="small muted">{% if e.competencies %}Компетенции: {{ e.competencies }} · {% endif %}{% if e.responsibilities %}Обязанности: {{ e.responsibilities }} · {% endif %}{% if e.context %}{{ e.context }}{% endif %}</div>{% endif %}
       <div class="small">{% if e.telegram_chat_id %}<span class="pill green">Telegram</span>{% else %}<span class="pill red">нет Telegram</span>{% endif %}</div></div>
       <div class="actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Изменить</a>
         <form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">×</button></form></div></div>

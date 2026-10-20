@@ -535,3 +535,26 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
   .active-recording { align-items: flex-start; flex-direction: column; }
   .active-recording .btn { align-self: flex-start; }
 }
+
+
+/* Department membership and invitation UI */
+.department-title { min-width: 0; }
+.department-people { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
+.department-people h3 { margin: 0; font-size: 15px; }
+.department-person { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.department-person:first-of-type { margin-top: 6px; }
+.department-person-main { min-width: 0; display: grid; gap: 4px; }
+.department-person-name { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.department-person .small { overflow-wrap: anywhere; }
+.department-add { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.department-add > summary { cursor: pointer; font-weight: 650; }
+.department-add-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding-top: 12px; }
+.department-add-tabs > section { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.department-add-tabs h4 { margin: 0 0 6px; font-size: 14px; }
+.department-add-tabs p { margin: 0 0 10px; }
+.department-add-tabs .btn { margin-top: 4px; }
+.department-add-tabs button:disabled { opacity: .5; cursor: not-allowed; }
+.department-badges { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+@media (max-width: 760px) {
+  .department-add-tabs { grid-template-columns: minmax(0, 1fr); }
+}

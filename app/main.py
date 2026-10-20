@@ -1070,9 +1070,27 @@ def departments_view(request: Request, edit: int = 0, msg: str = ""):
     guard_admin(request)
     with SessionLocal() as s:
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
         for department in departments:
+            for membership in department.memberships:
+                if membership.employee is not None:
+                    _ = membership.employee.name, membership.employee.position, membership.employee.active
             _ = len(department.memberships)
-    return page(request, "departments.html", departments=departments, edit=edit, msg=msg)
+        for employee in employees:
+            for membership in employee.department_memberships:
+                if membership.department is not None:
+                    _ = membership.department.name
+        member_ids_by_department = {
+            department.id: {membership.employee_id for membership in department.memberships}
+            for department in departments
+        }
+        available_employees_by_department = {
+            department.id: [employee for employee in employees
+                            if employee.id not in member_ids_by_department[department.id]]
+            for department in departments
+        }
+    return page(request, "departments.html", departments=departments, edit=edit, msg=msg,
+                available_employees_by_department=available_employees_by_department)
 
 
 @app.post("/departments")
@@ -1097,6 +1115,99 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         s.add(department)
         s.commit()
     return RedirectResponse("/departments", 303)
+
+
+@app.post("/departments/{department_id}/members")
+def department_add_member(request: Request, department_id: int,
+                          employee_id: int = Form(0), role: str = Form(""),
+                          responsibilities: str = Form("")):
+    guard_admin(request)
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        if not department.active:
+            raise HTTPException(400, "Сначала активируйте подразделение")
+        employee = s.get(Employee, employee_id)
+        if employee is None or not employee.active:
+            raise HTTPException(404, "Активный сотрудник не найден")
+        membership = s.query(EmployeeDepartment).filter_by(
+            employee_id=employee.id, department_id=department.id
+        ).first()
+        if membership is None:
+            membership = EmployeeDepartment(employee_id=employee.id, department_id=department.id)
+            s.add(membership)
+        membership.role = role.strip()[:200]
+        membership.responsibilities = responsibilities.strip()[:4000]
+        s.commit()
+        message = f"{employee.name} добавлен в подразделение «{department.name}». Он сохранён в общем справочнике сотрудников."
+    return RedirectResponse("/departments?msg=" + quote(message), 303)
+
+
+@app.post("/departments/{department_id}/members/create")
+def department_create_member(request: Request, department_id: int, name: str = Form(...),
+                             aliases: str = Form(""), position: str = Form(""),
+                             telegram_contact: str = Form(""), role: str = Form(""),
+                             responsibilities: str = Form("")):
+    guard_admin(request)
+    clean_name = name.strip()[:200]
+    if not clean_name:
+        raise HTTPException(400, "Укажите имя сотрудника")
+    contact = telegram_contact.strip()[:200]
+    if contact and userbot.ai_mode():
+        try:
+            contact = userbot.normalize_ref(contact)
+        except userbot.RefError as exc:
+            raise HTTPException(400, str(exc))
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        if not department.active:
+            raise HTTPException(400, "Сначала активируйте подразделение")
+        duplicate = next((item for item in s.query(Employee).all()
+                          if (item.name or "").strip().casefold() == clean_name.casefold()), None)
+        if duplicate is not None:
+            membership = s.query(EmployeeDepartment).filter_by(
+                employee_id=duplicate.id, department_id=department.id
+            ).first()
+            if membership is None:
+                raise HTTPException(
+                    409,
+                    f"Сотрудник «{duplicate.name}» уже есть в общем справочнике. Добавьте существующую запись."
+                )
+            raise HTTPException(409, f"«{duplicate.name}» уже состоит в этом подразделении.")
+        employee = Employee(
+            name=clean_name, aliases=aliases.strip()[:500], position=position.strip()[:200],
+            channel="telegram", telegram_chat_id=contact, active=True,
+        )
+        s.add(employee)
+        s.flush()
+        s.add(EmployeeDepartment(
+            employee_id=employee.id, department_id=department.id,
+            role=role.strip()[:200], responsibilities=responsibilities.strip()[:4000],
+        ))
+        s.commit()
+        message = f"Создан сотрудник «{employee.name}» и добавлен в «{department.name}». Он отображается и в общем справочнике."
+    return RedirectResponse("/departments?msg=" + quote(message), 303)
+
+
+@app.post("/departments/{department_id}/members/{employee_id}/remove")
+def department_remove_member(request: Request, department_id: int, employee_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        employee = s.get(Employee, employee_id)
+        membership = s.query(EmployeeDepartment).filter_by(
+            department_id=department_id, employee_id=employee_id
+        ).first()
+        if membership is not None:
+            s.delete(membership)
+            s.commit()
+        department_name = department.name if department is not None else "подразделение"
+        employee_name = employee.name if employee is not None else "Сотрудник"
+    message = f"{employee_name} исключён из «{department_name}». Запись в общем справочнике сотрудников сохранена."
+    return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
 @app.post("/departments/{department_id}/delete")
