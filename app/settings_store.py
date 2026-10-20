@@ -36,7 +36,8 @@ DEFAULTS = {
     "default_deadline_days": 3,      # business days
     "ask_timeout_hours": 24,         # if nobody answers, fall back to the default
     # models (OpenRouter)
-    "transcribe_model": "google/gemini-2.5-flash",
+    "transcribe_model": "openai/gpt-4o-transcribe",
+    "diarization_model": "google/gemini-2.5-flash",
     "report_model": "google/gemini-2.5-pro",
     "conversation_model": "openrouter/free",
     "dialogue_enabled": True,

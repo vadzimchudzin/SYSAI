@@ -49,3 +49,54 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
       - name: Run test suite
         run: python -m pytest -q
+name: tests
+
+on:
+  pull_request:
+    branches: [main, "feat/**"]
+  push:
+    branches:
+      - main
+      - "fix/**"
+      - "feat/**"
+
+permissions:
+  contents: read
+
+# Keep only the newest test run for a branch; rapid follow-up fixes should not queue stale runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SYSAI_TESTING: "1"
+      ADMIN_USERNAME: SYSAI
+      ADMIN_PASSWORD: pw
+      SECRET_KEY: test-secret
+      OPENROUTER_API_KEY: ""
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_WEBHOOK_SECRET: hook
+      DATABASE_URL: sqlite:///./sysai-ci-test.db
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
+      - name: Run test suite
+        run: python -m pytest -q

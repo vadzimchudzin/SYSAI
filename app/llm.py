@@ -1,4 +1,5 @@
 """OpenRouter client (OpenAI-compatible chat completions)."""
+import base64
 import datetime as dt
 import json
 import logging
@@ -107,6 +108,72 @@ def chat(model: str, messages: list, json_mode: bool = False, temperature: float
             last = str(e)
             time.sleep(5 * (attempt + 1))
     raise LLMError(f"OpenRouter недоступен: {last}")
+
+
+def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", language: str = "ru",
+                    timeout: float = 60) -> dict:
+    """Call OpenRouter's dedicated speech-to-text endpoint and preserve provider timestamps when available."""
+    key = config.openrouter_key()
+    if not key:
+        raise LLMError("Ключ OpenRouter не задан")
+    if not isinstance(audio_bytes, bytes) or not audio_bytes:
+        raise LLMError("Аудиофрагмент пуст")
+    audio_format = str(audio_format or "").lower().lstrip(".")
+    if audio_format not in {"wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"}:
+        raise LLMError(f"Неподдерживаемый формат аудио: {audio_format}")
+    check_budget()
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+               "X-Title": "SYSAI",
+               "HTTP-Referer": config.PUBLIC_URL or "https://github.com/VadimChudin/SYSAI"}
+    base = {"model": model, "input_audio": {"data": base64.b64encode(audio_bytes).decode("ascii"),
+                                             "format": audio_format}, "language": language}
+    variants = [
+        {**base, "response_format": "verbose_json", "timestamp_granularities": ["segment"]},
+        {**base, "response_format": "verbose_json"},
+        {**base, "response_format": "json"},
+    ]
+    last_error = "неизвестная ошибка"
+    for index, body in enumerate(variants):
+        retryable_error = None
+        for attempt in range(2):
+            try:
+                response = httpx.post(f"{config.OPENROUTER_BASE_URL}/audio/transcriptions", json=body,
+                                      headers=headers, timeout=timeout)
+                if response.status_code == 400 and index < len(variants) - 1:
+                    last_error = f"HTTP 400: {response.text[:300]}"
+                    break  # try a less provider-specific response format
+                if response.status_code in (408, 429, 500, 502, 503, 504):
+                    retryable_error = f"HTTP {response.status_code}: {response.text[:300]}"
+                    if attempt == 0:
+                        time.sleep(2)
+                        continue
+                    raise LLMError(f"OpenRouter STT недоступен: {retryable_error}")
+                if response.status_code != 200:
+                    raise LLMError(f"OpenRouter STT HTTP {response.status_code}: {response.text[:500]}")
+                try:
+                    data = response.json()
+                except ValueError:
+                    raise LLMError("OpenRouter STT вернул некорректный JSON") from None
+                if not isinstance(data, dict) or data.get("error"):
+                    raise LLMError(f"OpenRouter STT: {str(data.get('error') if isinstance(data, dict) else data)[:400]}")
+                if not isinstance(data.get("text"), str):
+                    raise LLMError("OpenRouter STT вернул ответ без текста")
+                record_cost(model, data.get("usage"))
+                return data
+            except httpx.TimeoutException as exc:
+                last_error = str(exc) or "timeout"
+                if attempt == 0:
+                    continue
+                raise IncompleteResponse("STT не успел обработать фрагмент; нужно разделить аудио на меньшие части") from exc
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+                if attempt == 0:
+                    continue
+                raise LLMError(f"OpenRouter STT недоступен: {last_error}") from exc
+        else:
+            if retryable_error:
+                raise LLMError(f"OpenRouter STT недоступен: {retryable_error}")
+    raise LLMError(f"OpenRouter STT не принял формат ответа: {last_error}")
 
 
 def parse_json(text: str):
