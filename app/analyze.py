@@ -929,10 +929,12 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
             elif spoken_name:
                 eid = None
                 resolved_assignee_name = spoken_name
-            elif eid not in ids or _is_assistant_light_task(t):
+            elif _is_assistant_light_task(t):
+                # Reserve clearly assistant-sized work for the post-analysis dispatcher.
                 eid = None
                 resolved_assignee_name = ""
             else:
+                # Do not trust an ungrounded model ID; resolve from directory relevance.
                 suggested = recommend_task_employee(context, employees)
                 if suggested is None:
                     eid = None
