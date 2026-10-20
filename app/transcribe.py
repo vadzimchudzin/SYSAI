@@ -131,13 +131,13 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
     def part(get_chunk, offset, length, index, context):
         key = checkpoints.fingerprint(dict(base, offset=offset, length=length, context=context))
 
-        def split_part():
+        def split_part(state=None):
             # Persist the split decision before processing children. If a child fails,
             # a retry resumes the same tree instead of asking the model about the
             # oversized parent again.
-            half = length / 2
-            overlap = min(OVERLAP_SECONDS, length / 4)
-            if checkpoint:
+            half = state["half"] if state is not None else length / 2
+            overlap = state["overlap"] if state is not None else min(OVERLAP_SECONDS, length / 4)
+            if checkpoint and state is None:
                 checkpoint.put("transcribe", index, key, {
                     "_sysai_checkpoint_state": "split",
                     "half": half,
@@ -163,7 +163,7 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         if cached is not None:
             if isinstance(cached, dict) and cached.get("_sysai_checkpoint_state") == "split":
                 progress(f"Продолжаю деление фрагмента {index}")
-                result = split_part()
+                result = split_part(cached)
                 if checkpoint:
                     checkpoint.put("transcribe", index, key, result)
                 return result
