@@ -1,5 +1,6 @@
 """SYSAI web app: upload form, meetings, draft editing/approval, settings, employees, Telegram webhook."""
 import datetime as dt
+import json
 import hmac
 import logging
 import mimetypes
@@ -27,7 +28,7 @@ from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, 
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, ConversationEscalation, Delivery, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, ConversationEscalation, Delivery, Department, Employee, EmployeeDepartment, EmployeeVoiceSample, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1009,6 +1010,8 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
             for membership in employee.department_memberships:
                 _ = membership.department.name if membership.department else ""
             _ = employee.voiceprint.created_at if employee.voiceprint else None
+            for sample in employee.voice_samples:
+                _ = sample.created_at, sample.sample_duration, sample.model_version
         for department in departments:
             _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
@@ -1016,7 +1019,7 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
                 departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
-                voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()))
+                voice_msg=voice_msg, voice_identity_enabled=config.voice_service_enabled())
 
 
 @app.post("/employees")
@@ -1074,11 +1077,12 @@ def _voice_redirect(employee_id: int, message: str):
 
 @app.post("/employees/{eid}/voice-sample")
 def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(...), consent: str = Form("")):
+    """Register an explicitly consented sample with the local ECAPA embedding service."""
     guard_admin(request)
     if consent not in ("yes", "1", "on", "true"):
         return _voice_redirect(eid, "Нужно отдельное подтверждённое согласие сотрудника на голосовой шаблон.")
-    if not config.pyannoteai_key():
-        return _voice_redirect(eid, "Сначала добавьте ключ pyannoteAI в Настройки → Идентификация по голосу.")
+    if not config.voice_service_enabled():
+        return _voice_redirect(eid, "Сервис голосовой идентификации не настроен: проверьте SYSAI_VOICE_SERVICE_URL и SYSAI_VOICE_SERVICE_TOKEN на Render.")
     if config.weak_secret_key():
         return _voice_redirect(eid, "Перед сохранением голосового шаблона задайте надёжный SECRET_KEY на сервере.")
     extension = pathlib.Path(sample.filename or "").suffix.lower()
@@ -1089,6 +1093,8 @@ def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(
         if employee is None or not employee.active:
             return _voice_redirect(eid, "Активный сотрудник не найден.")
         employee_name = employee.name
+
+    remote_sample = None
     try:
         with tempfile.TemporaryDirectory(prefix="sysai_voice_sample_") as tmp:
             source_path = pathlib.Path(tmp) / ("upload" + extension)
@@ -1106,29 +1112,48 @@ def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(
             if total == 0:
                 raise speaker_id.SpeakerIdentityError("Файл образца пуст.")
             duration = speaker_id.normalize_sample(source_path, normalized_path)
-            template = speaker_id.create_voiceprint(normalized_path, eid)
-            encrypted = speaker_id.encrypt_voiceprint(template)
-        with SessionLocal() as session:
-            employee = session.get(Employee, eid)
-            if employee is None:
-                raise speaker_id.SpeakerIdentityError("Сотрудник был удалён во время регистрации.")
-            profile = session.query(EmployeeVoiceprint).filter_by(employee_id=eid).one_or_none()
-            if profile is None:
-                profile = EmployeeVoiceprint(employee_id=eid)
-            profile.encrypted_voiceprint = encrypted
-            profile.provider = "pyannoteAI"
-            profile.sample_duration = duration
-            profile.consent_at = now()
-            profile.consent_version = speaker_id.CONSENT_VERSION
-            profile.updated_at = now()
-            session.add(profile)
-            session.commit()
-        return _voice_redirect(eid, f"Голосовой шаблон для «{employee_name}» создан. Исходный файл образца не сохранялся в SYSAI.")
+            remote_sample = speaker_id.embed_voice_sample(normalized_path, eid)
+            encrypted = speaker_id.encrypt_voiceprint(
+                json.dumps(remote_sample["embedding"], separators=(",", ":"), allow_nan=False)
+            )
+
+        try:
+            with SessionLocal() as session:
+                employee = session.get(Employee, eid)
+                if employee is None or not employee.active:
+                    raise speaker_id.SpeakerIdentityError("Активный сотрудник был удалён или деактивирован.")
+                profile = EmployeeVoiceSample(
+                    employee_id=eid,
+                    sample_blob_path=remote_sample["sample_blob_path"],
+                    encrypted_embedding=encrypted,
+                    embedding_dimensions=192,
+                    model_version=remote_sample["model_version"],
+                    sample_duration=duration,
+                    waveform_data=remote_sample["waveform"],
+                    source_kind="manual",
+                    consent_at=now(),
+                    consent_version="voiceprint-consent-v2",
+                )
+                session.add(profile)
+                session.commit()
+        except Exception:
+            # The Blob write succeeded but the database row did not. Avoid an orphaned private recording.
+            try:
+                speaker_id.delete_remote_voice_sample(eid, remote_sample["sample_blob_path"])
+            except Exception:
+                log.exception("Could not clean up voice sample after database save failed for employee id %s", eid)
+            raise
+
+        return _voice_redirect(
+            eid,
+            f"Голосовой образец «{employee_name}» сохранён. Модель: {remote_sample['model_version']}; "
+            f"длительность: {duration:g} сек. Можно добавить второй образец для повышения устойчивости сопоставления."
+        )
     except speaker_id.SpeakerIdentityError as exc:
         return _voice_redirect(eid, str(exc)[:300])
     except Exception:
-        log.exception("Could not enroll voiceprint for employee id %s", eid)
-        return _voice_redirect(eid, "Не удалось создать голосовой шаблон. Проверьте ключ pyannoteAI и логи сервера.")
+        log.exception("Could not enroll local voice sample for employee id %s", eid)
+        return _voice_redirect(eid, "Не удалось зарегистрировать голосовой образец. Проверьте настройки Render/Vercel и журналы.")
     finally:
         try:
             sample.file.close()
@@ -1136,8 +1161,37 @@ def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(
             pass
 
 
+@app.post("/employees/{eid}/voice-sample/{sample_id}/delete")
+def employee_voice_sample_delete_one(request: Request, eid: int, sample_id: int):
+    guard_admin(request)
+    with SessionLocal() as session:
+        employee = session.get(Employee, eid)
+        if employee is None:
+            return _voice_redirect(eid, "Сотрудник не найден.")
+        profile = session.query(EmployeeVoiceSample).filter_by(id=sample_id, employee_id=eid).one_or_none()
+        if profile is None:
+            return _voice_redirect(eid, "Голосовой образец не найден.")
+        pathname = profile.sample_blob_path
+        employee_name = employee.name
+    try:
+        if pathname:
+            speaker_id.delete_remote_voice_sample(eid, pathname)
+        with SessionLocal() as session:
+            profile = session.query(EmployeeVoiceSample).filter_by(id=sample_id, employee_id=eid).one_or_none()
+            if profile is not None:
+                session.delete(profile)
+                session.commit()
+        return _voice_redirect(eid, f"Голосовой образец сотрудника «{employee_name}» удалён.")
+    except speaker_id.SpeakerIdentityError as exc:
+        return _voice_redirect(eid, f"Образец не удалён: {str(exc)[:220]}")
+    except Exception:
+        log.exception("Could not delete local voice sample id %s for employee id %s", sample_id, eid)
+        return _voice_redirect(eid, "Не удалось удалить образец из приватного Blob. Запись в базе сохранена.")
+
+
 @app.post("/employees/{eid}/voice-sample/delete")
 def employee_voice_sample_delete(request: Request, eid: int):
+    """Remove a legacy pyannote voiceprint, if one is still present."""
     guard_admin(request)
     with SessionLocal() as session:
         employee = session.get(Employee, eid)
@@ -1148,7 +1202,7 @@ def employee_voice_sample_delete(request: Request, eid: int):
             session.delete(profile)
             session.commit()
         employee_name = employee.name
-    return _voice_redirect(eid, f"Локальный голосовой шаблон «{employee_name}» удалён.")
+    return _voice_redirect(eid, f"Старый голосовой шаблон «{employee_name}» удалён.")
 
 
 @app.get("/departments", response_class=HTMLResponse)
