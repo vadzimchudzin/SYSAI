@@ -675,3 +675,14 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 /* Quick-create uses a single field and an explicit action. */
 .employee-quick-form { grid-template-columns: minmax(0, 1fr); max-width: 600px; }
 .employee-quick-form .actions { grid-column: 1; }
+
+
+/* Local ECAPA voice samples in employee cards */
+.voice-sample-list { display: grid; gap: 10px; margin: 12px 0; }
+.voice-sample-row { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--card2); }
+.voice-sample-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.voice-sample-top form { margin: 0; flex: 0 0 auto; }
+.voice-waveform { display: flex; align-items: center; gap: 2px; height: 32px; margin-top: 10px; overflow: hidden; }
+.voice-waveform span { display: block; flex: 1 1 2px; min-width: 1px; max-width: 5px; border-radius: 2px; background: var(--sblue); opacity: .8; }
+.voice-legacy-note { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) { .voice-sample-top { align-items: flex-start; flex-direction: column; } }
