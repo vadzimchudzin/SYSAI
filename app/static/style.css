@@ -613,7 +613,13 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .departments-list-head { margin: 26px 0 14px; }
 .departments-list-head h2 { margin: 0; }
 .departments-list-head p { margin: 4px 0 0; }
-.departments-list { display: grid; gap: 16px; }
+.departments-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.departments-list-head, .departments-list > .empty-state { grid-column: 1 / -1; }
 .department-card { display: block; min-width: 0; padding: 22px; margin: 0; border: 1px solid var(--line2); border-radius: 16px; background: var(--card); box-shadow: 0 5px 18px rgba(0,0,0,.10); }
 .department-card.off { opacity: .68; }
 .department-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
