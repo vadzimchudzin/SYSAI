@@ -722,18 +722,38 @@ def recommend_task_employee(task_context: str, employees):
     return best_employee
 
 
-def _is_message_task(task: dict) -> bool:
+def _is_message_task(task: dict, employees=None) -> bool:
+    """Recognize communication work, not every task whose Russian verb is 'write'."""
     text = " ".join(str(task.get(key) or "") for key in ("title", "description", "quote")).lower().replace("ё", "е")
-    return any(word in text for word in (
-        "написать", "сообщить", "отправить", "уточнить у", "спросить у",
-        "связаться с", "позвонить", "напомнить", "попросить у", "направить сообщение",
-    ))
+    if not text:
+        return False
+    explicit_message_phrases = (
+        "сообщить", "уточнить у", "спросить у", "связаться с", "позвонить",
+        "напомнить", "попросить у", "направить сообщение", "отправить сообщение",
+        "отправить письмо", "написать сообщение", "написать письмо", "написать сотруднику",
+    )
+    if any(phrase in text for phrase in explicit_message_phrases):
+        return True
+    if any(word in text for word in ("сообщение", "письмо", "электронное письмо", "email")) and any(
+        verb in text for verb in ("написать", "отправить", "подготовить", "направить")
+    ):
+        return True
+    if str(task.get("target_employee_name") or "").strip() and any(
+        verb in text for verb in ("написать", "отправить", "сообщить", "уточнить", "спросить", "связаться", "позвонить", "напомнить")
+    ):
+        return True
+    # "Написать Андрею..." is a message only if a unique reachable employee can actually be identified.
+    if employees is not None and any(
+        verb in text for verb in ("написать", "отправить", "сообщить", "уточнить", "спросить", "связаться", "позвонить", "напомнить")
+    ):
+        return _find_message_target(task, employees) is not None
+    return False
 
 
-def _is_assistant_light_task(task: dict) -> bool:
+def _is_assistant_light_task(task: dict, employees=None) -> bool:
     """Only classify outputs that the assistant can actually produce from meeting data."""
     text = " ".join(str(task.get(key) or "") for key in ("title", "description", "quote")).lower().replace("ё", "е")
-    if _is_message_task(task):
+    if _is_message_task(task, employees):
         return True
     return any(marker in text for marker in (
         "сводк", "протокол", "итог совещ", "резюме совещ", "обобщить обсуждение",
@@ -796,8 +816,8 @@ def route_assistant_tasks(report: dict, employees, assistant_enabled: bool) -> d
         named_human = bool(name and name.casefold() not in {
             "ассистент", "ии", "ии-сотрудник", "ai", "не назначен", "не определен", "не определён"
         })
-        is_message = _is_message_task(task)
-        light_task = _is_assistant_light_task(task)
+        is_message = _is_message_task(task, employees)
+        light_task = _is_assistant_light_task(task, employees)
         explicit_assistant = task.get("executor") == "assistant" or name.casefold() in {"ассистент", "ии", "ии-сотрудник", "ai"}
 
         if assistant_enabled and not named_human and light_task:
@@ -893,6 +913,10 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
                 eid = None
         executor = "assistant" if t.get("executor") == "assistant" else "person"
         resolved_assignee_name = (t.get("assignee_name") or "").strip()
+        unassigned_labels = {"-", "—", "null", "none", "n/a", "unknown", "не назначен", "не назначена",
+                             "не назначено", "не определен", "не определён", "не указано", "неизвестно"}
+        if resolved_assignee_name.casefold() in unassigned_labels:
+            resolved_assignee_name = ""
         target_name = (t.get("target_employee_name") or "").strip()
         raw_target_id = t.get("target_employee_id")
         if isinstance(raw_target_id, bool):
@@ -915,6 +939,8 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
             target_id, target_name = None, ""
             context = " ".join(str(t.get(key) or "") for key in ("title", "description", "quote"))
             spoken_name = (t.get("assignee_name") or "").strip()
+            if spoken_name.casefold() in unassigned_labels:
+                spoken_name = ""
             candidates = _employee_matches(spoken_name, employees)
             matched = candidates[0] if len(candidates) == 1 else None
             if matched is None and spoken_name:
@@ -929,7 +955,7 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
             elif spoken_name:
                 eid = None
                 resolved_assignee_name = spoken_name
-            elif _is_assistant_light_task(t):
+            elif _is_assistant_light_task(t, employees):
                 # Reserve clearly assistant-sized work for the post-analysis dispatcher.
                 eid = None
                 resolved_assignee_name = ""
