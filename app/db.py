@@ -146,7 +146,8 @@ class Department(Base):
     active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=now)
     memberships = relationship("EmployeeDepartment", back_populates="department",
-                               cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
+                               cascade="all, delete-orphan",
+                               order_by=lambda: (EmployeeDepartment.is_primary.desc(), EmployeeDepartment.id))
 
 
 class EmployeeDepartment(Base):
