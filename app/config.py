@@ -38,7 +38,17 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-PYANNOTEAI_API_KEY = os.getenv("PYANNOTEAI_API_KEY", "")
+PYANNOTEAI_API_KEY = os.getenv("PYANNOTEAI_API_KEY", "")  # legacy only
+VOICE_SERVICE_URL = os.getenv("SYSAI_VOICE_SERVICE_URL", "").strip().rstrip("/")
+VOICE_SERVICE_TOKEN = os.getenv("SYSAI_VOICE_SERVICE_TOKEN", "").strip()
+try:
+    VOICE_MATCH_THRESHOLD = float(os.getenv("SYSAI_VOICE_MATCH_THRESHOLD", "0.55"))
+except ValueError:
+    VOICE_MATCH_THRESHOLD = 0.55
+try:
+    VOICE_MATCH_MARGIN = float(os.getenv("SYSAI_VOICE_MATCH_MARGIN", "0.08"))
+except ValueError:
+    VOICE_MATCH_MARGIN = 0.08
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "webhook")  # webhook | polling | off
@@ -83,8 +93,22 @@ def openrouter_key() -> str:
 
 
 def pyannoteai_key() -> str:
-    """Optional speaker-identification provider key; settings panel takes precedence."""
+    """Deprecated compatibility helper; the active provider is the Vercel microservice."""
     return _panel("pyannoteai_api_key") or PYANNOTEAI_API_KEY
+
+
+def voice_service_url() -> str:
+    """Server-to-server endpoint of the dedicated speaker-embedding service."""
+    return VOICE_SERVICE_URL
+
+
+def voice_service_token() -> str:
+    """Shared Render→Vercel secret; never expose it to browser templates."""
+    return VOICE_SERVICE_TOKEN
+
+
+def voice_service_enabled() -> bool:
+    return bool(voice_service_url() and voice_service_token())
 
 
 def telegram_token() -> str:

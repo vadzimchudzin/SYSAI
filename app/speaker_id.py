@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import pathlib
 import subprocess
 import time
@@ -58,8 +59,11 @@ def profiles_fingerprint(profiles: list[dict]) -> str:
     """Invalidate transcription checkpoints when the set of enrolled templates changes."""
     stable = []
     for profile in profiles:
-        value_hash = hashlib.sha256(str(profile.get("voiceprint") or "").encode("utf-8")).hexdigest()
-        stable.append((profile.get("label"), profile.get("employee_id"), value_hash))
+        material = profile.get("voiceprint")
+        if material is None:
+            material = json.dumps(profile.get("embedding"), ensure_ascii=False, separators=(",", ":"))
+        value_hash = hashlib.sha256(str(material or "").encode("utf-8")).hexdigest()
+        stable.append((profile.get("label"), profile.get("employee_id"), profile.get("sample_id"), value_hash))
     payload = json.dumps(sorted(stable), ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -317,3 +321,366 @@ def identify_segments(path: str | pathlib.Path, segments: list[dict], profiles: 
         })
         updated_segments.append(renamed)
     return updated_segments
+
+
+# -----------------------------------------------------------------------------
+# Local ECAPA embeddings through the isolated Vercel API. The legacy pyannote
+# helpers above are retained only for backward-compatible data/tests; new SYSAI
+# flows use the Vercel methods below and do not call pyannoteAI.
+VOICE_SERVICE_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _normalise_embedding(values) -> list[float]:
+    if not isinstance(values, (list, tuple)) or len(values) != 192:
+        raise SpeakerIdentityError("Сервис вернул голосовой профиль неверной размерности")
+    try:
+        vector = [float(value) for value in values]
+    except (TypeError, ValueError):
+        raise SpeakerIdentityError("Сервис вернул некорректный голосовой профиль") from None
+    if any(not math.isfinite(value) for value in vector):
+        raise SpeakerIdentityError("Голосовой профиль содержит некорректные числа")
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm < 1e-8:
+        raise SpeakerIdentityError("Не удалось получить признаки голоса")
+    return [round(value / norm, 8) for value in vector]
+
+
+def _voice_service_request_url(path: str) -> str:
+    if not config.voice_service_enabled():
+        raise SpeakerIdentityError("Сервис идентификации голоса ещё не настроен на сервере")
+    return f"{config.voice_service_url().rstrip('/')}/{path.lstrip('/')}"
+
+
+def _voice_service_headers() -> dict[str, str]:
+    token = config.voice_service_token()
+    if not token:
+        raise SpeakerIdentityError("Не задан ключ доступа к сервису идентификации голоса")
+    return {"X-SYSAI-Voice-Token": token}
+
+
+def embed_voice_sample(sample_path: str | pathlib.Path, employee_id: int) -> dict:
+    """Create a local model embedding and store the consented WAV in private Vercel Blob."""
+    path = pathlib.Path(sample_path)
+    raw = path.read_bytes()
+    if not raw or len(raw) > VOICE_SERVICE_MAX_BYTES:
+        raise SpeakerIdentityError("Нормализованный образец пуст или превышает 4 МБ.")
+    try:
+        response = httpx.post(
+            _voice_service_request_url("/v1/embed"),
+            headers=_voice_service_headers(),
+            data={"purpose": "profile", "employee_id": str(employee_id)},
+            files={"audio": (path.name, raw, "audio/wav")},
+            timeout=110,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+        try:
+            detail = str(exc.response.json().get("detail") or "")
+        except Exception:
+            pass
+        raise SpeakerIdentityError(
+            "Vercel не принял образец голоса" + (f": {detail[:180]}" if detail else f" (HTTP {exc.response.status_code})")
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SpeakerIdentityError("Не удалось связаться с сервисом идентификации Vercel") from exc
+    embedding = _normalise_embedding(payload.get("embedding"))
+    pathname = payload.get("sample_blob_path")
+    if not isinstance(pathname, str) or not pathname.startswith(f"profiles/employee-{employee_id}/"):
+        raise SpeakerIdentityError("Vercel не вернул корректный путь приватного образца")
+    waveform = payload.get("waveform")
+    if not isinstance(waveform, list) or not waveform:
+        raise SpeakerIdentityError("Vercel не вернул данные звуковой диаграммы")
+    try:
+        waveform = [round(min(1.0, max(0.0, float(value))), 4) for value in waveform[:128]]
+    except (TypeError, ValueError):
+        raise SpeakerIdentityError("Данные звуковой диаграммы некорректны") from None
+    if any(not math.isfinite(value) for value in waveform):
+        raise SpeakerIdentityError("Данные звуковой диаграммы некорректны")
+    try:
+        sample_duration = float(payload.get("duration_seconds"))
+    except (TypeError, ValueError):
+        sample_duration = audio.duration(str(path))
+    if not MIN_SAMPLE_SECONDS <= sample_duration <= MAX_SAMPLE_SECONDS:
+        raise SpeakerIdentityError("Сервис вернул неожиданную длительность образца")
+    return {
+        "embedding": embedding,
+        "sample_blob_path": pathname,
+        "waveform": waveform,
+        "duration_seconds": round(sample_duration, 3),
+        "model_version": str(payload.get("model_version") or "unknown")[:120],
+    }
+
+
+def delete_remote_voice_sample(employee_id: int, pathname: str) -> None:
+    """Remove a private reference blob; caller validates ownership from the DB row."""
+    if not pathname:
+        return
+    try:
+        response = httpx.request(
+            "DELETE",
+            _voice_service_request_url("/v1/sample"),
+            headers=_voice_service_headers(),
+            json={"employee_id": int(employee_id), "pathname": pathname},
+            timeout=25,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise SpeakerIdentityError(f"Vercel не удалил образец (HTTP {exc.response.status_code})") from exc
+    except httpx.HTTPError as exc:
+        raise SpeakerIdentityError("Не удалось удалить образец из Vercel Blob") from exc
+
+
+def enrolled_embeddings() -> list[dict]:
+    """Load and decrypt active employee embeddings from the shared SYSAI database."""
+    if not config.voice_service_enabled():
+        return []
+    from .db import Employee, EmployeeVoiceSample, SessionLocal
+
+    profiles = []
+    with SessionLocal() as session:
+        rows = (
+            session.query(EmployeeVoiceSample)
+            .join(Employee, Employee.id == EmployeeVoiceSample.employee_id)
+            .filter(Employee.active.is_(True))
+            .order_by(Employee.id, EmployeeVoiceSample.created_at)
+            .all()
+        )
+        for row in rows:
+            try:
+                value = decrypt_voiceprint(row.encrypted_embedding)
+                embedding = _normalise_embedding(json.loads(value))
+            except (SpeakerIdentityError, json.JSONDecodeError, TypeError):
+                log.warning("Skipping unreadable local voice sample id %s", row.id)
+                continue
+            profiles.append({
+                "label": f"employee-{row.employee_id}",
+                "employee_id": row.employee_id,
+                "employee_name": row.employee.name,
+                "sample_id": row.id,
+                "model_version": row.model_version,
+                "embedding": embedding,
+            })
+    return profiles
+
+
+def _cosine_similarity(first: list[float], second: list[float]) -> float:
+    if not first or len(first) != len(second):
+        return -1.0
+    left_norm = math.sqrt(sum(float(value) ** 2 for value in first))
+    right_norm = math.sqrt(sum(float(value) ** 2 for value in second))
+    if left_norm < 1e-8 or right_norm < 1e-8:
+        return -1.0
+    return sum(float(a) * float(b) for a, b in zip(first, second)) / (left_norm * right_norm)
+
+
+def _local_segments_with_end(segments: list[dict], offset: float, duration: float | None) -> list[dict]:
+    """Estimate conservative end times from text length while clipping at the next turn."""
+    ordered = sorted(segments, key=lambda item: float(item.get("start", 0) or 0))
+    starts = []
+    for item in ordered:
+        try:
+            starts.append(float(item.get("start", 0) or 0) - float(offset or 0))
+        except (TypeError, ValueError):
+            starts.append(0.0)
+    prepared = []
+    for index, item in enumerate(ordered):
+        try:
+            local_start = float(item.get("start", 0) or 0) - float(offset or 0)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(local_start):
+            continue
+        local_start = max(0.0, local_start)
+        next_start = next((value for value in starts[index + 1:] if value > local_start + 0.02), None)
+        words = max(1, len(str(item.get("text") or "").split()))
+        guess = max(1.05, min(8.0, words / 2.5 + 0.25))
+        local_end = local_start + guess
+        if next_start is not None:
+            local_end = min(local_end, max(local_start, next_start - 0.04))
+        if duration is not None and math.isfinite(float(duration)):
+            local_end = min(local_end, float(duration))
+        if local_end - local_start < 0.95:
+            continue
+        prepared.append({
+            "speaker": str(item.get("speaker") or ""),
+            "start": round(local_start, 3),
+            "end": round(local_end, 3),
+        })
+    return [item for item in prepared if item["speaker"]]
+
+
+def identify_embedded_segments(
+    path: str | pathlib.Path,
+    segments: list[dict],
+    profiles: list[dict],
+    offset: float = 0.0,
+    duration: float | None = None,
+) -> list[dict]:
+    """Get one embedding per diarized speaker and match conservatively to local enrolled samples."""
+    if not segments or not profiles or not config.voice_service_enabled():
+        return segments
+    payload_segments = _local_segments_with_end(segments, offset, duration)
+    if not payload_segments:
+        return segments
+    audio_path = pathlib.Path(path)
+    raw = audio_path.read_bytes()
+    if not raw or len(raw) > VOICE_SERVICE_MAX_BYTES:
+        raise SpeakerIdentityError("Аудиофрагмент слишком большой для сервиса идентификации")
+    try:
+        response = httpx.post(
+            _voice_service_request_url("/v1/identify"),
+            headers=_voice_service_headers(),
+            data={"segments_json": json.dumps({"segments": payload_segments}, ensure_ascii=False)},
+            files={"audio": (audio_path.name, raw, "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav")},
+            timeout=110,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+        try:
+            detail = str(exc.response.json().get("detail") or "")
+        except Exception:
+            pass
+        raise SpeakerIdentityError(
+            "Vercel не смог сравнить голоса" + (f": {detail[:180]}" if detail else f" (HTTP {exc.response.status_code})")
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SpeakerIdentityError("Не удалось связаться с сервисом идентификации Vercel") from exc
+
+    speaker_embeddings = payload.get("speakers")
+    if not isinstance(speaker_embeddings, dict):
+        raise SpeakerIdentityError("Vercel вернул некорректный ответ идентификации")
+    by_employee: dict[int, list[dict]] = {}
+    for profile in profiles:
+        try:
+            employee_id = int(profile["employee_id"])
+            embedding = _normalise_embedding(profile.get("embedding"))
+        except (KeyError, TypeError, ValueError, SpeakerIdentityError):
+            continue
+        by_employee.setdefault(employee_id, []).append({**profile, "embedding": embedding})
+
+    try:
+        threshold = float(config.VOICE_MATCH_THRESHOLD)
+        margin_required = float(config.VOICE_MATCH_MARGIN)
+    except (TypeError, ValueError):
+        threshold, margin_required = 0.55, 0.08
+    threshold = min(0.95, max(-1.0, threshold))
+    margin_required = min(0.5, max(0.0, margin_required))
+    recognized: dict[str, tuple[int, str, float]] = {}
+    for speaker, info in speaker_embeddings.items():
+        if not isinstance(info, dict):
+            continue
+        try:
+            observed = _normalise_embedding(info.get("embedding"))
+        except SpeakerIdentityError:
+            continue
+        scored = []
+        for employee_id, refs in by_employee.items():
+            similarities = sorted(
+                (_cosine_similarity(observed, ref["embedding"]) for ref in refs),
+                reverse=True,
+            )
+            if not similarities:
+                continue
+            # Two strong reference samples reduce over-reliance on a bad/outlier sample.
+            top = similarities[:2]
+            score = sum(top) / len(top)
+            name = str(refs[0].get("employee_name") or f"Сотрудник {employee_id}")
+            scored.append((score, employee_id, name))
+        scored.sort(reverse=True)
+        if not scored:
+            continue
+        best = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else -1.0
+        if best[0] >= threshold and best[0] - runner_up >= margin_required:
+            recognized[str(speaker)] = (best[1], best[2], best[0])
+
+    result = []
+    for segment in segments:
+        speaker = str(segment.get("speaker") or "")
+        match = recognized.get(speaker)
+        if match is None:
+            result.append(segment)
+            continue
+        employee_id, employee_name, similarity = match
+        renamed = dict(segment)
+        renamed.update({
+            "speaker": employee_name,
+            "speaker_employee_id": employee_id,
+            "speaker_source": "voiceprint",
+            "speaker_similarity": round(max(-1.0, min(1.0, similarity)), 3),
+        })
+        # Kept for compatibility with report normalization; UI displays cosine similarity, not a probability.
+        renamed["speaker_confidence"] = renamed["speaker_similarity"]
+        result.append(renamed)
+    return result
+
+
+def extract_confirmed_speaker_sample(
+    audio_path: str | pathlib.Path,
+    transcript: list[dict],
+    speaker: str,
+    destination: str | pathlib.Path,
+    maximum_seconds: float = 24.0,
+) -> tuple[float, float, float] | None:
+    """Concatenate clean, non-overlapping turns from a human-confirmed speaker into a short WAV."""
+    source = pathlib.Path(audio_path)
+    output = pathlib.Path(destination)
+    if not source.is_file():
+        return None
+    ordered = sorted(
+        [item for item in transcript if str(item.get("speaker") or "") == speaker],
+        key=lambda item: float(item.get("start", 0) or 0),
+    )
+    intervals = []
+    total = 0.0
+    for index, item in enumerate(ordered):
+        try:
+            start = float(item.get("start", 0) or 0)
+            end = float(item.get("end") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            continue
+        # Long diarization spans often include pauses; cap each turn before concatenation.
+        end = min(end, start + 7.0)
+        if end - start < 1.0:
+            continue
+        take = min(end - start, maximum_seconds - total)
+        if take < 0.8:
+            break
+        intervals.append((start, start + take))
+        total += take
+        if total >= maximum_seconds:
+            break
+    if total < MIN_SAMPLE_SECONDS or not intervals:
+        return None
+    output.parent.mkdir(parents=True, exist_ok=True)
+    filters = []
+    labels = []
+    for index, (start, end) in enumerate(intervals):
+        labels.append(f"[s{index}]")
+        filters.append(
+            f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
+            f"aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[s{index}]"
+        )
+    filters.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[out]")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(source),
+             "-filter_complex", ";".join(filters), "-map", "[out]",
+             "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(output)],
+            check=True, capture_output=True, timeout=45,
+        )
+        actual = audio.duration(str(output))
+    except Exception as exc:
+        log.warning("Could not prepare confirmed speaker sample: %s", exc)
+        output.unlink(missing_ok=True)
+        return None
+    if not MIN_SAMPLE_SECONDS <= actual <= MAX_SAMPLE_SECONDS:
+        output.unlink(missing_ok=True)
+        return None
+    return (actual, intervals[0][0], intervals[-1][1])

@@ -131,6 +131,8 @@ class Employee(Base):
                                           cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
     voiceprint = relationship("EmployeeVoiceprint", back_populates="employee", uselist=False,
                               cascade="all, delete-orphan", single_parent=True)
+    voice_samples = relationship("EmployeeVoiceSample", back_populates="employee",
+                                 cascade="all, delete-orphan", order_by="EmployeeVoiceSample.created_at")
 
     def alias_list(self):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
@@ -173,6 +175,27 @@ class EmployeeVoiceprint(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=now, onupdate=now)
     employee = relationship("Employee", back_populates="voiceprint")
+
+
+class EmployeeVoiceSample(Base):
+    """One consented reference recording and its encrypted local speaker embedding."""
+    __tablename__ = "employee_voice_samples"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
+    sample_blob_path = Column(String(600), nullable=False, default="")
+    encrypted_embedding = Column(LargeBinary, nullable=False)
+    embedding_dimensions = Column(Integer, nullable=False, default=192)
+    model_version = Column(String(120), nullable=False, default="")
+    sample_duration = Column(Float, nullable=False, default=0.0)
+    waveform_data = Column(JSON, nullable=False, default=list)
+    source_kind = Column(String(32), nullable=False, default="manual")  # manual | meeting_confirmed
+    source_meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_start = Column(Float, nullable=True)
+    source_end = Column(Float, nullable=True)
+    consent_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    consent_version = Column(String(40), nullable=False, default="voiceprint-consent-v2")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    employee = relationship("Employee", back_populates="voice_samples")
 
 
 class Meeting(Base):

@@ -265,12 +265,12 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         audio.extract(path, destination, offset, seconds)
         return destination
     try:
-        voiceprints = speaker_id.enrolled_voiceprints()
+        voiceprints = speaker_id.enrolled_embeddings()
     except speaker_id.SpeakerIdentityError as exc:
         log.warning("Voice identity is unavailable; keeping ordinary speaker labels: %s", exc)
         voiceprints = []
     segments: list = []
-    base = {"version": 8, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
+    base = {"version": 9, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
             "diarization_model": settings.get("diarization_model", LEGACY_CHAT_MODEL),
             "language": settings.get("language", "ru"), "glossary": settings.get("glossary", ""),
             "speaker_profiles": speaker_id.profiles_fingerprint(voiceprints),
@@ -339,7 +339,7 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
                 raise llm.IncompleteResponse("Ответ обрезан, нужен меньший фрагмент")
             if voiceprints and result:
                 try:
-                    result = speaker_id.identify_segments(chunk, result, voiceprints, offset=offset, duration=length)
+                    result = speaker_id.identify_embedded_segments(chunk, result, voiceprints, offset=offset, duration=length)
                 except speaker_id.SpeakerIdentityError as exc:
                     # Voice matching is optional. A provider outage must not break basic transcription.
                     log.warning("Voice identity failed for chunk %s; keeping anonymous labels: %s", index, exc)

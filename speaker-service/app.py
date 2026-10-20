@@ -22,6 +22,7 @@ import uuid
 from typing import Any
 
 import numpy as np
+from vercel import blob
 import soundfile as sf
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -254,6 +255,13 @@ def _waveform(samples: np.ndarray, bins: int = 96) -> list[float]:
     return peaks
 
 
+def _encode_wav(samples: np.ndarray) -> bytes:
+    """Encode a short mono clip as PCM16 WAV for private reference storage."""
+    buffer = io.BytesIO()
+    sf.write(buffer, np.asarray(samples, dtype=np.float32), SAMPLE_RATE, format="WAV", subtype="PCM_16")
+    return buffer.getvalue()
+
+
 def _slice_speech(samples: np.ndarray, segments: list[dict[str, Any]]) -> dict[str, np.ndarray]:
     grouped: dict[str, list[np.ndarray]] = {}
     for segment in segments:
@@ -289,7 +297,24 @@ def health() -> dict[str, Any]:
         "service": "sysai-speaker-identity",
         "model": MODEL_VERSION,
         "model_loaded": _MODEL is not None,
-        "blob_configured": bool(os.getenv("BLOB_READ_WRITE_TOKEN")),
+        "blob_configured": bool(os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")),
+    }
+
+
+@app.get("/v1/model-info")
+def model_info(
+    x_sysai_voice_token: str | None = Header(default=None, alias="X-SYSAI-Voice-Token"),
+) -> dict[str, Any]:
+    """Authenticated model diagnostic; it never returns credentials."""
+    _check_token(x_sysai_voice_token)
+    session, filters = _load_model()
+    return {
+        "ok": True,
+        "model": MODEL_VERSION,
+        "embedding_dimensions": EMBEDDING_DIM,
+        "filterbank_shape": list(filters.shape),
+        "inputs": [{"name": item.name, "shape": item.shape, "type": item.type} for item in session.get_inputs()],
+        "outputs": [{"name": item.name, "shape": item.shape, "type": item.type} for item in session.get_outputs()],
     }
 
 
@@ -322,20 +347,17 @@ async def embed(
 
     sample_blob_path = None
     if purpose == "profile":
-        if not os.getenv("BLOB_READ_WRITE_TOKEN"):
+        if not (os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")):
             raise HTTPException(status_code=503, detail="Private Vercel Blob storage is not configured")
         try:
-            from vercel.blob import AsyncBlobClient
-
-            client = AsyncBlobClient()
-            blob = await client.put(
+            uploaded = await blob.put_blob(
                 f"profiles/employee-{employee_id}/{uuid.uuid4().hex}.wav",
                 raw,
                 access="private",
                 content_type="audio/wav",
                 add_random_suffix=True,
             )
-            sample_blob_path = blob.pathname
+            sample_blob_path = uploaded.pathname
         except Exception as exc:
             log.exception("Could not store private reference audio for employee id %s", employee_id)
             raise HTTPException(status_code=502, detail="Could not store the voice sample in private Blob") from exc
@@ -381,18 +403,84 @@ async def identify(
     if len(clips) > MAX_SPEAKERS:
         raise HTTPException(status_code=422, detail="Too many distinct speakers in one chunk")
     results = {}
+    blob_available = bool(os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN"))
     for speaker, clip in clips.items():
-        if _duration(clip) < SEGMENT_MIN_SECONDS:
+        clip_duration = _duration(clip)
+        if clip_duration < SEGMENT_MIN_SECONDS:
             continue
         try:
-            results[speaker] = {
+            item = {
                 "embedding": await asyncio.to_thread(_run_embedding, clip),
-                "duration_seconds": round(_duration(clip), 3),
-                "turn_count": sum(1 for item in segments if isinstance(item, dict) and str(item.get("speaker", "")).strip() == speaker),
+                "duration_seconds": round(clip_duration, 3),
+                "turn_count": sum(1 for part in segments if isinstance(part, dict) and str(part.get("speaker", "")).strip() == speaker),
             }
+            # A human can map this unknown speaker after the meeting, when the source meeting
+            # audio has already been deleted by Render. Save only a clean short clip privately.
+            if blob_available and PROFILE_MIN_SECONDS <= clip_duration <= PROFILE_MAX_SECONDS:
+                try:
+                    sample_bytes = await asyncio.to_thread(_encode_wav, clip)
+                    uploaded = await blob.put_blob(
+                        f"candidates/{uuid.uuid4().hex}/{uuid.uuid4().hex}.wav",
+                        sample_bytes,
+                        access="private",
+                        content_type="audio/wav",
+                        add_random_suffix=True,
+                    )
+                    item["sample_blob_path"] = uploaded.pathname
+                    item["waveform"] = _waveform(clip)
+                except Exception:
+                    log.exception("Could not store temporary private speaker candidate clip")
+            results[speaker] = item
         except HTTPException:
             raise
     return {"model_version": MODEL_VERSION, "speakers": results}
+
+
+class PromoteCandidateRequest(BaseModel):
+    employee_id: int = Field(ge=1)
+    candidate_path: str = Field(min_length=1, max_length=600)
+
+
+@app.post("/v1/promote")
+async def promote_candidate(
+    payload: PromoteCandidateRequest,
+    x_sysai_voice_token: str | None = Header(default=None, alias="X-SYSAI-Voice-Token"),
+) -> dict[str, str]:
+    _check_token(x_sysai_voice_token)
+    if not payload.candidate_path.startswith("candidates/") or ".." in payload.candidate_path:
+        raise HTTPException(status_code=400, detail="Invalid candidate path")
+    try:
+        result = await blob.copy_blob(
+            payload.candidate_path,
+            f"profiles/employee-{payload.employee_id}/{uuid.uuid4().hex}.wav",
+            access="private",
+            content_type="audio/wav",
+            add_random_suffix=True,
+        )
+        try:
+            await blob.delete_blob(payload.candidate_path)
+        except Exception:
+            log.warning("Promoted candidate but could not remove temporary blob %s", payload.candidate_path)
+        return {"sample_blob_path": result.pathname}
+    except Exception as exc:
+        log.exception("Could not promote candidate sample for employee id %s", payload.employee_id)
+        raise HTTPException(status_code=502, detail="Could not promote candidate sample") from exc
+
+
+@app.delete("/v1/candidate")
+async def delete_candidate(
+    pathname: str,
+    x_sysai_voice_token: str | None = Header(default=None, alias="X-SYSAI-Voice-Token"),
+) -> dict[str, bool]:
+    _check_token(x_sysai_voice_token)
+    if not pathname.startswith("candidates/") or ".." in pathname:
+        raise HTTPException(status_code=400, detail="Invalid candidate path")
+    try:
+        await blob.delete_blob(pathname)
+    except Exception as exc:
+        log.exception("Could not delete temporary speaker candidate")
+        raise HTTPException(status_code=502, detail="Could not delete candidate sample") from exc
+    return {"ok": True}
 
 
 class DeleteSampleRequest(BaseModel):
@@ -410,8 +498,7 @@ async def delete_sample(
     if not payload.pathname.startswith(expected_prefix) or ".." in payload.pathname:
         raise HTTPException(status_code=400, detail="Sample path does not belong to the employee")
     try:
-        from vercel.blob import delete
-        await asyncio.to_thread(delete, payload.pathname)
+        await blob.delete_blob(payload.pathname)
     except Exception as exc:
         log.exception("Could not delete private reference audio for employee id %s", payload.employee_id)
         raise HTTPException(status_code=502, detail="Could not delete the voice sample") from exc
