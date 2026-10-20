@@ -196,3 +196,14 @@ def test_voice_sample_can_be_deleted_without_deleting_employee(client):
     with SessionLocal() as session:
         assert session.get(Employee, employee_id) is not None
         assert session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).count() == 0
+
+
+
+def test_analysis_transcript_marks_confirmed_voiceprint_identity():
+    text = analyze.transcript_text([
+        {"start": 12.0, "speaker": "Мария Смирнова", "text": "Доброе утро.",
+         "speaker_employee_id": 7, "speaker_source": "voiceprint", "speaker_confidence": 82.0},
+        {"start": 15.0, "speaker": "Спикер 1", "text": "Продолжаем."},
+    ])
+    assert "[VOICEPRINT_CONFIRMED employee_id=7] Мария Смирнова: Доброе утро." in text
+    assert "[VOICEPRINT_CONFIRMED" not in text.splitlines()[1]
