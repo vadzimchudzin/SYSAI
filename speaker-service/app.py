@@ -370,6 +370,10 @@ async def embed(
                 diagnostic += f"; status={status_code}"
             if isinstance(error_code, str) and error_code:
                 diagnostic += f"; code={error_code[:80]}"
+            # AttributeError messages name a missing SDK attribute/object, not credentials or
+            # request contents, and are needed to diagnose SDK-version mismatches.
+            if isinstance(exc, AttributeError) and str(exc):
+                diagnostic += f"; info={str(exc)[:120]}"
             raise HTTPException(
                 status_code=502,
                 detail=f"Could not store the voice sample in private Blob ({diagnostic})",
