@@ -186,6 +186,8 @@ def _wait_for_job(job_id: str, action: str, timeout_seconds: float = 150.0) -> d
         except httpx.TimeoutException:
             time.sleep(2)
             continue
+        except httpx.HTTPError as exc:
+            raise SpeakerIdentityError(f"Связь с pyannoteAI прервалась при операции «{action}»: {str(exc)[:150]}") from None
         status = job.get("status")
         if status == "succeeded":
             output = job.get("output")
@@ -246,6 +248,8 @@ def _identify_audio(path: str | pathlib.Path, profiles: list[dict]) -> dict:
         payload = _json_response(response, "идентификация говорящих")
     except httpx.TimeoutException:
         raise SpeakerIdentityError("Истекло время ожидания при идентификации говорящих") from None
+    except httpx.HTTPError as exc:
+        raise SpeakerIdentityError(f"Не удалось связаться с pyannoteAI: {str(exc)[:150]}") from None
     return _wait_for_job(_job_id(payload, "идентификация говорящих"), "идентификация говорящих")
 
 

@@ -122,3 +122,77 @@ def test_voice_identity_stays_disabled_without_provider_key(monkeypatch):
     monkeypatch.setattr(config, "PYANNOTEAI_API_KEY", "")
     monkeypatch.setattr(config, "_panel", lambda _key: "")
     assert speaker_id.enrolled_voiceprints() == []
+
+
+def test_voice_sample_enrollment_requires_explicit_consent(client, monkeypatch):
+    from app.db import Employee, EmployeeVoiceprint, SessionLocal
+
+    monkeypatch.setattr(config, "pyannoteai_key", lambda: "fake-api-key")
+    with SessionLocal() as session:
+        employee = Employee(name="Голос Без Согласия")
+        session.add(employee)
+        session.commit()
+        employee_id = employee.id
+
+    response = client.post(
+        f"/employees/{employee_id}/voice-sample",
+        files={"sample": ("sample.wav", b"fake-audio", "audio/wav")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "согласия" in response.headers["location"].lower()
+    with SessionLocal() as session:
+        assert session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).count() == 0
+
+
+def test_voice_sample_enrollment_saves_encrypted_template_and_consent(client, monkeypatch):
+    from app.db import Employee, EmployeeVoiceprint, SessionLocal
+
+    monkeypatch.setattr(config, "pyannoteai_key", lambda: "fake-api-key")
+    monkeypatch.setattr(speaker_id, "normalize_sample", lambda _source, _target: 12.5)
+    monkeypatch.setattr(speaker_id, "create_voiceprint", lambda _path, _employee_id: "provider-template-secret")
+
+    with SessionLocal() as session:
+        employee = Employee(name="Голос С Согласием")
+        session.add(employee)
+        session.commit()
+        employee_id = employee.id
+
+    response = client.post(
+        f"/employees/{employee_id}/voice-sample",
+        data={"consent": "yes"},
+        files={"sample": ("sample.wav", b"fake-audio", "audio/wav")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "создан" in response.headers["location"].lower()
+    with SessionLocal() as session:
+        profile = session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).one()
+        assert b"provider-template-secret" not in profile.encrypted_voiceprint
+        assert speaker_id.decrypt_voiceprint(profile.encrypted_voiceprint) == "provider-template-secret"
+        assert profile.consent_at is not None
+        assert profile.consent_version == speaker_id.CONSENT_VERSION
+        assert profile.sample_duration == 12.5
+
+
+def test_voice_sample_can_be_deleted_without_deleting_employee(client):
+    from app.db import Employee, EmployeeVoiceprint, SessionLocal
+
+    with SessionLocal() as session:
+        employee = Employee(name="Голос Для Удаления")
+        session.add(employee)
+        session.flush()
+        employee_id = employee.id
+        session.add(EmployeeVoiceprint(
+            employee_id=employee_id,
+            encrypted_voiceprint=speaker_id.encrypt_voiceprint("delete-me"),
+            sample_duration=9.0,
+            consent_at=dt.datetime.now(dt.timezone.utc),
+        ))
+        session.commit()
+
+    response = client.post(f"/employees/{employee_id}/voice-sample/delete", follow_redirects=False)
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        assert session.get(Employee, employee_id) is not None
+        assert session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).count() == 0
