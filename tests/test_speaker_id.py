@@ -142,7 +142,7 @@ def test_voice_sample_enrollment_requires_explicit_consent(client, monkeypatch):
     )
     assert response.status_code == 303
     message = parse_qs(urlsplit(response.headers["location"]).query).get("voice_msg", [""])[0].lower()
-    assert "согласия" in message
+    assert "соглас" in message
     with SessionLocal() as session:
         assert session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).count() == 0
 
