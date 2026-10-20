@@ -359,8 +359,21 @@ async def embed(
             )
             sample_blob_path = uploaded.pathname
         except Exception as exc:
+            # Keep provider internals and credentials out of client responses, but include a safe
+            # error class/status so an authenticated SYSAI caller can distinguish auth/config
+            # failures from SDK/runtime failures without access to Vercel runtime logs.
             log.exception("Could not store private reference audio for employee id %s", employee_id)
-            raise HTTPException(status_code=502, detail="Could not store the voice sample in private Blob") from exc
+            diagnostic = type(exc).__name__
+            status_code = getattr(exc, "status_code", None)
+            error_code = getattr(exc, "code", None)
+            if isinstance(status_code, int):
+                diagnostic += f"; status={status_code}"
+            if isinstance(error_code, str) and error_code:
+                diagnostic += f"; code={error_code[:80]}"
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not store the voice sample in private Blob ({diagnostic})",
+            ) from exc
 
     return {
         "embedding": embedding,
