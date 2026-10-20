@@ -669,6 +669,38 @@ def test_only_the_part_that_failed_is_cut_again(tmp_path, monkeypatch):
     assert [s["text"] for s in segments] == ["part 1", "part 2", "the last part"]
 
 
+def test_recursive_split_resume_reuses_saved_child_and_skips_parent_retry(tmp_path, monkeypatch):
+    source = make_long_mp3(tmp_path / "clip.mp3", 50)
+    checkpoint = checkpoints.Store(new_meeting())
+    monkeypatch.setattr(config, "llm_enabled", lambda: True)
+    calls = []
+
+    def flaky(*args, **kwargs):
+        call = len(calls)
+        calls.append(1)
+        if call == 0:
+            raise llm.IncompleteResponse("parent response too large")
+        if call == 2:
+            raise llm.LLMError("right child failed")
+        return json.dumps({"segments": [{"speaker": "A", "start": 1, "text": f"recognized call {call + 1}"}]})
+
+    monkeypatch.setattr(llm, "chat", flaky)
+    with pytest.raises(llm.LLMError, match="right child failed"):
+        transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+    assert len(calls) == 3
+
+    cuts, workdirs = watch_cuts(monkeypatch)
+    _, segments = transcribe.transcribe(str(source), settings(), checkpoint=checkpoint)
+
+    # The split marker resumes the child tree directly: the left child's saved
+    # transcript is reused, the parent is not asked again, and only the right
+    # child is cut and sent to the model.
+    assert len(calls) == 4
+    assert cuts == [25]
+    assert len(workdirs) == 1 and not pathlib.Path(workdirs[0]).exists()
+    assert [item["text"] for item in segments] == ["recognized call 2", "recognized call 4"]
+
+
 def test_a_run_that_cuts_cleans_its_folder_even_when_a_cut_fails(tmp_path, monkeypatch):
     source = make_audio(tmp_path / "source.wav", 5)
     monkeypatch.setattr(config, "llm_enabled", lambda: True)

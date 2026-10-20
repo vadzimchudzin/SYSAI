@@ -130,10 +130,46 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
 
     def part(get_chunk, offset, length, index, context):
         key = checkpoints.fingerprint(dict(base, offset=offset, length=length, context=context))
+
+        def split_part(state=None):
+            # Persist the split decision before processing children. If a child fails,
+            # a retry resumes the same tree instead of asking the model about the
+            # oversized parent again.
+            half = state["half"] if state is not None else length / 2
+            overlap = state["overlap"] if state is not None else min(OVERLAP_SECONDS, length / 4)
+            if checkpoint and state is None:
+                checkpoint.put("transcribe", index, key, {
+                    "_sysai_checkpoint_state": "split",
+                    "half": half,
+                    "overlap": overlap,
+                })
+            progress(f"Фрагмент {index}: делю и продолжаю")
+            left_length = half + overlap
+            right_length = length - half
+            # Cut lazily from the original recording at absolute offsets. A cached
+            # child therefore needs neither an ffmpeg run nor an intermediate MP3.
+            result = part(
+                lambda: cut(offset, left_length, f"chunk_{index}_left.mp3"),
+                offset, left_length, f"{index}L", context,
+            )
+            second = part(
+                lambda: cut(offset + half, right_length, f"chunk_{index}_right.mp3"),
+                offset + half, right_length, f"{index}R", _context(result),
+            )
+            _merge(result, second, offset + half)
+            return result
+
         cached = checkpoint.get("transcribe", index, key) if checkpoint else None
         if cached is not None:
+            if isinstance(cached, dict) and cached.get("_sysai_checkpoint_state") == "split":
+                progress(f"Продолжаю деление фрагмента {index}")
+                result = split_part(cached)
+                if checkpoint:
+                    checkpoint.put("transcribe", index, key, result)
+                return result
             progress(f"Восстановлен фрагмент {index}")
             return cached
+
         chunk = get_chunk()  # only now: a recognised part never needs its audio
         prompt = _prompt(settings, length, context)
         try:
@@ -151,16 +187,7 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         except llm.IncompleteResponse:
             if length <= MIN_SPLIT_SECONDS:
                 raise
-            else:
-                progress(f"Фрагмент {index}: делю и продолжаю")
-                half = length / 2
-                overlap = min(OVERLAP_SECONDS, length / 4)
-                left, right = chunk.parent / f"{index}_left.mp3", chunk.parent / f"{index}_right.mp3"
-                audio.extract(chunk, left, 0, half + overlap)
-                audio.extract(chunk, right, half, length - half)
-                result = part(lambda: left, offset, half + overlap, f"{index}L", context)
-                second = part(lambda: right, offset + half, length - half, f"{index}R", _context(result))
-                _merge(result, second, offset + half)
+            result = split_part()
         if checkpoint:
             checkpoint.put("transcribe", index, key, result)
         return result
