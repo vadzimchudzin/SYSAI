@@ -915,7 +915,8 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
         resolved_assignee_name = (t.get("assignee_name") or "").strip()
         unassigned_labels = {"-", "—", "null", "none", "n/a", "unknown", "не назначен", "не назначена",
                              "не назначено", "не определен", "не определён", "не указано", "неизвестно"}
-        if resolved_assignee_name.casefold() in unassigned_labels:
+        placeholder_assignee = resolved_assignee_name.casefold() in unassigned_labels
+        if placeholder_assignee:
             resolved_assignee_name = ""
         target_name = (t.get("target_employee_name") or "").strip()
         raw_target_id = t.get("target_employee_id")
@@ -951,7 +952,8 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
                 )
             if matched is not None:
                 eid = matched.id
-                resolved_assignee_name = matched.name
+                # Preserve the form used in speech ("Вадиму"), while linking the task to the canonical ID.
+                resolved_assignee_name = spoken_name
             elif spoken_name:
                 eid = None
                 resolved_assignee_name = spoken_name
@@ -959,8 +961,12 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
                 # Reserve clearly assistant-sized work for the post-analysis dispatcher.
                 eid = None
                 resolved_assignee_name = ""
+            elif eid in ids and not placeholder_assignee:
+                # Preserve a valid explicit/model-resolved ID when the speaker did not name anyone.
+                # The relevance resolver is for missing/placeholder assignments, not existing grounded IDs.
+                resolved_assignee_name = ""
             else:
-                # Do not trust an ungrounded model ID; resolve from directory relevance.
+                # Missing, invalid or placeholder IDs are not trusted; resolve from directory relevance.
                 suggested = recommend_task_employee(context, employees)
                 if suggested is None:
                     eid = None
