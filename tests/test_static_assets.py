@@ -39,3 +39,13 @@ def test_recording_monitor_has_targeted_stop_control(client):
 def test_the_version_follows_the_content():
     assert asset("style.css") != asset("app.js")
     assert asset("style.css") == asset("style.css")
+
+
+def test_voice_identity_upload_and_consent_controls_are_styled(client):
+    response = client.get(asset("style.css"))
+    assert response.status_code == 200
+    css = response.text
+    assert ".voice-profile-form" in css
+    assert ".voice-file-input::file-selector-button" in css
+    assert ".voice-consent-check" in css
+    assert ".voice-submit" in css
