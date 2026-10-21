@@ -5,12 +5,12 @@
   <div>
     <span class="eyebrow">ЗАПИСЬ · МОНИТОР</span>
     <h1>Монитор записи</h1>
-    <p>Состояние обновляется автоматически. Если исходная вкладка закрылась, загруженные части можно восстановить или удалить.</p>
+    <p>Сворачивание вкладки не останавливает запись. Кнопка × останавливает только эту сессию и отправляет её на обработку.</p>
   </div>
   <a class="btn ghost" href="/app">{{ icon('arrow-left') }} В кабинет</a>
 </div>
 
-<section class="card recording-monitor-card" id="recording-monitor" data-id="{{ recording.id }}">
+<section class="card recording-monitor-card" id="recording-monitor" data-id="{{ recording.id }}" data-status="{{ recording.status }}">
   <div class="recording-monitor-head">
     <div class="recording-monitor-title">
       <span class="recording-status-mark" aria-hidden="true"></span>
@@ -19,7 +19,12 @@
         <h2 id="monitor-title">{{ recording.title or 'Совещание без названия' }}</h2>
       </div>
     </div>
-    <span id="monitor-status" class="pill amber">{{ {'recording':'Идёт запись','finishing':'Сборка аудио','error':'Нужна проверка','finished':'Передано на обработку','cancelled':'Отменено'}.get(recording.status, 'Загрузка…') }}</span>
+    <div class="recording-monitor-state">
+      <span id="monitor-status" class="pill amber">{{ {'recording':'Идёт запись','stopping':'Останавливается','finishing':'Сборка аудио','error':'Нужна проверка','finished':'Передано на обработку','cancelled':'Отменено'}.get(recording.status, 'Загрузка…') }}</span>
+      <button id="monitor-stop" class="recording-stop-button" type="button"
+        aria-label="Остановить эту запись" title="Остановить эту запись"
+        {% if recording.status not in ('recording','stopping') %}hidden{% endif %}><span aria-hidden="true">×</span></button>
+    </div>
   </div>
 
   <div class="recording-stats-grid">
@@ -40,11 +45,11 @@
 
   <div class="recording-monitor-actions" id="monitor-actions">
     <a id="monitor-download" class="btn" href="/recordings/{{ recording.id }}/audio" {% if not recording.size_bytes or recording.status == 'cancelled' %}hidden{% endif %}>{{ icon('download') }} Скачать загруженное аудио</a>
-    <button id="monitor-finish" class="btn primary" type="button" {% if recording.status not in ('recording','error') or not recording.size_bytes %}hidden{% endif %}>{{ icon('check-circle') }} <span id="monitor-finish-label">Обработать загруженные части</span></button>
-    <button id="monitor-cancel" class="btn danger" type="button" {% if recording.status not in ('recording','finishing','error') %}hidden{% endif %}>{{ icon('x-circle') }} <span id="monitor-cancel-label">Закрыть зависшую запись</span></button>
+    <button id="monitor-finish" class="btn primary" type="button" {% if recording.status != 'error' or not recording.size_bytes %}hidden{% endif %}>{{ icon('check-circle') }} <span id="monitor-finish-label">Обработать загруженные части</span></button>
+    <button id="monitor-cancel" class="btn danger" type="button" {% if recording.status != 'error' %}hidden{% endif %}>{{ icon('x-circle') }} <span id="monitor-cancel-label">Закрыть зависшую запись</span></button>
     <a id="monitor-meeting-link" class="btn primary" hidden>{{ icon('arrow-up-right') }} Открыть совещание</a>
   </div>
-  <p class="recording-safety-note">Важно: скачай доступное аудио перед отменой. Кнопка отмены удаляет незавершённую серверную запись и её части.</p>
+  <p class="recording-safety-note">Остановка сохраняет загруженные аудиочасти и запускает обработку. «Закрыть зависшую запись» удаляет незавершённые аудиочасти; сначала скачай их, если они нужны.</p>
 </section>
 <script src="{{ asset('recordings-live.js') }}" defer></script>
 {% endblock %}
