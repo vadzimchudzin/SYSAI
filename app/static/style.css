@@ -849,3 +849,147 @@ tbody tr:hover td { background: rgba(145,179,240,.035); }
   .recording-row-actions .btn { flex: 1; }
   .recording-stop-button { width: 40px; height: 40px; flex-basis: 40px; }
 }
+
+
+/* Voice identity form: purpose-built upload field, consent panel and action. */
+.voice-profile { min-width: 0; }
+.voice-profile-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  min-width: 0;
+  margin-top: 16px;
+}
+.voice-profile-form .voice-file-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  color: var(--soft);
+  font-weight: 600;
+}
+.voice-duration-hint {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-left: 5px;
+  padding: 3px 8px;
+  border: 1px solid rgba(145,179,240,.18);
+  border-radius: 999px;
+  background: rgba(145,179,240,.07);
+  color: var(--sblue);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.voice-profile-form .voice-file-input {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 56px;
+  padding: 7px;
+  border: 1px solid rgba(145,179,240,.22);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(145,179,240,.045), transparent 70%), #0e131b;
+  color: var(--muted);
+  font: 13px var(--sans);
+}
+.voice-profile-form .voice-file-input::file-selector-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0 12px 0 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(145,179,240,.24);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255,255,255,.04), transparent), var(--card2);
+  color: var(--text);
+  font: 600 13px var(--sans);
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease, transform .16s ease;
+}
+.voice-profile-form .voice-file-input::file-selector-button:hover {
+  border-color: rgba(145,179,240,.55);
+  background-color: #222d3e;
+}
+.voice-profile-form .voice-file-input:focus-visible {
+  outline: 2px solid var(--sblue);
+  outline-offset: 3px;
+}
+.voice-file-help { margin: 0; max-width: 82ch; line-height: 1.65; }
+.voice-profile-form .voice-consent-check {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  margin: 2px 0 0;
+  padding: 15px 16px;
+  border: 1px solid rgba(145,179,240,.18);
+  border-radius: 14px;
+  background: linear-gradient(120deg, rgba(145,179,240,.055), rgba(255,255,255,.012));
+  color: var(--soft);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.6;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.voice-profile-form .voice-consent-check input[type=checkbox] {
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  margin: 2px 0 0;
+  border: 1px solid var(--line2);
+  border-radius: 5px;
+  background: #0b1018;
+  cursor: pointer;
+}
+.voice-profile-form .voice-consent-check input[type=checkbox]::before {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border: 2px solid #19141a;
+  border-top: 0;
+  border-right: 0;
+  transform: rotate(-45deg) scale(0);
+  transition: transform .12s ease;
+  margin-top: -2px;
+}
+.voice-profile-form .voice-consent-check input[type=checkbox]:checked {
+  border-color: var(--clay);
+  background: var(--clay);
+}
+.voice-profile-form .voice-consent-check input[type=checkbox]:checked::before {
+  transform: rotate(-45deg) scale(1);
+}
+.voice-profile-form .voice-consent-check:focus-within {
+  outline: 2px solid var(--sblue);
+  outline-offset: 3px;
+}
+.voice-profile-form .voice-submit {
+  justify-self: start;
+  min-height: 46px;
+  max-width: 100%;
+  padding: 11px 18px;
+  gap: 8px;
+}
+.voice-profile-form .voice-submit > span {
+  font-size: 18px;
+  line-height: 1;
+}
+@media (max-width: 560px) {
+  .voice-profile-form .voice-submit { width: 100%; justify-self: stretch; }
+  .voice-profile-form .voice-consent-check { padding: 13px; gap: 10px; font-size: 12.5px; }
+  .voice-profile-form .voice-file-input::file-selector-button { margin-right: 8px; padding: 9px 10px; }
+}
