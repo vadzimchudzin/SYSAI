@@ -36,6 +36,28 @@ def test_recording_routes_real_chunks_finish_settings_and_owner(client, tmp_path
         assert meeting.options["deadline_mode"] == "ask" and meeting.options["approval_required"]
 
 
+def test_monitor_can_recover_or_close_a_recording(client, monkeypatch):
+    client.post("/login", data={"username": "SYSAI", "password": "pw"})
+    response = client.post("/recordings", data={"mime_type": "audio/webm", "title": "Зависшая запись"})
+    assert response.status_code == 200
+    rid = response.json()["id"]
+
+    monitor = client.get(f"/recordings/{rid}/monitor")
+    assert monitor.status_code == 200
+    assert 'id="monitor-download"' in monitor.text
+    assert 'id="monitor-finish"' in monitor.text
+    assert 'id="monitor-cancel"' in monitor.text
+
+    abandoned = client.post(f"/recordings/{rid}/abandon")
+    assert abandoned.status_code == 200
+    assert abandoned.json()["status"] == "error"
+    assert client.get(f"/recordings/{rid}/status").json()["status"] == "error"
+
+    cancelled = client.post(f"/recordings/{rid}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+
 def test_recording_routes_require_login_and_validate_date(client):
     client.get("/logout")
     assert client.post("/recordings", data={"mime_type": "audio/webm"}, follow_redirects=False).status_code == 303
