@@ -180,7 +180,7 @@ def test_unnamed_task_remains_unassigned_when_relevance_is_tied():
         "tasks": [{
             "title": "Закупить оборудование",
             "description": "Подобрать поставщика",
-            "employee_id": 1,
+            "employee_id": None,
             "assignee_name": "",
             "executor": "person",
             "deadline": None,
