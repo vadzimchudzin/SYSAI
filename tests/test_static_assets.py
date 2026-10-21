@@ -23,6 +23,17 @@ def test_recording_script_marks_abandoned_sessions_for_recovery(client):
     assert response.status_code == 200
     assert "pagehide" in response.text
     assert "/abandon" in response.text
+    assert "pollServerStopRequest" in response.text
+
+
+def test_recording_monitor_has_targeted_stop_control(client):
+    client.post("/login", data={"username": "SYSAI", "password": "pw"})
+    response = client.post("/recordings", data={"mime_type": "audio/webm", "title": "Тестовая запись"})
+    rid = response.json()["id"]
+    monitor = client.get(f"/recordings/{rid}/monitor")
+    assert monitor.status_code == 200
+    assert 'id="monitor-stop"' in monitor.text
+    assert 'aria-label="Остановить эту запись"' in monitor.text
 
 
 def test_the_version_follows_the_content():
