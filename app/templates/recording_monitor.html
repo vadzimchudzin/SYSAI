@@ -40,8 +40,8 @@
 
   <div class="recording-monitor-actions" id="monitor-actions">
     <a id="monitor-download" class="btn" href="/recordings/{{ recording.id }}/audio" {% if not recording.size_bytes or recording.status == 'cancelled' %}hidden{% endif %}>{{ icon('download') }} Скачать загруженное аудио</a>
-    <button id="monitor-finish" class="btn primary" type="button" {% if recording.status not in ('recording','error') or not recording.size_bytes %}hidden{% endif %}>{{ icon('check-circle') }} Обработать загруженные части</button>
-    <button id="monitor-cancel" class="btn danger" type="button" {% if recording.status not in ('recording','finishing','error') %}hidden{% endif %}>{{ icon('x-circle') }} Закрыть зависшую запись</button>
+    <button id="monitor-finish" class="btn primary" type="button" {% if recording.status not in ('recording','error') or not recording.size_bytes %}hidden{% endif %}>{{ icon('check-circle') }} <span id="monitor-finish-label">Обработать загруженные части</span></button>
+    <button id="monitor-cancel" class="btn danger" type="button" {% if recording.status not in ('recording','finishing','error') %}hidden{% endif %}>{{ icon('x-circle') }} <span id="monitor-cancel-label">Закрыть зависшую запись</span></button>
     <a id="monitor-meeting-link" class="btn primary" hidden>{{ icon('arrow-up-right') }} Открыть совещание</a>
   </div>
   <p class="recording-safety-note">Важно: скачай доступное аудио перед отменой. Кнопка отмены удаляет незавершённую серверную запись и её части.</p>
