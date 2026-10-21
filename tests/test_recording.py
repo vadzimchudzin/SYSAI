@@ -195,6 +195,47 @@ def test_active_recordings_include_legacy_owner_only_when_explicitly_requested()
     assert recording.list_active("user:99") == []
     assert [item["id"] for item in recording.list_active("user:99", "legacy-session-unique")] == [rec["id"]]
 
+def test_abandon_marks_open_recording_recoverable_and_preserves_uploaded_chunks(webm_audio):
+    rec = start()
+    recording.append("session-1", rec["id"], 0, webm_audio[:100])
+    recording.append("session-1", rec["id"], 1, webm_audio[100:])
+
+    result = recording.abandon("session-1", rec["id"])
+    assert result["status"] == "error"
+    assert result["recoverable"] is True
+    assert result["next_sequence"] == 2
+    assert recording.get_status("session-1", rec["id"])["status"] == "error"
+    active = recording.list_active("session-1")
+    assert active[0]["id"] == rec["id"] and active[0]["status"] == "error"
+    path, _ = recording.download("session-1", rec["id"])
+    assert path.read_bytes() == webm_audio
+    assert recording.cancel("session-1", rec["id"])["status"] == "cancelled"
+
+
+def test_abandon_does_not_change_a_cancelled_recording():
+    rec = start()
+    recording.cancel("session-1", rec["id"])
+    result = recording.abandon("session-1", rec["id"])
+    assert result["status"] == "cancelled"
+
+
+def test_stop_request_targets_one_recording_and_accepts_its_final_chunk():
+    first = recording.start("session-1", "audio/webm", "First recording")
+    second = recording.start("session-1", "audio/webm", "Second recording")
+
+    requested = recording.request_stop("session-1", first["id"])
+    assert requested == {"id": first["id"], "status": "stopping", "stop_requested": True}
+    assert recording.get_status("session-1", first["id"])["status"] == "stopping"
+    assert recording.get_status("session-1", second["id"])["status"] == "recording"
+
+    final_chunk = recording.append("session-1", first["id"], 0, b"final-audio-chunk")
+    assert final_chunk["next_sequence"] == 1
+    assert recording.get_status("session-1", second["id"])["status"] == "recording"
+
+    recording.cancel("session-1", first["id"])
+    recording.cancel("session-1", second["id"])
+
+
 def test_elapsed_time_freezes_when_recording_is_terminal():
     from types import SimpleNamespace
 

@@ -7,7 +7,7 @@
   const state = document.getElementById('recording-state'), progress = document.getElementById('recording-progress');
   const maxBytes = Number(document.querySelector('script[src^="/static/recording.js"]').dataset.maxBytes);
   let recorder, stream, id, mime, chunks = [], next = 0, bytes = 0, busy = false;
-  let ended = false, cancelled = false, active = false, failed = false, startedAt, timer, url;
+  let ended = false, cancelled = false, active = false, failed = false, startedAt, timer, controlTimer, controlBusy = false, url;
 
   function status(text, error = false) {
     state.textContent = text;
@@ -36,6 +36,25 @@
   function release() {
     if (stream) stream.getTracks().forEach(track => track.stop());
     clearInterval(timer);
+  }
+  async function pollServerStopRequest() {
+    if (!active || ended || !id || controlBusy) return;
+    controlBusy = true;
+    try {
+      const response = await fetch('/recordings/' + encodeURIComponent(id) + '/status', {
+        headers: { accept: 'application/json' }, cache: 'no-store', credentials: 'same-origin'
+      });
+      if (!response.ok) return;
+      const current = await response.json();
+      if (current.status === 'stopping' && recorder && recorder.state !== 'inactive') {
+        stop.disabled = true;
+        status('Остановка записи');
+        progress.textContent = 'Получена команда остановки. Сохраняем последние аудиочасти…';
+        recorder.stop();
+      }
+    } catch (_) {
+      // Brief status outages must not stop local recording.
+    } finally { controlBusy = false; }
   }
   function localCopy() {
     if (!chunks.length) return;
@@ -100,6 +119,7 @@
       lock(true);
       const session = await request('/recordings', { method: 'POST', body: data });
       id = session.id; active = true; startedAt = Date.now();
+      clearInterval(controlTimer); controlTimer = setInterval(pollServerStopRequest, 2500);
       recorder.addEventListener('dataavailable', event => {
         if (!event.data.size) return;
         chunks.push(event.data); bytes += event.data.size;
@@ -108,7 +128,7 @@
         pump();
       });
       recorder.addEventListener('stop', () => {
-        ended = true; stop.disabled = true; release();
+        ended = true; stop.disabled = true; clearInterval(controlTimer); controlTimer = null; release();
         localCopy();
         if (!cancelled && !failed) { status('Передача последних частей'); pump(); }
       });
@@ -123,7 +143,7 @@
       }, 1000);
     } catch (exc) { active = false; release(); lock(false); status('Запись не началась', true); progress.textContent = exc.name === 'NotAllowedError' ? 'Доступ к микрофону запрещён. Разрешите его в настройках браузера и повторите.' : exc.message; }
   });
-  stop.addEventListener('click', () => { stop.disabled = true; if (recorder?.state !== 'inactive') recorder.stop(); });
+  stop.addEventListener('click', () => { stop.disabled = true; status('Остановка записи'); progress.textContent = 'Сохраняем последние аудиочасти…'; if (recorder?.state !== 'inactive') recorder.stop(); });
   retry.addEventListener('click', () => { failed = false; retry.hidden = true; status('Повтор передачи'); pump(); });
   cancel.addEventListener('click', async () => {
     if (!confirm('Отменить запись? Скачайте локальную копию перед удалением, если она нужна.')) return;
@@ -134,9 +154,28 @@
     release(); localCopy();
     try {
       await request(`/recordings/${id}/cancel`, { method: 'POST' });
-      active = false; lock(false); cancel.disabled = true; stop.disabled = true; retry.hidden = true;
+      active = false; clearInterval(controlTimer); controlTimer = null; lock(false); cancel.disabled = true; stop.disabled = true; retry.hidden = true;
       status('Запись отменена'); progress.textContent = 'Обработка и рассылка не запускались.';
     } catch (exc) { status('Не удалось отменить на сервере', true); progress.textContent = exc.message; }
   });
-  window.addEventListener('beforeunload', event => { if (active) { event.preventDefault(); event.returnValue = ''; } });
+  // If the recording tab is really closed, stop leaving a permanent server-side "recording" state.
+  // Keep already uploaded chunks so the monitor can download/retry finalization.
+  window.addEventListener('pagehide', () => {
+    if (!active || !id || cancelled) return;
+    const endpoint = `/recordings/${encodeURIComponent(id)}/abandon`;
+    let queued = false;
+    try {
+      queued = navigator.sendBeacon && navigator.sendBeacon(endpoint, new Blob([], { type: 'text/plain' }));
+    } catch (_) { /* Fall back to a keepalive fetch below. */ }
+    if (!queued) {
+      fetch(endpoint, { method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin', keepalive: true }).catch(() => {});
+    }
+    if (stream) stream.getTracks().forEach(track => track.stop());
+  });
+  window.addEventListener('beforeunload', event => {
+    if (active) {
+      event.preventDefault();
+      event.returnValue = 'Запись остановится при выходе. Уже переданные аудиочасти можно восстановить через монитор.';
+    }
+  });
 })();

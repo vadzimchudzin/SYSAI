@@ -141,6 +141,7 @@ def _process(meeting_id: int):
                     _ = membership.department.name if membership.department else ""
         report = analyze.mock_report(employees, mdate) if source == "demo" else analyze.analyze(
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
+        report = analyze.route_assistant_tasks(report, employees, assistant_enabled=userbot.ai_mode())
         _save_report(meeting_id, report, settings)
         _finish_processing(meeting_id, audio_path, settings)
     except Exception as e:  # noqa: BLE001

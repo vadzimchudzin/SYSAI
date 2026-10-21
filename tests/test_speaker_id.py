@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 from urllib.parse import parse_qs, urlsplit
 
 from app import analyze, config, speaker_id
@@ -147,12 +148,19 @@ def test_voice_sample_enrollment_requires_explicit_consent(client, monkeypatch):
         assert session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).count() == 0
 
 
-def test_voice_sample_enrollment_saves_encrypted_template_and_consent(client, monkeypatch):
-    from app.db import Employee, EmployeeVoiceprint, SessionLocal
+def test_voice_sample_enrollment_saves_encrypted_embedding_and_consent(client, monkeypatch):
+    from app.db import Employee, EmployeeVoiceSample, SessionLocal
 
-    monkeypatch.setattr(config, "pyannoteai_key", lambda: "fake-api-key")
+    embedding = [1.0] + [0.0] * 191
+    monkeypatch.setattr(config, "voice_service_enabled", lambda: True)
     monkeypatch.setattr(speaker_id, "normalize_sample", lambda _source, _target: 12.5)
-    monkeypatch.setattr(speaker_id, "create_voiceprint", lambda _path, _employee_id: "provider-template-secret")
+    monkeypatch.setattr(speaker_id, "embed_voice_sample", lambda _path, employee_id: {
+        "embedding": embedding,
+        "sample_blob_path": f"profiles/employee-{employee_id}/test.wav",
+        "waveform": [0.1, 0.5, 0.9],
+        "duration_seconds": 12.5,
+        "model_version": "test-ecapa",
+    })
 
     with SessionLocal() as session:
         employee = Employee(name="Голос С Согласием")
@@ -168,13 +176,16 @@ def test_voice_sample_enrollment_saves_encrypted_template_and_consent(client, mo
     )
     assert response.status_code == 303
     message = parse_qs(urlsplit(response.headers["location"]).query).get("voice_msg", [""])[0].lower()
-    assert "создан" in message
+    assert "сохран" in message
     with SessionLocal() as session:
-        profile = session.query(EmployeeVoiceprint).filter_by(employee_id=employee_id).one()
-        assert b"provider-template-secret" not in profile.encrypted_voiceprint
-        assert speaker_id.decrypt_voiceprint(profile.encrypted_voiceprint) == "provider-template-secret"
+        profile = session.query(EmployeeVoiceSample).filter_by(employee_id=employee_id).one()
+        assert json.loads(speaker_id.decrypt_voiceprint(profile.encrypted_embedding)) == embedding
+        assert profile.sample_blob_path == f"profiles/employee-{employee_id}/test.wav"
+        assert profile.embedding_dimensions == 192
+        assert profile.model_version == "test-ecapa"
+        assert profile.waveform_data == [0.1, 0.5, 0.9]
         assert profile.consent_at is not None
-        assert profile.consent_version == speaker_id.CONSENT_VERSION
+        assert profile.consent_version == "voiceprint-consent-v2"
         assert profile.sample_duration == 12.5
 
 
