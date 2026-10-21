@@ -770,6 +770,7 @@ def poke():
 
 def start_background():
     from . import agent, conversations, meeting_alerts, reminders
+    from .coordinator import wake as execution_wake
     resume_jobs()
     conversations.recover()
     assistant.recover()
@@ -778,7 +779,8 @@ def start_background():
         time.sleep(config.STARTUP_DELAY)  # let the web server answer the platform's checks first
         while True:
             for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
-                       assistant.run_pending, meeting_alerts.run_due, reminders.run_due, userbot.watchdog):
+                       assistant.run_pending, meeting_alerts.run_due, reminders.run_due, userbot.watchdog,
+                       execution_wake.run_pending):
                 try:
                     fn()
                 except Exception:

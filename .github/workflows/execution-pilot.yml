@@ -35,7 +35,7 @@ jobs:
         env:
           COVERAGE_FILE: .coverage.branch
         run: >-
-          python -m pytest -q tests/test_coordinator.py tests/test_execution_mcp.py tests/test_execution_proxy.py
+          python -m pytest -q tests/test_coordinator.py tests/test_execution_mcp.py tests/test_execution_proxy.py tests/test_execution_wake.py
           --cov=app.coordinator --cov=examples.sysai_mcp_client --cov-branch
           --cov-report=term-missing --cov-report=xml:coverage-branch.xml --cov-report=json:coverage-branch.json
       - uses: actions/upload-artifact@v4

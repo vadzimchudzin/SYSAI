@@ -48,7 +48,7 @@ def test_proxy_uses_main_credentials_fixed_upstream_and_spend_accounting(proxy_c
     ({"model":"sysai-agent","messages":[{"role":"root","content":"x"}]},400),
     ({"model":"sysai-agent","messages":[{"role":"user","content":"x","url":"bad"}]},400),
     ({"model":"sysai-agent","messages":[{"role":"user","content":[{"type":"image_url","image_url":"bad"}]}]},400),
-    ({"model":"sysai-agent","messages":[{"role":"user","content":"x"}],"stream":True},400),
+    ({"model":"sysai-agent","messages":[{"role":"user","content":"x"}],"stream":"yes"},400),
     ({"model":"sysai-agent","messages":[{"role":"user","content":"x"}],"max_tokens":2049},400),
     ({"model":"sysai-agent","messages":[{"role":"user","content":"x"}],"temperature":2},400),
     ({"model":"sysai-agent","messages":[{"role":"user","content":"x"*65000}]},413),
@@ -122,3 +122,36 @@ def test_proxy_request_size_and_json_errors(proxy_client,client):
     assert client.post("/execution/v1/chat/completions",headers=headers,content="x"*131073).status_code==413
     assert client.post("/execution/v1/chat/completions",headers=headers,content="x").status_code==400
     assert not calls
+
+
+def test_buffered_openai_sse_text_usage_and_done(proxy_client):
+    send,calls=proxy_client
+    response=send({"model":"sysai-agent","messages":[{"role":"user","content":"x"}],
+                   "stream":True,"stream_options":{"include_usage":True}})
+    assert response.status_code==200 and response.headers["content-type"].startswith("text/event-stream")
+    packets=[line[6:] for line in response.text.splitlines() if line.startswith("data: ")]
+    assert packets[-1]=="[DONE]"
+    chunks=[json.loads(p) for p in packets[:-1]]
+    assert chunks[0]["choices"][0]["delta"]["role"]=="assistant"
+    assert chunks[1]["choices"][0]["delta"]["content"]=="Evidence needed"
+    assert chunks[2]["choices"][0]["finish_reason"]=="stop"
+    assert chunks[3]["choices"]==[] and chunks[3]["usage"]["cost"]==0.01
+    assert json.loads(calls[0].content)["stream"] is False
+    assert "stream_options" not in json.loads(calls[0].content)
+
+
+def test_buffered_openai_sse_reconstructs_function_tools(proxy_client,monkeypatch):
+    send,calls=proxy_client
+    real=httpx._client.AsyncClient
+    function={"name":"mcp__sysai__get_task_context","arguments":'{"run_id":"abc"}'}
+    def handler(request):
+        return httpx.Response(200,json={"id":"tool-id","model":"sysai-agent","choices":[{"index":0,
+            "message":{"role":"assistant","content":None,"tool_calls":[{"id":"call-1","type":"function","function":function}]},
+            "finish_reason":"tool_calls"}]})
+    monkeypatch.setattr(proxy.httpx,"AsyncClient",lambda **kwargs:real(**kwargs,transport=httpx.MockTransport(handler)))
+    response=send({"model":"sysai-agent","messages":[{"role":"user","content":"x"}],"stream":True})
+    chunks=[json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+    call=chunks[1]["choices"][0]["delta"]["tool_calls"][0]
+    assert call=={"index":0,"id":"call-1","type":"function","function":function}
+    assert chunks[2]["choices"][0]["finish_reason"]=="tool_calls"
+    assert response.text.endswith("data: [DONE]\n\n")

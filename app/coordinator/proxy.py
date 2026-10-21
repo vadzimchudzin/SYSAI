@@ -1,6 +1,6 @@
 """Narrow OpenAI-compatible model proxy: main retains its encrypted OpenRouter key.
 
-Non-streaming text/tool calls only. No arbitrary upstream URL, model, file, image,
+Bounded text/tool calls; buffered OpenAI-compatible SSE when requested. No arbitrary upstream URL, model, file, image,
 SQL or shell capability. Dollar spend uses existing SYSAI accounting; request count
 is additionally reserved durably before the provider request, including failures.
 """
@@ -13,6 +13,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from .. import config, db, llm, settings_store
 from . import mcp_server, service
@@ -22,11 +23,15 @@ router = APIRouter()
 
 
 def validate(data):
-    allowed = {"model", "messages", "stream", "max_tokens", "max_completion_tokens", "temperature", "tools", "tool_choice", "response_format"}
+    allowed = {"model", "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens", "temperature", "tools", "tool_choice", "response_format"}
     if not isinstance(data, dict) or set(data) - allowed:
         raise HTTPException(400, "Unsupported completion fields")
-    if data.get("stream", False) is not False:
-        raise HTTPException(400, "Streaming is not supported by this pilot proxy")
+    if type(data.get("stream", False)) is not bool:
+        raise HTTPException(400, "stream must be boolean")
+    stream_options = data.get("stream_options", {})
+    if (not isinstance(stream_options, dict) or set(stream_options) - {"include_usage"} or
+            type(stream_options.get("include_usage", False)) is not bool):
+        raise HTTPException(400, "Unsupported stream options")
     selected = settings_store.get("agent_model")
     allowed_models = {selected, *(x.strip() for x in os.getenv("SYSAI_MCP_MODEL_ALLOWLIST", "").split(",") if x.strip())}
     model = data.get("model")
@@ -60,7 +65,34 @@ def validate(data):
         raise HTTPException(400, "Invalid temperature")
     body = {**data, "model": model, "stream": False, "max_tokens": maximum}
     body.pop("max_completion_tokens", None)
+    body.pop("stream_options", None)  # upstream remains bounded NON-streaming
     return body
+
+
+def buffered_sse(result, include_usage=False):
+    """Convert one already-bounded completion into standard OpenAI SSE deltas.
+
+    Upstream is never an unbounded stream. Tool calls retain index/id/name/arguments
+    so OpenClaw's native openai-completions parser can reconstruct them exactly.
+    """
+    base = {"id": result.get("id", "sysai"), "object": "chat.completion.chunk",
+            "created": result.get("created", int(time.time())), "model": result.get("model", "sysai-agent")}
+    def chunk(delta, finish=None, index=0):
+        return "data: " + json.dumps({**base, "choices": [{"index": index, "delta": delta,
+                                                        "finish_reason": finish}]}, ensure_ascii=False) + "\n\n"
+    for choice in result["choices"]:
+        message = choice.get("message") or {}
+        index = choice.get("index", 0)
+        yield chunk({"role": "assistant"}, index=index)
+        if message.get("content"):
+            yield chunk({"content": message["content"]}, index=index)
+        for number, tool in enumerate(message.get("tool_calls") or []):
+            yield chunk({"tool_calls": [{"index": number, "id": tool["id"],
+                        "type": "function", "function": tool["function"]}]}, index=index)
+        yield chunk({}, choice.get("finish_reason") or "stop", index)
+    if include_usage and "usage" in result:
+        yield "data: " + json.dumps({**base, "choices": [], "usage": result["usage"]}) + "\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def reserve():
@@ -100,7 +132,10 @@ async def completions(request: Request):
         if len(raw) > 131072:
             raise HTTPException(413, "Request too large")
     try:
-        body = validate(json.loads(raw))
+        requested = json.loads(raw)
+        body = validate(requested)
+        wants_stream = requested.get("stream", False)
+        include_usage = (requested.get("stream_options") or {}).get("include_usage", False)
     except ValueError:
         raise HTTPException(400, "Invalid JSON") from None
     key = config.openrouter_key()
@@ -123,10 +158,26 @@ async def completions(request: Request):
                     if len(data) > 262144:
                         raise HTTPException(502, "Model provider response too large")
         result = json.loads(data)
-        if not isinstance(result, dict) or not isinstance(result.get("choices"), list):
+        if not isinstance(result, dict) or not isinstance(result.get("choices"), list) or not 1 <= len(result["choices"]) <= 2:
             raise HTTPException(502, "Invalid provider completion")
+        for choice in result["choices"]:
+            message = choice.get("message") if isinstance(choice, dict) else None
+            if not isinstance(message, dict) or (message.get("content") is not None and not isinstance(message["content"], str)):
+                raise HTTPException(502, "Invalid provider message")
+            tools = message.get("tool_calls") or []
+            if not isinstance(tools, list) or len(tools) > 20:
+                raise HTTPException(502, "Invalid provider tool calls")
+            for tool in tools:
+                if (not isinstance(tool, dict) or not isinstance(tool.get("id"), str) or
+                        not isinstance(tool.get("function"), dict) or
+                        not all(isinstance(tool["function"].get(k), str) for k in ("name", "arguments"))):
+                    raise HTTPException(502, "Invalid provider tool call")
         llm.record_cost(body["model"], result.get("usage"))
-        return {key: result[key] for key in ("id", "object", "created", "model", "choices", "usage") if key in result}
+        clean = {key: result[key] for key in ("id", "object", "created", "model", "choices", "usage") if key in result}
+        if wants_stream:
+            return StreamingResponse(buffered_sse(clean, include_usage), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return clean
     except (httpx.HTTPError, ValueError, TypeError):
         raise HTTPException(502, "Bounded model request failed") from None
     finally:

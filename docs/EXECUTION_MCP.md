@@ -107,8 +107,9 @@ again immediately before external side effects. Single main process recommended.
 
 Base URL `/execution/v1`; POST `/chat/completions`, bearer token and `model` scope.
 Model `sysai-agent`, text/tool-call messages, maximum output 2048 tokens (default900),
-20 second provider timeout, bounded context and response sizes. **Nonstream only**:
-configure runtime `stream:false`; unsupported streaming returns 400 explicitly.
+20 second provider timeout, bounded context and response sizes. Streaming requests are supported by buffering the same bounded nonstream upstream
+completion, then emitting valid OpenAI SSE role/content/tool-call/finish/usage deltas
+and `[DONE]`. This is compatibility streaming, not upstream token-by-token streaming.
 The fixed upstream is OpenRouter; its key is read through existing config access,
 never returned. Existing spend guard and cost recording remain active. Durable daily
 model call ceiling is `daily_actions * 3`; task planning calls are also bounded (6/run).
@@ -133,3 +134,18 @@ only for NEW `app.coordinator` plus the SDK client example, and reports BRANCH
 coverage separately. Neither number is whole-repository coverage. Full existing
 regressions also run. PostgreSQL/live Telegram/actual OpenClaw need deployment acceptance
 checks; local passing tests alone do not prove that a runtime was provisioned.
+
+## Automatic real OpenClaw wake
+
+Main-only environment: `SYSAI_OPENCLAW_URL` (fixed HTTPS origin),
+`SYSAI_OPENCLAW_TOKEN` (gateway token, never returned/stored in task context),
+`SYSAI_OPENCLAW_ENABLED=1` (default0). Existing main scheduler submits one
+nonblocking wake job for eligible enrolled tasks. It calls `/v1/responses`,
+model `openclaw:main`, stable per-run `user`, maximum2048 output tokens and25s timeout.
+Per-run lease claims/backoff and wake diagnostic events use ONLY the four existing
+pilot tables; no additional migration is needed. Gateway timeout/503 holds retry
+for5minutes, at most3 wakes without task progress. Linked employee replies requeue
+the same run; the next eligible scheduler step wakes its stable task session.
+Dry-run prepared tasks do not repeatedly wake. `/coordinator` shows wake status/errors.
+Wake events do not invalidate a planner revision while OpenClaw is working.
+No custom Python planner or duplicate Telegram consumer is started.

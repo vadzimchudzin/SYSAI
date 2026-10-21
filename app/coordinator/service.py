@@ -382,7 +382,12 @@ def snapshot(run_id=None):
             query = query.filter_by(id=run_id)
         runs = []
         for r in query.limit(100):
+            wake = s.query(Event).filter_by(external_key="wake-state:"+r.id).first()
+            wake_lease = s.get(Lease, "wake:"+r.id)
             runs.append({"id": r.id, "task_id": r.task_id, "state": r.state, "plan": r.plan,
+                         "wake": {"status": wake.data.get("status"), "attempts": wake.data.get("attempts"),
+                                  "error": wake.data.get("error"),
+                                  "next_at": wake_lease.expires_at.isoformat() if wake_lease else None} if wake else None,
                          "summary": r.summary, "reason": r.reason,
                          "actions": [{"sequence": a.sequence, "status": a.status, "recipient": a.recipient,
                                       "body": a.body, "message_id": a.message_id} for a in
@@ -398,7 +403,7 @@ def planning_context(run_id, owner_id):
         if not run or run.owner_id != owner_id:
             raise Hold("Run not found for runtime principal")
         task = authorized(s, run)
-        latest = s.query(Event.id).filter_by(run_id=run.id).order_by(Event.id.desc()).first()
+        latest = s.query(Event.id).filter(Event.run_id == run.id, Event.kind.notin_(("wake_started", "wake_finished", "wake_state"))).order_by(Event.id.desc()).first()
         return {"run_id": run.id, "state": run.state, "revision": latest[0] if latest else 0,
                 "data": context(s, run, task)}
 
@@ -415,7 +420,7 @@ def submit_plan(run_id, owner_id, revision, data):
             if not run or run.owner_id != owner_id or run.state != "queued":
                 raise Hold("Run is not queued for this principal")
             task = authorized(s, run)
-            latest = s.query(Event.id).filter_by(run_id=run.id).order_by(Event.id.desc()).first()
+            latest = s.query(Event.id).filter(Event.run_id == run.id, Event.kind.notin_(("wake_started", "wake_finished", "wake_state"))).order_by(Event.id.desc()).first()
             if revision != (latest[0] if latest else 0):
                 raise Hold("Stale planning revision; fetch context again")
             # Strict allowlist of fields: ignore no executable or permission-bearing input.
