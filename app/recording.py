@@ -294,6 +294,24 @@ def finish(owner: str, recording_id: str) -> dict:
         return {"meeting_id": meeting_id, "url": f"/meetings/{meeting_id}"}
 
 
+def abandon(owner: str, recording_id: str) -> dict:
+    """Mark a browser session that left the page as recoverable, keeping uploaded chunks."""
+    with _lock(recording_id):
+        with SessionLocal() as session:
+            recording = _get_owned(session, owner, recording_id)
+            if recording.status in ("recording", "finishing"):
+                recording.status = "error"
+                recording.updated_at = now()
+                session.commit()
+            return {
+                "id": recording.id,
+                "status": recording.status,
+                "recoverable": recording.size_bytes > 0,
+                "size_bytes": recording.size_bytes,
+                "next_sequence": recording.next_sequence,
+            }
+
+
 def cancel(owner: str, recording_id: str) -> dict:
     with _lock(recording_id):
         with SessionLocal() as session:
