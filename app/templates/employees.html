@@ -124,12 +124,12 @@
           {% endif %}
           {% if voice_identity_enabled %}
           <form method="post" action="/employees/{{ e.id }}/voice-sample" enctype="multipart/form-data" class="voice-profile-form">
-            <label class="f">Чистый образец голоса (5–30 секунд)
-              <input type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
+            <label class="f voice-file-field">Чистый образец голоса <span class="voice-duration-hint">5–30 секунд</span>
+              <input class="voice-file-input" type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
             </label>
-            <p class="small muted">Рекомендуется 10–20 секунд обычной речи одного человека. Несколько образцов одного сотрудника помогают устойчивее сопоставлять голос в разных условиях.</p>
-            <label class="check"><input type="checkbox" name="consent" value="yes" required> Подтверждаю, что получено отдельное согласие сотрудника на обработку голосового образца. Аудио будет передано в приватное Blob-хранилище для идентификации; доступ к операции защищён серверным токеном.</label>
-            <button class="btn primary" type="submit">Добавить голосовой образец</button>
+            <p class="small muted voice-file-help">Лучше записать 10–20 секунд обычной речи одного человека без музыки и посторонних голосов. Несколько образцов помогают точнее сопоставлять голос в разных условиях.</p>
+            <label class="check voice-consent-check"><input type="checkbox" name="consent" value="yes" required><span>Подтверждаю, что получено отдельное согласие сотрудника на обработку голосового образца. Аудио будет передано в приватное Blob-хранилище для идентификации; доступ к операции защищён серверным токеном.</span></label>
+            <button class="btn primary voice-submit" type="submit"><span aria-hidden="true">＋</span> Добавить голосовой образец</button>
           </form>
           {% else %}
           <p class="small muted">Сервис пока не подключён к Render. Задайте SYSAI_VOICE_SERVICE_URL и SYSAI_VOICE_SERVICE_TOKEN в переменных окружения сервиса и BLOB_READ_WRITE_TOKEN в Vercel.</p>
