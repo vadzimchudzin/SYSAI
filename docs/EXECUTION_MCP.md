@@ -149,3 +149,15 @@ the same run; the next eligible scheduler step wakes its stable task session.
 Dry-run prepared tasks do not repeatedly wake. `/coordinator` shows wake status/errors.
 Wake events do not invalidate a planner revision while OpenClaw is working.
 No custom Python planner or duplicate Telegram consumer is started.
+
+## Approval handoff (global pilot opt-in)
+
+With the pilot enabled, assistant.run_task atomically enrolls each newly scheduled
+approved assistant task BEFORE the legacy planner/sender can claim it. Existing
+approval/recovery scheduling is reused; there is no unrelated historical bulk scan.
+The configured current approved SYSAI_MCP_USER_ID owns the run. Missing schema or
+invalid/revoked principal/approval holds visibly and does not fall back to sending.
+Already coordinator-owned tasks stay excluded from legacy even if pilot is disabled.
+When pilot is disabled, existing legacy behavior is unchanged for non-owned tasks.
+Default dry-run and the independent live gate still protect every external send.
+The diagnostics page reports only sanitized origin/configured flags, never tokens.

@@ -286,6 +286,19 @@ def send_task_file(target_ref: str, filename: str, content: bytes, caption: str 
 
 
 def run_task(task_id: int) -> None:
+    # Explicit pilot opt-in hands execution to separate OpenClaw BEFORE the old
+    # assistant can claim/send. No fallback on a handoff policy/config failure.
+    from .coordinator.service import Hold, maybe_enroll_task
+    try:
+        if maybe_enroll_task(task_id):
+            return
+    except Hold as exc:
+        _finish(task_id, "assistant_failed", str(exc))
+        return
+    except Exception:
+        log.warning("OpenClaw task handoff failed safely for task %s", task_id)
+        _finish(task_id, "assistant_failed", "OpenClaw handoff failed; review configuration before retry")
+        return
     if userbot.quiet_until() is not None:
         return  # started after the quiet hours, see run_pending
     with SessionLocal() as s:

@@ -375,7 +375,7 @@ def review(run_id, decision):
 
 def snapshot(run_id=None):
     if not schema_ready():
-        return {"config": options(), "schema_ready": False, "runs": []}
+        return {"config": options(), "schema_ready": False, "runtime": runtime_readiness(), "runs": []}
     with db.SessionLocal() as s:
         query = s.query(Run).order_by(Run.created_at.desc())
         if run_id:
@@ -394,7 +394,7 @@ def snapshot(run_id=None):
                                      s.query(Action).filter_by(run_id=r.id).order_by(Action.sequence)],
                          "events": [{"id": e.id, "kind": e.kind, "data": e.data} for e in
                                     s.query(Event).filter_by(run_id=r.id).order_by(Event.id)]})
-        return {"config": options(), "schema_ready": True, "runs": runs}
+        return {"config": options(), "schema_ready": True, "runtime": runtime_readiness(), "runs": runs}
 
 
 def planning_context(run_id, owner_id):
@@ -479,3 +479,50 @@ def recover():
             if db.now() - updated > dt.timedelta(hours=options()["reply_timeout_hours"]):
                 hold(s, run, "Reply overdue; reviewer follow-up required")
         s.commit()
+
+
+def maybe_enroll_task(task_id):
+    """Approval/recovery handoff only, before the legacy assistant claims a task.
+
+    Global UI opt-in authorizes this handoff, not a live send. It does not scan or
+    bulk-enroll unrelated history. Already-owned tasks never return to legacy even
+    after disabling the pilot. Policy/configuration failures are fail-closed.
+    """
+    with db.SessionLocal() as s:
+        task = s.get(db.Task, task_id)
+        if task and task.status == "coordinator_owned":
+            return True
+        if not options()["enabled"]:
+            return False
+        if not task or task.executor != "assistant":
+            return False
+        if task.status not in ("draft", "assistant_todo"):
+            return True
+    if not schema_ready():
+        raise Hold("OpenClaw handoff held: reviewed pilot schema is missing")
+    try:
+        owner_id = int(os.getenv("SYSAI_MCP_USER_ID", "0"))
+    except ValueError:
+        raise Hold("OpenClaw handoff held: service principal is not configured") from None
+    try:
+        enroll(task_id, owner_id)
+    except Hold:
+        # An overlapping approval/recovery call may have won the same task CAS.
+        with db.SessionLocal() as s:
+            task = s.get(db.Task, task_id)
+            if task and task.status not in ("draft", "assistant_todo"):
+                return True
+        raise
+    return True
+
+
+def runtime_readiness():
+    """Authenticated diagnostics only; never return gateway/model/session tokens."""
+    from urllib.parse import urlsplit
+    value = os.getenv("SYSAI_OPENCLAW_URL", "").rstrip("/")
+    parsed = urlsplit(value)
+    origin = value if parsed.scheme == "https" and parsed.hostname and not any(
+        (parsed.username, parsed.password, parsed.path, parsed.query, parsed.fragment)) else ""
+    return {"enabled": os.getenv("SYSAI_OPENCLAW_ENABLED", "0") == "1",
+            "origin": origin, "gateway_token_configured": len(os.getenv("SYSAI_OPENCLAW_TOKEN", "")) >= 32,
+            "live_gate": os.getenv("SYSAI_COORDINATOR_LIVE", "0") == "1"}
