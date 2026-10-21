@@ -83,6 +83,7 @@ export function buildConfig(env) {
         codeMode: { enabled: false },
         elevated: { enabled: false }
       },
+      plugins: { enabled: true, allow: ['openai'], slots: { memory: 'none' }, entries: { openai: { enabled: true } } },
       channels: {},
       discovery: { mdns: { mode: 'off' } },
       update: { checkOnStart: false, auto: { enabled: false } },

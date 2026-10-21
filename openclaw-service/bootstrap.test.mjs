@@ -72,3 +72,17 @@ test('bootstrap writes restrictive files and ephemeral-memory instructions', () 
     assert(instructions.includes('actual evidence')); assert(!instructions.includes(env().SYSAI_MCP_TOKEN));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('headless free runtime allows only required provider and disables local memory', () => {
+  const { config } = buildConfig(env());
+  assert.deepEqual(config.plugins.allow, ['openai']);
+  assert.equal(config.plugins.slots.memory, 'none');
+  assert.equal(config.plugins.entries.openai.enabled, true);
+  assert.equal(config.models.providers['sysai-proxy'].models[0].maxTokens, 2048);
+});
+test('fresh runtime starts official gateway directly without doctor preflight', () => {
+  const source = fs.readFileSync(new URL('./start.sh', import.meta.url), 'utf8');
+  assert(source.includes('exec node /app/openclaw.mjs gateway'));
+  assert(!source.includes('/app/docker-entrypoint.mjs'));
+  assert(source.includes('--max-old-space-size=256'));
+});
