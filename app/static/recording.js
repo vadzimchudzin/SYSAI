@@ -138,5 +138,24 @@
       status('Запись отменена'); progress.textContent = 'Обработка и рассылка не запускались.';
     } catch (exc) { status('Не удалось отменить на сервере', true); progress.textContent = exc.message; }
   });
-  window.addEventListener('beforeunload', event => { if (active) { event.preventDefault(); event.returnValue = ''; } });
+  // If the recording tab is really closed, stop leaving a permanent server-side "recording" state.
+  // Keep already uploaded chunks so the monitor can download/retry finalization.
+  window.addEventListener('pagehide', () => {
+    if (!active || !id || cancelled) return;
+    const endpoint = `/recordings/${encodeURIComponent(id)}/abandon`;
+    let queued = false;
+    try {
+      queued = navigator.sendBeacon && navigator.sendBeacon(endpoint, new Blob([], { type: 'text/plain' }));
+    } catch (_) { /* Fall back to a keepalive fetch below. */ }
+    if (!queued) {
+      fetch(endpoint, { method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin', keepalive: true }).catch(() => {});
+    }
+    if (stream) stream.getTracks().forEach(track => track.stop());
+  });
+  window.addEventListener('beforeunload', event => {
+    if (active) {
+      event.preventDefault();
+      event.returnValue = 'Запись остановится при выходе. Уже переданные аудиочасти можно восстановить через монитор.';
+    }
+  });
 })();
