@@ -124,7 +124,8 @@
           {% endif %}
           {% if voice_identity_enabled %}
           <form method="post" action="/employees/{{ e.id }}/voice-sample" enctype="multipart/form-data" class="voice-profile-form">
-            <label class="f voice-file-field">Чистый образец голоса <span class="voice-duration-hint">5–30 секунд</span>
+            <label class="f voice-file-field">
+              <span class="voice-file-title-row"><span>Чистый образец голоса</span><span class="voice-duration-hint">5–30 секунд</span></span>
               <input class="voice-file-input" type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
             </label>
             <p class="small muted voice-file-help">Лучше записать 10–20 секунд обычной речи одного человека без музыки и посторонних голосов. Несколько образцов помогают точнее сопоставлять голос в разных условиях.</p>
