@@ -9,3 +9,8 @@ weasyprint==65.1
 psycopg[binary]==3.2.9
 telethon==1.45.0
 cryptography==50.0.2
+
+# Maintained MCP StreamableHTTP; pins preserve FastAPI 0.115 compatibility.
+mcp==1.26.0
+starlette==0.46.2
+sse-starlette==2.3.6

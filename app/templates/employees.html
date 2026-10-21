@@ -81,7 +81,7 @@
             {% else %}<span class="pill gray">Без подразделения</span>{% endif %}
           </div>
           {% if e.competencies or e.responsibilities %}<div class="employee-details-line">{% if e.competencies %}<span><b>Компетенции:</b> {{ e.competencies }}</span>{% endif %}{% if e.responsibilities %}<span><b>Обязанности:</b> {{ e.responsibilities }}</span>{% endif %}</div>{% endif %}
-          <div class="employee-status">{% if e.telegram_chat_id %}<span class="pill green">Telegram подключён</span>{% else %}<span class="pill gray">Telegram не привязан</span>{% endif %}{% if e.voiceprint %}<span class="pill green">Голос зарегистрирован</span>{% endif %}</div>
+          <div class="employee-status">{% if e.telegram_chat_id %}<span class="pill green">Telegram подключён</span>{% else %}<span class="pill gray">Telegram не привязан</span>{% endif %}{% if e.voiceprint or e.voice_samples %}<span class="pill green">Голос зарегистрирован</span>{% endif %}</div>
         </div>
         <div class="actions employee-actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Настроить</a><form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">Удалить</button></form></div>
       </div>
@@ -90,21 +90,51 @@
         <div class="employee-edit-heading"><h3>Карточка сотрудника</h3><p class="muted small">Профиль, контакты, подразделения и обязанности.</p></div>
         {{ form(e) }}
         <section class="card voice-profile">
-          <h3>Образец речи для идентификации</h3>
+          <h3>Идентификация говорящего</h3>
+          <p class="small muted">Локальный движок ECAPA создаёт голосовой вектор; исходный образец хранится в приватном Vercel Blob, а в базе SYSAI хранится зашифрованный вектор.</p>
+          {% if e.voice_samples %}
+          <div class="voice-sample-list">
+            {% for sample in e.voice_samples %}
+            <article class="voice-sample-row">
+              <div class="voice-sample-top">
+                <div>
+                  <b>Образец {{ loop.index }}</b>
+                  <div class="small muted">{{ sample.sample_duration }} сек. · {{ sample.model_version or 'ECAPA' }} · {{ sample.created_at.strftime('%d.%m.%Y') if sample.created_at else '' }}</div>
+                </div>
+                <form method="post" action="/employees/{{ e.id }}/voice-sample/{{ sample.id }}/delete" onsubmit="return confirm('Удалить этот голосовой образец и приватный аудиофайл?')">
+                  <button class="btn sm danger" type="submit">Удалить</button>
+                </form>
+              </div>
+              {% if sample.waveform_data %}
+              <div class="voice-waveform" role="img" aria-label="Форма сигнала голосового образца">
+                {% for level in sample.waveform_data %}<span style="height: {{ [3, (level * 28)|int]|max }}px"></span>{% endfor %}
+              </div>
+              {% endif %}
+            </article>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="small muted">Локальные голосовые образцы ещё не зарегистрированы.</p>
+          {% endif %}
           {% if e.voiceprint %}
-            <p class="small"><span class="pill green">Голосовой шаблон активен</span> · {{ e.voiceprint.sample_duration }} сек. · зарегистрирован {{ e.voiceprint.created_at.strftime('%d.%m.%Y') if e.voiceprint.created_at else '' }}</p>
-            <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Удалить голосовой шаблон?')"><button class="btn sm danger">Удалить шаблон</button></form>
-          {% else %}<p class="small muted">Шаблон ещё не зарегистрирован. Для регистрации нужен отдельный образец речи сотрудника.</p>{% endif %}
+          <div class="voice-legacy-note">
+            <p class="small muted">Найден старый шаблон pyannoteAI ({{ e.voiceprint.sample_duration }} сек.). Новый движок использует только локальные ECAPA-образцы.</p>
+            <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Удалить устаревший шаблон pyannoteAI?')"><button class="btn sm danger" type="submit">Удалить старый шаблон</button></form>
+          </div>
+          {% endif %}
           {% if voice_identity_enabled %}
           <form method="post" action="/employees/{{ e.id }}/voice-sample" enctype="multipart/form-data" class="voice-profile-form">
-            <label class="f">Чистый образец голоса (5–30 секунд)
-              <input type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
+            <label class="f voice-file-field">
+              <span class="voice-file-title-row"><span>Чистый образец голоса</span><span class="voice-duration-hint">5–30 секунд</span></span>
+              <input class="voice-file-input" type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
             </label>
-            <p class="small muted">Лучше 10–20 секунд обычной речи только этого человека — без музыки, других голосов и сильного шума. Загрузка нового образца заменит прежний.</p>
-            <label class="check"><input type="checkbox" name="consent" value="yes" required> Подтверждаю, что отдельное согласие сотрудника получено и зафиксировано. Образец и аудиофрагменты совещаний будут обрабатываться внешним сервисом pyannoteAI.</label>
-            <button class="btn primary">Создать / заменить шаблон</button>
+            <p class="small muted voice-file-help">Лучше записать 10–20 секунд обычной речи одного человека без музыки и посторонних голосов. Несколько образцов помогают точнее сопоставлять голос в разных условиях.</p>
+            <label class="check voice-consent-check"><input type="checkbox" name="consent" value="yes" required><span>Подтверждаю, что получено отдельное согласие сотрудника на обработку голосового образца. Аудио будет передано в приватное Blob-хранилище для идентификации; доступ к операции защищён серверным токеном.</span></label>
+            <button class="btn primary voice-submit" type="submit"><span aria-hidden="true">＋</span> Добавить голосовой образец</button>
           </form>
-          {% else %}<p class="small muted">Для регистрации нужен ключ pyannoteAI. <a href="/settings#speaker-identification">Настроить ключ →</a></p>{% endif %}
+          {% else %}
+          <p class="small muted">Сервис пока не подключён к Render. Задайте SYSAI_VOICE_SERVICE_URL и SYSAI_VOICE_SERVICE_TOKEN в переменных окружения сервиса и BLOB_READ_WRITE_TOKEN в Vercel.</p>
+          {% endif %}
         </section>
       </div>
       {% endif %}

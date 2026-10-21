@@ -141,6 +141,7 @@ def _process(meeting_id: int):
                     _ = membership.department.name if membership.department else ""
         report = analyze.mock_report(employees, mdate) if source == "demo" else analyze.analyze(
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
+        report = analyze.route_assistant_tasks(report, employees, assistant_enabled=userbot.ai_mode())
         _save_report(meeting_id, report, settings)
         _finish_processing(meeting_id, audio_path, settings)
     except Exception as e:  # noqa: BLE001
@@ -544,6 +545,10 @@ def handle_update(u: dict):
                 f"Ваш chat_id: <code>{cid}</code>" + ("" if emp else " — администратор привяжет его в панели."))
         return
     if chat.get("type") != "private" or not text:
+        return
+    from .coordinator.service import inbound as task_reply
+    if task_reply({"user_id": chat["id"], "message_id": msg.get("message_id"), "text": text,
+                   "reply_to": (msg.get("reply_to_message") or {}).get("message_id")}):
         return
     with SessionLocal() as s:
         q = s.query(DeadlineRequest).filter_by(chat_id=cid, resolved=False)

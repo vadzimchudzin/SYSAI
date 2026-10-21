@@ -138,6 +138,9 @@ def handle_incoming(msg: dict) -> None:
             msg = _with_transcript(msg)
             if msg is None:
                 return
+        from .coordinator.service import inbound as task_reply
+        if task_reply(msg):
+            return  # correlated pilot replies cannot become free-form legacy orders
         row_id = _accept(msg)
     except Exception:  # noqa: BLE001
         log.exception("incoming message dropped")

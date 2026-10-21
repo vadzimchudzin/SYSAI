@@ -241,7 +241,7 @@ class TelethonBackend:
                 return
         msg = {"user_id": sender.id, "username": sender.username or "", "phone": getattr(sender, "phone", "") or "",
                "name": " ".join(x for x in (sender.first_name, sender.last_name) if x), "text": text,
-               "message_id": message.id}
+               "message_id": message.id, "reply_to": getattr(message, "reply_to_msg_id", None)}
         if not await self._served(sender):
             return
         if voice is not None:

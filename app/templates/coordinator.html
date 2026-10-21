@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Пилот исполнения · SYSAI{% endblock %}
+{% block body %}
+<h1>Пилот переписки по задачам</h1>
+<p>Расширение существующего ассистента, не OpenClaw. По умолчанию выключено. Отправка не означает исполнение: нужен связанный ответ сотрудника с результатом.</p>
+<div id="coordinator" data-csrf="{{ csrf }}">
+  <p>Таблицы: <b>{{ 'готовы' if pilot.schema_ready else 'нужна проверенная миграция' }}</b>. Настройка не применяет миграции.</p>
+  <form id="pilot-config">
+    <label><input type="checkbox" name="enabled" {% if pilot.config.enabled %}checked{% endif %}> Я включаю пилот для явно выбранных задач</label><br>
+    <label><input type="checkbox" name="dry_run" {% if pilot.config.dry_run %}checked{% endif %}> Только подготовка, без отправки</label><br>
+    <label>ID разрешённых сотрудников (через запятую) <input name="allowed" value="{{ pilot.config.allowed_employee_ids|join(',') }}"></label><br>
+    <label>Отправок в сутки <input name="daily" type="number" min="1" max="100" value="{{ pilot.config.daily_actions }}"></label><br>
+    <button class="btn" type="submit">Сохранить согласие и ограничения</button>
+  </form>
+  <p>Для живой отправки дополнительно нужен SYSAI_COORDINATOR_LIVE=1 на сервере. Тихие часы сохраняются. Нужны действующее согласование совещания, явный адресат и числовой Telegram ID.</p>
+  <form id="pilot-enroll"><label>ID ещё не отправленной задачи ассистента <input type="number" name="task" min="1" required></label> <button class="btn">Связать задачу с перепиской</button></form>
+  <button class="btn" id="pilot-tick" type="button">Один безопасный шаг</button>
+  <p>Во время ожидания ответов процесс не блокируется. Если Render спит, шаги и напоминания не выполняются; проснитесь вручную. Никакого самопинга.</p>
+  <output id="pilot-result" aria-live="polite"></output>
+  {% for run in pilot.runs %}
+  <section class="card"><h2>Задача {{ run.task_id }} · {{ run.state }}</h2>
+    <p><code>{{ run.id }}</code></p><p>{{ run.reason }}</p><p>{{ run.summary }}</p>
+    <details><summary>План, вопросы и журнал</summary><pre>{{ run|tojson(indent=2) }}</pre></details>
+    {% if run.state == 'needs_review' %}
+    <button class="btn pilot-review" data-run="{{ run.id }}" data-decision="stop">Остановить</button>
+    {% if run.plan.kind == 'delegate' %}<button class="btn pilot-review" data-run="{{ run.id }}" data-decision="accept_delegate">Принять предложенного исполнителя (не завершает его работу)</button>{% endif %}
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+<script src="{{ asset('coordinator.js') }}"></script>
+{% endblock %}

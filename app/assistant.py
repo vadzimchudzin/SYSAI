@@ -263,6 +263,28 @@ def _notify_reviewers_text(message: str) -> None:
         log.warning("Could not notify reviewers about assistant task update: %s", exc)
 
 
+def send_task_message(target_ref: str, message_text: str) -> dict:
+    """Shared existing transport for legacy tasks and the opt-in task supervisor.
+
+    The caller owns durable delivery claims; this function never retries or starts
+    another Telegram consumer. Account mode keeps its existing quiet/rate guards.
+    """
+    if userbot.ai_mode():
+        return userbot.send_message(target_ref, message_text)
+    if not config.telegram_enabled() or not str(target_ref).lstrip("-").isdigit():
+        raise AssistantError("Telegram bot delivery is not configured for this recipient")
+    return telegram.send_message(target_ref, render.e(message_text))
+
+
+def send_task_file(target_ref: str, filename: str, content: bytes, caption: str = "") -> dict:
+    """Share the existing safe transport; caller validates stored-artifact ownership."""
+    if userbot.ai_mode():
+        return userbot.send_document(target_ref, filename, content, caption)
+    if not config.telegram_enabled() or not str(target_ref).isdigit():
+        raise AssistantError("Telegram bot delivery is not configured for this recipient")
+    return telegram.send_document(target_ref, filename, content, render.e(caption))
+
+
 def run_task(task_id: int) -> None:
     if userbot.quiet_until() is not None:
         return  # started after the quiet hours, see run_pending

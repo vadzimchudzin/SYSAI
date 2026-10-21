@@ -1,18 +1,55 @@
 {% extends "base.html" %}{% from "_icons.html" import icon %}
 {% block title %}Монитор записи — SYSAI{% endblock %}
 {% block body %}
-<div class="page-h"><div><h1>Монитор записи</h1><p>Состояние обновляется автоматически. Эта страница только наблюдает и не управляет микрофоном на другом устройстве.</p></div><a class="btn" href="/app">← В кабинет</a></div>
-<section class="card" id="recording-monitor" data-id="{{ recording.id }}">
-  <div class="row between"><h2 id="monitor-title">{{ recording.title or 'Совещание без названия' }}</h2><span id="monitor-status" class="pill amber">Загрузка…</span></div>
-  <div class="stats">
-    <div class="stat"><b id="monitor-elapsed">—</b><span>время записи</span></div>
-    <div class="stat"><b id="monitor-size">—</b><span>передано</span></div>
-    <div class="stat"><b id="monitor-chunks">—</b><span>аудиочастей</span></div>
+<div class="page-h recording-page-head">
+  <div>
+    <span class="eyebrow">ЗАПИСЬ · МОНИТОР</span>
+    <h1>Монитор записи</h1>
+    <p>Сворачивание вкладки не останавливает запись. Кнопка × останавливает только эту сессию и отправляет её на обработку.</p>
   </div>
-  <p><b>Устройство:</b> <span id="monitor-device">{{ recording.device_label }}</span></p>
-  <p><b>Начало:</b> <span id="monitor-created">{{ recording.created_at or '—' }}</span></p>
-  <p id="monitor-message" class="muted">Подключаемся к статусу записи…</p>
-  <a id="monitor-meeting-link" class="btn primary" hidden>Открыть совещание</a>
+  <a class="btn ghost" href="/app">{{ icon('arrow-left') }} В кабинет</a>
+</div>
+
+<section class="card recording-monitor-card" id="recording-monitor" data-id="{{ recording.id }}" data-status="{{ recording.status }}">
+  <div class="recording-monitor-head">
+    <div class="recording-monitor-title">
+      <span class="recording-status-mark" aria-hidden="true"></span>
+      <div>
+        <p class="eyebrow">ТЕКУЩАЯ СЕССИЯ</p>
+        <h2 id="monitor-title">{{ recording.title or 'Совещание без названия' }}</h2>
+      </div>
+    </div>
+    <div class="recording-monitor-state">
+      <span id="monitor-status" class="pill amber">{{ {'recording':'Идёт запись','stopping':'Останавливается','finishing':'Сборка аудио','error':'Нужна проверка','finished':'Передано на обработку','cancelled':'Отменено'}.get(recording.status, 'Загрузка…') }}</span>
+      <button id="monitor-stop" class="recording-stop-button" type="button"
+        aria-label="Остановить эту запись" title="Остановить эту запись"
+        {% if recording.status not in ('recording','stopping') %}hidden{% endif %}><span aria-hidden="true">×</span></button>
+    </div>
+  </div>
+
+  <div class="recording-stats-grid">
+    <div class="recording-stat"><span class="stat-label">Прошло времени</span><b id="monitor-elapsed">—</b><span class="stat-caption">от начала сессии</span></div>
+    <div class="recording-stat"><span class="stat-label">Загружено</span><b id="monitor-size">—</b><span class="stat-caption">аудиоданных</span></div>
+    <div class="recording-stat"><span class="stat-label">Аудиочасти</span><b id="monitor-chunks">—</b><span class="stat-caption">получено сервером</span></div>
+  </div>
+
+  <div class="recording-detail-grid">
+    <div><span class="stat-label">Устройство</span><b id="monitor-device">{{ recording.device_label or 'Неизвестное устройство' }}</b></div>
+    <div><span class="stat-label">Начало записи</span><b id="monitor-created">{{ recording.created_at or '—' }}</b></div>
+  </div>
+
+  <div class="recording-monitor-message" role="status" aria-live="polite">
+    <span class="recording-message-icon" aria-hidden="true">{{ icon('info') }}</span>
+    <p id="monitor-message">Подключаемся к статусу записи…</p>
+  </div>
+
+  <div class="recording-monitor-actions" id="monitor-actions">
+    <a id="monitor-download" class="btn" href="/recordings/{{ recording.id }}/audio" {% if not recording.size_bytes or recording.status == 'cancelled' %}hidden{% endif %}>{{ icon('download') }} Скачать загруженное аудио</a>
+    <button id="monitor-finish" class="btn primary" type="button" {% if recording.status != 'error' or not recording.size_bytes %}hidden{% endif %}>{{ icon('check-circle') }} <span id="monitor-finish-label">Обработать загруженные части</span></button>
+    <button id="monitor-cancel" class="btn danger" type="button" {% if recording.status != 'error' %}hidden{% endif %}>{{ icon('x-circle') }} <span id="monitor-cancel-label">Закрыть зависшую запись</span></button>
+    <a id="monitor-meeting-link" class="btn primary" hidden>{{ icon('arrow-up-right') }} Открыть совещание</a>
+  </div>
+  <p class="recording-safety-note">Остановка сохраняет загруженные аудиочасти и запускает обработку. «Закрыть зависшую запись» удаляет незавершённые аудиочасти; сначала скачай их, если они нужны.</p>
 </section>
 <script src="{{ asset('recordings-live.js') }}" defer></script>
 {% endblock %}
