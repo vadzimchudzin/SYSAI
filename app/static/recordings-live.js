@@ -74,11 +74,14 @@
   const downloadLink = document.getElementById('monitor-download');
   const finishButton = document.getElementById('monitor-finish');
   const cancelButton = document.getElementById('monitor-cancel');
+  const finishLabel = document.getElementById('monitor-finish-label');
+  const cancelLabel = document.getElementById('monitor-cancel-label');
   const titleEl = document.getElementById('monitor-title');
   const TERMINAL = new Set(['finished', 'cancelled', 'error']);
-  let stopped = false, timer = null, lastStatus = null;
+  let stopped = false, timer = null, lastStatus = null, lastRecord = null;
 
   function render(rec) {
+    lastRecord = { ...(lastRecord || {}), ...rec };
     lastStatus = rec.status;
     monitor.dataset.status = rec.status || '';
     titleEl.textContent = rec.title || 'Совещание без названия';
@@ -128,7 +131,7 @@
   finishButton.addEventListener('click', async () => {
     if (!confirm('Попробовать собрать и обработать аудио, уже загруженное на сервер? Если исходная вкладка ещё пишет звук, сначала остановите её.')) return;
     finishButton.disabled = true;
-    finishButton.textContent = 'Проверяем аудио…';
+    finishLabel.textContent = 'Проверяем аудио…';
     try {
       const result = await api('/recordings/' + encodeURIComponent(id) + '/finish', { method: 'POST' });
       if (result.url) { location.assign(result.url); return; }
@@ -136,7 +139,7 @@
       message.textContent = `Не удалось собрать запись: ${exc.message}. Скачайте аудио или закройте незавершённую сессию.`;
     } finally {
       finishButton.disabled = false;
-      finishButton.textContent = 'Обработать загруженные части';
+      finishLabel.textContent = 'Обработать загруженные части';
     }
     stopped = false;
     await poll();
@@ -145,15 +148,15 @@
   cancelButton.addEventListener('click', async () => {
     if (!confirm('Закрыть незавершённую запись? Все аудиочасти на сервере будут удалены. Если они нужны, сначала нажмите «Скачать загруженное аудио».')) return;
     cancelButton.disabled = true;
-    cancelButton.textContent = 'Закрываем…';
+    cancelLabel.textContent = 'Закрываем…';
     try {
       const result = await api('/recordings/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
-      render({ id, status: result.status || 'cancelled', size_bytes: 0, next_sequence: 0 });
+      render({ ...(lastRecord || {}), id, status: result.status || 'cancelled', size_bytes: 0, next_sequence: 0 });
       message.textContent = 'Запись закрыта. Её больше не будет в списке активных записей.';
     } catch (exc) {
       message.textContent = `Не удалось закрыть запись: ${exc.message}`;
       cancelButton.disabled = false;
-      cancelButton.textContent = 'Закрыть зависшую запись';
+      cancelLabel.textContent = 'Закрыть зависшую запись';
     }
   });
 
