@@ -381,6 +381,12 @@ def recording_finish(request: Request, rid: str):
     return recording.finish(recording_owner(request, rid), rid)
 
 
+@app.post("/recordings/{rid}/abandon")
+def recording_abandon(request: Request, rid: str):
+    from . import recording
+    return recording.abandon(recording_owner(request, rid), rid)
+
+
 @app.post("/recordings/{rid}/cancel")
 def recording_cancel(request: Request, rid: str):
     from . import recording
