@@ -45,8 +45,14 @@ def test_monitor_can_recover_or_close_a_recording(client, monkeypatch):
     monitor = client.get(f"/recordings/{rid}/monitor")
     assert monitor.status_code == 200
     assert 'id="monitor-download"' in monitor.text
+    assert 'id="monitor-stop"' in monitor.text
     assert 'id="monitor-finish"' in monitor.text
     assert 'id="monitor-cancel"' in monitor.text
+
+    stop_request = client.post(f"/recordings/{rid}/stop")
+    assert stop_request.status_code == 200
+    assert stop_request.json()["status"] == "stopping"
+    assert client.get(f"/recordings/{rid}/status").json()["status"] == "stopping"
 
     abandoned = client.post(f"/recordings/{rid}/abandon")
     assert abandoned.status_code == 200
