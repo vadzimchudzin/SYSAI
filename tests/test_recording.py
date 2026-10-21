@@ -219,6 +219,23 @@ def test_abandon_does_not_change_a_cancelled_recording():
     assert result["status"] == "cancelled"
 
 
+def test_stop_request_targets_one_recording_and_accepts_its_final_chunk():
+    first = recording.start("session-1", "audio/webm", "First recording")
+    second = recording.start("session-1", "audio/webm", "Second recording")
+
+    requested = recording.request_stop("session-1", first["id"])
+    assert requested == {"id": first["id"], "status": "stopping", "stop_requested": True}
+    assert recording.get_status("session-1", first["id"])["status"] == "stopping"
+    assert recording.get_status("session-1", second["id"])["status"] == "recording"
+
+    final_chunk = recording.append("session-1", first["id"], 0, b"final-audio-chunk")
+    assert final_chunk["next_sequence"] == 1
+    assert recording.get_status("session-1", second["id"])["status"] == "recording"
+
+    recording.cancel("session-1", first["id"])
+    recording.cancel("session-1", second["id"])
+
+
 def test_elapsed_time_freezes_when_recording_is_terminal():
     from types import SimpleNamespace
 
