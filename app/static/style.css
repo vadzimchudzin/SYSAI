@@ -869,11 +869,18 @@ tbody tr:hover td { background: rgba(145,179,240,.035); }
   color: var(--soft);
   font-weight: 600;
 }
+.voice-file-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
 .voice-duration-hint {
   display: inline-flex;
   align-items: center;
   width: fit-content;
-  margin-left: 5px;
+  margin: 0;
   padding: 3px 8px;
   border: 1px solid rgba(145,179,240,.18);
   border-radius: 999px;
