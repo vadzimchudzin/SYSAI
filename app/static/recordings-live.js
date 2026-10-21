@@ -80,6 +80,7 @@
 
   function render(rec) {
     lastStatus = rec.status;
+    monitor.dataset.status = rec.status || '';
     titleEl.textContent = rec.title || 'Совещание без названия';
     document.getElementById('monitor-device').textContent = rec.device_label || 'Неизвестное устройство';
     document.getElementById('monitor-created').textContent = rec.created_at || '—';
