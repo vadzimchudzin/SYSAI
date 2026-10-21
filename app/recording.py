@@ -82,12 +82,16 @@ def _recording_dict(recording: Recording) -> dict:
         created = created.replace(tzinfo=dt.timezone.utc)
     if ended is not None and ended.tzinfo is None:
         ended = ended.replace(tzinfo=dt.timezone.utc)
+    updated = recording.updated_at
+    if updated is not None and updated.tzinfo is None:
+        updated = updated.replace(tzinfo=dt.timezone.utc)
     elapsed = max(0, int((ended - created).total_seconds())) if created and ended else 0
     return {"id": recording.id, "next_sequence": recording.next_sequence,
             "size_bytes": recording.size_bytes, "status": recording.status,
             "mime_type": recording.mime_type, "title": recording.title,
             "device_label": recording.device_label or "Неизвестное устройство",
-            "created_at": created.isoformat() if created else None, "elapsed_seconds": elapsed,
+            "created_at": created.isoformat() if created else None,
+            "updated_at": updated.isoformat() if updated else None, "elapsed_seconds": elapsed,
             "meeting_id": recording.meeting_id,
             "meeting_url": f"/meetings/{recording.meeting_id}" if recording.meeting_id else None}
 
@@ -129,7 +133,7 @@ def list_active(owner: str, legacy_owner: str | None = None) -> list[dict]:
     owners = list(dict.fromkeys(value for value in (owner, legacy_owner) if value))
     with SessionLocal() as session:
         rows = (session.query(Recording).filter(Recording.owner.in_(owners),
-                    Recording.status.in_(("recording", "finishing", "error")))
+                    Recording.status.in_(("recording", "stopping", "finishing", "error")))
                 .order_by(Recording.created_at.desc()).limit(20).all())
         return [_recording_dict(row) for row in rows]
 
@@ -156,10 +160,10 @@ def append(owner: str, recording_id: str, sequence: int, chunk: bytes) -> dict:
             if prior:
                 if prior.digest != digest or prior.size_bytes != len(chunk):
                     _http(409, "Chunk sequence was already used with different audio")
-                if recording.status not in ("recording", "finishing", "error", "finished"):
+                if recording.status not in ("recording", "stopping", "finishing", "error", "finished"):
                     _http(409, "Recording is not accepting chunks")
                 return {"next_sequence": recording.next_sequence, "size_bytes": recording.size_bytes}
-            if recording.status != "recording":
+            if recording.status not in ("recording", "stopping"):
                 _http(409, "Recording is not accepting chunks")
             if sequence != recording.next_sequence:
                 _http(409, "Unexpected chunk sequence")
@@ -243,7 +247,7 @@ def finish(owner: str, recording_id: str) -> dict:
                 if recording.meeting_id is None or session.get(Meeting, recording.meeting_id) is None:
                     _http(404, "Recording meeting not found")
                 return {"meeting_id": recording.meeting_id, "url": f"/meetings/{recording.meeting_id}"}
-            if recording.status not in ("recording", "finishing", "error"):
+            if recording.status not in ("recording", "stopping", "finishing", "error"):
                 _http(409, "Recording cannot be finished")
             if recording.size_bytes <= 0:
                 _http(409, "Recording has no audio")
@@ -294,12 +298,34 @@ def finish(owner: str, recording_id: str) -> dict:
         return {"meeting_id": meeting_id, "url": f"/meetings/{meeting_id}"}
 
 
+def request_stop(owner: str, recording_id: str) -> dict:
+    """Request that the source browser stops one recording and uploads its final audio chunk."""
+    with _lock(recording_id):
+        with SessionLocal() as session:
+            recording = _get_owned(session, owner, recording_id)
+            if recording.status == "recording":
+                recording.status = "stopping"
+                recording.updated_at = now()
+                session.commit()
+            elif recording.status in ("stopping", "finishing", "finished"):
+                pass
+            elif recording.status in ("error", "cancelled"):
+                return {"id": recording.id, "status": recording.status, "stop_requested": False}
+            else:
+                _http(409, "Recording cannot be stopped")
+            return {
+                "id": recording.id,
+                "status": recording.status,
+                "stop_requested": recording.status in ("stopping", "finishing"),
+            }
+
+
 def abandon(owner: str, recording_id: str) -> dict:
     """Mark a browser session that left the page as recoverable, keeping uploaded chunks."""
     with _lock(recording_id):
         with SessionLocal() as session:
             recording = _get_owned(session, owner, recording_id)
-            if recording.status in ("recording", "finishing"):
+            if recording.status in ("recording", "stopping", "finishing"):
                 recording.status = "error"
                 recording.updated_at = now()
                 session.commit()
