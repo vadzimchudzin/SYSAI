@@ -18,6 +18,13 @@ def test_the_versioned_url_serves_the_file(client):
     assert font.status_code == 200 and font.headers["content-type"].startswith("font/woff2")
 
 
+def test_recording_script_marks_abandoned_sessions_for_recovery(client):
+    response = client.get("/static/recording.js")
+    assert response.status_code == 200
+    assert "pagehide" in response.text
+    assert "/abandon" in response.text
+
+
 def test_the_version_follows_the_content():
     assert asset("style.css") != asset("app.js")
     assert asset("style.css") == asset("style.css")
