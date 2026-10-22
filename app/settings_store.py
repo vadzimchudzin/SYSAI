@@ -23,6 +23,9 @@ DEFAULTS = {
     "daily_budget_usd": 5.0,         # OpenRouter spend per UTC day; 0 = no limit
     "quiet_from_hour": 21,           # no messages to people from this hour (service time zone) ...
     "quiet_to_hour": 9,              # ... until this hour; equal hours mean no quiet time
+    "audio_cleanup": True,           # speech clean-up before recognition (rumble, steady noise, levels)
+    "speech_fix": True,              # after recognition: names and terms corrected by the directory and the glossary
+    "speaker_naming": True,          # «Спикер 1» becomes a name when the conversation proves who it is
     "company_profile": "",           # what the company does, clients, products, rules everyone should know (memory)
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only

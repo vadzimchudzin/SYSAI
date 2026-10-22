@@ -148,7 +148,7 @@ def embed(texts: list, model: str, timeout: float = 60) -> list:
 
 
 def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", language: str = "ru",
-                    timeout: float = 60) -> dict:
+                    timeout: float = 60, prompt: str = "") -> dict:
     """Call OpenRouter's dedicated speech-to-text endpoint and preserve provider timestamps when available."""
     key = config.openrouter_key()
     if not key:
@@ -164,6 +164,8 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
                "HTTP-Referer": config.PUBLIC_URL or "https://github.com/VadimChudin/SYSAI"}
     base = {"model": model, "input_audio": {"data": base64.b64encode(audio_bytes).decode("ascii"),
                                              "format": audio_format}, "language": language}
+    if prompt:  # names and terms the model should spell right (OpenAI-style STT "prompt")
+        base["prompt"] = prompt[:900]
     variants = [
         {**base, "response_format": "verbose_json", "timestamp_granularities": ["segment"]},
         {**base, "response_format": "verbose_json"},

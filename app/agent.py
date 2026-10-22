@@ -845,8 +845,13 @@ def _process(row_id: int) -> None:
         for attempt in (1, 2):
             decision = _decide(system, ctx, text, feedback)
             errors = [e for e in (_check(a, ctx, employee, reviewer, full) for a in decision["actions"]) if e]
-            if not errors:
+            stiff = voice.officialese(decision["reply"]) if attempt == 1 else []
+            if not errors and not stiff:
                 break
+            if not errors:  # only the style: one rewrite, then the reply goes as it is
+                feedback = (f"\nОтвет звучит как служебное письмо ({', '.join(stiff)}). Перепиши reply проще, как коллега "
+                            "в мессенджере; actions и memory оставь.")
+                continue
             if attempt == 2:
                 raise AgentError("; ".join(errors)[:300])
             feedback = "\nПрошлый ответ нельзя выполнить: " + "; ".join(errors) + ". Исправь ответ."

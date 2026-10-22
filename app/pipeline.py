@@ -150,6 +150,7 @@ def _process(meeting_id: int):
                     raise llm.LLMError("Исходное аудио не найдено; загрузите запись заново")
                 total, segments = transcribe.transcribe(audio_path, settings,
                                                         progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
+                segments = _name_speakers(segments)
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
              progress="Составление отчёта и задач")
         with SessionLocal() as s:
@@ -165,6 +166,19 @@ def _process(meeting_id: int):
     except Exception as e:  # noqa: BLE001
         log.exception("meeting %s failed", meeting_id)
         _set(meeting_id, status="error", progress="Ошибка", error=str(e)[:2000])
+
+
+def _name_speakers(segments: list) -> list:
+    """«Спикер 2» becomes «Ольга Кузнецова» when the conversation proves it (see speakers.py)."""
+    from . import speakers
+    try:
+        with SessionLocal() as s:
+            people = s.query(Employee).filter(Employee.active.is_(True)).all()
+            named, mapping = speakers.name_speakers(segments, people)
+        return named
+    except Exception:  # noqa: BLE001  naming must never lose a transcript
+        log.exception("speaker naming failed")
+        return segments
 
 
 def _directory_terms(limit: int = 80) -> list:

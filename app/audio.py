@@ -89,11 +89,29 @@ def prepare_chunks(path: str, chunk_minutes: float | None = 30, overlap_seconds:
     return total, chunks
 
 
-def extract(source, destination, start, seconds):
+# Speech clean-up before recognition: a gentle FFT noise reduction (fans, air conditioning, hum). Measured on the speech
+# benchmark (scripts/speech_benchmark.py): stronger chains — loudness normalisation, dynamic normalisation, aggressive
+# denoise — made recognition WORSE (WER 10% → 12–14%), the gentle one helped a little. Mono 16 kHz as speech models expect.
+CLEANUP = "afftdn=nr=6:nf=-40"
+
+
+def cleanup_enabled() -> bool:
+    try:
+        from . import settings_store
+        value = settings_store.get("audio_cleanup")
+    except Exception:  # noqa: BLE001  no database (tools, early start)
+        return True
+    return True if value is None else bool(value)
+
+
+def extract(source, destination, start, seconds, cleanup=None):
     if not math.isfinite(start) or start < 0 or not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("Некорректные границы части аудио")
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-t", str(seconds), "-i", str(source),
-                    "-ac", "1", "-ar", "16000", "-b:a", "32k", str(destination)],
+    cleanup = cleanup_enabled() if cleanup is None else cleanup
+    command = ["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-t", str(seconds), "-i", str(source)]
+    if cleanup:
+        command += ["-af", CLEANUP]
+    subprocess.run(command + ["-ac", "1", "-ar", "16000", "-b:a", "32k", str(destination)],
                    check=True, capture_output=True)
     if not pathlib.Path(destination).is_file() or pathlib.Path(destination).stat().st_size == 0:
         raise ValueError("Пустая часть аудио после преобразования")

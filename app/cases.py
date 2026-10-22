@@ -340,6 +340,19 @@ def _write(purpose: str, facts: dict) -> str:
     text = str((data or {}).get("text") or "").strip() if isinstance(data, dict) else ""
     if not text or len(text) > 3000:
         raise Retry("модель не написала текст сообщения")
+    stiff = voice.officialese(text)
+    if stiff:  # one rewrite without office-letter phrases; if it fails, the first text is good enough
+        try:
+            raw = llm.chat(voice.model(), [{"role": "system", "content": system},
+                                           {"role": "user", "content": "<data>" + json.dumps(facts, ensure_ascii=False, default=str) +
+                                            f"</data>\nПрошлый вариант: «{text}». Перепиши проще, как коллега в мессенджере, "
+                                            f"без канцелярита ({', '.join(stiff)}); смысл сохрани."}],
+                           json_mode=True, temperature=0.4, max_tokens=700, timeout=90)
+            better = str((llm.parse_json(raw) or {}).get("text") or "").strip()
+            if better and len(better) <= 3000:
+                text = better
+        except llm.LLMError:
+            pass
     return text
 
 
@@ -468,6 +481,12 @@ def _case_facts(s, case) -> dict:
     return facts
 
 
+def _history_with(s, person) -> str:
+    from .db import PersonMemory
+    rows = s.query(PersonMemory).filter_by(employee_id=person.id).all()
+    return " ".join(r.summary for r in rows if r.summary)[:1200]
+
+
 def _send_message(case_id: int, step_id: int) -> bool:
     if _quiet(case_id):
         return False
@@ -477,6 +496,9 @@ def _send_message(case_id: int, step_id: int) -> bool:
         facts = _case_facts(s, case)
         facts["person"] = {"name": person.name, "position": person.position or None,
                            "communication_style": getattr(person, "communication_style", "") or None}
+        history = _history_with(s, person)
+        if history:
+            facts["history"] = history  # a short summary of earlier conversations with this person
         if step.args.get("purpose") == "request":
             dests = [s.get(Employee, x.args["to"]) for x in case.steps if x.tool == "forward_document"]
             facts["forward_to"] = [e.name for e in dests if e is not None]

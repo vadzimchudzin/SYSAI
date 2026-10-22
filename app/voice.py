@@ -29,6 +29,25 @@ def self_name() -> str:
     return (userbot.me().get("first_name") or userbot.me().get("name") or "").strip()
 
 
+# How the AI employee writes: a colleague in a messenger, not an office letter.
+STYLE = ("Стиль: пиши, как пишет живой коллега в мессенджере. Сначала суть, потом детали. Короткие предложения, "
+         "глаголы вместо отглагольных существительных («проверю», а не «осуществлю проверку»), конкретика: кто, что, "
+         "когда, сколько. Без канцелярита и штампов: никаких «в целях», «в рамках», «осуществить», «данный», "
+         "«вышеуказанный», «доводим до вашего сведения», «обращаем ваше внимание», «просим вас», «в кратчайшие сроки», "
+         "«в установленном порядке», «с уважением». Не повторяй то, что человек уже знает из переписки (history). ")
+_OFFICIALESE = ("в целях ", "в рамках ", "осуществ", "данный ", "данного ", "данной ", "данному ", "вышеуказанн",
+                "вышеизложенн", "нижеследующ", "доводим до вашего сведения", "довожу до вашего сведения",
+                "обращаем ваше внимание", "обращаю ваше внимание", "просим вас", "настоящим сообща", "уведомляем",
+                "в кратчайшие сроки", "в установленном порядке", "на постоянной основе", "с уважением",
+                "заранее благодар", "имеет место", "в адрес ")
+
+
+def officialese(text: str) -> list:
+    """Office-letter phrases found in a text (the model is asked to rewrite once when there are any)."""
+    low = " " + " ".join(str(text or "").lower().replace("ё", "е").split()) + " "
+    return [p.strip() for p in _OFFICIALESE if p in low]
+
+
 def system_prompt(task: str) -> str:
     persona = (settings_store.get("persona") or "").strip() or DEFAULT_PERSONA
     company = str(settings_store.get("company_name") or "").strip()
@@ -39,6 +58,7 @@ def system_prompt(task: str) -> str:
         f"{who}Ты помощник руководителя{where}: ведёшь поручения после совещаний. Ты пишешь людям в Telegram "
         "с обычного аккаунта, как живой коллега, на русском. "
         f"Манера общения: {persona} "
+        + STYLE +
         "Пиши только обычным текстом без markdown и HTML, короткими абзацами, как в мессенджере. "
         "Не представляйся и не сообщай по своей инициативе, что ты ИИ, ассистент или бот: здоровайся и говори по "
         "делу, как коллега. "
@@ -90,8 +110,13 @@ def _ask(system: str, facts: dict, task_ids=None) -> dict:
         else:
             covered = {int(x) for x in data.get("covered_task_ids") or [] if str(x).lstrip("-").isdigit()}
             missing = required - covered
-            if not missing:
+            stiff = officialese(text) if attempt == 1 else []
+            if not missing and not stiff:
                 return {"text": text.strip(), "raw": data}
+            if not missing:  # only the style is off: one rewrite, then the message goes as it is
+                note = (f"\nПерепиши проще, как коллега в мессенджере, без канцелярита: {', '.join(stiff)}. "
+                        "Смысл и covered_task_ids оставь.")
+                continue
             last = f"в сообщении не упомянуты задачи {sorted(missing)}"
         note = f"\nПрошлый ответ не подошёл: {last}. Составь сообщение заново и перечисли в covered_task_ids все задачи, о которых написал."
     raise VoiceError(f"Модель не смогла составить сообщение: {last}")

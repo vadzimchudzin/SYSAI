@@ -14,10 +14,15 @@ import re
 import shutil
 import tempfile
 
-from . import audio, checkpoints, config, llm, settings_store, speaker_id
+from . import audio, checkpoints, config, llm, settings_store, speaker_id, speech_fix
 
 log = logging.getLogger("sysai.transcribe")
 LEGACY_CHAT_MODEL = "google/gemini-2.5-flash"
+
+
+def chat_model(model) -> bool:
+    """Audio-capable chat models (Gemini) hear words and voices in one pass and return speakers themselves."""
+    return str(model or "").startswith("google/gemini")
 DEMO = pathlib.Path(__file__).resolve().parent.parent / "samples" / "demo_transcript.json"
 SHORT_AUDIO_SECONDS = 10  # Includes codec padding around 1–5 second recordings.
 OVERLAP_SECONDS = 4
@@ -30,7 +35,7 @@ PROMPT = """Ты — стенографист. Расшифруй ТОЛЬКО �
 - Не придумывай слова, которых нет в аудио.
 - Сохраняй отрицания, имена, числа, даты, суммы, артикулы и аббревиатуры особенно внимательно: не угадывай их по смыслу.
 - Пунктуацию добавляй по интонации; не склеивай реплики разных людей. Один segment — непрерывный фрагмент речи одного говорящего.
-- Разделяй речь по говорящим. Используй устойчивые метки "Спикер 1", "Спикер 2"... Имя ставь только если оно действительно произнесено и однозначно относится к голосу; не выводи имя из справочника или контекста.
+- Разделяй речь по говорящим, слушая голос и ход разговора: на вопрос или обращение по имени («Пётр, договор подписан?») обычно отвечает другой человек — начни новый segment с новой меткой, если голос меняется; не сливай вопрос и ответ в одну реплику. Используй устойчивые метки "Спикер 1", "Спикер 2"... Имя ставь только если оно действительно произнесено и однозначно относится к голосу; не выводи имя из справочника или контекста.
 - Для каждой реплики укажи start — время начала слышимой речи в секундах от начала ЭТОГО фрагмента, не всей записи. Не выдумывай точность до миллисекунд.
 - Не сокращай и не пересказывай. Слышимое, но неразборчивое помечай [неразборчиво], не заменяй догадкой. Тишина, музыка и шум без речи — пустой список segments.
 - Словарь компании — только подсказка написания. Используй термины из словаря только если слышны в аудио: {glossary}
@@ -160,7 +165,8 @@ def _align_plain_transcript(path, text, settings, length, context):
 
 def _transcribe_stt_chunk(path, settings, length, context):
     result = llm.transcribe_audio(path.read_bytes(), settings["transcribe_model"],
-                                  path.suffix.lstrip(".") or "mp3", settings.get("language", "ru"))
+                                  path.suffix.lstrip(".") or "mp3", settings.get("language", "ru"),
+                                  prompt=settings.get("_stt_prompt", ""))
     raw_segments = result.get("segments")
     if not isinstance(raw_segments, list) or not raw_segments:
         text = str(result.get("text") or "").strip()
@@ -249,7 +255,7 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     maximum_minutes = settings.get("chunk_minutes")
-    if settings.get("transcribe_model") != LEGACY_CHAT_MODEL:
+    if not chat_model(settings.get("transcribe_model")):
         try:
             maximum_minutes = min(float(maximum_minutes or 5), 5)
         except (TypeError, ValueError):
@@ -270,7 +276,8 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         log.warning("Voice identity is unavailable; keeping ordinary speaker labels: %s", exc)
         voiceprints = []
     segments: list = []
-    base = {"version": 9, "audio": digest.hexdigest(), "model": settings["transcribe_model"],
+    settings = dict(settings, _stt_prompt=speech_fix.prompt_text(settings))  # names and terms to hear right
+    base = {"version": 10, "stt_prompt": settings["_stt_prompt"], "cleanup": audio.cleanup_enabled(), "audio": digest.hexdigest(), "model": settings["transcribe_model"],
             "diarization_model": settings.get("diarization_model", LEGACY_CHAT_MODEL),
             "language": settings.get("language", "ru"), "glossary": settings.get("glossary", ""),
             "speaker_profiles": speaker_id.profiles_fingerprint(voiceprints),
@@ -323,7 +330,7 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         chunk = get_chunk()
         prompt = _prompt(settings, length, context)
         try:
-            if settings["transcribe_model"] == LEGACY_CHAT_MODEL:
+            if chat_model(settings["transcribe_model"]):
                 text = llm.chat(settings["transcribe_model"], [{"role": "user", "content": [
                     {"type": "text", "text": prompt},
                     {"type": "input_audio", "input_audio": {"data": base64.b64encode(chunk.read_bytes()).decode(), "format": "mp3"}},
@@ -361,6 +368,8 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         if workdir:
             shutil.rmtree(workdir[0], ignore_errors=True)
     segments = [s for s in segments if s["text"]]
+    if segments:
+        segments, _ = speech_fix.fix_segments(segments, settings)  # «винсунаба» → «ВентСнаба» by the vocabulary
     if not segments:
         raise llm.LLMError("Речь в записи не распознана. Проверьте аудио; рассылка не запускалась.")
     for a, b in zip(segments, segments[1:]):
@@ -401,9 +410,9 @@ def voice_text(data: bytes, mime: str = "", seconds: float = 0.0) -> str:
         source.write_bytes(data)
         total = seconds if seconds and seconds > 0 else audio.duration(str(source))
         audio.extract(source, target, 0, max(1.0, total + 1.0))
-        if settings.get("transcribe_model") != LEGACY_CHAT_MODEL:
+        if not chat_model(settings.get("transcribe_model")):
             parsed = llm.transcribe_audio(target.read_bytes(), settings["transcribe_model"], "mp3",
-                                         settings.get("language", "ru"))
+                                         settings.get("language", "ru"), prompt=speech_fix.prompt_text(settings))
             text = parsed.get("text")
             if not isinstance(text, str) or not text.strip():
                 parts = parsed.get("segments") or []
@@ -419,6 +428,8 @@ def voice_text(data: bytes, mime: str = "", seconds: float = 0.0) -> str:
             text = parsed.get("text") if isinstance(parsed, dict) else None
         if not isinstance(text, str):
             raise llm.LLMError("Расшифровка голосового не содержит текста")
+        if text.strip() and settings.get("speech_fix", True) is not False:
+            text = speech_fix.fix_text(text, speech_fix.vocabulary(settings))[0]
         return text.strip()
     finally:
         shutil.rmtree(work, ignore_errors=True)

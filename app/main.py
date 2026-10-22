@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, bitrix, cases, doctext, memory, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
+from . import (accounts, agent, bitrix, cases, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
                settings_store, speaker_id, telegram, userbot, notion)
 from .analyze import mmss
 from .transcript_sections import group_transcript
@@ -1170,6 +1170,12 @@ def settings_models(request: Request):
                                      "name": str(item.get("name") or item["id"])[:200],
                                      "prompt_price": pricing.get("prompt"),
                                      "completion_price": pricing.get("completion")})
+    # Gemini hears words and voices in one pass (best on the speech benchmark, see scripts/speech_benchmark.py).
+    known = {m["id"] for m in transcription_models}
+    for model in models:
+        if model["audio_input"] and transcribe.chat_model(model["id"]) and model["id"] not in known:
+            transcription_models.append({"id": model["id"], "name": model["name"] + " — слова и голоса одним проходом",
+                                         "prompt_price": model["prompt_price"], "completion_price": model["completion_price"]})
     transcription_models.sort(key=lambda model: model["id"].casefold())
     return {"models": models, "count": len(models), "transcription_models": transcription_models,
             "transcription_count": len(transcription_models)}
