@@ -121,6 +121,15 @@
     {{ recipients('report_chat_ids', '@имя_группы или -1001234567890') }}
     {{ switch('send_tasks_to_assignees', 'Писать исполнителям их задачи', 'Каждому только его задачи, по справочнику сотрудников.') }}
   </section>
+
+  <section class="card setup-step" id="notion-import-scope">
+    <h2>Импорт TicNote через Notion</h2>
+    <p class="small muted">TicNote должен экспортировать транскрипт в выбранную страницу или базу Notion. SYSAI импортирует только страницы внутри указанной области и запускает существующий анализ. Это импорт текста: оригинальный WAV и повторная акустическая диаризация здесь не передаются.</p>
+    <label class="f">URL или ID страницы/базы Notion
+      <input name="notion_parent_id" value="{{ s.notion_parent_id }}" placeholder="https://www.notion.so/... или UUID">
+    </label>
+    <p class="small muted">Создайте отдельную страницу или базу для экспорта TicNote и укажите её здесь. Сохраните настройки, чтобы разрешить импорт только из этой области.</p>
+  </section>
   <section class="card setup-step">
     <h2>Отчёт</h2>
     <label class="f">Название компании <input name="company_name" value="{{ s.company_name }}"></label>
@@ -138,5 +147,43 @@
   </section>
   <div class="row sticky center"><button type="submit" class="btn primary">Сохранить настройки</button></div>
 </form>
+
+<section class="card setup-step" id="notion-connection">
+  <h2>Подключение Notion и webhook</h2>
+  {% if notion.connected %}
+    <p class="small">Подключено: <b>{{ notion.workspace_name or 'Рабочее пространство Notion' }}</b>{% if notion.owner_name %} · {{ notion.owner_name }}{% endif %}</p>
+    {% if notion.last_sync_at %}<p class="small muted">Последняя синхронизация: {{ notion.last_sync_at }}</p>{% endif %}
+  {% else %}
+    <p class="small muted">Рабочее пространство Notion не подключено.</p>
+  {% endif %}
+  {% if not notion.client_configured %}
+    <p class="small err">Сначала задайте NOTION_CLIENT_ID и NOTION_CLIENT_SECRET в переменных окружения сервера и перезапустите сервис.</p>
+  {% endif %}
+  <div class="actions">
+    <a class="btn primary" href="/settings/notion/connect">Подключить Notion</a>
+    {% if notion.connected %}
+    <form method="post" action="/settings/notion/sync"><button class="btn" type="submit">Импортировать существующие записи</button></form>
+    <form method="post" action="/settings/notion/disconnect"><button class="btn ghost" type="submit">Отключить Notion</button></form>
+    {% endif %}
+  </div>
+  <h3>Webhook</h3>
+  <p class="small muted">В Notion Developer Portal укажите адрес ниже и включите события <code>page.created</code> и <code>page.content_updated</code>. После проверки Notion отправит verification token. Скопируйте его по ссылке ниже и вставьте в кабинете интеграции.</p>
+  {% if notion.webhook_url %}
+    <label class="f">Webhook URL <input readonly value="{{ notion.webhook_url }}" onclick="this.select()"></label>
+  {% else %}
+    <p class="small err">Не задан публичный URL. На Render проверьте RENDER_EXTERNAL_URL или задайте PUBLIC_URL.</p>
+  {% endif %}
+  <p class="small">OAuth callback: <code>{{ notion.redirect_uri or 'не настроен' }}</code></p>
+  {% if notion.webhook_token_received %}
+    <div class="actions">
+      <a class="btn sm" href="/settings/notion/webhook-token" target="_blank" rel="noopener">Показать verification token</a>
+      <form method="post" action="/settings/notion/reset-webhook-token"><button class="btn sm ghost" type="submit">Сбросить verification token</button></form>
+    </div>
+  {% else %}
+    <p class="small muted">Verification token пока не получен. Это нормально до первой проверки webhook в кабинете Notion.</p>
+  {% endif %}
+  <p class="small muted">SYSAI ждёт завершения экспорта, сохраняет события в БД, отбрасывает дубли и повторяет временные ошибки импорта до пяти раз.</p>
+</section>
+
 {% if ephemeral %}<p class="small muted">База сейчас временная: без Postgres ключи и совещания могут сброситься при перезапуске.</p>{% endif %}
 {% endblock %}
