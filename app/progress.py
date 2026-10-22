@@ -28,7 +28,7 @@ def _ago(moment, at=None) -> str:
         return ""
     minutes = int(((at or now()) - _aware(moment)).total_seconds() // 60)
     if minutes < 1:
-        return "только что"
+        return "меньше минуты"
     if minutes < 60:
         return f"{minutes} мин"
     hours = minutes // 60
