@@ -358,3 +358,21 @@ Uvicorn (внутренний пул задач может иметь неско
 - Качество расшифровки зависит от модели — сравним провайдеров на реальных записях и при необходимости подключим специализированный сервис распознавания.
 - Имена говорящих определяются по контексту разговора, а не по голосу; ошибки исправляются на этапе проверки.
 - Две роли (суперпользователь и пользователь), без разделения совещаний по владельцам и без смены своего пароля в интерфейсе.
+
+
+## TicNote → Notion → SYSAI (experimental)
+
+SYSAI can import text from TicNote notes exported into a dedicated Notion page/database. This imports **Notion page text**, not original WAV/MP3 audio; it does not redo acoustic diarization. Upload audio directly to SYSAI when the original sound is required.
+
+### Setup
+
+1. Create a **Public** connection in the Notion Developer Portal. Enable read access to page content and register the exact OAuth callback shown in SYSAI Settings. By default it is \`https://<public-sysai-host>/settings/notion/callback\`.
+2. Set \`NOTION_CLIENT_ID\` and \`NOTION_CLIENT_SECRET\` on the server. \`NOTION_REDIRECT_URI\` is optional if \`PUBLIC_URL\` or \`RENDER_EXTERNAL_URL\` is correct.
+3. Deploy \`experimental\`, open **Settings → Import TicNote through Notion**, then connect the workspace through OAuth.
+4. Create a dedicated Notion page/database for TicNote exports, make it accessible to the connection if requested, and save its URL/UUID in SYSAI. Only pages below this configured parent are imported.
+5. Configure the webhook URL shown in SYSAI Settings in the Notion Developer Portal and subscribe to \`page.created\` and \`page.content_updated\`. Run the webhook verification. When the challenge token arrives, open **Show verification token** in SYSAI and paste it into the Notion portal. Future event signatures use HMAC-SHA256.
+6. Use **Import existing records** for a one-time backfill. New webhook events are stored durably, deduplicated, delayed briefly so TicNote can finish writing the page, and then handed to the current report/analysis pipeline.
+
+OAuth tokens and the webhook verification token are encrypted in the database with a key derived from \`SECRET_KEY\`; keep that secret long and stable and use persistent PostgreSQL storage. Keep OAuth client secrets only in server environment variables. A public webhook accepts only the initial verification challenge or correctly signed events. The worker retries temporary failures up to five times; manual backfill can recover missed events.
+
+TicNote must be configured to export its transcript/summary into the selected Notion location. This Notion webhook is what starts the SYSAI importer; it is not a TicNote webhook and will not supply original audio unless TicNote itself puts that audio in an accessible resource.
