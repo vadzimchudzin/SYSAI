@@ -5,7 +5,7 @@ import json
 import math
 import re
 
-from . import config, deadlines, llm
+from . import config, deadlines, llm, task_routing
 
 MAX_BATCH_CHARS = 24000
 OVERLAP_REPLIES = 2
@@ -19,17 +19,32 @@ SYSTEM = """Ты — опытный секретарь руководителя.
 - Визуализации: создай график только при наличии явных сопоставимых числовых данных в расшифровке. Не вычисляй отсутствующие значения.
   У каждой визуализации должны быть короткая точная source_quote из расшифровки, подписи и единицы измерения. Если надёжных чисел нет, верни пустой список.
 - Задачи: каждое поручение отдельно. Формулируй как действие («Подготовить…», «Согласовать…»).
-  Исполнитель — только если он явно назван или очевиден из контекста. Сопоставь со справочником сотрудников
-  (по имени, фамилии и псевдонимам из поля aliases; при нескольких одноимённых учитывай должность и responsibilities вместе с содержанием поручения. Не выбирай по одному имени; если контекст не даёт явного преимущества, оставь employee_id=null. Имя может прозвучать в любом падеже: «Вадиму», «у Вадима»)
-  и укажи employee_id. Если имя или псевдоним человека из справочника прозвучал рядом с поручением, employee_id
-  обязателен. null ставь, только если такого человека в справочнике нет или подходят несколько; в assignee_name
-  всегда пиши имя так, как оно прозвучало.
+  КТО ДЕЛАЕТ ЗАДАЧУ — главное правило. Отличай исполнителя от человека, к которому нужно обратиться.
+  Тип действия action_type: "message" (написать, сообщить, напомнить, предупредить), "ask" (узнать, спросить, уточнить,
+  выяснить, поговорить с кем-то, чтобы узнать), "request" (запросить, попросить прислать, взять у кого-то документ),
+  "forward" (переслать, передать, отправить документ кому-то), "produce" (график, диаграмма, сводка, расчёт по цифрам
+  из совещания), "do" (любая содержательная работа: подготовить, исправить, согласовать, разработать, позвонить,
+  съездить, встретиться, подписать, оплатить).
+  executor="assistant", если это лёгкое поручение (message, ask, request, forward, produce) и никто из людей не назван
+  его исполнителем: «нужно написать Вадиму и узнать статус», «надо взять у Ани акт и отправить Пете», «напомнить
+  Марии про отчёт», «уточнить у Татьяны про аренду», «переслать Вадиму протокол». Человек в таких фразах — НЕ
+  исполнитель, а собеседник ассистента: employee_id=null, assignee_name="ассистент", собеседники — в counterparts.
+  executor="person" только если человеку прямо поручили сделать работу: обращение по имени («Андрей, напиши Ивану»,
+  «Мария, с тебя креативы»), «пусть Вадим подготовит», «Петя должен отправить», «поручить Вадиму», «с тебя», либо
+  это содержательная работа (do), либо говорящий берёт задачу на себя («я поговорю с ними»).
+  Имя рядом с поручением само по себе НЕ делает человека исполнителем: «узнать у Вадима» — Вадим источник, «написать
+  Вадиму» — Вадим получатель, исполнитель в обоих случаях ассистент.
+  counterparts: [{{"role":"source"|"recipient"|"target","employee_id":ID|null,"name":"как прозвучало"}}] — source: у кого
+  взять или узнать; recipient: кому написать или передать; target: с кем связаться. Для forward укажи и source, и
+  recipient. Первым контактом ассистента (target_employee_id/target_employee_name) будет source для request/forward,
+  иначе recipient. Используй только сотрудников с has_contact=true; при неоднозначности employee_id=null.
+  Сопоставляй людей со справочником по имени, фамилии, aliases в любом падеже («Вадиму», «у Ани», «с Татьяной»).
+  Метки «Спикер 1», «Спикер 2» никогда не пиши в assignee_name: если по участникам понятно, кто это, укажи имя и
+  employee_id, иначе оставь пустую строку. Человека не из справочника пиши в assignee_name как прозвучало, employee_id=null.
+  При нескольких однофамильцах или тёзках учитывай должность, отдел и responsibilities; не угадывай.
 - Срок: если назван («до пятницы», «к 15-му», «через неделю») — переведи в дату YYYY-MM-DD относительно даты
   совещания {meeting_date} ({weekday}) и процитируй в deadline_quote. Если срок не назван — deadline null.
 - Для задач и тем укажи время в записи (MM:SS) и короткую цитату-основание.
-- Исполнитель-ассистент: если поручение отдали ИИ, ассистенту, боту или секретарю, либо это работа, которую ассистент реально может выполнить сам (график, сводка, отчёт или немедленное сообщение сотруднику через Telegram), поставь executor="assistant", employee_id=null и assignee_name="ассистент".
-- Различай исполнителя и адресата сообщения. «Нужно написать Андрею и спросить…» — действие ассистента: target_employee_name="Андрей", target_employee_id — ID однозначно найденного адресата. «Андрей, напиши Ивану…» — поручение Андрею: executor="person", employee_id — Андрей, target_employee_id=null.
-- Для assistant-задачи, требующей написать человеку, укажи target_employee_name и target_employee_id. Используй только сотрудника с has_contact=true. Если адресат неоднозначен, target_employee_id=null — не угадывай. Для обычных задач target_employee_id=null.
 - Решения — то, о чём договорились. Открытые вопросы — что осталось нерешённым. Риски — проблемы и опасения.
 - Участники: сопоставь метки говорящих с людьми. Если рядом с репликой есть маркер [VOICEPRINT_CONFIRMED employee_id=N], имя и employee_id N подтверждены голосовым шаблоном; сохрани эту идентификацию, не заменяй её предположением по тексту.
 При выборе исполнителя учитывай не только имя: должность, подразделение, компетенции и обязанности помогают понять контекст поручения. Не назначай задачу только по совпадению общей темы; если прямого указания и однозначных данных нет, оставь employee_id null и сохрани сказанное в assignee_name.
@@ -42,6 +57,8 @@ SYSTEM = """Ты — опытный секретарь руководителя.
  "decisions": [{{"text": str, "time": "MM:SS"}}],
  "tasks": [{{"title": str, "description": str, "employee_id": int|null, "assignee_name": str|null,
             "target_employee_id": int|null, "target_employee_name": str|null,
+            "action_type": "message"|"ask"|"request"|"forward"|"produce"|"do",
+            "counterparts": [{{"role": "source"|"recipient"|"target", "employee_id": int|null, "name": str}}],
             "deadline": "YYYY-MM-DD"|null, "deadline_quote": str|null, "priority": "high"|"medium"|"low",
             "executor": "person"|"assistant", "time": "MM:SS", "quote": str}}],
  "visualizations": [{{"title": str, "type": "bar"|"line", "labels": [str],
@@ -90,7 +107,7 @@ def employees_json(employees) -> str:
 def _fingerprint(segments, employees, settings, meeting_date):
     payload = {
         # Bump when prompt/normalization semantics change so old checkpoints cannot bypass new safeguards.
-        "analysis_version": 15, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
+        "analysis_version": 16, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
         "model": settings.get("report_model"), "report_style": settings.get("report_style", "balanced"), "glossary": settings.get("glossary", ""),
         "employees": employees_json(employees), "meeting_date": meeting_date.isoformat(),
         "transcript": transcript_text(segments),
@@ -332,6 +349,11 @@ def _validate_report(report, employees, transcript, duration, meeting_date, requ
         target_id = task.get("target_employee_id")
         if target_id is not None and (not isinstance(target_id, int) or isinstance(target_id, bool)):
             raise llm.LLMError("Некорректный target_employee_id")
+        if task.get("action_type") not in (None, "message", "ask", "request", "forward", "produce", "do"):
+            raise llm.LLMError("Некорректный action_type задачи")
+        if task.get("counterparts") is not None and (not isinstance(task["counterparts"], list) or any(
+                not isinstance(c, dict) for c in task["counterparts"])):
+            raise llm.LLMError("Некорректный counterparts задачи")
         eid = task.get("employee_id")
         if eid is not None and (not isinstance(eid, int) or isinstance(eid, bool)):
             raise llm.LLMError("Некорректный employee_id задачи")
@@ -497,6 +519,9 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
     system = SYSTEM.format(meeting_date=meeting_date.isoformat(), weekday=names[meeting_date.weekday()],
                            employees=employees_json(employees), glossary=settings.get("glossary", ""),
                            style_instruction=style_instruction)
+    if settings.get("open_tasks"):
+        system += ("\nОткрытые задачи прошлых совещаний (контекст; если поручение повторяет открытую задачу, не придумывай "
+                   "новую формулировку, а начни description со слов «повтор:»):\n" + str(settings["open_tasks"])[:4000])
     transcript = transcript_text(segments)
     duration = max((float(s.get("end", s.get("start", 0)) or 0) for s in segments), default=0)
     fingerprint = _fingerprint(segments, employees, settings, meeting_date)
@@ -669,6 +694,9 @@ def match_task_employee(name, task_context, employees):
     return winners[0] if best > 0 and len(winners) == 1 else None
 
 
+_SPEAKER_LABEL = re.compile(r"^\s*(спикер|speaker|говорящий|участник)\s*\d+\s*$", re.IGNORECASE)
+
+
 def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> dict:
     ids = {e.id for e in employees}
     employee_by_id = {employee.id: employee for employee in employees}
@@ -710,11 +738,16 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
         normalized["employee_id"] = eid
         participants.append(normalized)
     out["participants"] = participants
+    speaker_ids = {}
+    for participant in participants:
+        label, pid = participant.get("speaker"), participant.get("employee_id")
+        if isinstance(label, str) and pid in ids:
+            speaker_ids[label.strip().lower()] = pid
     out["title"] = (r.get("title") or "Совещание").strip()
     out["summary"] = (r.get("summary") or "").strip()
     out["next_meeting"] = r.get("next_meeting")
     out["requires_review"] = bool(r.get("requires_review", False))
-    tasks = []
+    tasks, routing_notes, unknown_names = [], [], []
     for t in out["tasks"]:
         if not isinstance(t, dict) or not t.get("title"):
             continue
@@ -748,6 +781,15 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
             target_id, target_name = None, ""
             context = " ".join(str(t.get(key) or "") for key in ("title", "description", "quote"))
             spoken_name = (t.get("assignee_name") or "").strip()
+            if _SPEAKER_LABEL.match(spoken_name):
+                # «Спикер 1» is a diarization label, never a person's name.
+                mapped = speaker_ids.get(spoken_name.lower())
+                if mapped is None:
+                    identity_review_notes.append(
+                        f"Исполнитель задачи «{str(t.get('title') or '').strip()}» назван меткой «{spoken_name}»: укажите сотрудника.")
+                spoken_name = employee_by_id[mapped].name if mapped is not None else ""
+                t = dict(t, assignee_name=spoken_name, employee_id=mapped)
+                eid = mapped
             candidates = _employee_matches(spoken_name, employees)
             matched = candidates[0] if len(candidates) == 1 else None
             if matched is None and spoken_name:
@@ -760,6 +802,33 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
                 eid = matched.id
             elif spoken_name or eid not in ids:
                 eid = None
+            if spoken_name and not candidates and matched is None:
+                unknown_names.append((spoken_name, str(t.get("title") or "").strip()))
+        # Plain rules re-check the model's executor: a light message/ask/request/forward task goes to the assistant
+        # and the person named in it becomes the assistant's counterpart (see task_routing).
+        routed = task_routing.route({"title": t.get("title"), "description": t.get("description"), "quote": t.get("quote"),
+                                     "executor": executor, "employee_id": eid if eid in ids else None,
+                                     "target_employee_id": target_id, "target_employee_name": target_name}, employees)
+        if routed["executor"] == "assistant":
+            unknown_names = [u for u in unknown_names if u[1] != str(t.get("title") or "").strip()]
+            routed_target = employee_by_id.get(routed["target_employee_id"])
+            if routed_target is not None:
+                target_name = target_name if executor == "assistant" and target_id == routed_target.id else routed_target.name
+                target_id = routed_target.id if getattr(routed_target, "telegram_chat_id", "") else None
+            elif executor != "assistant":
+                target_id, target_name = None, ""
+            if executor != "assistant":
+                t = dict(t, assignee_name="ассистент")
+            executor, eid = "assistant", None
+        else:
+            if executor == "assistant" or routed["employee_id"] != (eid if eid in ids else None):
+                doer = employee_by_id.get(routed["employee_id"])
+                t = dict(t, assignee_name=doer.name if doer is not None else (t.get("assignee_name") or ""))
+            executor, eid, target_id, target_name = "person", routed["employee_id"], None, ""
+        if routed["routing_note"]:
+            routing_notes.append(f"«{str(t.get('title') or '').strip()}»: {routed['routing_note']}.")
+        counterparts = [dict(c, has_contact=bool(getattr(employee_by_id.get(c["employee_id"]), "telegram_chat_id", "")))
+                        for c in routed["counterparts"]]
         deadline = normalize_deadline(t["deadline"], meeting_date) if t.get("deadline") else None
         tasks.append({
             "title": str(t["title"]).strip(),
@@ -769,6 +838,9 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
             "assignee_name": ((t.get("assignee_name") or "").strip() or ("ассистент" if executor == "assistant" else "")),
             "target_employee_id": target_id if target_id in ids else None,
             "target_employee_name": target_name,
+            "action_type": routed["action_type"],
+            "counterparts": counterparts,
+            "routing_note": routed["routing_note"],
             "deadline": deadline.isoformat() if deadline else None,
             "deadline_quote": t.get("deadline_quote") or "",
             "priority": t.get("priority") if t.get("priority") in ("high", "medium", "low") else "medium",
@@ -776,6 +848,11 @@ def normalize(r: dict, employees, meeting_date=None, source_segments=None) -> di
             "quote": t.get("quote") or "",
         })
     out["tasks"] = tasks
+    for name, title in unknown_names:
+        # Informational: a person outside the directory is kept as heard and does not block the report.
+        routing_notes.append(f"«{name}» нет в справочнике сотрудников: добавьте его или выберите исполнителя задачи «{title}».")
+    # Shown to the reviewer next to the tasks, separately from the meeting's own notes.
+    out["assignment_notes"] = routing_notes
     if identity_review_notes:
         out["notes"] = [*out["notes"], *identity_review_notes]
         out["requires_review"] = True

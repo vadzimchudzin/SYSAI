@@ -13,7 +13,7 @@ import logging
 import pathlib
 import re
 
-from . import analyze, config, deadlines, llm, render, report_archive, settings_store, telegram, userbot, visuals, voice
+from . import analyze, task_routing, config, deadlines, llm, render, report_archive, settings_store, telegram, userbot, visuals, voice
 from .db import Artifact, Employee, Meeting, Note, SessionLocal, Task
 
 log = logging.getLogger("sysai.assistant")
@@ -148,6 +148,13 @@ def _task_facts(s, task, meeting) -> dict:
     return {"task": {"title": task.title, "description": task.description or "", "quote": task.source_quote or "",
                      "quote_time": task.source_time or None},
             "target_employee": target_info, "meeting": voice.meeting_facts(meeting),
+            # What kind of light task this is and with whom: «взять у Ани акт и передать Пете» starts by asking Anna
+            # for the document and saying it will go to Petya.
+            "action": {"type": getattr(task, "action_type", "") or "",
+                       "counterparts": [{"role": c.get("role"), "name": c.get("name")}
+                                        for c in (getattr(task, "counterparts", None) or []) if isinstance(c, dict)],
+                       "plan": task_routing.describe(getattr(task, "action_type", "") or "",
+                                                     getattr(task, "counterparts", None) or [])},
             "computed": computed, "transcript_excerpt": excerpt,
             "_allowed": _allowed_numbers(computed, analyze.transcript_text(segments))}
 
@@ -161,6 +168,9 @@ def _ask(facts: dict, feedback: str = "") -> dict:
             "(например, «напомнить завтра», «написать через час»), не отправляй его сейчас — верни kind=cannot и объясни, что требуется "
             "запланированная отправка. Не используй это действие для звонков, email или иных каналов. "
             "Не отправляй сообщение, если target_employee отсутствует или reachable=false; верни kind=cannot и объясни, чего не хватает. "
+            "action.plan описывает, что нужно сделать с собеседниками: для ask спроси и попроси ответить, для request попроси "
+            "прислать документ или данные, для forward попроси документ у первого собеседника и скажи, кому он будет передан. "
+            "Не пиши собеседнику так, будто задача поручена ему, если в плане он только источник информации. "
             "Не утверждай, что написал человеку до фактической отправки. "
             "Числа в графике бери только из computed или из того, что названо вслух в тексте совещания, ничего не выдумывай; "
             "если данных не хватает, верни kind=cannot. В message своими словами коротко напиши проверяющему, что сделал. "

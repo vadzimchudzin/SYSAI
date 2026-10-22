@@ -69,6 +69,24 @@ def create_meeting(filename: str, audio_path: str = "", source: str = "web", tit
         return m.id
 
 
+OPEN_TASK_STATUSES = ("draft", "sent", "awaiting_deadline", "in_progress", "blocked", "assistant_todo")
+
+
+def open_tasks_brief(meeting_id: int, limit: int = 40) -> str:
+    """Open tasks of earlier meetings, one line each, so the analyst sees what is already in progress."""
+    with SessionLocal() as s:
+        rows = (s.query(Task).filter(Task.meeting_id != meeting_id, Task.status.in_(OPEN_TASK_STATUSES))
+                .order_by(Task.id.desc()).limit(limit).all())
+        lines = []
+        for task in rows:
+            if task.executor == "assistant":
+                who = "ассистент"
+            else:
+                who = task.assignee.name if task.assignee else (task.assignee_name or "не назначен")
+            lines.append(f"- {task.title[:160]} — {who}")
+        return "\n".join(lines)
+
+
 def meeting_settings(meeting_id: int) -> dict:
     with SessionLocal() as s:
         m = s.get(Meeting, meeting_id)
@@ -139,6 +157,7 @@ def _process(meeting_id: int):
             for employee in employees:
                 for membership in employee.department_memberships:
                     _ = membership.department.name if membership.department else ""
+        settings = dict(settings, open_tasks=open_tasks_brief(meeting_id))
         report = analyze.mock_report(employees, mdate) if source == "demo" else analyze.analyze(
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
         _save_report(meeting_id, report, settings)
@@ -252,7 +271,9 @@ def _save_report(meeting_id: int, report: dict, settings: dict):
             m.tasks.append(Task(title=t["title"], description=t.get("description", ""), assignee_id=t.get("employee_id"),
                                 assignee_name=t.get("assignee_name", ""), target_employee_id=t.get("target_employee_id"),
                                 target_employee_name=t.get("target_employee_name", ""),
-                                executor=t.get("executor") or "person", deadline=d, deadline_source=src,
+                                executor=t.get("executor") or "person", action_type=t.get("action_type") or "",
+                                counterparts=t.get("counterparts") or [], routing_note=(t.get("routing_note") or "")[:500],
+                                deadline=d, deadline_source=src,
                                 deadline_quote=t.get("deadline_quote", ""), priority=t.get("priority", "medium"),
                                 source_quote=t.get("quote", ""), source_time=t.get("time", "")))
         s.commit()

@@ -106,8 +106,11 @@ def test_unique_full_name_resolves_even_when_first_name_is_ambiguous():
     assert out["tasks"][0]["employee_id"] == 2
 
 
-def test_the_analyst_is_told_that_the_id_is_required_for_a_named_person():
-    assert "employee_id" in analyze.SYSTEM and "в любом падеже" in analyze.SYSTEM and "обязателен" in analyze.SYSTEM
+def test_the_analyst_is_told_that_a_named_person_is_not_automatically_the_doer():
+    # Sprint 1: a name next to an instruction is a counterpart unless the person is told to do the work.
+    assert "employee_id" in analyze.SYSTEM and "в любом падеже" in analyze.SYSTEM
+    assert "Имя рядом с поручением само по себе НЕ делает человека исполнителем" in analyze.SYSTEM
+    assert "обязателен" not in analyze.SYSTEM
 
 
 def test_employee_assignment_profile_is_included_in_analysis_directory():

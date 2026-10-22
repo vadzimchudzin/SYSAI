@@ -470,3 +470,49 @@ def test_poking_the_loop_marks_activity():
     pipeline.poke()
     assert pipeline._ACTIVITY[0] > 0 and pipeline._WAKE.is_set()
     pipeline._WAKE.clear()
+
+
+def test_a_saved_report_stores_action_type_counterparts_and_routing_note():
+    mid = make_meeting(status="analyzing", people=())
+    report = {"title": "X", "tasks": [{"title": "Узнать статус договора", "executor": "assistant", "employee_id": None,
+                                       "assignee_name": "ассистент", "deadline": None, "priority": "medium",
+                                       "quote": "q", "time": "00:01", "description": "", "action_type": "ask",
+                                       "counterparts": [{"role": "source", "employee_id": None, "name": "Вадим"}],
+                                       "routing_note": "исполнитель — ассистент"}]}
+    pipeline._save_report(mid, report, pipeline.meeting_settings(mid))
+    with SessionLocal() as s:
+        task = s.query(Task).one()
+        assert task.action_type == "ask" and task.counterparts[0]["name"] == "Вадим"
+        assert task.routing_note == "исполнитель — ассистент"
+
+
+def test_open_tasks_of_other_meetings_are_listed_for_the_analyst():
+    first = make_meeting(status="analyzing", people=())
+    pipeline._save_report(first, {"title": "X", "tasks": [{"title": "Согласовать аренду", "executor": "person",
+                                                          "employee_id": None, "assignee_name": "Ольга",
+                                                          "deadline": None, "priority": "medium", "quote": "q",
+                                                          "time": "00:01", "description": ""}]},
+                          pipeline.meeting_settings(first))
+    second = make_meeting(status="analyzing", people=())
+    brief = pipeline.open_tasks_brief(second)
+    assert "Согласовать аренду" in brief and "Ольга" in brief
+    assert pipeline.open_tasks_brief(first) == ""
+
+
+def test_meeting_page_explains_routing_and_assistant_plan(client):
+    mid = make_meeting(status="review", people=())
+    report = {"title": "X", "assignment_notes": ["«Ольга» нет в справочнике сотрудников"],
+              "tasks": [{"title": "Взять акт и передать", "executor": "assistant", "employee_id": None,
+                         "assignee_name": "ассистент", "deadline": None, "priority": "medium", "quote": "q",
+                         "time": "00:01", "description": "", "action_type": "forward",
+                         "counterparts": [{"role": "source", "employee_id": None, "name": "Аня"},
+                                          {"role": "recipient", "employee_id": None, "name": "Петя"}],
+                         "routing_note": "исполнитель — ассистент: это поручение связаться"}]}
+    pipeline._save_report(mid, report, pipeline.meeting_settings(mid))
+    with SessionLocal() as s:
+        s.get(Meeting, mid).report = report
+        s.commit()
+    page = client.get(f"/meetings/{mid}").text
+    assert "Проверьте исполнителей" in page and "Ольга" in page
+    assert "План ассистента" in page and "взять у Аня" in page and "Петя" in page
+    assert "это поручение связаться" in page

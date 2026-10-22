@@ -289,6 +289,9 @@ class Task(Base):
     source_time = Column(String(20), default="")
     status = Column(String(30), default="draft")  # draft | sent | awaiting_deadline | no_recipient | in_progress | blocked | done | assistant_todo | assistant_done | assistant_failed
     executor = Column(String(12), default="person")  # person | assistant (the AI employee does it itself)
+    action_type = Column(String(12), default="")  # message | ask | request | forward | produce | do (see task_routing)
+    counterparts = Column(JSON, default=list)  # [{"role": "source|recipient|target", "employee_id": 3, "name": "Аня"}]
+    routing_note = Column(String(500), default="")  # why the executor differs from what the model proposed
     bitrix_task_id = Column(String(40), default="")
     meeting = relationship("Meeting", back_populates="tasks")
     assignee = relationship("Employee", foreign_keys=[assignee_id])
@@ -505,6 +508,9 @@ def init_db():
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")
     _add_column_if_missing("tasks", "target_employee_name", "target_employee_name VARCHAR(200) DEFAULT ''")
+    _add_column_if_missing("tasks", "action_type", "action_type VARCHAR(12) DEFAULT ''")
+    _add_column_if_missing("tasks", "counterparts", "counterparts JSON")
+    _add_column_if_missing("tasks", "routing_note", "routing_note VARCHAR(500) DEFAULT ''")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
     _add_column_if_missing("recordings", "device_label", "device_label VARCHAR(120) NOT NULL DEFAULT ''")
     _add_column_if_missing("employees", "department", "department VARCHAR(200) DEFAULT ''")
