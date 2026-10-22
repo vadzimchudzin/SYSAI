@@ -1,0 +1,10 @@
+<div class="mem-note" id="note-{{ n.id }}">
+  <div>{{ n.text }}</div>
+  <div class="muted small">{% if n.about and n.about != 'компания' %}{{ n.about }} · {% endif %}{{ n.source }}{% if n.meeting_id %} (<a href="/meetings/{{ n.meeting_id }}">совещание</a>){% endif %} · {{ n.at.strftime('%d.%m.%Y') if n.at }} · уверенность: <span class="pill {{ {'high':'green','medium':'blue','low':'amber'}.get(n.confidence,'gray') }}">{{ n.confidence_ru }}</span>{% if n.author %} · {{ n.author }}{% endif %}{% if n.edited %} · изменил {{ n.edited }}{% endif %}</div>
+  {% if n.quote %}<div class="muted small">«{{ n.quote }}»</div>{% endif %}
+  <details class="small"><summary>Изменить</summary>
+    <form method="post" action="/memory/notes/{{ n.id }}" class="row"><input name="text" value="{{ n.text }}" style="flex:1">
+      <select name="confidence">{% for k, v in (('high','высокая'),('medium','средняя'),('low','низкая')) %}<option value="{{ k }}" {{ 'selected' if n.confidence == k }}>{{ v }}</option>{% endfor %}</select>
+      <button class="btn sm">Сохранить</button>
+      <button class="btn sm ghost" name="action" value="archive" onclick="return confirm('Убрать заметку из памяти?')">Удалить</button></form></details>
+</div>

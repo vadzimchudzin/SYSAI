@@ -1,0 +1,29 @@
+{% extends "base.html" %}{% block title %}{{ card.name }} — Память{% endblock %}
+{% block body %}
+<p class="small"><a href="/memory">← Память</a></p>
+<h1>{{ card.name }}</h1>
+<p class="muted">{{ card.position }}{% if card.departments %} · {{ card.departments|join(', ') }}{% endif %}{% if card.aliases %} · также: {{ card.aliases }}{% endif %}{% if card.telegram %} · {{ card.telegram }}{% endif %}</p>
+{% if request.query_params.get('saved') %}<div class="card small">Сохранено.</div>{% endif %}
+<section class="card"><h2>Карточка</h2>
+  <form method="post" action="/memory/people/{{ card.id }}">
+    <label class="f">Зона ответственности <textarea name="responsibilities" rows="2">{{ card.responsibilities }}</textarea></label>
+    <label class="f">Компетенции <textarea name="competencies" rows="2">{{ card.competencies }}</textarea></label>
+    <label class="f">Как предпочитает общаться <textarea name="communication_style" rows="2" placeholder="Коротко и по делу; пишет вечером; документы присылает в PDF">{{ card.communication_style }}</textarea></label>
+    <label class="f">Контекст <textarea name="context" rows="2">{{ card.context }}</textarea></label>
+    <button class="btn sm primary">Сохранить</button> <a class="small" href="/employees?edit={{ card.id }}">Должность, отделы, контакты →</a>
+  </form>
+</section>
+<section class="card"><h2>Заметки <span class="muted small">{{ notes|length }}{% if archived %} · удалено {{ archived }}{% endif %}</span></h2>
+  <p class="muted small">Только факты: что человек делает, за что отвечает, о чём договорились. Каждую можно исправить или удалить — это требование закона о персональных данных.</p>
+  {% for n in notes %}{% include "_memory_note.html" %}{% else %}<div class="muted small">Заметок пока нет.</div>{% endfor %}
+  <form method="post" action="/memory/notes" class="row mem-add"><input type="hidden" name="employee_id" value="{{ card.id }}">
+    <input name="text" required placeholder="Новый факт о работе {{ card.name }}" style="flex:1">
+    <select name="confidence"><option value="high">высокая</option><option value="medium">средняя</option><option value="low">низкая</option></select>
+    <button class="btn sm">Добавить</button></form>
+</section>
+{% if summaries %}<section class="card"><h2>Что ассистент помнит из переписки</h2>
+  {% for t in summaries %}<p class="small">{{ t }}</p>{% endfor %}
+  <form method="post" action="/memory/people/{{ card.id }}/forget-summary" onsubmit="return confirm('Стереть эту сводку?')"><button class="btn sm ghost">Стереть сводку</button></form></section>{% endif %}
+{% if documents %}<section class="card"><h2>Документы от {{ card.name }}</h2>
+  {% for d in documents %}<div class="small"><a href="/documents/{{ d.id }}/view">{{ d.filename }}</a> <span class="muted">{{ d.at.strftime('%d.%m.%Y') if d.at }}</span></div>{% endfor %}</section>{% endif %}
+{% endblock %}

@@ -686,3 +686,8 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .pg-actions { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
 .pg-actions .row { gap: 6px; flex-wrap: wrap; } .pg-actions form { margin: 0; }
 .pg-form { margin-top: 8px; } .pg-form textarea { width: 100%; }
+
+/* Memory, skills, documents */
+.mem-hit, .mem-note { padding: 8px 0; border-bottom: 1px dashed var(--line); } .mem-note:last-of-type { border-bottom: 0; }
+.mem-add { gap: 6px; margin-top: 10px; flex-wrap: wrap; } .mem-dept { margin: 6px 0; } .mem-dept summary { cursor: pointer; }
+.doc-text { white-space: pre-wrap; font-size: 13px; max-height: 520px; overflow: auto; background: var(--bg2); padding: 12px; border-radius: 10px; }

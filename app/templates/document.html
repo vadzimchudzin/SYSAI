@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% block title %}{{ doc.filename }} — Документы{% endblock %}
+{% block body %}
+<p class="small"><a href="/documents">← Документы</a></p>
+<div class="row between"><h1>{{ doc.filename }}</h1><a class="btn sm" href="/documents/{{ doc.id }}">Скачать</a></div>
+<p class="muted small">от {{ doc.sender }} · {{ doc.at.strftime('%d.%m.%Y %H:%M') if doc.at }} · {{ (doc.size / 1024)|round(1) }} КБ · SHA-256 {{ doc.sha[:16] }}…{% if doc.sensitive %} · <span class="pill amber">конфиденциальный</span>{% endif %}{% if doc.case %} · дело <a href="/progress?scope=open#case-{{ doc.case.id }}">«{{ doc.case.title }}»</a>{% endif %}</p>
+{% if doc.summary %}<section class="card"><b>Кратко:</b> {{ doc.summary }}</section>{% endif %}
+<section class="card"><h2>Вопрос по документу</h2>
+  <form method="get" action="/documents/{{ doc.id }}/view" class="row"><input name="q" value="{{ q }}" placeholder="Например: на какую сумму акт и за какой период?" style="flex:1"> <button class="btn sm primary">Спросить</button></form>
+  {% if answer %}<div style="margin-top:10px"><b>Ответ:</b> {{ answer.answer }}</div>
+  {% if answer.pieces %}<details class="small"><summary>Фрагменты, на которые опирается ответ</summary>{% for p in answer.pieces %}<p class="muted">{{ p }}</p>{% endfor %}</details>{% endif %}{% endif %}
+</section>
+<section class="card"><h2>Кому передавался</h2>
+  {% for t in transfers %}<div class="small">{{ t.to }} — {{ {'sent':'передан','awaiting_approval':'ждёт разрешения','approved':'разрешён','sending':'отправляется','uncertain':'проверить доставку','blocked':'остановлен'}.get(t.status, t.status) }} · {{ t.at.strftime('%d.%m %H:%M') if t.at }}{% if t.by %} · разрешил {{ t.by }}{% endif %}</div>{% else %}<div class="muted small">Никому.</div>{% endfor %}
+</section>
+<section class="card"><div class="row between"><h2>Текст</h2>
+  <form method="post" action="/documents/{{ doc.id }}/reread"><button class="btn sm ghost">Перечитать</button></form></div>
+  {% if doc.status == 'done' %}<pre class="doc-text">{{ doc.text }}</pre>{% if doc.truncated %}<p class="muted small">Показано начало; поиск идёт по всему тексту.</p>{% endif %}
+  {% elif doc.status == 'pending' %}<p class="muted">Документ ещё читается.</p>
+  {% elif doc.status == 'empty' %}<p class="muted">Текст не найден (или формат не читается: старые .doc/.xls).</p>
+  {% else %}<p class="warn">Прочитать не удалось.</p>{% endif %}
+</section>
+{% endblock %}

@@ -23,6 +23,10 @@ DEFAULTS = {
     "daily_budget_usd": 5.0,         # OpenRouter spend per UTC day; 0 = no limit
     "quiet_from_hour": 21,           # no messages to people from this hour (service time zone) ...
     "quiet_to_hour": 9,              # ... until this hour; equal hours mean no quiet time
+    "company_profile": "",           # what the company does, clients, products, rules everyone should know (memory)
+    "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
+    "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
+    "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents
     "case_autonomy": "auto",         # cases the assistant runs itself: auto | approve (director confirms the plan) | suggest
     "case_reminder_hours": 4,        # no answer this long: a polite reminder (quiet hours are respected)
     "case_max_reminders": 2,         # reminders before the director is told

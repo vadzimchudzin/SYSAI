@@ -4,6 +4,7 @@
   <input type="hidden" name="id" value="{{ d.id if d else 0 }}">
   <label class="f">Название подразделения<input name="name" required maxlength="100" value="{{ d.name if d else '' }}" placeholder="Например, Технический отдел"></label>
   <label class="f">Зона ответственности<textarea name="description" rows="2" maxlength="1000" placeholder="Основные задачи подразделения">{{ d.description if d else '' }}</textarea></label>
+  <label class="f">Регламенты: порядок работы, кто что согласует и подписывает<textarea name="regulations" rows="3" maxlength="10000" placeholder="Например: счета согласует руководитель отдела, оплату — директор">{{ d.regulations if d else '' }}</textarea></label>
   {% if d %}<label class="check"><input type="checkbox" name="active" {% if d.active %}checked{% endif %}> Подразделение активно</label>{% endif %}
   <div class="actions"><button class="btn primary">{{ 'Сохранить изменения' if d else 'Создать подразделение' }}</button>{% if d %}<a class="btn ghost" href="/departments">Отмена</a>{% endif %}</div>
 </form>

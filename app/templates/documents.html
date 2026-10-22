@@ -7,8 +7,9 @@
 <div class="table-wrap"><table>
   <thead><tr><th>Файл</th><th>От кого</th><th>Дело</th><th>Передан</th></tr></thead>
   <tbody>{% for d in docs %}
-  <tr><td><a href="/documents/{{ d.id }}">{{ d.filename }}</a> <span class="pill gray">{{ d.kind }}</span>{% if d.sensitive %} <span class="pill amber">конфиденциальный</span>{% endif %}
+  <tr><td><a href="/documents/{{ d.id }}/view">{{ d.filename }}</a> <span class="pill gray">{{ d.kind }}</span>{% if d.sensitive %} <span class="pill amber">конфиденциальный</span>{% endif %}
       <div class="muted small">{{ (d.size / 1024)|round(1) }} КБ · SHA-256 {{ d.sha }}… · {{ d.at.strftime('%d.%m %H:%M') if d.at }}</div>
+      {% if d.summary %}<div class="small">{{ d.summary }}</div>{% elif d.status == 'pending' %}<div class="muted small">читается…</div>{% endif %}
       {% if d.caption %}<div class="small">«{{ d.caption }}»</div>{% endif %}</td>
     <td>{{ d.sender }}</td>
     <td>{% if d.case %}<a href="/meetings/{{ d.case.meeting_id }}">{{ d.case.title }}</a>{% else %}<span class="muted">не привязан</span>{% endif %}</td>

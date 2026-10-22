@@ -324,6 +324,12 @@ def _write(purpose: str, facts: dict) -> str:
     }[purpose]
     system = voice.system_prompt("Ты ведёшь дело по поручению с совещания. " + instructions + ' JSON: {"text":"..."}')
     facts = {"purpose": purpose, **facts}
+    if purpose in ("ask", "request", "remind", "deliver", "handover"):
+        from . import memory
+        found = memory.skills_for(f"{purpose} {json.dumps(facts.get('task') or {}, ensure_ascii=False)}")
+        if found:
+            facts["skills"] = found  # the company's scenarios and templates for such messages
+            system += " Если в skills есть подходящий навык или шаблон, следуй ему."
     try:
         raw = llm.chat(voice.model(), [{"role": "system", "content": system},
                                        {"role": "user", "content": "<data>" + json.dumps(facts, ensure_ascii=False, default=str) + "</data>"}],
@@ -469,7 +475,8 @@ def _send_message(case_id: int, step_id: int) -> bool:
         case, step = s.get(Case, case_id), s.get(CaseStep, step_id)
         person = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
         facts = _case_facts(s, case)
-        facts["person"] = {"name": person.name, "position": person.position or None}
+        facts["person"] = {"name": person.name, "position": person.position or None,
+                           "communication_style": getattr(person, "communication_style", "") or None}
         if step.args.get("purpose") == "request":
             dests = [s.get(Employee, x.args["to"]) for x in case.steps if x.tool == "forward_document"]
             facts["forward_to"] = [e.name for e in dests if e is not None]
@@ -718,7 +725,17 @@ def intake_document(msg: dict, employee_id) -> dict:
         except IntegrityError:
             s.rollback()
             doc = s.query(Document).filter_by(chat_id=str(msg["user_id"]), message_id=int(msg["message_id"])).first()
-        return {"document_id": doc.id, "filename": doc.filename, "kind": doc.kind, "size": doc.size}
+        result = {"document_id": doc.id, "filename": doc.filename, "kind": doc.kind, "size": doc.size}
+    read_later(result["document_id"])
+    return result
+
+
+def read_later(document_id: int) -> None:
+    """The text of a received document is read in the background (memory search, questions about it)."""
+    if _testing():
+        return  # tests call doctext.process themselves
+    from . import doctext
+    _pool().submit(doctext.process, document_id)
 
 
 def _pick_wait(waits: list, reply_to):
@@ -935,6 +952,7 @@ def attach_document(case_id: int, filename: str, mime: str, data: bytes, by: str
         s.add(doc)
         s.commit()
         wait_id, doc_id = wait.id, doc.id
+    read_later(doc_id)
     _resolve(wait_id, document_id=doc_id, by=by or "руководитель")
     return True
 

@@ -16,18 +16,19 @@ import httpx
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode
 
+from sqlalchemy import func
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, bitrix, cases, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
+from . import (accounts, agent, bitrix, cases, doctext, memory, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
                settings_store, speaker_id, telegram, userbot, notion)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -539,21 +540,264 @@ async def progress_case_action(request: Request, case_id: int, action: str):
     return RedirectResponse(back.split("#")[0] + f"#case-{case_id}", status_code=303)
 
 
+def _who(request: Request) -> str:
+    me = current_user(request) or {}
+    return str(me.get("name") or me.get("username") or "панель")[:120]
+
+
+def _note_view(n, people, departments) -> dict:
+    return {"id": n.id, "text": n.text, "quote": n.quote or "", "confidence": n.confidence or "medium",
+            "confidence_ru": memory.CONFIDENCE_RU.get(n.confidence or "medium", n.confidence),
+            "source": memory.SOURCE_RU.get(n.source, n.source), "meeting_id": n.meeting_id, "at": n.created_at,
+            "author": n.author or "", "edited": n.edited_by or "", "kind": n.kind,
+            "about": people.get(n.employee_id) or (f"отдел {departments[n.department_id]}" if n.department_id in departments else "компания")}
+
+
+@app.get("/memory", response_class=HTMLResponse)
+def memory_view(request: Request, q: str = "", msg: str = ""):
+    """What the AI employee knows: the company, departments, people (cards and notes), with search."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        people = {e.id: e.name for e in s.query(Employee).all()}
+        departments = {d.id: d.name for d in s.query(Department).all()}
+        company_notes = [_note_view(n, people, departments) for n in
+                         s.query(Note).filter(Note.employee_id.is_(None), Note.archived.is_(False),
+                                              Note.kind.in_(("company", "fact"))).order_by(Note.id.desc()).limit(200)]
+        depts = [{"id": d.id, "name": d.name, "description": d.description or "", "regulations": d.regulations or "",
+                  "members": [f"{m.employee.name}" + (f" — {m.role}" if m.role else "") for m in d.memberships
+                              if m.employee is not None and m.employee.active]}
+                 for d in s.query(Department).filter(Department.active.is_(True)).order_by(Department.name)]
+        counts = dict(s.query(Note.employee_id, func.count(Note.id)).filter(Note.archived.is_(False),
+                                                                            Note.employee_id.isnot(None))
+                      .group_by(Note.employee_id).all())
+        staff = [{"id": e.id, "name": e.name, "position": e.position or "", "notes": counts.get(e.id, 0),
+                  "style": bool(getattr(e, "communication_style", ""))}
+                 for e in s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name)]
+        results = []
+        if q.strip():
+            for h in memory.search(q, k=15, s=s):
+                results.append({"type": memory.TYPE_RU[h["type"]], "title": h["title"], "text": h["text"][:400],
+                                "url": h.get("url") or "/memory", "score": h["score"], "meta": h.get("meta") or {}})
+    return page(request, "memory.html", q=q, msg=msg, results=results, company_notes=company_notes, departments=depts,
+                staff=staff, profile=settings_store.get("company_profile") or "",
+                autolearn=bool(settings_store.get("memory_autolearn")))
+
+
+@app.post("/memory/company")
+async def memory_company_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    settings_store.set_many({"company_profile": str(f.get("company_profile") or "")[:20000],
+                             "memory_autolearn": f.get("memory_autolearn") == "on"})
+    return RedirectResponse("/memory?msg=saved", 303)
+
+
+@app.post("/memory/departments/{did}")
+async def memory_department_save(request: Request, did: int):
+    guard_admin(request)
+    f = await request.form()
+    with SessionLocal() as s:
+        d = s.get(Department, did)
+        if d is None:
+            raise HTTPException(404, "Отдел не найден")
+        d.description = str(f.get("description") or "").strip()[:1000]
+        d.regulations = str(f.get("regulations") or "").strip()[:10000]
+        s.commit()
+    return RedirectResponse("/memory?msg=saved#departments", 303)
+
+
+def _back(request: Request, default: str) -> str:
+    back = request.headers.get("referer") or default
+    path = "/" + back.split("://", 1)[-1].split("/", 1)[-1] if "://" in back else back
+    return path if path.startswith(("/memory", "/skills")) else default
+
+
+@app.post("/memory/notes")
+async def memory_note_add(request: Request):
+    guard_admin(request)
+    f = await request.form()
+
+    def num(key):
+        value = str(f.get(key) or "").strip()
+        return int(value) if value.isdigit() else None
+    try:
+        memory.add_note(text=str(f.get("text") or ""), employee_id=num("employee_id"), department_id=num("department_id"),
+                        confidence=str(f.get("confidence") or "high"), author=_who(request))
+    except ValueError as exc:
+        raise HTTPException(400, f"Заметка не сохранена: {exc}")
+    return RedirectResponse(_back(request, "/memory"), 303)
+
+
+@app.post("/memory/notes/{nid}")
+async def memory_note_edit(request: Request, nid: int):
+    guard_admin(request)
+    f = await request.form()
+    action = str(f.get("action") or "save")
+    ok = memory.edit_note(nid, archived=True, by=_who(request)) if action == "archive" else \
+        memory.edit_note(nid, text=str(f.get("text") or ""), confidence=str(f.get("confidence") or ""), by=_who(request))
+    if not ok:
+        raise HTTPException(400, "Заметка не изменена")
+    return RedirectResponse(_back(request, "/memory"), 303)
+
+
+@app.get("/memory/people/{eid}", response_class=HTMLResponse)
+def memory_person(request: Request, eid: int):
+    """A person's card: role, duties, how to talk to them, and every note with its source."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        e = s.get(Employee, eid)
+        if e is None:
+            raise HTTPException(404, "Сотрудник не найден")
+        people = {x.id: x.name for x in s.query(Employee).all()}
+        departments = {d.id: d.name for d in s.query(Department).all()}
+        notes = [_note_view(n, people, departments) for n in
+                 s.query(Note).filter(Note.employee_id == eid, Note.archived.is_(False)).order_by(Note.id.desc()).limit(300)]
+        archived = s.query(Note).filter(Note.employee_id == eid, Note.archived.is_(True)).count()
+        summaries = [m.summary for m in s.query(PersonMemory).filter_by(employee_id=eid).all() if m.summary]
+        card = {"id": e.id, "name": e.name, "aliases": e.aliases or "", "position": e.position or "",
+                "departments": [f"{m.department.name}" + (f" — {m.role}" if m.role else "") for m in e.department_memberships
+                                if m.department is not None],
+                "responsibilities": e.responsibilities or "", "competencies": e.competencies or "",
+                "context": e.context or "", "communication_style": getattr(e, "communication_style", "") or "",
+                "telegram": e.telegram_chat_id or ""}
+        documents = [{"id": d.id, "filename": d.filename, "at": d.created_at} for d in
+                     s.query(Document).filter_by(employee_id=eid).order_by(Document.id.desc()).limit(20)]
+    return page(request, "memory_person.html", card=card, notes=notes, archived=archived, summaries=summaries,
+                documents=documents)
+
+
+@app.post("/memory/people/{eid}")
+async def memory_person_save(request: Request, eid: int):
+    guard_admin(request)
+    f = await request.form()
+    with SessionLocal() as s:
+        e = s.get(Employee, eid)
+        if e is None:
+            raise HTTPException(404, "Сотрудник не найден")
+        for key, limit in (("responsibilities", 4000), ("competencies", 4000), ("context", 4000), ("communication_style", 2000)):
+            if key in f:
+                setattr(e, key, str(f.get(key) or "").strip()[:limit])
+        s.commit()
+    agent.invalidate_roster()
+    return RedirectResponse(f"/memory/people/{eid}?saved=1", 303)
+
+
+@app.post("/memory/people/{eid}/forget-summary")
+def memory_person_forget(request: Request, eid: int):
+    """The assistant's own rolling summary about the person is erased (the person asked, or it is wrong)."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        for m in s.query(PersonMemory).filter_by(employee_id=eid).all():
+            m.summary = ""
+        s.commit()
+    return RedirectResponse(f"/memory/people/{eid}", 303)
+
+
+@app.get("/skills", response_class=HTMLResponse)
+def skills_view(request: Request, edit: int = 0):
+    guard_admin(request)
+    with SessionLocal() as s:
+        rows = [{"id": k.id, "title": k.title, "kind": k.kind, "when": k.when_to_use or "", "body": k.body, "active": k.active,
+                 "uses": k.uses, "updated": k.updated_at, "by": k.updated_by or ""}
+                for k in s.query(Skill).order_by(Skill.active.desc(), Skill.title)]
+    return page(request, "skills.html", skills=rows, edit=edit)
+
+
+@app.post("/skills")
+async def skill_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    title, body = str(f.get("title") or "").strip()[:200], str(f.get("body") or "").strip()[:8000]
+    if not title or not body:
+        raise HTTPException(400, "Нужны название и текст навыка")
+    kind = f.get("kind") if f.get("kind") in ("scenario", "template", "tone") else "scenario"
+    with SessionLocal() as s:
+        sid = str(f.get("id") or "").strip()
+        k = s.get(Skill, int(sid)) if sid.isdigit() else None
+        if k is None:
+            k = Skill()
+            s.add(k)
+        k.title, k.body, k.kind = title, body, kind
+        k.when_to_use = str(f.get("when_to_use") or "").strip()[:2000]
+        k.active, k.updated_by = f.get("active", "on") == "on", _who(request)
+        s.commit()
+    return RedirectResponse("/skills", 303)
+
+
+@app.post("/skills/{sid}/{action}")
+def skill_action(request: Request, sid: int, action: str):
+    guard_admin(request)
+    with SessionLocal() as s:
+        k = s.get(Skill, sid)
+        if k is None:
+            raise HTTPException(404, "Навык не найден")
+        if action == "toggle":
+            k.active = not k.active
+        elif action == "delete":
+            s.delete(k)
+        else:
+            raise HTTPException(404, "Неизвестное действие")
+        s.commit()
+    return RedirectResponse("/skills", 303)
+
+
+@app.get("/documents/{doc_id}/view", response_class=HTMLResponse)
+def document_view(request: Request, doc_id: int, q: str = ""):
+    """A document's card: what it is, its text, which case it belongs to, where it was passed on, questions about it."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        d = s.get(Document, doc_id)
+        if d is None:
+            raise HTTPException(404, "Документ не найден")
+        case = s.get(Case, d.case_id) if d.case_id else None
+        transfers = [{"to": (s.get(Employee, t.to_employee_id).name if t.to_employee_id and s.get(Employee, t.to_employee_id)
+                             else t.to_ref), "status": t.status, "at": t.sent_at or t.created_at, "by": t.approved_by or ""}
+                     for t in s.query(DocumentTransfer).filter_by(document_id=d.id).order_by(DocumentTransfer.id)]
+        doc = {"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256, "at": d.created_at,
+               "sender": d.employee.name if d.employee else d.chat_id, "caption": d.caption or "", "sensitive": d.sensitive,
+               "status": d.text_status or "pending", "summary": d.summary or "", "text": (d.text or "")[:20000],
+               "truncated": len(d.text or "") > 20000,
+               "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None}
+    answer = None
+    if q.strip():
+        try:
+            answer = memory.answer_about_document(doc_id, q.strip()[:500])
+        except llm.LLMError as exc:
+            answer = {"answer": f"Модель недоступна: {exc}", "pieces": []}
+    return page(request, "document.html", doc=doc, transfers=transfers, q=q, answer=answer)
+
+
+@app.post("/documents/{doc_id}/reread")
+def document_reread(request: Request, doc_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        d = s.get(Document, doc_id)
+        if d is None:
+            raise HTTPException(404, "Документ не найден")
+        d.text_status = "pending"
+        s.commit()
+    doctext.process(doc_id) if config.TESTING else pipeline.POOL.submit(doctext.process, doc_id)
+    return RedirectResponse(f"/documents/{doc_id}/view", 303)
+
+
 @app.get("/documents", response_class=HTMLResponse)
 def documents_view(request: Request, q: str = ""):
     """The library of files people sent to the AI employee, with the case and where each file was passed on."""
     guard_admin(request)
     with SessionLocal() as s:
         query = s.query(Document).order_by(Document.id.desc())
-        if q.strip():
-            like = f"%{q.strip()}%"
-            query = query.filter(Document.filename.ilike(like) | Document.caption.ilike(like))
+        found = query.limit(200).all()
+        if q.strip():  # case-insensitive in Russian on every database (SQLite's LIKE folds only Latin letters)
+            needle = q.strip().casefold()
+            found = [d for d in query.limit(2000).all()
+                     if needle in f"{d.filename} {d.caption} {d.text or ''} {d.summary or ''}".casefold()][:200]
         rows = []
-        for d in query.limit(200).all():
+        for d in found:
             case = s.get(Case, d.case_id) if d.case_id else None
             transfers = s.query(DocumentTransfer).filter_by(document_id=d.id).order_by(DocumentTransfer.id).all()
             rows.append({"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256[:12],
                          "sensitive": d.sensitive, "caption": d.caption, "at": d.created_at,
+                         "summary": d.summary or "", "status": d.text_status or "pending",
                          "sender": d.employee.name if d.employee else d.chat_id,
                          "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None,
                          "transfers": [{"to": (s.get(Employee, t.to_employee_id).name if t.to_employee_id and
@@ -1419,7 +1663,7 @@ def departments_view(request: Request, edit: int = 0, msg: str = ""):
 
 @app.post("/departments")
 def department_save(request: Request, id: int = Form(0), name: str = Form(...),
-                    description: str = Form(""), active: str = Form("")):
+                    description: str = Form(""), active: str = Form(""), regulations: str = Form(None)):
     guard_admin(request)
     clean_name = name.strip()[:100]
     if not clean_name:
@@ -1435,6 +1679,8 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
             raise HTTPException(404, "Подразделение не найдено")
         department.name = clean_name
         department.description = description.strip()[:1000]
+        if regulations is not None:
+            department.regulations = regulations.strip()[:10000]
         department.active = bool(active) if id else True
         s.add(department)
         s.commit()

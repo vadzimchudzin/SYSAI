@@ -505,6 +505,14 @@ def _merge_metadata(reports):
     return merged
 
 
+def settings_store_get(key: str):
+    try:
+        from . import settings_store
+        return settings_store.get(key)
+    except Exception:  # noqa: BLE001  analysis also runs without a database in tests
+        return ""
+
+
 def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, progress=None, checkpoint=None) -> dict:
     if not config.llm_enabled():
         raise llm.LLMError("Ключ OpenRouter не задан; для анализа расшифровки он обязателен")
@@ -519,6 +527,9 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
     system = SYSTEM.format(meeting_date=meeting_date.isoformat(), weekday=names[meeting_date.weekday()],
                            employees=employees_json(employees), glossary=settings.get("glossary", ""),
                            style_instruction=style_instruction)
+    profile = str(settings.get("company_profile") or settings_store_get("company_profile") or "").strip()
+    if profile:
+        system += "\nО компании (контекст для понимания обсуждения):\n" + profile[:2000]
     if settings.get("open_tasks"):
         system += ("\nОткрытые задачи прошлых совещаний (контекст; если поручение повторяет открытую задачу, не придумывай "
                    "новую формулировку, а начни description со слов «повтор:»):\n" + str(settings["open_tasks"])[:4000])

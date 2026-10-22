@@ -1,0 +1,44 @@
+{% extends "base.html" %}{% block title %}Память — SYSAI{% endblock %}
+{% block body %}
+<div class="row between"><h1>Память</h1>
+  <form method="get" action="/memory" class="row"><input name="q" value="{{ q }}" placeholder="Что знает ассистент? Например: кто подписывает акты" style="min-width:320px"> <button class="btn sm primary">Найти</button></form></div>
+<p class="muted small">Всё, на что опирается ИИ-сотрудник: компания, отделы, люди, заметки (у каждой — источник, дата и уверенность), документы и <a href="/skills">навыки</a>. Нужное подставляется в каждый его ответ и сообщение.</p>
+{% if msg == 'saved' %}<div class="card small">Сохранено.</div>{% endif %}
+
+{% if q %}<section class="card"><h2>Найдено по запросу «{{ q }}»</h2>
+  {% for r in results %}<div class="mem-hit"><span class="pill gray">{{ r.type }}</span> <a href="{{ r.url }}"><b>{{ r.title }}</b></a>
+    <div class="small">{{ r.text }}</div>
+    <div class="muted small">{% if r.meta.source %}источник: {{ r.meta.source }} · {% endif %}{% if r.meta.confidence %}уверенность: {{ r.meta.confidence }} · {% endif %}{% if r.meta.date %}{{ r.meta.date.strftime('%d.%m.%Y') }} · {% endif %}совпадение {{ r.score }}</div></div>
+  {% else %}<div class="muted">Ничего не найдено. Ассистент ответит, что не знает, и предложит уточнить.</div>{% endfor %}
+</section>{% endif %}
+
+<section class="card"><h2>Компания</h2>
+  <form method="post" action="/memory/company">
+    <label class="f">Профиль: чем занимается компания, клиенты и объекты, правила, которые должен знать каждый
+      <textarea name="company_profile" rows="7" placeholder="ООО «…» — проектирование и монтаж систем… Основные заказчики… Акты подписывает директор…">{{ profile }}</textarea></label>
+    <p class="muted small">Абзацы разделяйте пустой строкой — так поиск точнее находит нужное.</p>
+    <label class="small"><input type="checkbox" name="memory_autolearn" {{ 'checked' if autolearn }}> После одобренного совещания ассистент сам дополняет память фактами — только с дословной цитатой из расшифровки, без оценок людей</label>
+    <div style="margin-top:8px"><button class="btn sm primary">Сохранить</button></div>
+  </form>
+  <h3 style="margin-top:18px">Факты о компании и отделах</h3>
+  {% for n in company_notes %}{% include "_memory_note.html" %}{% else %}<div class="muted small">Пока нет.</div>{% endfor %}
+  <form method="post" action="/memory/notes" class="row mem-add"><input name="text" required placeholder="Новый факт: например, «Закупки свыше 5000 BYN согласует директор»" style="flex:1">
+    <select name="department_id"><option value="">о компании</option>{% for d in departments %}<option value="{{ d.id }}">отдел {{ d.name }}</option>{% endfor %}</select>
+    <button class="btn sm">Добавить</button></form>
+</section>
+
+<section class="card" id="departments"><h2>Отделы</h2>
+  {% for d in departments %}<details class="mem-dept"><summary><b>{{ d.name }}</b> <span class="muted small">{{ d.members|join(', ') }}</span></summary>
+    <form method="post" action="/memory/departments/{{ d.id }}">
+      <label class="f">Функции отдела <textarea name="description" rows="2">{{ d.description }}</textarea></label>
+      <label class="f">Регламенты: порядок работы, кто что согласует и подписывает <textarea name="regulations" rows="4">{{ d.regulations }}</textarea></label>
+      <button class="btn sm">Сохранить</button></form></details>
+  {% else %}<div class="muted small">Отделов нет — <a href="/departments">создать</a>.</div>{% endfor %}
+</section>
+
+<section class="card"><h2>Люди</h2>
+  <div class="table-wrap"><table><thead><tr><th>Сотрудник</th><th>Должность</th><th>Заметок</th><th>Как общаться</th></tr></thead><tbody>
+  {% for p in staff %}<tr><td><a href="/memory/people/{{ p.id }}">{{ p.name }}</a></td><td>{{ p.position }}</td><td>{{ p.notes }}</td><td>{{ 'указано' if p.style else '—' }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}

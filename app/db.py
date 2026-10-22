@@ -122,6 +122,7 @@ class Employee(Base):
     competencies = Column(Text, default="")  # comma/newline separated skills and areas of expertise
     responsibilities = Column(Text, default="")  # what this employee is accountable for
     context = Column(Text, default="")  # extra disambiguating notes for assignment decisions
+    communication_style = Column(Text, default="")  # how the person prefers to be written to (memory card)
     channel = Column(String(20), default="telegram")  # only telegram in MVP
     telegram_chat_id = Column(String(40), default="")  # bot chat id; in AI-employee mode @username, +phone or id
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
@@ -143,6 +144,7 @@ class Department(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
     description = Column(Text, default="")
+    regulations = Column(Text, default="")  # how the department works: rules, procedures, who signs what
     active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=now)
     memberships = relationship("EmployeeDepartment", back_populates="department",
@@ -394,11 +396,17 @@ class Note(Base):
     employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
     task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
     meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True)
-    kind = Column(String(20), default="fact")  # fact | status | commitment | done | system
+    kind = Column(String(20), default="fact")  # fact | status | commitment | done | system | company
     text = Column(Text, nullable=False)
     source = Column(String(20), default="conversation")  # conversation | meeting | system | manual
     author = Column(String(80), default="")
     created_at = Column(DateTime(timezone=True), default=now, index=True)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True)
+    confidence = Column(String(10), default="medium")  # high | medium | low
+    quote = Column(Text, default="")  # the words the fact rests on (meeting transcript, message)
+    archived = Column(Boolean, nullable=False, default=False)  # hidden from memory, kept for the audit trail
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    edited_by = Column(String(120), default="")
 
 
 class PersonMemory(Base):
@@ -566,6 +574,9 @@ class Document(Base):
     caption = Column(Text, default="")
     sensitive = Column(Boolean, nullable=False, default=False)
     data = Column(LargeBinary, nullable=True)
+    text = Column(Text, default="")  # extracted text (PDF/DOCX/XLSX, scans through the vision model)
+    text_status = Column(String(12), default="pending")  # pending | done | empty | failed
+    summary = Column(Text, default="")
     created_at = Column(DateTime(timezone=True), default=now, index=True)
     employee = relationship("Employee")
 
@@ -587,6 +598,40 @@ class DocumentTransfer(Base):
     message_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now)
     sent_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class DocumentChunk(Base):
+    """A piece of a document's text: what memory search finds and what questions about the document are answered from."""
+    __tablename__ = "document_chunks"
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    position = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+
+
+class Skill(Base):
+    """A know-how of the AI employee: a scenario or a template («как запросить исполнительную», «тон с подрядчиками»)."""
+    __tablename__ = "skills"
+    id = Column(Integer, primary_key=True)
+    title = Column(String(200), nullable=False)
+    kind = Column(String(12), default="scenario")  # scenario | template | tone
+    when_to_use = Column(Text, default="")
+    body = Column(Text, nullable=False, default="")
+    active = Column(Boolean, nullable=False, default=True)
+    uses = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+    updated_by = Column(String(120), default="")
+
+
+class MemoryVector(Base):
+    """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
+    __tablename__ = "memory_vectors"
+    key = Column(String(60), primary_key=True)
+    hash = Column(String(40), nullable=False)
+    model = Column(String(120), default="")
+    vector = Column(JSON, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
 
 
 def _add_column_if_missing(table: str, column: str, ddl: str):
@@ -629,6 +674,17 @@ def init_db():
     _add_column_if_missing("employees", "responsibilities", "responsibilities TEXT DEFAULT ''")
     _add_column_if_missing("employees", "context", "context TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_at", "consent_at TIMESTAMP")
+    _add_column_if_missing("employees", "communication_style", "communication_style TEXT DEFAULT ''")
+    _add_column_if_missing("departments", "regulations", "regulations TEXT DEFAULT ''")
+    _add_column_if_missing("notes", "department_id", "department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL")
+    _add_column_if_missing("notes", "confidence", "confidence VARCHAR(10) DEFAULT 'medium'")
+    _add_column_if_missing("notes", "quote", "quote TEXT DEFAULT ''")
+    _add_column_if_missing("notes", "archived", "archived BOOLEAN NOT NULL DEFAULT FALSE")
+    _add_column_if_missing("notes", "updated_at", "updated_at TIMESTAMP")
+    _add_column_if_missing("notes", "edited_by", "edited_by VARCHAR(120) DEFAULT ''")
+    _add_column_if_missing("documents", "text", "text TEXT DEFAULT ''")
+    _add_column_if_missing("documents", "text_status", "text_status VARCHAR(12) DEFAULT 'pending'")
+    _add_column_if_missing("documents", "summary", "summary TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
 
 

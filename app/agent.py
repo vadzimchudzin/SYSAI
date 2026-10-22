@@ -22,7 +22,7 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import bitrix, cases, deadlines, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
+from . import bitrix, cases, deadlines, memory as company_memory, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
 from .db import (ConversationEscalation, ConversationMessage, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
@@ -361,6 +361,12 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                        s.query(ConversationEscalation).filter_by(chat_id=chat, status="open").all()]
         ctx["notes"] = _notes_view(s, employee.id)
         ctx["assistant_waiting_for_you"] = cases.waiting_view(employee.id)
+    # What the company memory knows about this message: an employee sees only their own card and notes.
+    query = " ".join(h.text for h in history[-2:] if h.role == "user")[-600:] + " " + (getattr(row, "text", "") or "")
+    ctx["known_facts"] = company_memory.for_prompt(query, viewer=None if full else (employee.id if employee else -1))
+    found_skills = company_memory.skills_for(getattr(row, "text", "") or "")
+    if found_skills:
+        ctx["skills"] = found_skills
     if result.get("document"):
         ctx["file_received"] = result["document"]
     if result.get("case"):
@@ -447,6 +453,11 @@ ACTIONS_HELP = (
     "скажи, что передашь (кому — в forward_to); сам ничего не пересылай и не обещай сверх этого. Если в нём ambiguous_cases, "
     "спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с просьбой. assistant_waiting_for_you — "
     "чего ты ждёшь от этого человека. file_received — человек прислал файл; он сохранён в библиотеке документов. "
+    "known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки с источником и "
+    "уверенностью, фрагменты документов). На вопросы о компании, людях и документах отвечай по known_facts и данным "
+    "выше; при низкой уверенности так и скажи; если ответа нет — честно скажи, что не знаешь, и предложи уточнить у "
+    "руководителя, не выдумывай. skills — навыки компании для таких ситуаций: следуй им. Новое устойчивое знание о "
+    "человеке или работе сохраняй действием note (только факты, без оценок людей). "
 
     "Поле memory: если узнал что-то важное о человеке или его работе, верни обновлённую краткую память (до 1200 символов, "
     "сохрани важное из прошлой памяти), иначе не добавляй поле.")

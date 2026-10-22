@@ -11,6 +11,8 @@
     <a class="nav {{ 'on' if path.startswith('/progress') }}" href="/progress">{{ icon('home') }} Прогресс</a>
     {% if me and me.role == 'superuser' %}
     <a class="nav {{ 'on' if path.startswith('/employees') }}" href="/employees">{{ icon('users') }} Сотрудники</a>
+    <a class="nav {{ 'on' if path.startswith('/memory') }}" href="/memory">{{ icon('users') }} Память</a>
+    <a class="nav {{ 'on' if path.startswith('/skills') }}" href="/skills">{{ icon('gear') }} Навыки</a>
     <a class="nav {{ 'on' if path.startswith('/documents') }}" href="/documents">{{ icon('list') }} Документы</a>
     <a class="nav {{ 'on' if path.startswith('/reminders') }}" href="/reminders">{{ icon('bell') }} Напоминания</a>
     <a class="nav {{ 'on' if path.startswith('/admin/users') }}" href="/admin/users">{{ icon('key') }} Пользователи{% if pending_users %} <span class="pill red">{{ pending_users }}</span>{% endif %}</a>

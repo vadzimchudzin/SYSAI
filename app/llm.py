@@ -121,6 +121,32 @@ def chat(model: str, messages: list, json_mode: bool = False, temperature: float
     raise LLMError(f"OpenRouter недоступен: {last}")
 
 
+def embed(texts: list, model: str, timeout: float = 60) -> list:
+    """Embeddings for memory search (one vector per text). Counted in the daily budget like any other call."""
+    key = config.openrouter_key()
+    if not key:
+        raise LLMError("Ключ OpenRouter не задан")
+    check_budget()
+    headers = {"Authorization": f"Bearer {key}", "X-Title": "SYSAI"}
+    try:
+        r = httpx.post(f"{config.OPENROUTER_BASE_URL}/embeddings", json={"model": model, "input": list(texts)},
+                       headers=headers, timeout=timeout)
+    except httpx.HTTPError as exc:
+        raise LLMError(f"OpenRouter недоступен: {exc}") from None
+    if r.status_code != 200:
+        raise LLMError(f"OpenRouter embeddings HTTP {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    record_cost(model, data.get("usage"))
+    try:
+        rows = sorted(data["data"], key=lambda x: x.get("index", 0))
+        vectors = [[float(v) for v in row["embedding"]] for row in rows]
+    except (KeyError, TypeError, ValueError):
+        raise LLMError("OpenRouter вернул эмбеддинги в неверной форме") from None
+    if len(vectors) != len(texts):
+        raise LLMError("OpenRouter вернул не все эмбеддинги")
+    return vectors
+
+
 def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", language: str = "ru",
                     timeout: float = 60) -> dict:
     """Call OpenRouter's dedicated speech-to-text endpoint and preserve provider timestamps when available."""

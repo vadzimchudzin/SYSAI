@@ -1,0 +1,24 @@
+{% extends "base.html" %}{% block title %}Навыки — SYSAI{% endblock %}
+{% block body %}
+<h1>Навыки</h1>
+<p class="muted small">Сценарии и шаблоны, по которым ИИ-сотрудник действует: как запросить документ, каким тоном писать подрядчикам, что проверить перед отправкой. Подходящий навык сам подставляется в сообщения и ответы ассистента.</p>
+{% set cur = (skills|selectattr('id', 'equalto', edit)|list|first) if edit else None %}
+<section class="card"><h2>{{ 'Изменить навык' if cur else 'Новый навык' }}</h2>
+  <form method="post" action="/skills"><input type="hidden" name="id" value="{{ cur.id if cur else '' }}">
+    <div class="row"><label class="f" style="flex:2">Название <input name="title" required maxlength="200" value="{{ cur.title if cur else '' }}" placeholder="Как запросить исполнительную документацию"></label>
+      <label class="f">Вид <select name="kind">{% for k, v in (('scenario','сценарий'),('template','шаблон'),('tone','тон общения')) %}<option value="{{ k }}" {{ 'selected' if cur and cur.kind == k }}>{{ v }}</option>{% endfor %}</select></label></div>
+    <label class="f">Когда применять <input name="when_to_use" value="{{ cur.when if cur else '' }}" placeholder="Запрос актов, исполнительной, КС-2 у подрядчиков"></label>
+    <label class="f">Что делать / текст шаблона <textarea name="body" rows="6" required placeholder="1. Назвать объект и период. 2. Перечислить документы… 3. Срок — 3 рабочих дня.">{{ cur.body if cur else '' }}</textarea></label>
+    <label class="small"><input type="checkbox" name="active" {{ 'checked' if not cur or cur.active }}> Включён</label>
+    <div style="margin-top:8px"><button class="btn sm primary">Сохранить</button>{% if cur %} <a href="/skills" class="small">отмена</a>{% endif %}</div>
+  </form></section>
+{% for k in skills %}<article class="card {{ '' if k.active else 'muted' }}"><div class="row between"><b>{{ k.title }}</b>
+  <span><span class="pill gray">{{ {'scenario':'сценарий','template':'шаблон','tone':'тон'}.get(k.kind, k.kind) }}</span> {% if not k.active %}<span class="pill gray">выключен</span>{% endif %}</span></div>
+  {% if k.when %}<div class="small muted">Когда: {{ k.when }}</div>{% endif %}
+  <div class="small" style="white-space:pre-line;margin-top:6px">{{ k.body }}</div>
+  <div class="row small" style="gap:8px;margin-top:8px"><span class="muted">применён {{ k.uses }} раз{% if k.by %} · {{ k.by }}{% endif %}</span>
+    <a href="/skills?edit={{ k.id }}">изменить</a>
+    <form method="post" action="/skills/{{ k.id }}/toggle"><button class="btn sm ghost">{{ 'выключить' if k.active else 'включить' }}</button></form>
+    <form method="post" action="/skills/{{ k.id }}/delete" onsubmit="return confirm('Удалить навык?')"><button class="btn sm ghost">удалить</button></form></div>
+</article>{% else %}<div class="card muted">Навыков пока нет.</div>{% endfor %}
+{% endblock %}
