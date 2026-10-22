@@ -57,6 +57,7 @@ DEFAULTS = {
     "pyannoteai_api_key": "",
     "telegram_bot_token": "",
     "bitrix_webhook_url": "",
+    "notion_parent_id": "",       # only import TicNote exports below this Notion page/database
     # site owner: shown in the footer, on /legal and in the privacy policy (defaults from sysat.by)
     "legal_name": "ООО «СисЭйТи»",
     "legal_unp": "",
