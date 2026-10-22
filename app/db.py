@@ -431,6 +431,50 @@ class LlmSpend(Base):
     created_at = Column(DateTime(timezone=True), default=now)
 
 
+
+class NotionConnection(Base):
+    """Single Notion workspace authorized by an administrator; tokens are encrypted at rest."""
+    __tablename__ = "notion_connections"
+    id = Column(Integer, primary_key=True, default=1)
+    access_token_encrypted = Column(Text, nullable=False, default="")
+    refresh_token_encrypted = Column(Text, nullable=False, default="")
+    token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    workspace_id = Column(String(100), default="")
+    workspace_name = Column(String(200), default="")
+    owner_name = Column(String(200), default="")
+    bot_id = Column(String(100), default="")
+    webhook_verification_token_encrypted = Column(Text, nullable=False, default="")
+    last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    connected_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class NotionImportedPage(Base):
+    """One Notion page maps to at most one SYSAI meeting."""
+    __tablename__ = "notion_imported_pages"
+    page_id = Column(String(64), primary_key=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(300), default="")
+    page_url = Column(String(1000), default="")
+    last_edited_time = Column(String(50), default="")
+    status = Column(String(20), default="queued")
+    imported_at = Column(DateTime(timezone=True), default=now)
+    error = Column(Text, default="")
+
+
+class NotionWebhookEvent(Base):
+    """Durable, deduplicated Notion webhook inbox and retry state."""
+    __tablename__ = "notion_webhook_events"
+    event_id = Column(String(200), primary_key=True)
+    page_id = Column(String(64), nullable=False, index=True)
+    event_type = Column(String(80), nullable=False, default="")
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    error = Column(Text, default="")
+    received_at = Column(DateTime(timezone=True), default=now, index=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+
 def _add_column_if_missing(table: str, column: str, ddl: str):
     """Lightweight migration for databases created by earlier versions."""
     from sqlalchemy import inspect
