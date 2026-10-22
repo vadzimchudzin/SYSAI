@@ -478,6 +478,117 @@ class NotionWebhookEvent(Base):
     processed_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class Case(Base):
+    """A piece of work the AI employee carries through to the end: ask somebody, wait, get a document, pass it on."""
+    __tablename__ = "cases"
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, unique=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True, index=True)
+    title = Column(String(500), nullable=False, default="")
+    kind = Column(String(12), default="")  # ask | request | forward (task_routing action types)
+    # awaiting_approval | suggested | running | waiting | attention | done | failed | cancelled
+    status = Column(String(20), nullable=False, default="running", index=True)
+    autonomy = Column(String(10), default="auto")  # auto | approve | suggest
+    planner = Column(String(10), default="template")  # model | template
+    note = Column(Text, default="")  # why the case stopped or what it needs
+    attempts = Column(Integer, nullable=False, default=0)
+    retry_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    steps = relationship("CaseStep", order_by="CaseStep.position", cascade="all, delete-orphan")
+    events = relationship("CaseEvent", order_by="CaseEvent.id", cascade="all, delete-orphan")
+    task = relationship("Task")
+
+
+class CaseStep(Base):
+    __tablename__ = "case_steps"
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    position = Column(Integer, nullable=False)
+    tool = Column(String(30), nullable=False)  # send_message | wait_reply | forward_document | report | close
+    args = Column(JSON, nullable=False, default=dict)
+    # pending | sending | waiting | awaiting_approval | done | uncertain | failed | skipped
+    status = Column(String(20), nullable=False, default="pending")
+    result = Column(JSON, nullable=True)
+    error = Column(Text, default="")
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class CaseWait(Base):
+    """The case waits for one person: an answer or a document. Reminders and escalation run on this row."""
+    __tablename__ = "case_waits"
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    step_id = Column(Integer, ForeignKey("case_steps.id", ondelete="CASCADE"), nullable=False, unique=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
+    chat_ref = Column(String(80), default="")
+    expects = Column(String(10), nullable=False, default="answer")  # answer | document
+    status = Column(String(12), nullable=False, default="open", index=True)  # open | resolved | cancelled
+    asked_message_id = Column(Integer, nullable=True)
+    started_at = Column(DateTime(timezone=True), default=now)
+    next_reminder_at = Column(DateTime(timezone=True), nullable=True)
+    reminders_sent = Column(Integer, nullable=False, default=0)
+    escalate_at = Column(DateTime(timezone=True), nullable=True)
+    escalated = Column(Boolean, nullable=False, default=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    answer = Column(Text, default="")
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+
+
+class CaseEvent(Base):
+    """The case's diary: what was done, to whom, what came back. Shown in the panel and kept as an audit trail."""
+    __tablename__ = "case_events"
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    step_id = Column(Integer, nullable=True)
+    kind = Column(String(30), nullable=False)
+    text = Column(Text, nullable=False, default="")
+    data = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
+class Document(Base):
+    """A file a person sent to the AI employee in Telegram (PDF, DOCX, XLSX, photo...): the document library."""
+    __tablename__ = "documents"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id"),)
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="SET NULL"), nullable=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
+    chat_id = Column(String(40), nullable=False)
+    message_id = Column(Integer, nullable=False)
+    filename = Column(String(255), default="")
+    mime = Column(String(120), default="")
+    size = Column(Integer, nullable=False, default=0)
+    sha256 = Column(String(64), nullable=False)
+    kind = Column(String(10), default="other")  # pdf | docx | xlsx | image | other
+    caption = Column(Text, default="")
+    sensitive = Column(Boolean, nullable=False, default=False)
+    data = Column(LargeBinary, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now, index=True)
+    employee = relationship("Employee")
+
+
+class DocumentTransfer(Base):
+    """One forwarding of a document: who to, which bytes (hash), who allowed it, what Telegram answered."""
+    __tablename__ = "document_transfers"
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="SET NULL"), nullable=True, index=True)
+    step_id = Column(Integer, ForeignKey("case_steps.id", ondelete="SET NULL"), nullable=True)
+    to_employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    to_ref = Column(String(80), default="")
+    sha256 = Column(String(64), nullable=False)
+    # awaiting_approval | approved | sending | sent | uncertain | blocked
+    status = Column(String(20), nullable=False, default="approved")
+    reason = Column(Text, default="")
+    approved_by = Column(String(120), default="")
+    message_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+
+
 def _add_column_if_missing(table: str, column: str, ddl: str):
     """Lightweight migration for databases created by earlier versions."""
     from sqlalchemy import inspect

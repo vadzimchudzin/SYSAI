@@ -100,6 +100,20 @@
     <p class="small muted">По времени сервиса (TIMEZONE). В это время сообщения людям и ответы ждут утра. Одинаковые часы означают, что тихих часов нет.</p>
     {% endif %}
   </section>
+  {% if ai %}
+  <section class="card setup-step">
+    <h2>Дела ассистента</h2>
+    <label class="f">Самостоятельность
+      <select name="case_autonomy">{% for k, v in (('auto','Делать самому'),('approve','Делать после одобрения плана'),('suggest','Только предложить')) %}<option value="{{ k }}" {{ 'selected' if s.case_autonomy == k }}>{{ v }}</option>{% endfor %}</select></label>
+    <p class="small muted">Касается поручений «узнать», «запросить», «взять и передать». Конфиденциальные файлы всегда пересылаются только с разрешения руководителя.</p>
+    <div class="row">
+      <label class="f sm">Напомнить через, ч <input type="number" min="0.5" max="168" step="0.5" name="case_reminder_hours" value="{{ s.case_reminder_hours }}"></label>
+      <label class="f sm">Напоминаний <input type="number" min="0" max="10" name="case_max_reminders" value="{{ s.case_max_reminders }}"></label>
+      <label class="f sm">Сообщить руководителю через, ч <input type="number" min="1" max="720" name="case_escalate_hours" value="{{ s.case_escalate_hours }}"></label>
+    </div>
+    <label class="f">Слова конфиденциальных файлов <input name="sensitive_keywords" value="{{ s.sensitive_keywords }}"></label>
+  {% endif %}
+  </section>
   <section class="card setup-step">
     <h2>Кому писать</h2>
     {{ switch('approval_required', 'Сначала показать черновик проверяющему', 'Включено: проверяющий видит план и подтверждает отправку. Выключено: после обработки всё уходит сразу.') }}

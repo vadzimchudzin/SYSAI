@@ -13,7 +13,7 @@ import logging
 import pathlib
 import re
 
-from . import analyze, task_routing, config, deadlines, llm, render, report_archive, settings_store, telegram, userbot, visuals, voice
+from . import analyze, cases, task_routing, config, deadlines, llm, render, report_archive, settings_store, telegram, userbot, visuals, voice
 from .db import Artifact, Employee, Meeting, Note, SessionLocal, Task
 
 log = logging.getLogger("sysai.assistant")
@@ -283,8 +283,22 @@ def run_task(task_id: int) -> None:
         if not claimed:
             return
         task = s.get(Task, task_id)
-        meeting = s.get(Meeting, task.meeting_id)
-        facts = _task_facts(s, task, meeting)
+        if cases.wants_case(task):
+            s.commit()
+            carried = True
+        else:
+            carried = False
+            meeting = s.get(Meeting, task.meeting_id)
+            facts = _task_facts(s, task, meeting)
+    if carried:  # a question or a document to get: the assistant carries it as a case until it is done
+        try:
+            cases.start_for_task(task_id)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("case for task %s did not start", task_id)
+            _finish(task_id, "assistant_failed", f"Не удалось начать дело: {str(exc)[:300]}")
+        return
+    with SessionLocal() as s:
+        task = s.get(Task, task_id)
         title, meeting_id = task.title, meeting.id
     try:
         data, feedback = None, ""

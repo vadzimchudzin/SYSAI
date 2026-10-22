@@ -164,7 +164,17 @@
       <td><input type="date" name="deadline_{{ t.id }}" value="{{ t.deadline.isoformat() if t.deadline }}">
         <div class="muted small">{{ {'stated':'назван на встрече','default':'по умолчанию','asked':'от исполнителя','manual':'вручную','none':'без срока'}.get(t.deadline_source) }}{% if t.deadline_quote %}: «{{ t.deadline_quote }}»{% endif %}</div></td>
       <td><select name="priority_{{ t.id }}">{% for k, v in priority.items() %}<option value="{{ k }}" {{ 'selected' if t.priority == k }}>{{ v }}</option>{% endfor %}</select></td>
-      <td>{% set ts = {'draft':('черновик','gray'),'sent':('отправлена','green'),'awaiting_deadline':('ждём срок','amber'),'no_recipient':('нет получателя','red'),'delivery_failed':('не доставлено','red'),'assistant_message_sending':('отправляется','blue'),'assistant_message_uncertain':('проверить доставку','amber')}.get(t.status, (t.status,'gray')) %}<span class="pill {{ ts[1] }}">{{ ts[0] }}</span>
+      <td>{% set ts = {'draft':('черновик','gray'),'sent':('отправлена','green'),'awaiting_deadline':('ждём срок','amber'),'no_recipient':('нет получателя','red'),'delivery_failed':('не доставлено','red'),'assistant_message_sending':('отправляется','blue'),'assistant_message_uncertain':('проверить доставку','amber'),'assistant_waiting':('ведёт дело','blue'),'assistant_done':('сделано','green'),'assistant_failed':('не удалось','red')}.get(t.status, (t.status,'gray')) %}<span class="pill {{ ts[1] }}">{{ ts[0] }}</span>
+        {% set cs = case_by_task.get(t.id) if case_by_task else None %}
+        {% if cs %}<div class="case small" style="margin-top:6px">
+          <div><b>Дело:</b> <span class="pill {{ {'done':'green','failed':'red','cancelled':'gray','attention':'red','awaiting_approval':'amber','suggested':'amber','waiting':'blue','running':'blue'}.get(cs.status,'gray') }}">{{ cs.status_ru }}</span></div>
+          <div class="muted">План{% if cs.planner == 'model' %} (составила модель, проверен кодом){% endif %}: {{ cs.plan }}</div>
+          {% if cs.note %}<div class="warn">{{ cs.note }}</div>{% endif %}
+          {% if cs.events %}<details><summary>Ход дела</summary><ul>{% for e in cs.events %}<li>{{ e.at.strftime('%d.%m %H:%M') if e.at }} — {{ e.text }}</li>{% endfor %}</ul></details>{% endif %}
+          {% if cs.status in ('awaiting_approval','suggested','attention') %}<div class="row" style="gap:6px;margin-top:4px">
+            {% if cs.status in ('awaiting_approval','suggested') or 'разрешения' in (cs.note or '') %}<button class="btn sm primary" formmethod="post" formaction="/cases/{{ cs.id }}/approve" formnovalidate>Одобрить</button>{% else %}<button class="btn sm" formmethod="post" formaction="/cases/{{ cs.id }}/retry" formnovalidate onclick="return confirm('Сначала проверьте чат. Повторить шаг?')">Повторить шаг</button>{% endif %}
+            <button class="btn sm ghost" formmethod="post" formaction="/cases/{{ cs.id }}/cancel" formnovalidate onclick="return confirm('Отменить дело?')">Отменить</button></div>{% endif %}
+        </div>{% endif %}
         {% if t.status == 'assistant_message_uncertain' and t.target_employee_id %}
         <form method="post" action="/meetings/{{ m.id }}/tasks/{{ t.id }}/retry-assistant-message"
               onsubmit="return confirm('Сначала проверьте чат адресата. Если сообщение действительно не пришло, повторить отправку?')">

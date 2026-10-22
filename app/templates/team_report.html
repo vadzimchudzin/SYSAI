@@ -42,5 +42,5 @@ td { padding: 5pt 7pt; border-top: 1px solid #e5e7eb; vertical-align: top; }
 </div>
 {% endfor %}
 {% if assistant_tasks %}<h2>Задачи ассистента</h2><table><tr><th>Задача</th><th>Статус</th></tr>
-{% for t in assistant_tasks %}<tr><td>{{ t.title }}</td><td>{{ {'assistant_todo':'в очереди','assistant_running':'выполняется','assistant_done':'сделано','assistant_failed':'не удалось','draft':'ждёт одобрения'}.get(t.status, t.status) }}</td></tr>{% endfor %}</table>{% endif %}
+{% for t in assistant_tasks %}<tr><td>{{ t.title }}</td><td>{{ {'assistant_todo':'в очереди','assistant_running':'выполняется','assistant_done':'сделано','assistant_failed':'не удалось','assistant_waiting':'ведёт дело','draft':'ждёт одобрения'}.get(t.status, t.status) }}</td></tr>{% endfor %}</table>{% endif %}
 </body></html>

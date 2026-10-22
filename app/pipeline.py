@@ -30,7 +30,7 @@ def _set(meeting_id: int, **kw):
 
 def load(s, meeting_id: int) -> Meeting:
     m = s.get(Meeting, meeting_id)
-    _ = [t.assignee for t in m.tasks]  # eager-load for rendering outside the session
+    _ = [(t.assignee, t.target_employee) for t in m.tasks]  # eager-load for rendering outside the session
     _ = list(m.deliveries)
     _ = list(m.checkpoints)
     _ = list(m.dialogue)
@@ -69,7 +69,7 @@ def create_meeting(filename: str, audio_path: str = "", source: str = "web", tit
         return m.id
 
 
-OPEN_TASK_STATUSES = ("draft", "sent", "awaiting_deadline", "in_progress", "blocked", "assistant_todo")
+OPEN_TASK_STATUSES = ("draft", "sent", "awaiting_deadline", "in_progress", "blocked", "assistant_todo", "assistant_waiting")
 
 
 def open_tasks_brief(meeting_id: int, limit: int = 40) -> str:
@@ -785,16 +785,17 @@ def poke():
 
 
 def start_background():
-    from . import agent, conversations, meeting_alerts, reminders
+    from . import agent, cases, conversations, meeting_alerts, reminders
     resume_jobs()
     conversations.recover()
     assistant.recover()
+    cases.recover()
 
     def loop():
         time.sleep(config.STARTUP_DELAY)  # let the web server answer the platform's checks first
         while True:
             for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
-                       assistant.run_pending, meeting_alerts.run_due, reminders.run_due, userbot.watchdog):
+                       assistant.run_pending, cases.run_due, meeting_alerts.run_due, reminders.run_due, userbot.watchdog):
                 try:
                     fn()
                 except Exception:

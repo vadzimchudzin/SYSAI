@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block title %}Документы — SYSAI{% endblock %}
+{% block body %}
+<div class="row between"><h1>Документы</h1>
+  <form method="get" action="/documents" class="row"><input name="q" value="{{ q }}" placeholder="Поиск по имени файла или подписи"> <button class="btn sm">Найти</button></form></div>
+<p class="muted small">Файлы, которые сотрудники прислали ИИ-сотруднику в Telegram: к какому делу привязаны и кому переданы. Содержимое проверяется по SHA-256 перед каждой пересылкой.</p>
+{% if not docs %}<div class="card muted">Документов пока нет.</div>{% else %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Файл</th><th>От кого</th><th>Дело</th><th>Передан</th></tr></thead>
+  <tbody>{% for d in docs %}
+  <tr><td><a href="/documents/{{ d.id }}">{{ d.filename }}</a> <span class="pill gray">{{ d.kind }}</span>{% if d.sensitive %} <span class="pill amber">конфиденциальный</span>{% endif %}
+      <div class="muted small">{{ (d.size / 1024)|round(1) }} КБ · SHA-256 {{ d.sha }}… · {{ d.at.strftime('%d.%m %H:%M') if d.at }}</div>
+      {% if d.caption %}<div class="small">«{{ d.caption }}»</div>{% endif %}</td>
+    <td>{{ d.sender }}</td>
+    <td>{% if d.case %}<a href="/meetings/{{ d.case.meeting_id }}">{{ d.case.title }}</a>{% else %}<span class="muted">не привязан</span>{% endif %}</td>
+    <td>{% for t in d.transfers %}<div class="small">{{ t.to }} — {{ {'sent':'передан','awaiting_approval':'ждёт разрешения','approved':'разрешён','sending':'отправляется','uncertain':'проверить доставку','blocked':'остановлен'}.get(t.status, t.status) }}</div>{% else %}<span class="muted small">—</span>{% endfor %}</td></tr>
+  {% endfor %}</tbody></table></div>{% endif %}
+{% endblock %}

@@ -23,6 +23,11 @@ DEFAULTS = {
     "daily_budget_usd": 5.0,         # OpenRouter spend per UTC day; 0 = no limit
     "quiet_from_hour": 21,           # no messages to people from this hour (service time zone) ...
     "quiet_to_hour": 9,              # ... until this hour; equal hours mean no quiet time
+    "case_autonomy": "auto",         # cases the assistant runs itself: auto | approve (director confirms the plan) | suggest
+    "case_reminder_hours": 4,        # no answer this long: a polite reminder (quiet hours are respected)
+    "case_max_reminders": 2,         # reminders before the director is told
+    "case_escalate_hours": 24,       # no answer this long after the request: the director is told
+    "sensitive_keywords": "паспорт, зарплат, персональн, конфиденц, nda, пароль, банковск, выписк, больничн, медицин, трудов",
     # processing
     "auto_ingest": False,            # pick up recordings from the microphone automatically (mocked inbox in MVP)
     "approval_required": True,       # draft goes to approvers before anything is sent

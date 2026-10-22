@@ -36,7 +36,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "SYSAI")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "SYSAI")
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 PYANNOTEAI_API_KEY = os.getenv("PYANNOTEAI_API_KEY", "")  # legacy only
 VOICE_SERVICE_URL = os.getenv("SYSAI_VOICE_SERVICE_URL", "").strip().rstrip("/")

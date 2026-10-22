@@ -30,6 +30,7 @@ DAILY_LIMIT = 150               # outgoing messages per rolling 24 hours; the re
 TYPING_MAX = 6.0                # seconds of the "typing..." indicator before a long message
 MAX_VOICE_SECONDS = 600            # longer voice messages are not recognised (cost, and a meeting belongs in the panel)
 MAX_VOICE_BYTES = 15 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024  # files people send for cases (kept in the database)
 PEER_FLOOD_PAUSE = 6 * 3600     # after Telegram's PeerFlood answer nothing is sent for this long
 LEASE_TTL = 90                  # seconds a running instance keeps the account to itself (renewed every watchdog tick)
 INSTANCE = secrets.token_hex(4)  # this process; during a deploy the old and the new instance run side by side
@@ -230,22 +231,46 @@ class TelethonBackend:
             return asyncio.run_coroutine_threadsafe(message.download_media(file=bytes), loop).result(120)
         return {"fetch": fetch, "seconds": seconds, "mime": mime}
 
+    @staticmethod
+    def _document_of(message):
+        """A file or a photo (PDF, DOCX, XLSX, scans...) as a description with a lazy download, else None."""
+        file = getattr(message, "file", None)
+        if file is None or not (getattr(message, "document", None) or getattr(message, "photo", None)):
+            return None
+        if any(getattr(message, k, None) for k in ("voice", "audio", "video_note", "sticker", "gif")):
+            return None
+        size = int(getattr(file, "size", 0) or 0)
+        mime = str(getattr(file, "mime_type", "") or "")
+        name = getattr(file, "name", None) or ("фото.jpg" if getattr(message, "photo", None)
+                                               else "файл" + str(getattr(file, "ext", "") or ""))
+        if size > MAX_DOCUMENT_BYTES:
+            return {"too_big": True, "size": size, "mime": mime, "filename": name}
+        loop = asyncio.get_running_loop()
+
+        def fetch():  # called from a worker thread of the app, only for people the app serves
+            return asyncio.run_coroutine_threadsafe(message.download_media(file=bytes), loop).result(180)
+        return {"fetch": fetch, "size": size, "mime": mime, "filename": name}
+
     async def _dispatch(self, sender, message):
         text = (message.raw_text or "").strip()
         if sender is None or getattr(sender, "bot", False):
             return
-        voice = None
+        voice = document = None
         if not text:
             voice = self._voice_of(message)
-            if voice is None:
-                return
+        if voice is None:
+            document = self._document_of(message)
+        if not text and voice is None and document is None:
+            return
         msg = {"user_id": sender.id, "username": sender.username or "", "phone": getattr(sender, "phone", "") or "",
                "name": " ".join(x for x in (sender.first_name, sender.last_name) if x), "text": text,
-               "message_id": message.id}
+               "message_id": message.id, "reply_to": getattr(message, "reply_to_msg_id", None)}
         if not await self._served(sender):
             return
         if voice is not None:
             msg["voice"] = voice
+        if document is not None:
+            msg["document"] = document
         await asyncio.get_running_loop().run_in_executor(None, self._on_message, msg)
 
     async def _served(self, person) -> bool:

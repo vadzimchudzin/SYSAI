@@ -14,8 +14,19 @@ from . import config, db, settings_store
 log = logging.getLogger("sysai.llm")
 
 
+_SECRET = re.compile(r"(sk-or-[A-Za-z0-9_-]{6})[A-Za-z0-9_-]+|(Bearer\s+)[^\s'\"]+")
+
+
+def redact(text) -> str:
+    """Keys never travel in error texts (they end up in the database, the panel and messages to people)."""
+    return _SECRET.sub(lambda m: (m.group(1) + "…") if m.group(1) else (m.group(2) + "…"), str(text))
+
+
 class LLMError(RuntimeError):
     pass
+
+    def __init__(self, *args):
+        super().__init__(*(redact(a) if isinstance(a, str) else a for a in args))
 
 
 class IncompleteResponse(LLMError):

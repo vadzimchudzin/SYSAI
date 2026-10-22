@@ -22,7 +22,7 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import bitrix, deadlines, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
+from . import bitrix, cases, deadlines, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
 from .db import (ConversationEscalation, ConversationMessage, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
@@ -129,13 +129,38 @@ def _with_transcript(msg: dict):
     return out
 
 
+def _with_document(msg: dict):
+    """A file from a person we serve is kept in the document library (strangers' files are never downloaded). The
+    conversation sees the caption, or a system note in brackets that a file came."""
+    if not wants(msg) or _seen(msg):
+        return None
+    with SessionLocal() as s:
+        employee = _find_employee(s, msg)
+        employee_id = employee.id if employee is not None else None
+    try:
+        info = cases.intake_document(msg, employee_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("file %s of %s not received: %s", msg["message_id"], msg["user_id"], exc)
+        info = {"problem": "failed", "filename": str(msg["document"].get("filename") or "файл")}
+    out = {k: v for k, v in msg.items() if k != "document"}
+    note = {"too_big": "(прислал файл «{}», он больше 20 МБ — не принят)", "empty": "(прислал пустой файл «{}»)",
+            "failed": "(прислал файл «{}», скачать не удалось)"}.get(info.get("problem"), "(прислал файл «{}»)")
+    out["text"] = (msg.get("text") or "").strip() or note.format(info.get("filename"))
+    out["document_info"] = info
+    return out
+
+
 def handle_incoming(msg: dict) -> None:
-    """Called by the Telegram account for each private text or voice message. Safe to call twice with the same message."""
+    """Called by the Telegram account for each private text, voice message or file. Safe to call twice."""
     if not userbot.ai_mode():
         return
     try:
         if msg.get("voice") is not None:
             msg = _with_transcript(msg)
+            if msg is None:
+                return
+        elif msg.get("document") is not None:
+            msg = _with_document(msg)
             if msg is None:
                 return
         row_id = _accept(msg)
@@ -144,6 +169,7 @@ def handle_incoming(msg: dict) -> None:
         return
     if row_id is None:
         return
+    _link_case(row_id)
     if userbot.quiet_until() is not None:
         return  # the reply waits in the queue until the quiet hours end (see run_pending)
     if _testing():
@@ -169,7 +195,8 @@ def _accept(msg: dict):
             result={"attempts": 0, "name": msg.get("name", "") if wanted else "", "reviewer": reviewer,
                     "director": director, "full_access": full, "employee_id": employee.id if employee else None,
                     "voice": bool(msg.get("voice_info")), "voice_problem": (msg.get("voice_info") or {}).get("problem"),
-                    "username": msg.get("username", "") if wanted else "", "phone": msg.get("phone", "") if wanted else ""})
+                    "username": msg.get("username", "") if wanted else "", "phone": msg.get("phone", "") if wanted else "",
+                    "reply_to": msg.get("reply_to"), "document": msg.get("document_info") if wanted else None})
         s.add(row)
         try:
             s.commit()
@@ -177,6 +204,29 @@ def _accept(msg: dict):
             s.rollback()
             return None  # already seen (the unread scan hands messages over again)
         return row.id if wanted else None
+
+
+def _link_case(row_id: int) -> None:
+    """Does this message (or file) answer one of the assistant's cases? The case goes on by itself; the conversation
+    model is told so it can thank the person instead of acting on it."""
+    try:
+        with SessionLocal() as s:
+            row = s.get(ConversationMessage, row_id)
+            result = dict(row.result or {})
+            if not result.get("employee_id"):
+                return
+            text, employee_id = row.text, result["employee_id"]
+        document_id = (result.get("document") or {}).get("document_id")
+        link = cases.on_message(employee_id, text, result.get("reply_to"), document_id)
+        if link:
+            with SessionLocal() as s:
+                row = s.get(ConversationMessage, row_id)
+                result = dict(row.result or {})
+                result["case"] = link
+                row.result = result
+                s.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("message %s not matched to a case", row_id)
 
 
 def record_outgoing(ref: str, text: str, message_id, user_id) -> None:
@@ -310,6 +360,11 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         ctx["waiting_for_reviewer"] = [{"id": e.id, "question": e.reason} for e in
                                        s.query(ConversationEscalation).filter_by(chat_id=chat, status="open").all()]
         ctx["notes"] = _notes_view(s, employee.id)
+        ctx["assistant_waiting_for_you"] = cases.waiting_view(employee.id)
+    if result.get("document"):
+        ctx["file_received"] = result["document"]
+    if result.get("case"):
+        ctx["this_message_for_case"] = result["case"]
     if full:
         people = s.query(Employee).filter_by(active=True).order_by(Employee.name).all()
         tasks = s.query(Task).order_by(Task.id.desc()).limit(300).all()
@@ -338,6 +393,8 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         ctx["recent_meetings"] = [_meeting_view(m, True) for m in
                                   s.query(Meeting).order_by(Meeting.id.desc()).limit(4).all()]
     ctx["reminders_pending"] = reminders.pending_view(s, chat, full)
+    if reviewer or director:
+        ctx["cases_awaiting_decision"] = cases.decisions_view()
     if reviewer:
         waiting = s.query(Meeting).filter_by(status="awaiting_approval").order_by(Meeting.id.desc()).limit(5).all()
         ctx["meetings_awaiting_approval"] = [{**_meeting_view(m, True), "tasks": len(m.tasks)} for m in waiting]
@@ -383,6 +440,14 @@ ACTIONS_HELP = (
     "Текст напоминания потом напишешь сам, в reply скажи кому и когда напомнишь; если неясно кому, когда или о чём, "
     'сначала спроси; '
     '{"type":"cancel_reminder","reminder_id":ID}: отменить напоминание из reminders_pending. '
+    '{"type":"approve_case","case_id":ID} и {"type":"cancel_case","case_id":ID}: руководитель прямо разрешил начать дело, '
+    "переслать документ или повторить остановленный шаг из cases_awaiting_decision, либо отменил дело (если дел несколько и "
+    "неясно какое, спроси). "
+    "Дела ведёт код: если this_message_for_case задан, человек ответил или прислал документ по делу — коротко поблагодари и "
+    "скажи, что передашь (кому — в forward_to); сам ничего не пересылай и не обещай сверх этого. Если в нём ambiguous_cases, "
+    "спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с просьбой. assistant_waiting_for_you — "
+    "чего ты ждёшь от этого человека. file_received — человек прислал файл; он сохранён в библиотеке документов. "
+
     "Поле memory: если узнал что-то важное о человеке или его работе, верни обновлённую краткую память (до 1200 символов, "
     "сохрани важное из прошлой памяти), иначе не добавляй поле.")
 
@@ -559,6 +624,13 @@ def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str
     if kind == "cancel_reminder":
         ids = {r["id"] for r in ctx.get("reminders_pending", [])}
         return "" if action.get("reminder_id") in ids else "cancel_reminder: напоминание не найдено среди ожидающих"
+    if kind in ("approve_case", "cancel_case"):
+        if not reviewer:
+            return f"{kind} доступно только руководителю"
+        ids = {c["id"] for c in ctx.get("cases_awaiting_decision", [])}
+        if kind == "cancel_case":
+            return "" if isinstance(action.get("case_id"), int) else "cancel_case: укажи case_id"
+        return "" if action.get("case_id") in ids else "approve_case: дело не найдено среди ждущих решения"
     if kind == "team_report":
         if not full:
             return "team_report доступно только проверяющему и людям с полным доступом"
@@ -574,7 +646,7 @@ def _denied(action: dict, employee, reviewer: bool, full: bool) -> bool:
         return not full
     if kind == "remind":
         return action.get("to") != "me" and not full
-    if kind in ("relay_answer", "approve_meeting", "reject_meeting"):
+    if kind in ("relay_answer", "approve_meeting", "reject_meeting", "approve_case", "cancel_case"):
         return not reviewer
     if kind == "note":
         return action.get("employee_id") not in (None, employee.id if employee else None) and not full
@@ -687,6 +759,12 @@ def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | Non
                 raise AgentError("напоминание уже отправлено или отменено")
             meeting_alerts.release(s, action["reminder_id"])
             s.commit()
+        elif kind in ("approve_case", "cancel_case"):
+            s.commit()
+            if kind == "cancel_case":
+                cases.cancel(action["case_id"], author)
+            elif not cases.approve(action["case_id"], author):
+                cases.retry_step(action["case_id"], author)
         elif kind == "assign_task":
             task = s.get(Task, action["task_id"])
             target = action["to"]

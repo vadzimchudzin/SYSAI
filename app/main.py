@@ -22,12 +22,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, pipeline, progress_board, render, report_archive,
+from . import (accounts, agent, bitrix, cases, config, llm, deadlines, meeting_alerts, pipeline, progress_board, render, report_archive,
                settings_store, speaker_id, telegram, userbot, notion)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, ConversationEscalation, Delivery, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -446,7 +446,58 @@ def meeting_view(request: Request, mid: int):
                 if userbot.ai_mode() and loaded.status in ("awaiting_approval", "rejected") else None)
     until = userbot.quiet_until()
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
-                plan=plan, quiet_at=userbot.local_time(until) if until is not None else "")
+                plan=plan, quiet_at=userbot.local_time(until) if until is not None else "",
+                case_by_task=cases.for_meeting(mid))
+
+
+@app.post("/cases/{case_id}/{action}")
+def case_action(request: Request, case_id: int, action: str):
+    """The director's decisions on a case: allow the plan or a transfer, repeat a stopped step, cancel."""
+    guard_admin(request)
+    who = (current_user(request) or {}).get("username") or "панель"
+    done = {"approve": cases.approve, "retry": cases.retry_step, "cancel": cases.cancel}.get(action)
+    if done is None:
+        raise HTTPException(404, "Неизвестное действие")
+    if not done(case_id, f"{who} (панель)"):
+        raise HTTPException(409, "Действие сейчас невозможно: дело уже в другом состоянии")
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        target = f"/meetings/{case.meeting_id}" if case and case.meeting_id else "/documents"
+    return RedirectResponse(target, status_code=303)
+
+
+@app.get("/documents", response_class=HTMLResponse)
+def documents_view(request: Request, q: str = ""):
+    """The library of files people sent to the AI employee, with the case and where each file was passed on."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        query = s.query(Document).order_by(Document.id.desc())
+        if q.strip():
+            like = f"%{q.strip()}%"
+            query = query.filter(Document.filename.ilike(like) | Document.caption.ilike(like))
+        rows = []
+        for d in query.limit(200).all():
+            case = s.get(Case, d.case_id) if d.case_id else None
+            transfers = s.query(DocumentTransfer).filter_by(document_id=d.id).order_by(DocumentTransfer.id).all()
+            rows.append({"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256[:12],
+                         "sensitive": d.sensitive, "caption": d.caption, "at": d.created_at,
+                         "sender": d.employee.name if d.employee else d.chat_id,
+                         "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None,
+                         "transfers": [{"to": (s.get(Employee, t.to_employee_id).name if t.to_employee_id and
+                                               s.get(Employee, t.to_employee_id) else t.to_ref), "status": t.status,
+                                        "at": t.sent_at} for t in transfers]})
+    return page(request, "documents.html", docs=rows, q=q)
+
+
+@app.get("/documents/{doc_id}")
+def document_download(request: Request, doc_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        d = s.get(Document, doc_id)
+        if d is None or d.data is None:
+            raise HTTPException(404, "Документ не найден")
+        data, mime, name = bytes(d.data), d.mime or "application/octet-stream", d.filename or f"document-{doc_id}"
+    return Response(data, media_type=mime, headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name)})
 
 
 @app.get("/artifacts/{aid}")
@@ -851,6 +902,21 @@ async def settings_save(request: Request):
             raise HTTPException(400, "Укажите целое число рабочих дней")
     if "ask_timeout_hours" in f:
         updates["ask_timeout_hours"] = _num(f["ask_timeout_hours"], 24)
+    if "case_autonomy" in f:
+        if f["case_autonomy"] not in cases.AUTONOMY:
+            raise HTTPException(400, "Выберите уровень самостоятельности из списка")
+        updates["case_autonomy"] = f["case_autonomy"]
+    for key, low, high in (("case_reminder_hours", 0.5, 168), ("case_max_reminders", 0, 10), ("case_escalate_hours", 1, 720)):
+        if key in f:
+            try:
+                value = float(str(f[key]).replace(",", "."))
+            except ValueError:
+                raise HTTPException(400, "Сроки дел укажите числом")
+            if not low <= value <= high:
+                raise HTTPException(400, f"Значение вне диапазона {low}–{high}")
+            updates[key] = int(value) if key == "case_max_reminders" else value
+    if "sensitive_keywords" in f:
+        updates["sensitive_keywords"] = str(f["sensitive_keywords"])[:1000]
     # Secrets are never echoed in hidden inputs. A value alone (including a
     # legacy hidden value) is not an instruction to replace a credential.
     # Require the explicit action selected in the visible credential control.
