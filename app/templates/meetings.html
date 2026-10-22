@@ -23,6 +23,7 @@
       <option value="microphone" {{ 'selected' if source == 'microphone' }}>Микрофон</option>
       <option value="demo" {{ 'selected' if source == 'demo' }}>Демо</option>
       <option value="api" {{ 'selected' if source == 'api' }}>API</option>
+      <option value="notion" {{ 'selected' if source == 'notion' }}>Notion</option>
     </select>
   </label>
   <label class="f archive-date">С даты<input type="date" name="date_from" value="{{ date_from }}"></label>
@@ -60,7 +61,7 @@
       </div>
       <div class="archive-meta">
         <span>{{ counts[m.id] }} {{ 'задач' if counts[m.id] % 10 in (0, 5, 6, 7, 8, 9) or counts[m.id] % 100 in (11, 12, 13, 14) else ('задача' if counts[m.id] % 10 == 1 else 'задачи') }}</span>
-        <span>{{ {'web':'Файл', 'microphone':'Микрофон', 'demo':'Демо', 'api':'API'}.get(m.source, m.source) }}</span>
+        <span>{{ {'web':'Файл', 'microphone':'Микрофон', 'demo':'Демо', 'api':'API', 'notion':'Notion'}.get(m.source, m.source) }}</span>
       </div>
       <div class="archive-document">
         {% if version %}
