@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, bitrix, cases, config, llm, deadlines, meeting_alerts, pipeline, progress_board, render, report_archive,
+from . import (accounts, agent, bitrix, cases, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
                settings_store, speaker_id, telegram, userbot, notion)
 from .analyze import mmss
 from .transcript_sections import group_transcript
@@ -464,6 +464,79 @@ def case_action(request: Request, case_id: int, action: str):
         case = s.get(Case, case_id)
         target = f"/meetings/{case.meeting_id}" if case and case.meeting_id else "/documents"
     return RedirectResponse(target, status_code=303)
+
+
+def _progress_data(request: Request, scope: str) -> dict:
+    with SessionLocal() as s:
+        return progress.build(s, scope or "last")
+
+
+@app.get("/progress", response_class=HTMLResponse)
+def progress_view(request: Request, scope: str = "last"):
+    """Every case of the assistant and every task after a meeting: what is done, who is awaited, what needs a decision."""
+    guard(request)
+    me = current_user(request) or {}
+    return page(request, "progress.html", data=_progress_data(request, scope), admin=me.get("role") == "superuser")
+
+
+@app.get("/progress/feed", response_class=HTMLResponse)
+def progress_feed(request: Request, scope: str = "last"):
+    guard(request)
+    me = current_user(request) or {}
+    return tpl.TemplateResponse(request, "_progress_feed.html", {"request": request, "data": _progress_data(request, scope),
+                                                                 "admin": me.get("role") == "superuser"},
+                                headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/progress/version")
+def progress_version(request: Request, scope: str = "last"):
+    guard(request)
+    with SessionLocal() as s:
+        return JSONResponse({"version": progress.version(s, scope or "last")}, headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/progress/cases/{case_id}/{action}")
+async def progress_case_action(request: Request, case_id: int, action: str):
+    """A person steps into a case: approve, repeat, pause, resume, enter an answer, upload a document, write from the
+    assistant's account, hand over to an employee, close."""
+    guard_admin(request)
+    me = current_user(request) or {}
+    who = f"{me.get('name') or me.get('username') or 'руководитель'} (панель)"
+    form = await request.form()
+    if action == "upload":
+        upload = form.get("file")
+        data = await upload.read() if upload is not None and hasattr(upload, "read") else b""
+        ok = cases.attach_document(case_id, getattr(upload, "filename", "") or "файл",
+                                   getattr(upload, "content_type", "") or "", data, who)
+    elif action == "answer":
+        ok = cases.record_answer(case_id, str(form.get("text") or ""), who)
+    elif action == "message":
+        ok = cases.send_manual(case_id, str(form.get("text") or ""), who)
+    elif action == "handover":
+        try:
+            employee_id = int(str(form.get("employee_id") or ""))
+        except ValueError:
+            raise HTTPException(400, "Выберите сотрудника")
+        ok = cases.hand_over(case_id, employee_id, who)
+    elif action == "close":
+        ok = cases.close_manually(case_id, who, str(form.get("note") or ""))
+    elif action == "link":
+        try:
+            ok = cases.link_document(case_id, int(str(form.get("document_id") or "")), who)
+        except ValueError:
+            raise HTTPException(400, "Выберите документ")
+    else:
+        simple = {"approve": cases.approve, "retry": cases.retry_step, "pause": cases.pause, "resume": cases.resume,
+                  "cancel": cases.cancel}.get(action)
+        if simple is None:
+            raise HTTPException(404, "Неизвестное действие")
+        ok = simple(case_id, who)
+    if not ok:
+        raise HTTPException(409, "Действие сейчас невозможно: дело в другом состоянии или не хватает данных")
+    back = request.headers.get("referer") or "/progress"
+    if not back.split("://", 1)[-1].split("/", 1)[-1].startswith(("progress", "meetings")):
+        back = "/progress"
+    return RedirectResponse(back.split("#")[0] + f"#case-{case_id}", status_code=303)
 
 
 @app.get("/documents", response_class=HTMLResponse)

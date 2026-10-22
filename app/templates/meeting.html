@@ -167,7 +167,7 @@
       <td>{% set ts = {'draft':('черновик','gray'),'sent':('отправлена','green'),'awaiting_deadline':('ждём срок','amber'),'no_recipient':('нет получателя','red'),'delivery_failed':('не доставлено','red'),'assistant_message_sending':('отправляется','blue'),'assistant_message_uncertain':('проверить доставку','amber'),'assistant_waiting':('ведёт дело','blue'),'assistant_done':('сделано','green'),'assistant_failed':('не удалось','red')}.get(t.status, (t.status,'gray')) %}<span class="pill {{ ts[1] }}">{{ ts[0] }}</span>
         {% set cs = case_by_task.get(t.id) if case_by_task else None %}
         {% if cs %}<div class="case small" style="margin-top:6px">
-          <div><b>Дело:</b> <span class="pill {{ {'done':'green','failed':'red','cancelled':'gray','attention':'red','awaiting_approval':'amber','suggested':'amber','waiting':'blue','running':'blue'}.get(cs.status,'gray') }}">{{ cs.status_ru }}</span></div>
+          <div><b>Дело</b> (<a href="/progress?scope={{ m.id }}#case-{{ cs.id }}">в «Прогрессе»</a>): <span class="pill {{ {'done':'green','failed':'red','cancelled':'gray','attention':'red','awaiting_approval':'amber','suggested':'amber','waiting':'blue','running':'blue'}.get(cs.status,'gray') }}">{{ cs.status_ru }}</span></div>
           <div class="muted">План{% if cs.planner == 'model' %} (составила модель, проверен кодом){% endif %}: {{ cs.plan }}</div>
           {% if cs.note %}<div class="warn">{{ cs.note }}</div>{% endif %}
           {% if cs.events %}<details><summary>Ход дела</summary><ul>{% for e in cs.events %}<li>{{ e.at.strftime('%d.%m %H:%M') if e.at }} — {{ e.text }}</li>{% endfor %}</ul></details>{% endif %}

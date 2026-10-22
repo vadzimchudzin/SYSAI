@@ -8,6 +8,7 @@
     <a href="/app/new" class="btn primary new">{{ icon('plus') }} Новое совещание</a>
     <a class="nav {{ 'on' if path == '/app' }}" href="/app">{{ icon('home') }} Обзор</a>
     <a class="nav {{ 'on' if path.startswith('/meetings') }}" href="/meetings">{{ icon('list') }} Совещания</a>
+    <a class="nav {{ 'on' if path.startswith('/progress') }}" href="/progress">{{ icon('home') }} Прогресс</a>
     {% if me and me.role == 'superuser' %}
     <a class="nav {{ 'on' if path.startswith('/employees') }}" href="/employees">{{ icon('users') }} Сотрудники</a>
     <a class="nav {{ 'on' if path.startswith('/documents') }}" href="/documents">{{ icon('list') }} Документы</a>

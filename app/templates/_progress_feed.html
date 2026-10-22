@@ -1,0 +1,56 @@
+{% set sm = data.summary %}
+<section class="card pg-summary">
+  <div class="muted small">{{ data.label }}{% if data.meeting %} · <a href="/meetings/{{ data.meeting.id }}">открыть совещание</a>{% endif %}</div>
+  <div class="pg-stats">
+    <div class="pg-stat"><b>{{ sm.created }}</b><span>дел создано</span></div>
+    <div class="pg-stat ok"><b>{{ sm.done }}</b><span>закрыто</span></div>
+    <div class="pg-stat"><b>{{ sm.waiting }}</b><span>ждут ответа</span></div>
+    <div class="pg-stat {{ 'bad' if sm.stuck }}"><b>{{ sm.stuck }}</b><span>нужно решение</span></div>
+    {% if sm.handed_over %}<div class="pg-stat"><b>{{ sm.handed_over }}</b><span>передано людям</span></div>{% endif %}
+    {% if sm.failed %}<div class="pg-stat bad"><b>{{ sm.failed }}</b><span>не удалось / отменено</span></div>{% endif %}
+  </div>
+  {% set pp = data.people %}
+  {% if pp and pp.total %}
+  <div class="pg-people small">Поручения людям: {{ pp.total }} · в работе {{ pp.in_work }} · сделано {{ pp.done }}{% if pp.overdue %} · <span class="warn">просрочено {{ pp.overdue }}</span>{% endif %}{% if pp.blocked %} · <span class="warn">заблокировано {{ pp.blocked }}</span>{% endif %}{% if pp.nobody %} · <span class="warn">без исполнителя {{ pp.nobody }}</span>{% endif %}</div>
+  {% if pp.attention %}<ul class="pg-people-list small">{% for t in pp.attention %}<li><b>{{ t.why }}</b>: {{ t.title }} — {{ t.who }}{% if t.deadline %} (срок {{ t.deadline }}){% endif %}</li>{% endfor %}</ul>{% endif %}
+  {% endif %}
+</section>
+
+{% if not data.groups %}<div class="card muted">Дел ассистента здесь пока нет. Они появляются, когда на совещании звучит «узнать у…», «запросить у…» или «взять у… и передать…», и совещание одобрено.</div>{% endif %}
+
+{% for title, items in data.groups %}
+<h2 class="pg-group">{{ title }} <span class="muted">{{ items|length }}</span></h2>
+{% for c in items %}
+<article class="card pg-case {{ 'stuck' if c.stuck }}" id="case-{{ c.id }}">
+  <div class="row between"><div><b>{{ c.title }}</b>{% if data.scope != 'last' and c.meeting %} <span class="muted small">· {{ c.meeting }}</span>{% endif %}</div>
+    <span class="pill {{ c.pill }}">{{ c.status_ru }}</span></div>
+  <div class="pg-now"><span class="muted">Сейчас:</span> {{ c.now }}</div>
+  {% if c.retry %}<div class="small warn">Повторю {{ c.retry.in }}{% if c.retry.why %}: {{ c.retry.why }}{% endif %}</div>{% endif %}
+  {% if c.waiting %}<div class="pg-wait small">Ждёт {{ c.waiting.what }} от <b>{{ c.waiting.who }}</b> уже {{ c.waiting.for }}{% if c.waiting.reminders %} · напоминаний: {{ c.waiting.reminders }}{% endif %}{% if c.waiting.next_reminder %} · следующее {{ c.waiting.next_reminder }}{% endif %}{% if c.waiting.escalated %} · <span class="warn">руководитель уведомлён</span>{% elif c.waiting.escalate_in %} · сообщу руководителю {{ c.waiting.escalate_in }}{% endif %}</div>{% endif %}
+  {% if c.next %}<div class="small"><span class="muted">Дальше:</span> {{ c.next|join(' → ') }}</div>{% endif %}
+  {% if c.documents %}<div class="small pg-docs"><span class="muted">Документы:</span>{% for d in c.documents %} <a href="/documents/{{ d.id }}">{{ d.filename }}</a>{% if d.from %} от {{ d.from }}{% endif %}{% if d.sensitive %} <span class="pill amber">конфиденциальный</span>{% endif %}{% for t in d.transfers %} → {{ t.to }} ({{ {'sent':'передан','awaiting_approval':'ждёт разрешения','approved':'разрешён','sending':'отправляется','uncertain':'проверить доставку','blocked':'остановлен'}.get(t.status, t.status) }}){% endfor %}{% if not loop.last %};{% endif %}{% endfor %}</div>{% endif %}
+  <details class="pg-log" data-key="log-{{ c.id }}"><summary class="small">Ход дела{% if c.updated %} · последнее событие {{ c.updated }} назад{% endif %}</summary>
+    <div class="muted small">План{% if c.planner == 'model' %} (модель, проверен кодом){% endif %}: {{ c.plan }}</div>
+    <ol class="pg-events small">{% for e in c.events %}<li><span class="muted">{{ e.at.strftime('%d.%m %H:%M') if e.at }}</span> {{ e.text }}</li>{% endfor %}</ol>
+  </details>
+  {% if admin and c.open %}
+  <div class="pg-actions">
+    <div class="row">
+      {% if c.can.approve %}<form method="post" action="/progress/cases/{{ c.id }}/approve"><button class="btn sm primary">Одобрить</button></form>{% endif %}
+      {% if c.can.retry %}<form method="post" action="/progress/cases/{{ c.id }}/retry" onsubmit="return confirm('Сначала проверьте чат: сообщение могло дойти. Повторить шаг?')"><button class="btn sm">Повторить шаг</button></form>{% endif %}
+      {% if c.can.pause %}<form method="post" action="/progress/cases/{{ c.id }}/pause"><button class="btn sm ghost">Пауза</button></form>{% endif %}
+      {% if c.can.resume %}<form method="post" action="/progress/cases/{{ c.id }}/resume"><button class="btn sm primary">Продолжить</button></form>{% endif %}
+      <form method="post" action="/progress/cases/{{ c.id }}/close" onsubmit="return confirm('Закрыть дело как выполненное?')"><button class="btn sm ghost">Закрыть</button></form>
+    </div>
+    <details data-key="act-{{ c.id }}"><summary class="small">Вмешаться</summary>
+      {% if c.can.answer %}<form method="post" action="/progress/cases/{{ c.id }}/answer" class="pg-form"><label class="f">Ответ получен иначе (звонок, лично) <textarea name="text" rows="2" required placeholder="Что ответил {{ c.waiting.who }}"></textarea></label><button class="btn sm">Внести ответ</button></form>{% endif %}
+      {% if c.unlinked %}<form method="post" action="/progress/cases/{{ c.id }}/link" class="pg-form row"><label class="f">{{ c.waiting.who }} уже прислал(а) файл без привязки к делу <select name="document_id" required>{% for d in c.unlinked %}<option value="{{ d.id }}">{{ d.filename }}{% if d.at %} · {{ d.at.strftime('%d.%m %H:%M') }}{% endif %}</option>{% endfor %}</select></label><button class="btn sm primary">Привязать к этому делу</button></form>{% endif %}
+      {% if c.can.upload %}<form method="post" action="/progress/cases/{{ c.id }}/upload" enctype="multipart/form-data" class="pg-form"><label class="f">Документ пришёл иначе (почта, скан) <input type="file" name="file" required></label><button class="btn sm">Загрузить и продолжить</button></form>{% endif %}
+      <form method="post" action="/progress/cases/{{ c.id }}/message" class="pg-form"><label class="f">Написать от имени ассистента{% if c.waiting %} — {{ c.waiting.who }}{% endif %} <textarea name="text" rows="2" required maxlength="3500" placeholder="Текст уйдёт ровно так, как написан"></textarea></label><button class="btn sm">Отправить</button></form>
+      <form method="post" action="/progress/cases/{{ c.id }}/handover" class="pg-form row"><label class="f">Передать человеку <select name="employee_id" required><option value="">— выберите —</option>{% for e in data.employees %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}</select></label><button class="btn sm" onclick="return confirm('Ассистент остановит дело и передаст его. Продолжить?')">Передать</button></form>
+    </details>
+  </div>
+  {% endif %}
+</article>
+{% endfor %}
+{% endfor %}

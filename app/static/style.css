@@ -669,3 +669,20 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 /* Quick-create uses a single field and an explicit action. */
 .employee-quick-form { grid-template-columns: minmax(0, 1fr); max-width: 600px; }
 .employee-quick-form .actions { grid-column: 1; }
+
+/* Progress page (cases of the assistant) */
+.pg-head { align-items: center; gap: 12px; flex-wrap: wrap; }
+.pg-scope select { min-width: 240px; }
+.pg-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin: 12px 0 6px; }
+.pg-stat { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; display: flex; flex-direction: column; }
+.pg-stat b { font-size: 26px; line-height: 1.1; } .pg-stat span { color: var(--muted); font-size: 13px; }
+.pg-stat.ok b { color: var(--green); } .pg-stat.bad b { color: var(--red); }
+.pg-people { margin-top: 8px; } .pg-people-list { margin: 6px 0 0 18px; }
+.pg-group { margin: 22px 0 10px; font-size: 18px; }
+.pg-case { padding: 14px 18px; margin-bottom: 12px; } .pg-case.stuck { border-color: rgba(224,108,90,.45); }
+.pg-now { margin: 6px 0 2px; } .pg-wait { margin: 2px 0; } .pg-docs { margin-top: 4px; }
+.pg-log summary, .pg-actions summary { cursor: pointer; margin-top: 8px; }
+.pg-events { margin: 6px 0 0 18px; } .pg-events li { margin: 2px 0; }
+.pg-actions { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.pg-actions .row { gap: 6px; flex-wrap: wrap; } .pg-actions form { margin: 0; }
+.pg-form { margin-top: 8px; } .pg-form textarea { width: 100%; }

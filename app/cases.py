@@ -38,11 +38,12 @@ MAX_STEPS = 10
 MAX_ATTEMPTS = 6               # model or Telegram failures of one step before the case asks for a human
 RETRY_MINUTES = 5
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
-OPEN = ("awaiting_approval", "suggested", "running", "waiting", "attention")
+OPEN = ("awaiting_approval", "suggested", "running", "waiting", "attention", "paused")
 AUTONOMY = ("auto", "approve", "suggest")
 STATUS_RU = {"awaiting_approval": "ждёт одобрения плана", "suggested": "предложено директору", "running": "выполняется",
              "waiting": "ждёт ответа", "attention": "нужно решение человека", "done": "завершено",
-             "failed": "не удалось", "cancelled": "отменено"}
+             "failed": "не удалось", "cancelled": "отменено", "paused": "на паузе",
+             "handed_over": "передано человеку"}
 
 _locks = collections.defaultdict(threading.Lock)
 
@@ -318,6 +319,8 @@ def _write(purpose: str, facts: dict) -> str:
                         "причину (reason). Он может ответить «да» в этом чате или одобрить в панели.",
         "attention": "Сообщи руководителю, что дело остановилось и нужно его решение: reason.",
         "failure": "Сообщи руководителю, что дело не удалось начать или выполнить: reason. Предложи, что можно сделать.",
+        "handover": "Напиши сотруднику (person), что руководитель передаёт ему поручение (task), которое вёл ты. Коротко "
+                    "перечисли, что уже сделано (done_so_far) и что получено (documents), и что осталось сделать.",
     }[purpose]
     system = voice.system_prompt("Ты ведёшь дело по поручению с совещания. " + instructions + ' JSON: {"text":"..."}')
     facts = {"purpose": purpose, **facts}
@@ -761,31 +764,43 @@ def on_message(employee_id, text: str, reply_to=None, document_id=None) -> dict:
                     _event(s, other.case_id, "note", f"Написал(а), но документа пока нет: {text[:300]}", other.step_id)
                 s.commit()
             return {}
+        s.commit()
+        wait_id = wait.id
+    return _resolve(wait_id, answer=None if document_id else text, document_id=document_id)
+
+
+def _resolve(wait_id: int, answer=None, document_id=None, by: str = "") -> dict:
+    """The awaited answer or document is here (from Telegram, or entered by a person in the panel)."""
+    with SessionLocal() as s:
+        wait = s.get(CaseWait, wait_id)
         case = s.get(Case, wait.case_id)
         step = s.get(CaseStep, wait.step_id)
         wait.status, wait.resolved_at = "resolved", now()
+        suffix = f" (внёс {by})" if by else ""
         if document_id:
             doc = s.get(Document, document_id)
             doc.case_id = case.id
             wait.document_id = doc.id
             step.result = {"document_id": doc.id, "sha256": doc.sha256, "filename": doc.filename}
-            _event(s, case.id, "document_received", f"Получил «{doc.filename}» ({doc.size} байт)", step.id,
+            _event(s, case.id, "document_received", f"Получил «{doc.filename}» ({doc.size} байт){suffix}", step.id,
                    {"sha256": doc.sha256})
         else:
-            wait.answer = text[:4000]
-            step.result = {"answer": text[:4000]}
-            _event(s, case.id, "answer_received", f"Ответ: {text[:600]}", step.id)
+            wait.answer = str(answer or "")[:4000]
+            step.result = {"answer": wait.answer}
+            _event(s, case.id, "answer_received", f"Ответ{suffix}: {wait.answer[:600]}", step.id)
         step.status, step.finished_at = "done", now()
         if case.status in ("waiting", "attention"):
             case.status = "running"
         forward_to = [s.get(Employee, x.args["to"]).name for x in case.steps
                       if x.tool == "forward_document" and s.get(Employee, x.args["to"])]
         s.commit()
-        link = {"case_id": case.id, "title": case.title, "kind": expects, "forward_to": forward_to}
+        link = {"case_id": case.id, "title": case.title, "kind": "document" if document_id else "answer",
+                "forward_to": forward_to}
+        case_id = case.id
     if _testing():
-        advance(case.id)
+        advance(case_id)
     else:
-        _pool().submit(advance, case.id)
+        _pool().submit(advance, case_id)
     return link
 
 
@@ -843,6 +858,193 @@ def cancel(case_id: int, by: str = "") -> bool:
     return True
 
 
+# ----------------------------------------------------------------------------- a person steps in (Progress page)
+def pause(case_id: int, by: str = "") -> bool:
+    """Nothing is sent, nobody is reminded; answers that come meanwhile are still recorded."""
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        if case is None or case.status not in ("running", "waiting", "attention", "awaiting_approval", "suggested"):
+            return False
+        case.note = f"на паузе (было: {STATUS_RU.get(case.status, case.status)})"
+        case.status = "paused"
+        _event(s, case_id, "paused", f"Пауза: {by or 'руководитель'}")
+        s.commit()
+    return True
+
+
+def resume(case_id: int, by: str = "") -> bool:
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        if case is None or case.status != "paused":
+            return False
+        waits = s.query(CaseWait).filter_by(case_id=case_id, status="open").all()
+        moment = now()
+        for wait in waits:  # the pause does not count as silence
+            wait.next_reminder_at = moment + dt.timedelta(hours=_hours("case_reminder_hours", 4))
+            if not wait.escalated:
+                wait.escalate_at = max(_aware(wait.escalate_at) or moment, moment + dt.timedelta(hours=1))
+        blocked = any(x.status in ("uncertain", "failed", "awaiting_approval") for x in case.steps)
+        case.status = "waiting" if waits else ("attention" if blocked else "running")
+        case.note, case.retry_at, case.attempts = "", None, 0
+        _event(s, case_id, "resumed", f"Продолжено: {by or 'руководитель'}")
+        s.commit()
+        go = case.status == "running"
+    if go:
+        advance(case_id) if _testing() else _pool().submit(advance, case_id)
+    return True
+
+
+def _open_wait(s, case_id: int, expects=None):
+    query = s.query(CaseWait).filter_by(case_id=case_id, status="open")
+    if expects:
+        query = query.filter_by(expects=expects)
+    return query.order_by(CaseWait.id).first()
+
+
+def record_answer(case_id: int, text: str, by: str = "") -> bool:
+    """The answer came by phone or in person: a person enters it, the case goes on as if it came in Telegram."""
+    text = str(text or "").strip()
+    if not text:
+        return False
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        wait = _open_wait(s, case_id, "answer") if case is not None and case.status in OPEN else None
+        if wait is None:
+            return False
+        wait_id = wait.id
+    _resolve(wait_id, answer=text[:4000], by=by or "руководитель")
+    return True
+
+
+def attach_document(case_id: int, filename: str, mime: str, data: bytes, by: str = "") -> bool:
+    """The document came another way (email, paper scan): a person uploads it in the panel. It is kept as if the
+    awaited person sent it, so every later check (hash, recipient, approval of sensitive files) still applies."""
+    if not data or len(data) > MAX_DOCUMENT_BYTES:
+        return False
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        wait = _open_wait(s, case_id, "document") if case is not None and case.status in OPEN else None
+        if wait is None:
+            return False
+        name = str(filename or "файл")[:255]
+        caption = f"загружен в панели: {by or 'руководитель'}"
+        doc = Document(employee_id=wait.employee_id, chat_id="panel",
+                       message_id=int(dt.datetime.now().timestamp() * 1000) % 2_000_000_000, filename=name,
+                       mime=str(mime or "")[:120], size=len(data), sha256=_sha(bytes(data)), kind=_classify(mime or "", name),
+                       caption=caption, sensitive=is_sensitive(name, ""), data=bytes(data))
+        s.add(doc)
+        s.commit()
+        wait_id, doc_id = wait.id, doc.id
+    _resolve(wait_id, document_id=doc_id, by=by or "руководитель")
+    return True
+
+
+def unlinked_documents(s, employee_id) -> list:
+    """Files this person sent that belong to no case (e.g. sent without a reply while two requests were open)."""
+    if not employee_id:
+        return []
+    return [{"id": d.id, "filename": d.filename, "at": _aware(d.created_at)} for d in
+            s.query(Document).filter(Document.employee_id == employee_id, Document.case_id.is_(None))
+            .order_by(Document.id.desc()).limit(10)]
+
+
+def link_document(case_id: int, document_id: int, by: str = "") -> bool:
+    """A person says which case a file belongs to. Only a file of the awaited person, not used by another case."""
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        wait = _open_wait(s, case_id, "document") if case is not None and case.status in OPEN else None
+        doc = s.get(Document, document_id)
+        if wait is None or doc is None or doc.case_id is not None or doc.employee_id != wait.employee_id:
+            return False
+        wait_id = wait.id
+    _resolve(wait_id, document_id=document_id, by=by or "руководитель")
+    return True
+
+
+def send_manual(case_id: int, text: str, by: str = "") -> bool:
+    """A person writes in the assistant's chat with the awaited person: these exact words, from the AI account."""
+    text = str(text or "").strip()
+    if not text or len(text) > 3500 or not userbot.ai_mode():
+        return False
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        if case is None or case.status not in OPEN:
+            return False
+        wait = _open_wait(s, case_id)
+        person_id = wait.employee_id if wait else next((x.args.get("to") for x in case.steps if x.tool == "send_message"), None)
+        person = s.get(Employee, person_id) if person_id else None
+        if person is None or not person.telegram_chat_id:
+            return False
+        ref, name = person.telegram_chat_id, person.name
+    try:
+        _send_text(ref, text)
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as s:
+            _event(s, case_id, "manual_failed", f"Сообщение {name} не отправлено: {str(exc)[:200]}")
+            s.commit()
+        return False
+    with SessionLocal() as s:
+        _event(s, case_id, "manual_message", f"{by or 'Руководитель'} написал {name} от имени ассистента: {text}")
+        s.commit()
+    return True
+
+
+def hand_over(case_id: int, employee_id: int, by: str = "") -> bool:
+    """The case goes to a person: the assistant stops, the task becomes theirs, they get a short handover note."""
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        person = s.get(Employee, employee_id)
+        if case is None or case.status not in OPEN or person is None or not person.active:
+            return False
+        done_so_far = [e.text for e in case.events if e.kind in ("message_sent", "answer_received", "document_received",
+                                                                 "document_forwarded", "reminder")][-6:]
+        documents = [d.filename for d in s.query(Document).filter_by(case_id=case_id).all()]
+        for wait in s.query(CaseWait).filter_by(case_id=case_id, status="open"):
+            wait.status = "cancelled"
+        for transfer in s.query(DocumentTransfer).filter_by(case_id=case_id, status="awaiting_approval"):
+            transfer.status = "blocked"
+        case.status, case.closed_at, case.note = "handed_over", now(), f"передано: {person.name}"
+        task = case.task
+        if task is not None:
+            task.executor, task.assignee_id, task.assignee_name = "person", person.id, person.name
+            task.status = "in_progress"
+        s.add(Note(task_id=case.task_id, meeting_id=case.meeting_id, employee_id=person.id, kind="commitment",
+                   source="system", author=(by or "руководитель")[:80],
+                   text=f"Дело «{case.title}» передано: {person.name}"[:800]))
+        _event(s, case_id, "handed_over", f"{by or 'Руководитель'} передал дело: {person.name}")
+        s.commit()
+        facts = {"task": {"title": case.title}, "person": {"name": person.name}, "done_so_far": done_so_far,
+                 "documents": documents}
+        ref = person.telegram_chat_id
+    if ref and userbot.ai_mode():
+        try:
+            _send_text(ref, _write("handover", facts))
+        except Exception as exc:  # noqa: BLE001
+            with SessionLocal() as s:
+                _event(s, case_id, "manual_failed", f"{facts['person']['name']} не получил(а) сообщение о передаче: "
+                                                    f"{str(exc)[:200]}")
+                s.commit()
+    return True
+
+
+def close_manually(case_id: int, by: str = "", note: str = "") -> bool:
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        if case is None or case.status not in OPEN:
+            return False
+        for wait in s.query(CaseWait).filter_by(case_id=case_id, status="open"):
+            wait.status = "cancelled"
+        for transfer in s.query(DocumentTransfer).filter_by(case_id=case_id, status="awaiting_approval"):
+            transfer.status = "blocked"
+        case.status, case.closed_at = "done", now()
+        case.note = f"закрыто вручную{': ' + note.strip()[:300] if note and note.strip() else ''}"
+        if case.task is not None:
+            case.task.status = "assistant_done"
+        _event(s, case_id, "closed", f"{by or 'Руководитель'} закрыл дело вручную" + (f": {note.strip()[:300]}" if note and note.strip() else ""))
+        s.commit()
+    return True
+
+
 # ----------------------------------------------------------------------------- the clock
 def run_due(now_utc=None) -> None:
     """Background loop: reminders, escalation, retries after the quiet hours or a model failure."""
@@ -873,6 +1075,8 @@ def _nudge(wait_id: int, moment) -> None:
         if wait is None or wait.status != "open":
             return
         case = s.get(Case, wait.case_id)
+        if case.status != "waiting":
+            return  # paused, stopped or closed: no reminders
         person = s.get(Employee, wait.employee_id) if wait.employee_id else None
         asked = s.query(CaseStep).filter(CaseStep.case_id == case.id, CaseStep.tool == "send_message",
                                          CaseStep.status == "done").order_by(CaseStep.position.desc()).first()
