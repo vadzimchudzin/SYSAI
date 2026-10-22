@@ -34,7 +34,8 @@ def safe_url(raw: str) -> str:
         parsed = urlsplit(raw)
         segments = []
         for segment in parsed.path.split("/"):
-            if _UUID.match(segment) or _LONG_HEX.match(segment) or _LONG_DIGITS.match(segment):
+            if (_UUID.match(segment) or _LONG_HEX.match(segment) or _LONG_DIGITS.match(segment) or
+                    (len(segment) >= 16 and re.match(r"(?=.*[A-Za-z])(?=.*\\d)[A-Za-z0-9_-]+$", segment))):
                 segments.append("{id}")
             elif len(segment) > 80:
                 segments.append("{opaque}")
