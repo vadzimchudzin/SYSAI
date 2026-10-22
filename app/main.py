@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import (accounts, agent, bitrix, config, llm, deadlines, meeting_alerts, pipeline, progress_board, render, report_archive,
-               settings_store, speaker_id, telegram, userbot)
+               settings_store, speaker_id, telegram, userbot, notion)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
@@ -93,6 +93,7 @@ def startup():
     if config.TESTING:
         return
     pipeline.start_background()
+    notion.start_worker()
     if userbot.ai_mode():
         # The AI employee answers from the Telegram account, the bot webhook stays off. The connection waits a little so
         # the platform's port check passes before the heavy Telegram library loads.
@@ -114,6 +115,7 @@ def shutdown():
     new instance can take it at once instead of waiting for the lease to run out."""
     if config.TESTING:
         return
+    notion.stop_worker()
     try:
         userbot.stop()
     except Exception:  # noqa: BLE001
@@ -250,7 +252,7 @@ def meetings_list(request: Request, q: str = "", status: str = "", source: str =
     q = q.strip()[:200]
     if status and status not in STATUS:
         raise HTTPException(400, "Некорректный статус")
-    if source and source not in ("web", "microphone", "demo", "api"):
+    if source and source not in ("web", "microphone", "demo", "api", "notion"):
         raise HTTPException(400, "Некорректный источник")
     try:
         first = dt.date.fromisoformat(date_from) if date_from else None
@@ -736,7 +738,8 @@ def settings_view(request: Request, msg: str = ""):
         st.pop(k, None)  # secrets never go back to the browser, only a mask
     ai = bool(st.get("ai_employee"))
     return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
-                account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2))
+                account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
+                notion=notion.connection_status())
 
 
 def voice_default_persona() -> str:
@@ -865,6 +868,12 @@ async def settings_save(request: Request):
             if not 0 <= hour <= 23:
                 raise HTTPException(400, "Тихие часы: целые часы от 0 до 23")
             updates[k] = hour
+    if "notion_parent_id" in f:
+        raw_parent = str(f.get("notion_parent_id") or "").strip()
+        normalized_parent = notion.normalise_parent_setting(raw_parent) if raw_parent else ""
+        if raw_parent and not normalized_parent:
+            raise HTTPException(400, "Укажите корректный URL или UUID страницы/базы Notion")
+        updates["notion_parent_id"] = normalized_parent
     old_token = config.telegram_token()
     for k in settings_store.SECRET_KEYS:
         action = f.get("action_" + k, "keep")
@@ -948,6 +957,88 @@ def test_bitrix(request: Request):
         return RedirectResponse(f"/settings?msg=Bitrix24 подключён: {bitrix.check()}", 303)
     except Exception as e:  # noqa: BLE001
         return RedirectResponse(f"/settings?msg=Bitrix24: {str(e)[:200]}", 303)
+
+
+
+# ----------------------------------------------------------------------------- Notion / TicNote export
+@app.get("/settings/notion/connect")
+def notion_connect(request: Request):
+    guard_admin(request)
+    state = secrets.token_urlsafe(32)
+    try:
+        callback_uri = notion.redirect_uri()
+        url = notion.authorization_url(state, callback_uri)
+    except notion.NotionError as exc:
+        return RedirectResponse("/settings?msg=" + quote(str(exc)[:220]), 303)
+    request.session["notion_oauth_state"] = state
+    request.session["notion_oauth_callback_uri"] = callback_uri
+    return RedirectResponse(url, 303)
+
+
+@app.get("/settings/notion/callback")
+def notion_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    guard_admin(request)
+    expected = str(request.session.pop("notion_oauth_state", "") or "")
+    callback_uri = str(request.session.pop("notion_oauth_callback_uri", "") or "")
+    if error:
+        return RedirectResponse("/settings?msg=" + quote("Notion отклонил авторизацию: " + error[:100]), 303)
+    if not expected or not state or not hmac.compare_digest(expected, state):
+        return RedirectResponse("/settings?msg=" + quote("Не прошла проверка state OAuth Notion. Подключите аккаунт заново."), 303)
+    try:
+        notion.save_connection(notion.exchange_code(code, callback_uri or notion.redirect_uri()))
+    except notion.NotionError as exc:
+        log.warning("Notion OAuth failed: %s", str(exc)[:180])
+        return RedirectResponse("/settings?msg=" + quote("Notion: " + str(exc)[:200]), 303)
+    return RedirectResponse("/settings?msg=" + quote("Рабочее пространство Notion подключено."), 303)
+
+
+@app.post("/settings/notion/sync")
+def notion_sync(request: Request):
+    guard_admin(request)
+    try:
+        result = notion.sync_existing_pages()
+        summary = (f"Импорт Notion: найдено {result['found']}, в очереди {result['queued']}, "
+                   f"уже импортировано {result['duplicate']}, вне выбранной страницы {result['ignored']}, "
+                   f"ошибок {result['failed']}.")
+    except notion.NotionError as exc:
+        summary = "Notion: " + str(exc)[:220]
+    return RedirectResponse("/settings?msg=" + quote(summary), 303)
+
+
+@app.post("/settings/notion/disconnect")
+def notion_disconnect(request: Request):
+    guard_admin(request)
+    notion.disconnect()
+    return RedirectResponse("/settings?msg=" + quote("OAuth-токены Notion удалены. Настройка webhook сохранена."), 303)
+
+
+@app.post("/settings/notion/reset-webhook-token")
+def notion_reset_webhook_token(request: Request):
+    guard_admin(request)
+    notion.reset_webhook_verification_token()
+    return RedirectResponse("/settings?msg=" + quote("Verification token очищен. Повторно выполните проверку webhook в Notion."), 303)
+
+
+@app.get("/settings/notion/webhook-token")
+def notion_webhook_token(request: Request):
+    guard_admin(request)
+    token = notion.webhook_verification_token()
+    if not token:
+        raise HTTPException(404, "Notion пока не отправил verification_token. Запустите проверку webhook.")
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(token, headers={"Cache-Control": "private, no-store", "Pragma": "no-cache"})
+
+
+@app.post("/webhooks/notion")
+async def notion_webhook(request: Request):
+    raw_body = await request.body()
+    if len(raw_body) > 1_000_000:
+        raise HTTPException(413, "Слишком большой Notion webhook.")
+    try:
+        result = notion.receive_webhook(raw_body, request.headers.get("x-notion-signature", ""))
+    except notion.WebhookError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from None
+    return JSONResponse(result)
 
 
 # ----------------------------------------------------------------------------- telegram account of the AI employee
