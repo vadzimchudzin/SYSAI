@@ -59,6 +59,10 @@ PUBLIC_URL = (os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or
 
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL", "").rstrip("/")
 
+NOTION_CLIENT_ID = os.getenv("NOTION_CLIENT_ID", "").strip()
+NOTION_CLIENT_SECRET = os.getenv("NOTION_CLIENT_SECRET", "").strip()
+NOTION_REDIRECT_URI = os.getenv("NOTION_REDIRECT_URI", "").strip().rstrip("/")
+
 MIC_INBOX_DIR = pathlib.Path(os.getenv("MIC_INBOX_DIR", DATA_DIR / "inbox"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Minsk")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
