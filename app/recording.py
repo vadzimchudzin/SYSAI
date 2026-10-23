@@ -77,17 +77,31 @@ def _atomic_write(path: pathlib.Path, data: bytes):
 
 def _recording_dict(recording: Recording) -> dict:
     created = recording.created_at
-    ended = recording.updated_at if recording.status in {"finished", "cancelled", "error"} else now()
-    if created is not None and created.tzinfo is None:
-        created = created.replace(tzinfo=dt.timezone.utc)
-    if ended is not None and ended.tzinfo is None:
-        ended = ended.replace(tzinfo=dt.timezone.utc)
+    updated = recording.updated_at
+    current = now()
+    for value_name, value in (("created", created), ("updated", updated), ("current", current)):
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=dt.timezone.utc)
+        if value_name == "created":
+            created = value
+        elif value_name == "updated":
+            updated = value
+        else:
+            current = value
+
+    terminal = recording.status in {"finished", "cancelled", "error"}
+    ended = updated if terminal else current
     elapsed = max(0, int((ended - created).total_seconds())) if created and ended else 0
+    last_activity = updated or created
+    idle_seconds = (max(0, int((current - last_activity).total_seconds()))
+                    if not terminal and last_activity and current else 0)
     return {"id": recording.id, "next_sequence": recording.next_sequence,
             "size_bytes": recording.size_bytes, "status": recording.status,
             "mime_type": recording.mime_type, "title": recording.title,
             "device_label": recording.device_label or "Неизвестное устройство",
             "created_at": created.isoformat() if created else None, "elapsed_seconds": elapsed,
+            "last_activity_at": last_activity.isoformat() if last_activity else None,
+            "idle_seconds": idle_seconds,
             "meeting_id": recording.meeting_id,
             "meeting_url": f"/meetings/{recording.meeting_id}" if recording.meeting_id else None}
 

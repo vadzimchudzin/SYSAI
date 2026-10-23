@@ -205,4 +205,23 @@ def test_elapsed_time_freezes_when_recording_is_terminal():
         mime_type="audio/webm", title="Тест", device_label="iPhone · Safari",
         created_at=started, updated_at=ended, meeting_id=None,
     )
-    assert recording._recording_dict(item)["elapsed_seconds"] == 73
+    result = recording._recording_dict(item)
+    assert result["elapsed_seconds"] == 73
+    assert result["idle_seconds"] == 0
+
+
+def test_idle_seconds_detects_a_stale_live_recording(monkeypatch):
+    from types import SimpleNamespace
+
+    current = dt.datetime(2026, 10, 23, 8, 0, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(recording, "now", lambda: current)
+    item = SimpleNamespace(
+        id="stale-recording", next_sequence=297, size_bytes=10_155_670, status="recording",
+        mime_type="audio/webm", title="", device_label="iPhone/iPad · Safari",
+        created_at=current - dt.timedelta(minutes=70),
+        updated_at=current - dt.timedelta(minutes=5), meeting_id=None,
+    )
+
+    result = recording._recording_dict(item)
+    assert result["idle_seconds"] == 300
+    assert result["elapsed_seconds"] == 4200

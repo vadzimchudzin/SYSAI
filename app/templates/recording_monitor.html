@@ -12,6 +12,8 @@
   <p><b>Устройство:</b> <span id="monitor-device">{{ recording.device_label }}</span></p>
   <p><b>Начало:</b> <span id="monitor-created">{{ recording.created_at or '—' }}</span></p>
   <p id="monitor-message" class="muted">Подключаемся к статусу записи…</p>
+  <button id="monitor-finish" class="btn danger" type="button" hidden>Завершить и обработать сохранённое аудио</button>
+  <p class="small muted">Кнопка завершения появится, если аудиоданные не поступают больше 2 минут. Она собирает уже полученные сервером фрагменты и не выключает микрофон на исходном устройстве.</p>
   <a id="monitor-meeting-link" class="btn primary" hidden>Открыть совещание</a>
 </section>
 <script src="{{ asset('recordings-live.js') }}" defer></script>
