@@ -50,6 +50,28 @@
     const statusEl = document.getElementById('monitor-status');
     const message = document.getElementById('monitor-message');
     const meetingLink = document.getElementById('monitor-meeting-link');
+    const finishButton = document.getElementById('monitor-finish');
+
+    finishButton.addEventListener('click', async () => {
+      if (!confirm('Завершить запись по фрагментам, уже полученным сервером? Новые фрагменты после этого не будут приняты. Продолжайте только если совещание завершено или передача окончательно остановилась.')) return;
+      const originalText = finishButton.textContent;
+      finishButton.disabled = true;
+      finishButton.textContent = 'Собираем аудио…';
+      try {
+        const response = await fetch('/recordings/' + encodeURIComponent(id) + '/finish', {
+          method: 'POST', headers: { accept: 'application/json' }, cache: 'no-store'
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.detail || `Ошибка завершения (${response.status})`);
+        if (!result.url) throw new Error('Сервер не вернул ссылку на созданное совещание');
+        location.assign(result.url);
+      } catch (exc) {
+        finishButton.disabled = false;
+        finishButton.textContent = originalText;
+        message.textContent = `Не удалось завершить запись: ${exc.message || exc}. Повторите попытку.`;
+      }
+    });
+
     const poll = async () => {
       try {
         const response = await fetch('/recordings/' + encodeURIComponent(id) + '/status', {
@@ -65,9 +87,21 @@
         document.getElementById('monitor-chunks').textContent = String(rec.next_sequence || 0);
         statusEl.textContent = stateLabel(rec.status);
         statusEl.className = 'pill ' + (rec.status === 'recording' ? 'amber' : rec.status === 'error' ? 'red' : rec.status === 'finished' ? 'green' : 'gray');
-        if (rec.status === 'recording') message.textContent = 'Микрофон и передача управляются исходным устройством. Этот экран показывает актуальный статус.';
+        const idleSeconds = Math.max(0, Number(rec.idle_seconds) || 0);
+        const canFinish = rec.status === 'error' ||
+          (['recording', 'finishing'].includes(rec.status) && idleSeconds >= 120);
+        finishButton.hidden = !canFinish;
+        if (canFinish) {
+          finishButton.textContent = rec.status === 'error'
+            ? 'Повторить сборку и обработку аудио'
+            : `Завершить и обработать сохранённое аудио · без данных ${duration(idleSeconds)}`;
+        }
+        if (rec.status === 'recording' && idleSeconds >= 120) {
+          message.textContent = `Новых аудиоданных не поступало ${duration(idleSeconds)}. Если совещание завершено, можно собрать и обработать уже сохранённые фрагменты кнопкой ниже. Микрофон на исходном устройстве эта операция не выключает.`;
+        } else if (rec.status === 'recording') message.textContent = 'Микрофон и передача управляются исходным устройством. Этот экран показывает актуальный статус.';
+        else if (rec.status === 'finishing' && idleSeconds >= 120) message.textContent = `Сборка аудио не обновлялась ${duration(idleSeconds)}. Если процесс действительно завис, можно повторно запустить сборку кнопкой ниже.`;
         else if (rec.status === 'finishing') message.textContent = 'Аудиочасти собираются и проверяются перед запуском расшифровки.';
-        else if (rec.status === 'error') message.textContent = 'Передача или сборка столкнулась с ошибкой. На исходном устройстве можно повторить передачу или скачать локальную копию.';
+        else if (rec.status === 'error') message.textContent = 'Передача или сборка столкнулась с ошибкой. Можно повторить сборку сохранённых фрагментов или восстановить аудио.';
         else if (rec.status === 'finished') message.textContent = 'Запись передана в обработку.';
         else if (rec.status === 'cancelled') message.textContent = 'Запись отменена.';
         if (rec.meeting_url) { meetingLink.href = rec.meeting_url; meetingLink.hidden = false; }
