@@ -2,7 +2,9 @@
 import datetime as dt
 import json
 import logging
+import socket
 import time
+from urllib.parse import urlparse
 
 from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint,
                         create_engine, text)
@@ -12,6 +14,26 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from . import config
 
 log = logging.getLogger("sysai.db")
+
+
+def ipv4_hostaddr(hostname: str) -> str | None:
+    """First A-record for the host, or None if IPv4 is unavailable.
+
+    Render (and some other PaaS) resolve Neon to AAAA first. Outbound IPv6 is often
+    missing, which surfaces as 'Network is unreachable' to port 5432. Pinning hostaddr
+    to IPv4 keeps the same hostname/TLS while using a reachable path.
+    """
+    host = (hostname or "").strip().strip("[]")
+    if not host or host in {"localhost", "127.0.0.1"}:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, 5432, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    for family, _type, _proto, _canon, sockaddr in infos:
+        if family == socket.AF_INET and sockaddr:
+            return sockaddr[0]
+    return None
 
 
 def engine_options(url: str) -> dict:
@@ -26,6 +48,10 @@ def engine_options(url: str) -> dict:
     connect_args = {"connect_timeout": 30}
     if url.startswith("postgresql+psycopg://"):
         connect_args["prepare_threshold"] = None
+        host = urlparse(url).hostname
+        hostaddr = ipv4_hostaddr(host or "")
+        if hostaddr:
+            connect_args["hostaddr"] = hostaddr
     return {"pool_pre_ping": True, "pool_recycle": 300, "pool_size": 8, "max_overflow": 8,
             "connect_args": connect_args}
 

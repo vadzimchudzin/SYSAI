@@ -23,6 +23,20 @@ def test_postgres_engine_survives_suspended_compute_and_pgbouncer():
     assert options["connect_args"]["prepare_threshold"] is None
 
 
+def test_postgres_engine_pins_ipv4_hostaddr_when_aaaa_would_win(monkeypatch):
+    monkeypatch.setattr(db.socket, "getaddrinfo", lambda *a, **k: [
+        (db.socket.AF_INET, db.socket.SOCK_STREAM, 6, "", ("203.0.113.10", 5432)),
+    ])
+    options = db.engine_options("postgresql+psycopg://u:p@ep-x.neon.tech/db?sslmode=require")
+    assert options["connect_args"]["hostaddr"] == "203.0.113.10"
+
+
+def test_postgres_engine_skips_hostaddr_without_ipv4(monkeypatch):
+    monkeypatch.setattr(db.socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(OSError("no A")))
+    options = db.engine_options("postgresql+psycopg://u:p@ep-x.neon.tech/db?sslmode=require")
+    assert "hostaddr" not in options["connect_args"]
+
+
 class _Connection:
     def __enter__(self):
         return self
