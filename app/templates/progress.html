@@ -7,6 +7,7 @@
       <option value="last" {{ 'selected' if data.scope == 'last' }}>Последнее совещание</option>
       <option value="open" {{ 'selected' if data.scope == 'open' }}>Все открытые дела</option>
       <option value="week" {{ 'selected' if data.scope == 'week' }}>За 7 дней</option>
+      <option value="chat" {{ 'selected' if data.scope == 'chat' }}>Поручения из чата</option>
       {% for m in data.meetings %}<option value="{{ m.id }}" {{ 'selected' if data.scope == m.id|string }}>{{ m.date }} · {{ m.title }}</option>{% endfor %}
     </select>
     <noscript><button class="btn sm">Показать</button></noscript>

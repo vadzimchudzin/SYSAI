@@ -1159,7 +1159,9 @@ def settings_view(request: Request, msg: str = ""):
     for k in settings_store.SECRET_KEYS + settings_store.HIDDEN_KEYS:
         st.pop(k, None)  # secrets never go back to the browser, only a mask
     ai = bool(st.get("ai_employee"))
+    from . import digest
     return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
+                digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU,
                 account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
                 notion=notion.connection_status())
 
@@ -1302,6 +1304,20 @@ async def settings_save(request: Request):
             updates["daily_budget_usd"] = max(0.0, float(str(f["daily_budget_usd"]).replace(",", ".") or 0))
         except ValueError:
             raise HTTPException(400, "Лимит расходов укажите числом в долларах")
+    if "digest_frequency" in f:
+        from . import digest
+        if f["digest_frequency"] not in digest.FREQUENCIES:
+            raise HTTPException(400, "Сводка: выберите «каждый день», «раз в неделю» или «не присылать»")
+        updates["digest_frequency"] = f["digest_frequency"]
+    for k, top, label in (("digest_hour", 23, "час сводки от 0 до 23"), ("digest_weekday", 6, "день недели сводки")):
+        if k in f:
+            try:
+                value = int(str(f[k]).strip())
+            except ValueError:
+                raise HTTPException(400, f"Укажите {label}") from None
+            if not 0 <= value <= top:
+                raise HTTPException(400, f"Укажите {label}")
+            updates[k] = value
     for k in ("quiet_from_hour", "quiet_to_hour"):
         if k in f:
             try:
@@ -1371,6 +1387,17 @@ def test_openrouter(request: Request):
         return RedirectResponse("/settings?msg=OpenRouter: " + llm.check_key(), 303)
     except Exception as e:  # noqa: BLE001
         return RedirectResponse(f"/settings?msg=OpenRouter: {str(e)[:200]}", 303)
+
+
+@app.post("/settings/test-digest")
+def test_digest(request: Request):
+    """«Прислать сводку сейчас»: the same text the reviewers get on schedule, without moving the schedule."""
+    guard_admin(request)
+    from . import digest
+    if not digest.recipients():
+        return RedirectResponse("/settings?msg=" + quote("Сводка: нет проверяющих — назначьте их в карточке сотрудника"), 303)
+    got = digest.send(mark=False)
+    return RedirectResponse("/settings?msg=" + quote(f"Сводка отправлена проверяющим: {got} из {len(digest.recipients())}"), 303)
 
 
 @app.post("/settings/test-ticnote")

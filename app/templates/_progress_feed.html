@@ -25,6 +25,8 @@
   <div class="row between"><div><b>{{ c.title }}</b>{% if data.scope != 'last' and c.meeting %} <span class="muted small">· {{ c.meeting }}</span>{% endif %}</div>
     <span class="pill {{ c.pill }}">{{ c.status_ru }}</span></div>
   <div class="pg-now"><span class="muted">Сейчас:</span> {{ c.now }}</div>
+  {% if c.from_chat and c.requested_by %}<div class="small muted">Поручение из чата от {{ c.requested_by }}</div>{% endif %}
+  {% if c.delivered %}<div class="small pg-docs"><span class="muted">Отправлено:</span>{% for d in c.delivered %} {% if d.archive %}{% if d.artifact_id %}<a href="/artifacts/{{ d.artifact_id }}">{{ d.archive }}</a>{% else %}{{ d.archive }}{% endif %} ({{ d.files|length }} файл(ов)){% else %}{{ d.files|join(', ') }}{% endif %} → {{ d.to }}{% if not loop.last %};{% endif %}{% endfor %}</div>{% endif %}
   {% if c.retry %}<div class="small warn">Повторю {{ c.retry.in }}{% if c.retry.why %}: {{ c.retry.why }}{% endif %}</div>{% endif %}
   {% if c.waiting %}<div class="pg-wait small">Ждёт {{ c.waiting.what }} от <b>{{ c.waiting.who }}</b> уже {{ c.waiting.for }}{% if c.waiting.reminders %} · напоминаний: {{ c.waiting.reminders }}{% endif %}{% if c.waiting.next_reminder %} · следующее {{ c.waiting.next_reminder }}{% endif %}{% if c.waiting.escalated %} · <span class="warn">руководитель уведомлён</span>{% elif c.waiting.escalate_in %} · сообщу руководителю {{ c.waiting.escalate_in }}{% endif %}</div>{% endif %}
   {% if c.next %}<div class="small"><span class="muted">Дальше:</span> {{ c.next|join(' → ') }}</div>{% endif %}

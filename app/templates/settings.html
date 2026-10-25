@@ -54,6 +54,19 @@
     <p class="small muted">Опциональное распознавание зарегистрированных сотрудников по образцам речи. Задайте ключ pyannoteAI, затем откройте карточку сотрудника, загрузите чистый образец 5–30 секунд и подтвердите согласие. При обработке новых записей аудиофрагменты будут передаваться pyannoteAI для сопоставления; без ключа и образцов обычная диаризация работает как раньше.</p>
     {{ credential('pyannoteai_api_key', 'Ключ pyannoteAI', 'Ключ из кабинета pyannote.ai') }}
   </section>
+  <section class="card setup-step" id="digest">
+    <h2>Сводка по делам</h2>
+    <p class="small muted">Короткий отчёт проверяющим в Telegram: что ассистент закрыл, что ждёт решения, что в работе и кого ждём, что висит без движения. Директор и наблюдатели её не получают.</p>
+    <div class="row">
+      <label class="f">Как часто
+        <select name="digest_frequency">{% for k, label in digest_frequencies.items() %}<option value="{{ k }}" {{ 'selected' if s.digest_frequency == k }}>{{ label }}</option>{% endfor %}</select></label>
+      <label class="f sm">Во сколько <input type="number" min="0" max="23" name="digest_hour" value="{{ s.digest_hour }}"></label>
+      <label class="f">День недели (для «раз в неделю»)
+        <select name="digest_weekday">{% for d in weekdays %}<option value="{{ loop.index0 }}" {{ 'selected' if s.digest_weekday == loop.index0 }}>{{ d }}</option>{% endfor %}</select></label>
+    </div>
+    <p class="small muted">Время — по часовому поясу сервиса. В тихие часы сводка ждёт утра.</p>
+    <button type="submit" class="btn sm" formaction="/settings/test-digest" formnovalidate>Прислать сводку сейчас</button>
+  </section>
   <section class="card setup-step" id="ticnote">
     <h2>TicNote</h2>
     <p class="small muted">Записи с диктофона TicNote забираются автоматически: SYSAI берёт только звук и прогоняет его через свой конвейер.</p>

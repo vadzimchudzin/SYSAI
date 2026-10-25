@@ -23,6 +23,13 @@ def _aware(moment):
     return cases._aware(moment)
 
 
+def _local(moment):
+    """Event times in the service time zone (Minsk), as people read them."""
+    from zoneinfo import ZoneInfo
+    from . import config
+    return _aware(moment).astimezone(ZoneInfo(config.TIMEZONE)) if moment is not None else None
+
+
 def _ago(moment, at=None) -> str:
     if moment is None:
         return ""
@@ -66,6 +73,9 @@ def _scope_query(s, scope: str):
         return query.filter(Case.status.in_(cases.OPEN)), None, "Все открытые дела"
     if scope == "week":
         return query.filter(Case.created_at >= now() - dt.timedelta(days=7)), None, "Дела за 7 дней"
+    if scope == "chat":
+        return (query.filter(Case.meeting_id.is_(None), Case.created_at >= now() - dt.timedelta(days=30)), None,
+                "Поручения из чата за 30 дней")
     meeting = None
     if scope and scope.isdigit():
         meeting = s.get(Meeting, int(scope))
@@ -90,6 +100,10 @@ def _step_text(s, step, names) -> str:
         return f"дождаться {'ответа' if a.get('expects') == 'answer' else 'документа'} от {who('from')}"
     if step.tool == "forward_document":
         return f"передать документ {who('to')}"
+    if step.tool == "zip_pack":
+        return f"упаковать {len(a.get('document_ids') or [])} файл(ов) в ZIP"
+    if step.tool == "send_files":
+        return f"отправить {'архив' if a.get('from_step') is not None else 'файлы'} {who('to')}"
     if step.tool == "report":
         return "доложить руководителю"
     return "закрыть дело"
@@ -120,6 +134,14 @@ def case_card(s, case, at=None) -> dict:
                           "transfers": [{"to": (s.get(Employee, t.to_employee_id).name if t.to_employee_id and
                                                 s.get(Employee, t.to_employee_id) else t.to_ref),
                                          "status": t.status} for t in transfers]})
+    delivered = []
+    for x in steps:  # what the assistant itself sent in this case (packed archives, files to people)
+        res = x.result or {}
+        if x.tool == "send_files" and x.status == "done":
+            delivered.append({"to": res.get("to"), "archive": res.get("archive"), "files": res.get("files") or [],
+                              "artifact_id": next(((y.result or {}).get("artifact_id") for y in steps
+                                                   if y.tool == "zip_pack" and y.status == "done"), None)})
+    requested_by = next((x.args.get("requested_by") for x in steps if (x.args or {}).get("requested_by")), None)
     task = case.task
     stuck = case.status in ("attention", "awaiting_approval", "suggested") or bool(waiting and waiting["escalated"])
     if case.status in cases.OPEN and current is not None:
@@ -139,7 +161,8 @@ def case_card(s, case, at=None) -> dict:
             "meeting_id": case.meeting_id, "meeting": case.task.meeting.title if task and task.meeting else "",
             "planner": case.planner, "plan": cases.describe_plan(s, case), "now": now_text,
             "next": [_step_text(s, x, names) for x in upcoming][:3],
-            "waiting": waiting, "documents": documents, "retry": retry,
+            "waiting": waiting, "documents": documents, "retry": retry, "delivered": delivered,
+            "requested_by": requested_by, "from_chat": case.meeting_id is None,
             "can": {"approve": case.status in ("awaiting_approval", "suggested") or any(x.status == "awaiting_approval" for x in steps),
                     "retry": case.status == "attention" and any(x.status in ("uncertain", "failed") for x in steps),
                     "pause": case.status in ("running", "waiting", "attention", "awaiting_approval", "suggested"),
@@ -150,7 +173,7 @@ def case_card(s, case, at=None) -> dict:
                     "close": case.status in cases.OPEN},
             "unlinked": cases.unlinked_documents(s, wait.employee_id) if wait is not None and wait.expects == "document" else [],
             "updated": _ago(events[-1].created_at, at) if events else "",
-            "events": [{"at": _aware(e.created_at), "kind": e.kind, "text": e.text} for e in events[-30:]]}
+            "events": [{"at": _local(e.created_at), "kind": e.kind, "text": e.text} for e in events[-30:]]}
 
 
 def _person_tasks(s, meeting) -> dict:
