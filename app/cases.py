@@ -744,7 +744,7 @@ def _checked_documents(s, ids) -> list:
 
 
 def start_delivery(requested_by: str, to_employee_id: int, document_ids: list, as_zip: bool,
-                   archive_name: str = "", note: str = "") -> int:
+                   archive_name: str = "", note: str = "", requested_chat: str = "") -> int:
     """An order in the chat («перешли ему», «запакуй и отправь зипом»): a case of code-built steps
     zip_pack → send_files → report → close. It ends only when Telegram confirmed the sending."""
     ids = list(dict.fromkeys(int(x) for x in document_ids))
@@ -765,10 +765,11 @@ def start_delivery(requested_by: str, to_employee_id: int, document_ids: list, a
         steps = []
         if as_zip:
             steps.append(CaseStep(position=0, tool="zip_pack", args={"document_ids": ids, "archive_name": name,
-                                                                     "requested_by": requested_by[:120]}))
+                                                                     "requested_by": requested_by[:120],
+                                                                     "requested_chat": str(requested_chat)}))
         steps.append(CaseStep(position=len(steps), tool="send_files",
                               args={"to": recipient.id, "to_ref": recipient.telegram_chat_id,
-                                    "requested_by": requested_by[:120],
+                                    "requested_by": requested_by[:120], "requested_chat": str(requested_chat),
                                     **({"from_step": 0} if as_zip else {"document_ids": ids})}))
         steps += [CaseStep(position=len(steps), tool="report", args={}),
                   CaseStep(position=len(steps) + 1, tool="close", args={})]
@@ -875,6 +876,59 @@ def _send_files(case_id: int, step_id: int) -> bool:
     return True
 
 
+def _local_time(moment) -> str:
+    from zoneinfo import ZoneInfo
+    if moment is None:
+        return ""
+    local = _aware(moment).astimezone(ZoneInfo(config.TIMEZONE))
+    today = now().astimezone(ZoneInfo(config.TIMEZONE)).date()
+    return local.strftime("%H:%M") if local.date() == today else local.strftime("%d.%m %H:%M")
+
+
+EVENT_SKIP = ("retry", "told_leader")  # internal noise, not what a person wants to hear about
+
+
+def _case_story(s, case, events: int = 5) -> dict:
+    """A case in plain words: what it is about, what happened lately (with times), who it is waiting for."""
+    waits = s.query(CaseWait).filter_by(case_id=case.id, status="open").all()
+    waiting_for = []
+    for w in waits:
+        e = s.get(Employee, w.employee_id) if w.employee_id else None
+        waiting_for.append({"person": e.name if e else w.chat_ref, "expects": "ответ" if w.expects == "answer" else "файл",
+                            "since": _local_time(w.started_at)})
+    story = [{"at": _local_time(ev.created_at), "text": ev.text[:300]}
+             for ev in case.events if ev.kind not in EVENT_SKIP][-events:]
+    return {"id": case.id, "title": case.title, "status": STATUS_RU.get(case.status, case.status),
+            "open": case.status in OPEN, "waiting_for": waiting_for, "last_events": story,
+            "requested_by": next((x.args.get("requested_by") for x in case.steps if (x.args or {}).get("requested_by")), None)}
+
+
+def person_view(employee_id=None, chat: str = "", hours: int = 72, limit: int = 5) -> list:
+    """Cases this person takes part in (asked by the assistant, receiving files) or ordered, open first and then the
+    latest. The conversation answers «ну что там?» from this instead of guessing."""
+    if not employee_id and not chat:
+        return []
+    since = now() - dt.timedelta(hours=hours)
+    with SessionLocal() as s:
+        found = []
+        for case in (s.query(Case).filter((Case.updated_at >= since) | Case.status.in_(OPEN))
+                     .order_by(Case.id.desc()).limit(60)):
+            role = None
+            for step in case.steps:
+                a = step.args or {}
+                if employee_id and a.get("from") == employee_id:
+                    role = role or "у тебя что-то запросили"
+                if employee_id and a.get("to") == employee_id:
+                    role = role or ("тебе передают файлы" if step.tool in ("send_files", "forward_document")
+                                    else "тебя спрашивали")
+                if chat and str(a.get("requested_chat") or "") == str(chat):
+                    role = "ты поручил это ассистенту"
+            if role:
+                found.append({**_case_story(s, case), "your_role": role})
+        found.sort(key=lambda c: (not c["open"], -c["id"]))
+        return found[:limit]
+
+
 def recent_view(hours: int = 48, limit: int = 8) -> list:
     """Cases of the last days for people with full rights: who was asked, what they answered, what is left.
     Lets the conversation understand «перешли ему» right after a case."""
@@ -890,8 +944,11 @@ def recent_view(hours: int = 48, limit: int = 8) -> list:
                         people.add((e.id, e.name))
                 if step.tool == "wait_reply" and (step.result or {}).get("answer"):
                     answers.append(step.result["answer"][:400])
-            out.append({"id": case.id, "title": case.title, "status": STATUS_RU.get(case.status, case.status),
-                        "people": [{"id": i, "name": n} for i, n in sorted(people)], "answers": answers[-2:]})
+            story = _case_story(s, case, events=3)
+            out.append({"id": case.id, "title": case.title, "status": story["status"],
+                        "people": [{"id": i, "name": n} for i, n in sorted(people)], "answers": answers[-2:],
+                        "waiting_for": story["waiting_for"], "last_events": story["last_events"],
+                        "requested_by": story["requested_by"]})
         return out
 
 

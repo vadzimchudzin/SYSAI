@@ -465,6 +465,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                        s.query(ConversationEscalation).filter_by(chat_id=chat, status="open").all()]
         ctx["notes"] = _notes_view(s, employee.id)
         ctx["assistant_waiting_for_you"] = cases.waiting_view(employee.id)
+    ctx["my_cases"] = cases.person_view(employee.id if employee is not None else None, chat)
     # What the company memory knows about this message: an employee sees only their own card and notes.
     query = " ".join(h.text for h in history[-2:] if h.role == "user")[-600:] + " " + (getattr(row, "text", "") or "")
     ctx["known_facts"] = company_memory.for_prompt(query, viewer=None if full else (employee.id if employee else -1))
@@ -570,7 +571,10 @@ ACTIONS_HELP = (
     "неясно какое, спроси). "
     "Дела ведёт код: если this_message_for_case задан, человек ответил или прислал документ по делу — коротко поблагодари и "
     "скажи, что передашь (кому — в forward_to); сам ничего не пересылай и не обещай сверх этого. Если в нём ambiguous_cases, "
-    "спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с просьбой. assistant_waiting_for_you — "
+    "спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с просьбой. my_cases — дела ассистента, где участвует этот человек или которые он поручил: your_role, статус, last_events "
+    "(что и когда было), waiting_for (кого и чего ждём). На вопросы «ну что там?», «как там?», «есть новости?», «где файлы?» "
+    "отвечай по my_cases (и recent_cases, если есть): что уже сделано, чего ждёшь и от кого; если дел нет — так и скажи и "
+    "спроси, о чём речь. Не выдумывай дел и событий, которых нет в данных. assistant_waiting_for_you — "
     "чего ты ждёшь от этого человека. file_received — человек прислал файл; он сохранён в библиотеке документов. "
     "files_received — человек прислал сразу несколько файлов (альбом): ответь один раз на все вместе. "
     "known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки с источником и "
@@ -960,7 +964,7 @@ def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | Non
             try:
                 case_id = cases.start_delivery(author or "руководителя", action["to"], action["document_ids"],
                                                bool(action.get("zip")), str(action.get("archive_name") or ""),
-                                               str(action.get("note") or ""))
+                                               str(action.get("note") or ""), requested_chat=chat)
             except cases.CaseError as exc:
                 raise AgentError(f"deliver_files: {exc}") from exc
             if _testing():
