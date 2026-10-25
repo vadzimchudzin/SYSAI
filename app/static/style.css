@@ -711,3 +711,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 /* people with full rights (director, reviewer, full access) */
 .employee-card.full-rights { border-left: 3px solid var(--red); }
 .employee-card.full-rights .employee-name-line b { color: var(--red); }
+
+/* dashboard quick access: file / microphone / TicNote */
+.grid2.quick3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.tn-dash h2 { display: flex; align-items: center; gap: 10px; }

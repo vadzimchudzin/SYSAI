@@ -10,10 +10,13 @@
   <div class="stat"><b>{{ stats.employees }}</b><span>сотрудников</span></div>
 </div>
 {% include "_active_recordings.html" %}
-<div class="grid2">
+<div class="grid2 quick3">
   <a class="card" href="/app/new?source=file" style="color:inherit"><h2>{{ icon('upload') }} Загрузить запись</h2><p class="muted" style="margin:0">mp3, m4a, wav, ogg, webm, flac — до {{ config.MAX_UPLOAD_MB }} МБ.</p></a>
   <a class="card" href="/app/new?source=mic" style="color:inherit"><h2>{{ icon('mic') }} С микрофона</h2>
     <p class="muted" style="margin:0">Настоящая запись в браузере · передача звука на сервер</p></a>
+  <a class="card tn-card tn-dash" id="tn-dash" data-mode="{{ 'waiting' if settings.ticnote_enabled else 'off' }}" href="/app/new?source=ticnote" style="color:inherit">
+    <h2><span class="tn-dot big"></span> TicNote</h2>
+    <p class="muted" style="margin:0" id="tn-dash-text">{% if settings.ticnote_enabled %}Ждём запись: нажмите кнопку на устройстве — после стопа запись придёт сама{% else %}Режим выключен · включить в настройках{% endif %}</p></a>
 </div>
 <div class="card"><div class="row between"><h2>Последние совещания</h2><a href="/meetings" class="small">Все →</a></div>
   {% include "_meetings_table.html" %}</div>

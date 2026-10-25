@@ -195,3 +195,27 @@
   });
   poll();
 })();
+
+// TicNote card on the dashboard: the same light as on the TicNote tab
+(function () {
+  const card = document.getElementById('tn-dash');
+  if (!card) return;
+  const text = document.getElementById('tn-dash-text');
+  const TEXT = {
+    off: 'Режим выключен · включить в настройках',
+    nokey: 'Нет ключа TicNote · вставьте AppKey в настройках',
+    waiting: 'Ждём запись: нажмите кнопку на устройстве — после стопа запись придёт сама',
+    busy: 'Забираю запись с TicNote — расшифровка и отчёт идут сами',
+  };
+  let timer;
+  const poll = () => fetch('/ticnote/status', {headers: {Accept: 'application/json'}})
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (!d) return;
+      const mode = d.mode === 'waiting' && d.last_error ? 'error' : d.mode;
+      card.dataset.mode = mode;
+      text.textContent = mode === 'error' ? 'TicNote не отвечает: ' + d.last_error : TEXT[mode];
+    }).catch(() => {})
+    .finally(() => { clearTimeout(timer); timer = setTimeout(poll, card.dataset.mode === 'busy' ? 5000 : 15000); });
+  poll();
+})();

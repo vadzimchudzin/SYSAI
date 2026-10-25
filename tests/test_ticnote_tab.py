@@ -55,3 +55,11 @@ def test_status_shows_poll_error(client):
         assert client.get("/ticnote/status").json()["last_error"].startswith("TicNote HTTP 401")
     finally:
         ticnote_ingest.STATE.update(last_scan_at=0.0, last_error="")
+
+
+def test_dashboard_has_ticnote_quick_access(client):
+    settings_store.set_many({"ticnote_enabled": False})
+    html = client.get("/app").text
+    assert 'id="tn-dash"' in html and 'href="/app/new?source=ticnote"' in html and 'data-mode="off"' in html
+    settings_store.set_many({"ticnote_enabled": True, "ticnote_appkey": "tnovs_sk_x"})
+    assert 'data-mode="waiting"' in client.get("/app").text
