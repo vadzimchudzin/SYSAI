@@ -69,7 +69,9 @@ DEFAULTS = {
     "pyannoteai_api_key": "",
     "telegram_bot_token": "",
     "bitrix_webhook_url": "",
-    "notion_parent_id": "",       # only import TicNote exports below this Notion page/database
+    "notion_parent_id": "",
+    "ticnote_enabled": False,      # TicNote mode: device recordings are picked up automatically
+    "ticnote_appkey": "",          # TicNote AppKey (tnovs_sk_... / tncn_sk_...)       # only import TicNote exports below this Notion page/database
     # site owner: shown in the footer, on /legal and in the privacy policy (defaults from sysat.by)
     "legal_name": "ООО «СисЭйТи»",
     "legal_unp": "",
@@ -123,7 +125,7 @@ def set_many(values: dict):
         s.commit()
 
 
-SECRET_KEYS = ("openrouter_api_key", "pyannoteai_api_key", "telegram_bot_token", "bitrix_webhook_url")
+SECRET_KEYS = ("openrouter_api_key", "pyannoteai_api_key", "telegram_bot_token", "bitrix_webhook_url", "ticnote_appkey")
 # Never sent to the browser (sealed Telegram account data).
 HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me")
 

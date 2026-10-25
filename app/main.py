@@ -1101,7 +1101,8 @@ def settings_view(request: Request, msg: str = ""):
     st = settings_store.all_settings()
     masked = {k: bool(st.get(k)) for k in settings_store.SECRET_KEYS}
     env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "pyannoteai_api_key": bool(config.PYANNOTEAI_API_KEY),
-           "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN), "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL)}
+           "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN), "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL),
+           "ticnote_appkey": bool(config.TICNOTE_APPKEY)}
     for k in settings_store.SECRET_KEYS + settings_store.HIDDEN_KEYS:
         st.pop(k, None)  # secrets never go back to the browser, only a mask
     ai = bool(st.get("ai_employee"))
@@ -1191,7 +1192,7 @@ async def settings_save(request: Request):
     updates = {}
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
-              "bitrix_enabled", "ai_employee"):
+              "bitrix_enabled", "ai_employee", "ticnote_enabled"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -1314,6 +1315,19 @@ def test_openrouter(request: Request):
         return RedirectResponse("/settings?msg=OpenRouter: " + llm.check_key(), 303)
     except Exception as e:  # noqa: BLE001
         return RedirectResponse(f"/settings?msg=OpenRouter: {str(e)[:200]}", 303)
+
+
+@app.post("/settings/test-ticnote")
+def test_ticnote(request: Request):
+    guard_admin(request)
+    from . import ticnote
+    key = config.ticnote_appkey()
+    if not key:
+        return RedirectResponse("/settings?msg=" + quote("TicNote: сначала сохраните AppKey"), 303)
+    try:
+        return RedirectResponse("/settings?msg=" + quote("TicNote: " + ticnote.check_key(key)), 303)
+    except ticnote.TicNoteError as e:
+        return RedirectResponse("/settings?msg=" + quote(f"TicNote: {str(e)[:200]}"), 303)
 
 
 @app.post("/settings/test-telegram")
