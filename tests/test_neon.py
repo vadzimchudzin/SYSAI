@@ -72,6 +72,24 @@ def test_wait_for_db_retries_until_the_compute_is_awake(monkeypatch):
     assert pauses == [2.0, 4.0]
 
 
+def test_wait_for_db_does_not_retry_neon_quota(monkeypatch):
+    class _QuotaEngine:
+        calls = 0
+
+        def connect(self):
+            self.calls += 1
+            raise OperationalError("SELECT 1", {}, Exception(
+                "ERROR:  Your account or project has exceeded the quota. Upgrade your plan to increase limits."
+            ))
+
+    engine = _QuotaEngine()
+    monkeypatch.setattr(db, "engine", engine)
+    monkeypatch.setattr(db.time, "sleep", lambda seconds: None)
+    with pytest.raises(OperationalError):
+        db.wait_for_db(attempts=6, delay=0.1)
+    assert engine.calls == 1
+
+
 def test_wait_for_db_gives_up_with_the_original_error(monkeypatch):
     engine = _FlakyEngine(failures=99)
     monkeypatch.setattr(db, "engine", engine)

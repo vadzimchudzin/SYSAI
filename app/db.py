@@ -400,6 +400,25 @@ class Delivery(Base):
     sent_at = Column(DateTime(timezone=True), nullable=True)
 
 
+def _db_error_text(exc: Exception) -> str:
+    return str(exc)
+
+
+def is_permanent_db_error(exc: Exception) -> bool:
+    """Errors that will not clear by waiting (quota, auth, TLS). Do not retry these at boot."""
+    text = _db_error_text(exc).lower()
+    markers = (
+        "exceeded the quota",
+        "upgrade your plan",
+        "password authentication failed",
+        "no password supplied",
+        "ssl connection has been closed unexpectedly",
+        "invalid authorization",
+        "permission denied",
+    )
+    return any(marker in text for marker in markers)
+
+
 def wait_for_db(attempts: int = 6, delay: float = 3.0):
     """Block until the database answers. A suspended Neon compute needs a few seconds to wake up,
     so a failed first connection retries with a growing pause instead of crashing the boot."""
@@ -409,9 +428,13 @@ def wait_for_db(attempts: int = 6, delay: float = 3.0):
                 con.execute(text("SELECT 1"))
             return
         except OperationalError as exc:
+            message = str(exc).splitlines()[0]
+            if is_permanent_db_error(exc):
+                log.error("Database refused the connection (not a wake-up delay): %s", message)
+                raise
             if attempt == attempts:
                 raise
-            log.warning("Database is not ready (attempt %s of %s): %s", attempt, attempts, str(exc).splitlines()[0])
+            log.warning("Database is not ready (attempt %s of %s): %s", attempt, attempts, message)
             time.sleep(delay * attempt)
 
 
