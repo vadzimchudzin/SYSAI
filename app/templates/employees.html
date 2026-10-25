@@ -44,6 +44,17 @@
         <input name="telegram_manual" maxlength="200" placeholder="Или chat_id вручную" value="{{ e.telegram_chat_id if e.telegram_chat_id not in chats|map(attribute='chat_id')|list else '' }}">
       </label>
       {% endif %}
+      {% set level = rights.get(e.id) or 'employee' %}
+      {% if level == 'director' %}
+      <div class="f">Права доступа<p class="small"><span class="pill red">Директор</span> задан в настройках</p></div>
+      {% else %}
+      <label class="f">Права доступа
+        <select name="access_level">
+          {% for lv in access_levels %}<option value="{{ lv }}" {{ 'selected' if lv == level }}>{{ rights_ru[lv] }} — {{ access_hints[lv] }}</option>{% endfor %}
+        </select>
+        <small class="muted">Полный доступ и Проверяющий нужны Telegram в карточке. Директор только наблюдает — его ставьте «Наблюдателем».</small>
+      </label>
+      {% endif %}
       <label class="f">ID в Bitrix24<input name="bitrix_user_id" value="{{ e.bitrix_user_id or '' }}" placeholder="При подключении интеграции"></label>
     </div>
     <label class="check employee-active-check"><input type="checkbox" name="active" {% if e.active %}checked{% endif %}> Сотрудник активен</label>
@@ -69,10 +80,10 @@
   {% else %}
   <div class="employee-list">
   {% for e in employees %}
-    <article class="employee-card {{ '' if e.active else 'off' }} {{ 'full-rights' if rights.get(e.id) }}">
+    <article class="employee-card {{ '' if e.active else 'off' }} {{ 'full-rights' if rights.get(e.id) in strong_rights }}">
       <div class="employee-row">
         <div class="employee-main">
-          <div class="employee-name-line"><b>{{ e.name }}</b>{% if rights.get(e.id) %}<span class="pill red" title="Решения этого человека ИИ-сотрудник выполняет без согласований">{{ rights_ru[rights[e.id]] }}</span>{% endif %}{% if e.position %}<span class="muted">{{ e.position }}</span>{% endif %}{% if not e.active %}<span class="pill gray">Неактивен</span>{% endif %}</div>
+          <div class="employee-name-line"><b>{{ e.name }}</b>{% if rights.get(e.id) in strong_rights %}<span class="pill red" title="Решения этого человека ИИ-сотрудник выполняет без согласований">{{ rights_ru[rights[e.id]] }}</span>{% elif rights.get(e.id) %}<span class="pill blue" title="Видит всё, ассистент его не тревожит">{{ rights_ru[rights[e.id]] }}</span>{% endif %}{% if e.position %}<span class="muted">{{ e.position }}</span>{% endif %}{% if not e.active %}<span class="pill gray">Неактивен</span>{% endif %}</div>
           {% if e.aliases %}<div class="small muted">{{ e.aliases }}</div>{% endif %}
           <div class="department-badges">
             {% if e.department_memberships %}

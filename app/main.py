@@ -1564,9 +1564,11 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
+    from . import access
     rights = {e.id: agent.rights_of(e) for e in emps}
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked, rights=rights,
-                rights_ru=agent.RIGHTS_RU, departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
+                rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
+                strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
                 voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()))
 
 
@@ -1615,7 +1617,17 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
             role = str(form.get(f"department_role_{d.id}") or "").strip()[:200]
             duties = str(form.get(f"department_responsibilities_{d.id}") or "").strip()[:4000]
             s.add(EmployeeDepartment(employee_id=e.id, department_id=d.id, role=role, responsibilities=duties))
+        from . import access
+        level = str(form.get("access_level") or "").strip()
+        if level and (level not in access.LEVELS or access.level_of(e) == "director"):
+            level = ""  # unknown value, or the director (set in the settings, not in the card)
+        if level and level != "employee" and not e.telegram_chat_id:
+            s.rollback()
+            raise HTTPException(400, "Сначала укажите Telegram сотрудника: права привязываются к его аккаунту")
         s.commit()
+    if level and level != access.level_of(e):
+        access.set_level(e, level)  # after the card is saved: the settings are written in their own transaction
+    agent.invalidate_roster()
     return RedirectResponse("/employees", 303)
 
 

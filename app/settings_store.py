@@ -12,7 +12,8 @@ DEFAULTS = {
     "ai_employee": False,
     "director_chat_ids": [],         # the director: the AI employee answers to them directly. Once somebody is listed, only
                                      # they may ask about other people, give orders, ask for reports and reminders for others
-    "full_access_chat_ids": [],      # contacts (besides the reviewers) who may ask "who does what" and get reports
+    "full_access_chat_ids": [],
+    "observer_chat_ids": [],         # see everything, never asked or reported to by the assistant (access.py)      # contacts (besides the reviewers) who may ask "who does what" and get reports
     "persona": "",                   # how the AI employee talks; empty = built-in default
     "agent_model": "google/gemini-2.5-flash",
     "userbot_api_id": "", "userbot_api_hash": "", "userbot_session": "", "userbot_phone": "",  # sealed, see userbot.py

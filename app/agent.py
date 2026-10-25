@@ -18,11 +18,12 @@ import datetime as dt
 import json
 import logging
 import threading
+import re
 import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import bitrix, cases, deadlines, memory as company_memory, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
+from . import access, bitrix, cases, deadlines, memory as company_memory, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
 from .db import (ConversationEscalation, ConversationMessage, Document, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
@@ -59,23 +60,13 @@ def _in_refs(setting: str, msg: dict) -> bool:
     return any(userbot.same_person(ref, msg) for ref in settings_store.get(setting) or [])
 
 
-RIGHTS_RU = {"director": "Директор", "reviewer": "Полные права", "full": "Полные права"}
+RIGHTS_RU = access.LEVEL_RU
 
 
 def rights_of(employee) -> str:
-    """'director' | 'reviewer' | 'full' | '': the person's say in the settings (director, reviewer, full access).
-    The panel marks such people in red: they decide and the AI employee obeys them."""
-    chat = (employee.telegram_chat_id or "").strip()
-    probe = {"user_id": (employee.telegram_user_id or "").strip(),
-             "username": chat[1:] if chat.startswith("@") else "",
-             "phone": chat if chat.startswith("+") else ""}
-    if chat and chat.lstrip("-").isdigit() and not probe["user_id"]:
-        probe["user_id"] = chat
-    for role, setting in (("director", "director_chat_ids"), ("reviewer", "approver_chat_ids"),
-                          ("full", "full_access_chat_ids")):
-        if _in_refs(setting, probe):
-            return role
-    return ""
+    """'director' | 'reviewer' | 'full' | 'observer' | '' (an ordinary employee); see access.py."""
+    level = access.level_of(employee)
+    return "" if level == "employee" else level
 
 
 def _find_employee(s, msg: dict):
@@ -104,7 +95,7 @@ def _roster() -> dict:
             people = tuple((u or "", c or "") for u, c in
                            s.query(Employee.telegram_user_id, Employee.telegram_chat_id).filter_by(active=True).all())
         refs = (tuple(settings_store.get("director_chat_ids") or []) + tuple(settings_store.get("approver_chat_ids") or [])
-                + tuple(settings_store.get("full_access_chat_ids") or []))
+                + tuple(settings_store.get("full_access_chat_ids") or []) + tuple(settings_store.get("observer_chat_ids") or []))
         _ROSTER.update(at=time.time(), refs=refs, employees=people)
     return _ROSTER
 
@@ -291,7 +282,8 @@ def _accept(msg: dict):
     with SessionLocal() as s:
         director = _in_refs("director_chat_ids", msg)
         reviewer = director or _in_refs("approver_chat_ids", msg)
-        full = reviewer or _in_refs("full_access_chat_ids", msg)
+        observer = _in_refs("observer_chat_ids", msg)
+        full = reviewer or _in_refs("full_access_chat_ids", msg) or observer
         employee = _find_employee(s, msg)
         wanted = bool(full or employee)
         row = ConversationMessage(
@@ -299,7 +291,7 @@ def _accept(msg: dict):
             status="agent_pending" if wanted else "agent_ignored",
             text=str(msg["text"]).strip()[:4000] if wanted else "",  # a stranger's words are not kept
             result={"attempts": 0, "name": msg.get("name", "") if wanted else "", "reviewer": reviewer,
-                    "director": director, "full_access": full, "employee_id": employee.id if employee else None,
+                    "director": director, "full_access": full, "observer": observer, "employee_id": employee.id if employee else None,
                     "voice": bool(msg.get("voice_info")), "voice_problem": (msg.get("voice_info") or {}).get("problem"),
                     "username": msg.get("username", "") if wanted else "", "phone": msg.get("phone", "") if wanted else "",
                     "reply_to": msg.get("reply_to"), "document": msg.get("document_info") if wanted else None,
@@ -815,6 +807,48 @@ def _denied(action: dict, employee, reviewer: bool, full: bool) -> bool:
     return False
 
 
+# ----------------------------------------------------------------------------- «обещал — сделал»
+_W = r"(?<![а-яёa-z])({})(?![а-яёa-z])"
+PROMISES = (  # (words in the reply, actions that keep the promise, does a running case keep it)
+    (_W.format("перешлю|передам|отправлю|скину|пришлю|упакую|запакую|заархивирую"),
+     {"deliver_files", "relay_answer", "assign_task", "team_report"}, True),
+    (_W.format("напомню"), {"remind"}, False),
+    (_W.format("уточню|спрошу|узнаю|запрошу"), {"ask_reviewer", "assign_task", "relay_answer"}, False),
+    (_W.format("подготовлю|соберу|сделаю"), {"team_report", "assign_task", "deliver_files", "remind"}, False),
+)
+_CONDITIONAL = re.compile(r"(?<![а-яё])(если|как только|когда|после того как|могу|можно|хочешь|нужно ли)(?![а-яё])")
+
+
+def _sentences(text: str) -> list:
+    return [x.strip() for x in re.split(r"(?<=[.!?…])\s+|\n+", text or "") if x.strip()]
+
+
+def unbacked_promises(reply: str, actions: list, ctx: dict) -> list:
+    """Sentences where the assistant promises to do something («перешлю», «напомню») with no action that does it.
+    Offers and conditions («могу переслать», «если пришлёшь — передам») are not promises."""
+    kinds = {a.get("type") for a in actions or [] if isinstance(a, dict)}
+    case_running = bool(ctx.get("this_message_for_case"))
+    bad = []
+    for sentence in _sentences(reply):
+        low = sentence.lower()
+        if _CONDITIONAL.search(low):
+            continue
+        for pattern, keeps, by_case in PROMISES:
+            found = re.search(pattern, low)
+            if not found or re.search(r"(?<![а-яё])не\s+" + re.escape(found.group(1)), low):
+                continue
+            if kinds & keeps or (by_case and case_running):
+                continue
+            bad.append(sentence)
+            break
+    return bad
+
+
+def _drop_sentences(reply: str, bad: list) -> str:
+    kept = [x for x in _sentences(reply) if x not in bad]
+    return " ".join(kept).strip() or "Понял. Уточни, пожалуйста, что именно сделать и кому."
+
+
 DECLINE_GENTLY = ("\nЭти действия тебе недоступны: такие просьбы по запросам коллег ты не выполняешь. Не выполняй их и убери "
                   "из actions. В reply мягко, коротко и по-человечески скажи, что такие просьбы ты не выполняешь и с ними "
                   "лучше к руководителю, и предложи, чем можешь помочь этому человеку сам. Без слов «нет доступа», «нет "
@@ -1009,11 +1043,23 @@ def _process(row_id: int) -> None:
             decision = _decide(system, ctx, text, feedback)
             errors = [e for e in (_check(a, ctx, employee, reviewer, full) for a in decision["actions"]) if e]
             stiff = voice.officialese(decision["reply"]) if attempt == 1 else []
-            if not errors and not stiff:
+            promises = unbacked_promises(decision["reply"], decision["actions"], ctx)
+            if not errors and not stiff and not promises:
                 break
-            if not errors:  # only the style: one rewrite, then the reply goes as it is
-                feedback = (f"\nОтвет звучит как служебное письмо ({', '.join(stiff)}). Перепиши reply проще, как коллега "
-                            "в мессенджере; actions и memory оставь.")
+            if not errors:
+                if attempt == 2:  # a promise nobody will keep is not sent: those sentences are dropped
+                    log.warning("message %s: unbacked promise dropped: %s", row_id, promises)
+                    decision["reply"] = _drop_sentences(decision["reply"], promises)
+                    break
+                feedback = ""
+                if stiff:  # the style: one rewrite, then the reply goes as it is
+                    feedback += (f"\nОтвет звучит как служебное письмо ({', '.join(stiff)}). Перепиши reply проще, как "
+                                 "коллега в мессенджере; actions и memory оставь.")
+                if promises:
+                    feedback += ("\nВ reply ты обещаешь сделать: «" + "»; «".join(promises) + "», но в actions нет действия, "
+                                 "которое это делает. Либо добавь нужное действие (deliver_files, remind, ask_reviewer, "
+                                 "assign_task, team_report), либо убери обещание и честно скажи, что нужно, чтобы это "
+                                 "сделать (кому, какие файлы, когда).")
                 continue
             if attempt == 2:
                 raise AgentError("; ".join(errors)[:300])
