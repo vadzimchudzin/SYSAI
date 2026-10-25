@@ -707,3 +707,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .tn-recent .tn-row small { display: block; }
 .tn-recent .tn-row a { color: inherit; font-weight: 600; }
 .tn-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* people with full rights (director, reviewer, full access) */
+.employee-card.full-rights { border-left: 3px solid var(--red); }
+.employee-card.full-rights .employee-name-line b { color: var(--red); }

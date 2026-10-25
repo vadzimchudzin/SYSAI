@@ -69,10 +69,10 @@
   {% else %}
   <div class="employee-list">
   {% for e in employees %}
-    <article class="employee-card {{ '' if e.active else 'off' }}">
+    <article class="employee-card {{ '' if e.active else 'off' }} {{ 'full-rights' if rights.get(e.id) }}">
       <div class="employee-row">
         <div class="employee-main">
-          <div class="employee-name-line"><b>{{ e.name }}</b>{% if e.position %}<span class="muted">{{ e.position }}</span>{% endif %}{% if not e.active %}<span class="pill gray">Неактивен</span>{% endif %}</div>
+          <div class="employee-name-line"><b>{{ e.name }}</b>{% if rights.get(e.id) %}<span class="pill red" title="Решения этого человека ИИ-сотрудник выполняет без согласований">{{ rights_ru[rights[e.id]] }}</span>{% endif %}{% if e.position %}<span class="muted">{{ e.position }}</span>{% endif %}{% if not e.active %}<span class="pill gray">Неактивен</span>{% endif %}</div>
           {% if e.aliases %}<div class="small muted">{{ e.aliases }}</div>{% endif %}
           <div class="department-badges">
             {% if e.department_memberships %}

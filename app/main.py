@@ -1564,8 +1564,9 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
     ai = userbot.ai_mode()
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
-    return page(request, "employees.html", employees=emps, chats=chats, linked=linked,
-                departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
+    rights = {e.id: agent.rights_of(e) for e in emps}
+    return page(request, "employees.html", employees=emps, chats=chats, linked=linked, rights=rights,
+                rights_ru=agent.RIGHTS_RU, departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
                 voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()))
 
 

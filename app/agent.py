@@ -58,6 +58,25 @@ def _in_refs(setting: str, msg: dict) -> bool:
     return any(userbot.same_person(ref, msg) for ref in settings_store.get(setting) or [])
 
 
+RIGHTS_RU = {"director": "Директор", "reviewer": "Полные права", "full": "Полные права"}
+
+
+def rights_of(employee) -> str:
+    """'director' | 'reviewer' | 'full' | '': the person's say in the settings (director, reviewer, full access).
+    The panel marks such people in red: they decide and the AI employee obeys them."""
+    chat = (employee.telegram_chat_id or "").strip()
+    probe = {"user_id": (employee.telegram_user_id or "").strip(),
+             "username": chat[1:] if chat.startswith("@") else "",
+             "phone": chat if chat.startswith("+") else ""}
+    if chat and chat.lstrip("-").isdigit() and not probe["user_id"]:
+        probe["user_id"] = chat
+    for role, setting in (("director", "director_chat_ids"), ("reviewer", "approver_chat_ids"),
+                          ("full", "full_access_chat_ids")):
+        if _in_refs(setting, probe):
+            return role
+    return ""
+
+
 def _find_employee(s, msg: dict):
     for employee in s.query(Employee).filter_by(active=True).all():
         if employee.telegram_user_id and employee.telegram_user_id == str(msg["user_id"]):
