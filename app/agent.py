@@ -23,13 +23,14 @@ import time
 from sqlalchemy.exc import IntegrityError
 
 from . import bitrix, cases, deadlines, memory as company_memory, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
-from .db import (ConversationEscalation, ConversationMessage, Employee, Meeting, Note, PersonMemory, SessionLocal,
+from .db import (ConversationEscalation, ConversationMessage, Document, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
 log = logging.getLogger("sysai.agent")
 
 HISTORY = 40            # messages of one conversation the model sees
 MAX_ATTEMPTS = 3
+RECENT_FILES_HOURS = 48
 RETRY_AFTER = 20        # seconds before a waiting message is picked up again
 TALKING_HOURS = 8       # within this time a conversation is "going on": no new greeting
 MAX_REPLY = 3500
@@ -511,6 +512,12 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         ctx["notes"] = _notes_view(s, None, 25)
         ctx["recent_meetings"] = [_meeting_view(m, True) for m in
                                   s.query(Meeting).order_by(Meeting.id.desc()).limit(4).all()]
+        ctx["recent_cases"] = cases.recent_view()
+        since = now() - dt.timedelta(hours=RECENT_FILES_HOURS)
+        ctx["recent_files"] = [{"id": d.id, "filename": d.filename, "size": d.size, "case_id": d.case_id,
+                                "at": d.created_at.isoformat() if d.created_at else None}
+                               for d in s.query(Document).filter(Document.chat_id == chat, Document.created_at >= since)
+                               .order_by(Document.id.desc()).limit(30)]
     ctx["reminders_pending"] = reminders.pending_view(s, chat, full)
     if reviewer or director:
         ctx["cases_awaiting_decision"] = cases.decisions_view()
@@ -547,6 +554,13 @@ ACTIONS_HELP = (
     'отправлено"}: проверяющий решил, кто делает задачу (to="assistant" значит, что задачу выполнишь ты сам: график, '
     "таблица, сводка, отчёт, напоминание, запрос статуса; так же повторяют задачу ассистента со статусом "
     "assistant_failed); "
+    '{"type":"deliver_files","to":ID сотрудника,"document_ids":[ID из files_received или recent_files],"zip":true|false,'
+    '"archive_name":"имя архива","note":"по какому делу"}: человек с полным доступом просит переслать, передать, упаковать '
+    "или отправить файлы сотруднику («перешли ему», «запакуй и отправь зипом»). Код соберёт ZIP (если zip=true), "
+    "отправит и доложит, когда Telegram подтвердит доставку. «Ему/ей» ищи в recent_cases и в разговоре. Бери все файлы, "
+    "которые человек прислал для этого, а не один. ОБЕЩАНИЕ = ДЕЙСТВИЕ: не пиши «перешлю», «упакую», «отправлю», "
+    "«передам», если в actions нет deliver_files (или другого действия, которое это делает); если не хватает данных "
+    "(кому, какие файлы) — спроси. "
     '{"type":"team_report","scope":"all или ID сотрудника"}: человек с полным доступом просит отчёт о том, кто что делает '
     "(код соберёт красивый PDF из базы и пришлёт после твоего ответа, в reply коротко скажи главное). "
     '{"type":"remind","to":"me" или "all" или "reviewers" или [ID сотрудников из команды],"at":"ГГГГ-ММ-ДД ЧЧ:ММ" или null,'
@@ -756,6 +770,29 @@ def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str
         if kind == "cancel_case":
             return "" if isinstance(action.get("case_id"), int) else "cancel_case: укажи case_id"
         return "" if action.get("case_id") in ids else "approve_case: дело не найдено среди ждущих решения"
+    if kind == "deliver_files":
+        if not full:
+            return "deliver_files доступно только проверяющему и людям с полным доступом"
+        team = {p["id"]: p for p in ctx.get("team", [])}
+        if action.get("to") not in team:
+            return "deliver_files: to должен быть ID сотрудника из команды"
+        if not team[action["to"]].get("reachable"):
+            return f"deliver_files: у {team[action['to']]['name']} нет Telegram-контакта в справочнике"
+        ids = action.get("document_ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(x, int) and not isinstance(x, bool) for x in ids):
+            return "deliver_files: document_ids — непустой список ID файлов"
+        known = {d["id"] for d in ctx.get("recent_files", [])}
+        known |= {d.get("document_id") for d in ctx.get("files_received", []) if isinstance(d, dict)}
+        if isinstance(ctx.get("file_received"), dict):
+            known.add(ctx["file_received"].get("document_id"))
+        missing = [x for x in ids if x not in known]
+        if missing:
+            return f"deliver_files: файлы {missing[:5]} не найдены среди присланных этим человеком (recent_files)"
+        if len(set(ids)) > cases.MAX_DELIVERY_FILES:
+            return f"deliver_files: не больше {cases.MAX_DELIVERY_FILES} файлов за раз"
+        if action.get("zip") not in (None, True, False):
+            return "deliver_files: zip это true или false"
+        return ""
     if kind == "team_report":
         if not full:
             return "team_report доступно только проверяющему и людям с полным доступом"
@@ -767,7 +804,7 @@ def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str
 def _denied(action: dict, employee, reviewer: bool, full: bool) -> bool:
     """The action needs more than this person is allowed (as opposed to a mistake in the action itself)."""
     kind = action.get("type")
-    if kind in ("team_report", "assign_task"):
+    if kind in ("team_report", "assign_task", "deliver_files"):
         return not full
     if kind == "remind":
         return action.get("to") != "me" and not full
@@ -884,6 +921,18 @@ def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | Non
                 raise AgentError("напоминание уже отправлено или отменено")
             meeting_alerts.release(s, action["reminder_id"])
             s.commit()
+        elif kind == "deliver_files":
+            s.commit()
+            try:
+                case_id = cases.start_delivery(author or "руководителя", action["to"], action["document_ids"],
+                                               bool(action.get("zip")), str(action.get("archive_name") or ""),
+                                               str(action.get("note") or ""))
+            except cases.CaseError as exc:
+                raise AgentError(f"deliver_files: {exc}") from exc
+            if _testing():
+                cases.advance(case_id)
+            else:
+                cases._pool().submit(cases.advance, case_id)
         elif kind in ("approve_case", "cancel_case"):
             s.commit()
             if kind == "cancel_case":

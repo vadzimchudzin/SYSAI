@@ -18,21 +18,26 @@ Every outgoing text is written by the model; when the model is down the step wai
 import collections
 import datetime as dt
 import hashlib
+import io
 import json
 import logging
 import re
 import threading
+import zipfile
 
 from sqlalchemy.exc import IntegrityError
 
 from . import config, llm, settings_store, task_routing, userbot, voice
-from .db import (Case, CaseEvent, CaseStep, CaseWait, Document, DocumentTransfer, Employee, Note, SessionLocal, Task,
+from .db import (Artifact, Case, CaseEvent, CaseStep, CaseWait, Document, DocumentTransfer, Employee, Note, SessionLocal, Task,
                  now)
 
 log = logging.getLogger("sysai.cases")
 
 KINDS = ("ask", "request", "forward")
 TOOLS = ("send_message", "wait_reply", "forward_document", "report", "close")
+DELIVERY_TOOLS = ("zip_pack", "send_files")  # a delivery case is built by code from an order, never by the planner
+MAX_DELIVERY_FILES = 50
+MAX_ZIP_BYTES = 45 * 1024 * 1024
 PURPOSES = ("ask", "request")
 MAX_STEPS = 10
 MAX_ATTEMPTS = 6               # model or Telegram failures of one step before the case asks for a human
@@ -93,8 +98,9 @@ def _event(s, case_id: int, kind: str, text: str, step_id=None, data=None):
 
 
 def _leaders() -> list:
-    """Who decides for the case: the director, or the reviewers when there is no director."""
-    return list(settings_store.get("director_chat_ids") or []) or list(settings_store.get("approver_chat_ids") or [])
+    """Who runs the cases day to day: the reviewers (full rights). The director only watches and is told only when
+    there are no reviewers."""
+    return list(settings_store.get("approver_chat_ids") or []) or list(settings_store.get("director_chat_ids") or [])
 
 
 # ----------------------------------------------------------------------------- people and plans
@@ -245,6 +251,10 @@ def describe_plan(s, case) -> str:
             lines.append(f"дождаться {'ответа' if a.get('expects') == 'answer' else 'документа'} от {names[a['from']]}")
         elif step.tool == "forward_document":
             lines.append(f"передать документ {names[a['to']]}")
+        elif step.tool == "zip_pack":
+            lines.append(f"упаковать {len(a.get('document_ids') or [])} файл(ов) в ZIP «{a.get('archive_name', '')}»")
+        elif step.tool == "send_files":
+            lines.append(f"отправить {'архив' if a.get('from_step') is not None else 'файлы'} {names[a['to']]}")
         elif step.tool == "report":
             lines.append("доложить результат")
     return "; ".join(lines)
@@ -310,7 +320,9 @@ def _write(purpose: str, facts: dict) -> str:
                   "напоминание по счёту; не дави и не упрекай.",
         "deliver": "Напиши короткую подпись к документу для получателя: от кого документ (from) и по какому поручению (task).",
         "report": "Коротко сообщи руководителю, чем закончилось дело: что спросил или попросил, у кого, что получил "
-                  "(answers, documents), кому передал (forwarded). Если ответ — передай его суть точно.",
+                  "(answers, documents), кому передал (forwarded, sent). Если ответ — передай его суть точно. Если в ответе "
+                  "человек просит что-то прислать или сделать, предложи следующий шаг, который ты сделаешь сам: например, "
+                  "«пришлите сюда файлы — упакую в ZIP и передам ему».",
         "escalate": "Сообщи руководителю, что сотрудник (person) не отвечает по делу уже hours часов, несмотря на "
                     "напоминания (reminders). Предложи вмешаться. Без упрёков в адрес сотрудника.",
         "approval": "Сообщи руководителю план дела (plan) и попроси разрешения начать: он может ответить «да» в этом "
@@ -657,7 +669,7 @@ def _forward_document(case_id: int, step_id: int) -> bool:
 def _report(case_id: int, step_id: int) -> bool:
     with SessionLocal() as s:
         case = s.get(Case, case_id)
-        answers, documents, forwarded = [], [], []
+        answers, documents, forwarded, sent = [], [], [], []
         for step in case.steps:
             if step.tool == "wait_reply" and step.status == "done":
                 who = s.get(Employee, step.args["from"])
@@ -670,11 +682,16 @@ def _report(case_id: int, step_id: int) -> bool:
                                       "id": result["document_id"]})
             if step.tool == "forward_document" and step.status == "done":
                 forwarded.append((step.result or {}).get("to"))
+            if step.tool == "send_files" and step.status == "done":
+                res = step.result or {}
+                forwarded.append(res.get("to"))
+                sent.append({"to": res.get("to"), "files": res.get("files"), "archive": res.get("archive")})
         attach = None
         if documents and not forwarded:  # «запросить у Ани акт»: the document goes to whoever asked for it
             doc = s.get(Document, documents[0]["id"])
             attach = {"filename": doc.filename, "data": bytes(doc.data)} if doc and doc.data else None
-        facts = {**_case_facts(s, case), "answers": answers, "documents": documents, "forwarded": forwarded}
+        facts = {**_case_facts(s, case), "answers": answers, "documents": documents, "forwarded": forwarded,
+                 "sent": sent}
     _tell_leaders(case_id, "report", facts, document=attach)
     with SessionLocal() as s:
         step = s.get(CaseStep, step_id)
@@ -691,8 +708,195 @@ def _close_step(case_id: int, step_id: int) -> bool:
     return True
 
 
+# ----------------------------------------------------------------------------- delivery: «запакуй и отправь ему»
+def _safe_name(name: str, fallback: str = "файл") -> str:
+    name = re.sub(r"[\\/\x00-\x1f]+", "_", str(name or "")).strip(" .") or fallback
+    return name[:150]
+
+
+def _unique(name: str, taken: set) -> str:
+    """фото.jpg, фото (2).jpg, фото (3).jpg: files with the same name must not overwrite each other in the archive."""
+    if name.lower() not in taken:
+        taken.add(name.lower())
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    n = 2
+    while True:
+        candidate = f"{stem} ({n}){'.' + ext if ext else ''}"
+        if candidate.lower() not in taken:
+            taken.add(candidate.lower())
+            return candidate
+        n += 1
+
+
+def _checked_documents(s, ids) -> list:
+    docs = []
+    for doc_id in ids:
+        doc = s.get(Document, doc_id)
+        if doc is None or doc.data is None:
+            raise CaseError(f"файл #{doc_id} не найден в библиотеке документов")
+        if _sha(bytes(doc.data)) != doc.sha256:
+            raise CaseError(f"содержимое «{doc.filename}» изменилось после получения (хеш не совпал)")
+        docs.append(doc)
+    return docs
+
+
+def start_delivery(requested_by: str, to_employee_id: int, document_ids: list, as_zip: bool,
+                   archive_name: str = "", note: str = "") -> int:
+    """An order in the chat («перешли ему», «запакуй и отправь зипом»): a case of code-built steps
+    zip_pack → send_files → report → close. It ends only when Telegram confirmed the sending."""
+    ids = list(dict.fromkeys(int(x) for x in document_ids))
+    if not ids or len(ids) > MAX_DELIVERY_FILES:
+        raise CaseError(f"нужно от 1 до {MAX_DELIVERY_FILES} файлов")
+    with SessionLocal() as s:
+        recipient = s.get(Employee, to_employee_id)
+        if recipient is None or not recipient.active or not recipient.telegram_chat_id:
+            raise CaseError("у получателя нет Telegram-контакта в справочнике")
+        docs = _checked_documents(s, ids)
+        as_zip = bool(as_zip) or len(docs) > 10
+        name = _safe_name(archive_name or f"Файлы для {recipient.name}") if as_zip else ""
+        if as_zip and not name.lower().endswith(".zip"):
+            name += ".zip"
+        title = (note or "").strip() or (f"Упаковать и отправить {len(docs)} файл(ов) {recipient.name}" if as_zip
+                                         else f"Отправить {len(docs)} файл(ов) {recipient.name}")
+        case = Case(title=title[:500], kind="deliver", autonomy="auto", planner="order", status="running")
+        steps = []
+        if as_zip:
+            steps.append(CaseStep(position=0, tool="zip_pack", args={"document_ids": ids, "archive_name": name,
+                                                                     "requested_by": requested_by[:120]}))
+        steps.append(CaseStep(position=len(steps), tool="send_files",
+                              args={"to": recipient.id, "to_ref": recipient.telegram_chat_id,
+                                    "requested_by": requested_by[:120],
+                                    **({"from_step": 0} if as_zip else {"document_ids": ids})}))
+        steps += [CaseStep(position=len(steps), tool="report", args={}),
+                  CaseStep(position=len(steps) + 1, tool="close", args={})]
+        case.steps.extend(steps)
+        s.add(case)
+        s.flush()
+        for doc in docs:
+            if doc.case_id is None:
+                doc.case_id = case.id
+        _event(s, case.id, "planned", f"Поручение от {requested_by or 'руководителя'}: {describe_plan(s, case)}")
+        s.commit()
+        return case.id
+
+
+def _zip_pack(case_id: int, step_id: int) -> bool:
+    with SessionLocal() as s:
+        case, step = s.get(Case, case_id), s.get(CaseStep, step_id)
+        docs = _checked_documents(s, step.args.get("document_ids") or [])
+        buf, taken = io.BytesIO(), set()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            names = [_unique(_safe_name(d.filename), taken) for d in docs]
+            for name, doc in zip(names, docs):
+                archive.writestr(name, bytes(doc.data))
+        data = buf.getvalue()
+        if len(data) > MAX_ZIP_BYTES:
+            raise CaseError(f"архив получился {len(data) // (1024 * 1024)} МБ — больше лимита {MAX_ZIP_BYTES // (1024 * 1024)} МБ")
+        with zipfile.ZipFile(io.BytesIO(data)) as check:  # the archive opens and holds exactly the ordered files
+            if check.testzip() is not None or sorted(check.namelist()) != sorted(names):
+                raise CaseError("архив собран с ошибкой, отправка остановлена")
+        filename = step.args.get("archive_name") or "Файлы.zip"
+        art = Artifact(title=case.title[:300], filename=filename[:200], mime="application/zip", data=data)
+        s.add(art)
+        s.flush()
+        step.status, step.finished_at = "done", now()
+        step.result = {"artifact_id": art.id, "filename": filename, "sha256": _sha(data), "files": names, "size": len(data)}
+        _event(s, case_id, "zip_packed", f"Упаковал {len(names)} файл(ов) в «{filename}» ({len(data) // 1024} КБ)", step_id)
+        s.commit()
+    return True
+
+
+def _send_files(case_id: int, step_id: int) -> bool:
+    if _quiet(case_id):
+        return False
+    with SessionLocal() as s:
+        case, step = s.get(Case, case_id), s.get(CaseStep, step_id)
+        recipient = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
+        archive = None
+        if step.args.get("from_step") is not None:
+            packed = next((x for x in case.steps if x.position == step.args["from_step"]), None)
+            res = (packed.result or {}) if packed is not None else {}
+            art = s.get(Artifact, res.get("artifact_id")) if res.get("artifact_id") else None
+            if art is None or art.data is None or _sha(bytes(art.data)) != res.get("sha256"):
+                raise CaseError("архив для отправки не найден или изменился")
+            payload = [(art.filename, bytes(art.data))]
+            archive, listed = art.filename, res.get("files") or []
+        else:
+            docs = _checked_documents(s, step.args.get("document_ids") or [])
+            payload = [(d.filename, bytes(d.data)) for d in docs]
+            listed = [d.filename for d in docs]
+        facts = _case_facts(s, case)
+        facts.update({"from": step.args.get("requested_by") or "руководителя", "to": recipient.name,
+                      "filename": archive or ", ".join(listed[:5]), "files_count": len(listed)})
+        ref, name = recipient.telegram_chat_id, recipient.name
+    caption = _write("deliver", facts)
+    with SessionLocal() as s:
+        s.get(CaseStep, step_id).status = "sending"
+        s.commit()
+    message_ids = []
+    try:
+        for i, (filename, data) in enumerate(payload):
+            sent = userbot.send_document(ref, filename, data, caption[:1000] if i == 0 else "")
+            if not isinstance(sent, dict) or not sent.get("message_id"):
+                raise CaseError("Telegram не подтвердил отправку файла")
+            message_ids.append(sent["message_id"])
+    except userbot.QuietHours:
+        if not message_ids:
+            with SessionLocal() as s:
+                s.get(CaseStep, step_id).status = "pending"
+                s.commit()
+            _quiet(case_id)
+            return False
+        raise CaseError("тихие часы начались посреди отправки; часть файлов ушла — проверьте чат") from None
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as s:
+            step = s.get(CaseStep, step_id)
+            step.status, step.result = "uncertain", {"message_ids": message_ids, "to": name}
+            s.commit()
+        raise CaseError(f"не удалось подтвердить отправку {name}: {str(exc)[:200]}. Проверьте чат перед повтором") from exc
+    try:
+        from . import agent
+        what = f"архив «{archive}»" if archive else ", ".join(f"«{n}»" for n in listed[:5])
+        agent.record_outgoing(ref, f"[файл {what}] {caption}", message_ids[0], None)
+    except Exception:  # noqa: BLE001
+        log.exception("sent files are not in the conversation history")
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        step.status, step.finished_at = "done", now()
+        step.result = {"message_ids": message_ids, "to": name, "files": listed, "archive": archive}
+        case = s.get(Case, case_id)
+        case.attempts, case.retry_at = 0, None
+        what = f"архив «{archive}» ({len(listed)} файл(ов))" if archive else f"{len(listed)} файл(ов)"
+        _event(s, case_id, "files_sent", f"Отправил {name} {what}", step_id)
+        s.commit()
+    return True
+
+
+def recent_view(hours: int = 48, limit: int = 8) -> list:
+    """Cases of the last days for people with full rights: who was asked, what they answered, what is left.
+    Lets the conversation understand «перешли ему» right after a case."""
+    since = now() - dt.timedelta(hours=hours)
+    with SessionLocal() as s:
+        out = []
+        for case in s.query(Case).filter(Case.updated_at >= since).order_by(Case.id.desc()).limit(limit):
+            people, answers = set(), []
+            for step in case.steps:
+                for key in ("to", "from"):
+                    e = s.get(Employee, (step.args or {}).get(key)) if (step.args or {}).get(key) else None
+                    if e:
+                        people.add((e.id, e.name))
+                if step.tool == "wait_reply" and (step.result or {}).get("answer"):
+                    answers.append(step.result["answer"][:400])
+            out.append({"id": case.id, "title": case.title, "status": STATUS_RU.get(case.status, case.status),
+                        "people": [{"id": i, "name": n} for i, n in sorted(people)], "answers": answers[-2:]})
+        return out
+
+
 _RUN = {"send_message": _send_message, "wait_reply": _wait_reply, "forward_document": _forward_document,
-        "report": _report, "close": _close_step}
+        "report": _report, "close": _close_step, "zip_pack": _zip_pack, "send_files": _send_files}
 
 
 def _close(s, case) -> None:
