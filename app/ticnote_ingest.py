@@ -18,6 +18,7 @@ log = logging.getLogger("sysai.ticnote")
 POLL_SECONDS = 60
 MAX_ATTEMPTS = 3
 _last_scan = [0.0]
+STATE = {"last_scan_at": 0.0, "last_error": ""}  # shown on the TicNote tab
 
 
 def _ms(node: dict, *keys) -> int:
@@ -140,10 +141,37 @@ def scan(force: bool = False) -> list[int]:
     if not enabled_at:  # turned on outside the settings page: start from now, never import the whole history
         enabled_at = int(time.time() * 1000)
         settings_store.set_many({"ticnote_enabled_at": enabled_at})
-    nodes = ticnote.ready_recordings(appkey)
+    try:
+        nodes = ticnote.ready_recordings(appkey)
+    except Exception as e:
+        STATE.update(last_scan_at=time.time(), last_error=str(e)[:300])
+        raise
+    STATE.update(last_scan_at=time.time(), last_error="")
     queued = []
     for node in candidates(nodes, enabled_at):
         mid = import_recording(appkey, node)
         if mid:
             queued.append(mid)
     return queued
+
+
+def status(limit: int = 6) -> dict:
+    """What the TicNote tab shows: mode, key, last poll and the latest device recordings with their meetings."""
+    from .db import Meeting
+    enabled = bool(settings_store.get("ticnote_enabled"))
+    has_key = bool(config.ticnote_appkey())
+    recent, busy = [], False
+    with SessionLocal() as s:
+        rows = s.query(TicnoteImport).order_by(TicnoteImport.created_at.desc()).limit(limit).all()
+        for row in rows:
+            m = s.get(Meeting, row.meeting_id) if row.meeting_id else None
+            state = "downloading" if row.status == "downloading" else (m.status if m else row.status)
+            if state in ("downloading", "queued", "transcribing", "analyzing"):
+                busy = True
+            recent.append({"title": row.title or "Запись TicNote", "state": state,
+                           "progress": (m.progress if m else "") or "", "error": (row.error or (m.error if m else "") or "")[:300],
+                           "meeting_id": row.meeting_id,
+                           "at": row.created_at.isoformat() if row.created_at else ""})
+    mode = "off" if not enabled else ("nokey" if not has_key else ("busy" if busy else "waiting"))
+    return {"mode": mode, "enabled": enabled, "has_key": has_key, "last_scan_at": STATE["last_scan_at"],
+            "last_error": STATE["last_error"], "recent": recent}

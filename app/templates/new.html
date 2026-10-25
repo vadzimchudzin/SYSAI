@@ -6,13 +6,14 @@
 <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form" class="setup">
 <section class="card setup-step">
   <div class="seg-switch" id="src-switch">
-    <label><input type="radio" name="src" value="file" {{ 'checked' if source != 'mic' }}>{{ icon('upload') }} Файл</label>
+    <label><input type="radio" name="src" value="file" {{ 'checked' if source == 'file' }}>{{ icon('upload') }} Файл</label>
     <label><input type="radio" name="src" value="mic" {{ 'checked' if source == 'mic' }}>{{ icon('mic') }} Микрофон</label>
+    <label><input type="radio" name="src" value="ticnote" {{ 'checked' if source == 'ticnote' }}><span class="tn-dot {{ 'on' if s.ticnote_enabled }}" aria-hidden="true"></span> TicNote</label>
   </div>
 
-  <div class="pane {{ 'on' if source != 'mic' }}" data-pane="file">
+  <div class="pane {{ 'on' if source == 'file' }}" data-pane="file">
     <label class="drop" id="drop">
-      <input type="file" name="file" accept="{{ audio_ext|join(',') }}" data-max-mb="{{ config.MAX_UPLOAD_MB }}" id="file" aria-describedby="upload-error" {{ 'required' if source != 'mic' }}>
+      <input type="file" name="file" accept="{{ audio_ext|join(',') }}" data-max-mb="{{ config.MAX_UPLOAD_MB }}" id="file" aria-describedby="upload-error" {{ 'required' if source == 'file' }}>
       <span class="ic">{{ icon('upload') }}</span>
       <span id="drop-text"><b>Перетащите запись сюда</b><br><small class="muted">mp3, m4a, wav, ogg · до {{ config.MAX_UPLOAD_MB }} МБ</small></span>
     </label>
@@ -24,6 +25,20 @@
     <div class="progress hidden" id="up-progress" style="margin-top:14px"><div></div></div>
     <button class="btn primary wide" id="upload-btn" style="margin-top:16px">Распознать и собрать отчёт</button>
     <p class="small muted privacy-note">Предупредите участников совещания о записи. В демонстрационной версии запись распознаёт модель через OpenRouter (США). Для клиентов в Беларуси сервис работает на серверах в стране. <a href="/privacy">Подробнее</a></p>
+  </div>
+
+  <div class="pane {{ 'on' if source == 'ticnote' }}" data-pane="ticnote" id="ticnote-pane">
+    <div class="mic-card tn-card" data-mode="{{ 'waiting' if s.ticnote_enabled else 'off' }}" id="tn-card">
+      <span class="mic-ic tn-ic"><span class="tn-dot big"></span></span>
+      <div><b id="tn-state">{{ 'Ждём запись с TicNote' if s.ticnote_enabled else 'Режим TicNote выключен' }}</b>
+        <div class="small muted" id="tn-hint" role="status" aria-live="polite">{% if s.ticnote_enabled %}Нажмите кнопку на устройстве в начале совещания и стоп в конце. Запись сама попадёт сюда и пойдёт в отчёт.{% else %}Включите режим и вставьте ключ в <a href="/settings#ticnote">настройках</a>.{% endif %}</div></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn sm" type="button" id="tn-scan" {{ 'disabled' if not s.ticnote_enabled }}>Проверить сейчас</button>
+      <a class="btn sm ghost" href="/settings#ticnote">Настройки TicNote</a>
+      <span class="small muted" id="tn-last"></span>
+    </div>
+    <div id="tn-recent" class="tn-recent"></div>
   </div>
 
   <div class="pane {{ 'on' if source == 'mic' }}" data-pane="mic">

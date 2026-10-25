@@ -295,8 +295,38 @@ def new_meeting(request: Request, source: str = "file"):
     guard(request)
     with SessionLocal() as s:
         mic = s.query(Meeting).filter_by(source="microphone").order_by(Meeting.id.desc()).limit(3).all()
+    if source not in ("file", "mic", "ticnote"):
+        source = "file"
     return page(request, "new.html", s=settings_store.all_settings(), chats=known_chats(), source=source,
                 today=deadlines.today().isoformat(), mic_meetings=mic, audio_ext=sorted(pipeline.AUDIO_EXT))
+
+
+@app.get("/ticnote/status")
+def ticnote_status(request: Request):
+    guard(request)
+    from . import ticnote_ingest
+    data = ticnote_ingest.status()
+    for item in data["recent"]:
+        item["label"], item["color"] = STATUS.get(item["state"], ("Скачивание записи", "blue") if item["state"] == "downloading"
+                                                  else (item["state"], "gray"))
+    return JSONResponse(data)
+
+
+@app.post("/ticnote/scan")
+def ticnote_scan_now(request: Request):
+    """'Проверить сейчас' on the TicNote tab: poll TicNote without waiting for the next minute."""
+    guard(request)
+    from . import ticnote_ingest
+    if not settings_store.get("ticnote_enabled") or not config.ticnote_appkey():
+        raise HTTPException(409, "Включите режим TicNote и сохраните ключ в настройках")
+
+    def job():
+        try:
+            ticnote_ingest.scan(force=True)
+        except Exception:  # noqa: BLE001
+            log.exception("TicNote scan failed")
+    job() if config.TESTING else pipeline.POOL.submit(job)
+    return JSONResponse({"ok": True})
 
 
 def _options(form) -> dict:

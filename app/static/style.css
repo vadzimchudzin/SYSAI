@@ -691,3 +691,17 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .mem-hit, .mem-note { padding: 8px 0; border-bottom: 1px dashed var(--line); } .mem-note:last-of-type { border-bottom: 0; }
 .mem-add { gap: 6px; margin-top: 10px; flex-wrap: wrap; } .mem-dept { margin: 6px 0; } .mem-dept summary { cursor: pointer; }
 .doc-text { white-space: pre-wrap; font-size: 13px; max-height: 520px; overflow: auto; background: var(--bg2); padding: 12px; border-radius: 10px; }
+
+/* TicNote tab: the dot is grey when the mode is off, green while waiting for a recording, clay and pulsing while one is being taken */
+.tn-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
+.tn-dot.on { background: var(--green); }
+.tn-dot.big { width: 18px; height: 18px; }
+.tn-card[data-mode="waiting"] .tn-dot { background: var(--green); box-shadow: 0 0 0 0 rgba(127,183,126,.5); animation: tn-pulse 2.4s infinite; }
+.tn-card[data-mode="busy"] { border-color: var(--clay); }
+.tn-card[data-mode="busy"] .tn-dot { background: var(--clay); animation: tn-pulse 1s infinite; }
+.tn-card[data-mode="nokey"] .tn-dot, .tn-card[data-mode="error"] .tn-dot { background: var(--amber); }
+.seg-switch label.tn-busy .tn-dot { background: var(--clay); animation: tn-pulse 1s infinite; }
+@keyframes tn-pulse { 0% { box-shadow: 0 0 0 0 rgba(201,129,121,.55); } 70% { box-shadow: 0 0 0 10px rgba(201,129,121,0); } 100% { box-shadow: 0 0 0 0 rgba(201,129,121,0); } }
+.tn-recent { margin-top: 14px; display: grid; gap: 8px; }
+.tn-recent .tn-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; color: inherit; }
+.tn-recent .tn-row small { display: block; }

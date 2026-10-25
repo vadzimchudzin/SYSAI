@@ -137,3 +137,46 @@
   window.addEventListener('hashchange', openDialogue);
   openDialogue();
 })();
+
+// TicNote tab: light up while a device recording is being taken, list the latest ones
+(function () {
+  const pane = document.getElementById('ticnote-pane');
+  if (!pane) return;
+  const card = document.getElementById('tn-card'), state = document.getElementById('tn-state'), hint = document.getElementById('tn-hint');
+  const last = document.getElementById('tn-last'), recent = document.getElementById('tn-recent'), scan = document.getElementById('tn-scan');
+  const tab = document.querySelector('#src-switch input[value="ticnote"]').closest('label');
+  const TEXT = {
+    off: ['Режим TicNote выключен', 'Включите режим и вставьте ключ в настройках.'],
+    nokey: ['Нет ключа TicNote', 'Вставьте AppKey в настройках.'],
+    waiting: ['Ждём запись с TicNote', 'Нажмите кнопку на устройстве в начале совещания и стоп в конце. Запись сама попадёт сюда и пойдёт в отчёт.'],
+    busy: ['Забираю запись с TicNote', 'Запись уже у нас: расшифровка и отчёт идут сами.'],
+  };
+  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
+  const render = data => {
+    let mode = data.mode;
+    if (mode === 'waiting' && data.last_error) mode = 'error';
+    card.dataset.mode = mode;
+    tab.classList.toggle('tn-busy', mode === 'busy');
+    const [title, text] = mode === 'error' ? ['TicNote не отвечает', data.last_error] : TEXT[mode];
+    state.textContent = title;
+    hint.textContent = text;
+    scan.disabled = !(data.enabled && data.has_key);
+    last.textContent = data.last_scan_at ? 'Проверено в ' + new Date(data.last_scan_at * 1000).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'}) : '';
+    recent.replaceChildren(...data.recent.map(r => {
+      const row = el(r.meeting_id ? 'a' : 'div', 'tn-row');
+      if (r.meeting_id) row.href = '/meetings/' + r.meeting_id;
+      const left = el('div'); left.append(el('b', '', r.title), el('small', 'muted', r.error || r.progress || ''));
+      row.append(left, el('span', 'pill ' + r.color, r.label));
+      return row;
+    }));
+  };
+  let timer;
+  const poll = () => fetch('/ticnote/status', {headers: {Accept: 'application/json'}})
+    .then(r => r.ok ? r.json() : null).then(d => { if (d) render(d); }).catch(() => {})
+    .finally(() => { clearTimeout(timer); timer = setTimeout(poll, card.dataset.mode === 'busy' ? 5000 : 15000); });
+  scan.addEventListener('click', () => {
+    scan.disabled = true; last.textContent = 'Проверяю…';
+    fetch('/ticnote/scan', {method: 'POST'}).finally(() => setTimeout(poll, 3000));
+  });
+  poll();
+})();
