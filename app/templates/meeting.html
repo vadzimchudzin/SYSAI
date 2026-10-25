@@ -50,7 +50,9 @@
   </form>{% endif %}
 </div>{% endif %}
 {% if m.status in ('queued','transcribing','analyzing','sending','delivery_queued','delivery_retry') %}
-<div class="card center"><div class="spinner"></div><p class="soft">{{ m.progress }}… Данные обновятся автоматически.</p></div>
+<div class="card center"><div class="spinner"></div><p class="soft">{{ m.progress }}… Данные обновятся автоматически.</p>
+  {% if m.status in ('queued','transcribing','analyzing') %}<form method="post" action="/meetings/{{ m.id }}/cancel-processing" onsubmit="return confirm('Остановить обработку? Потом её можно запустить заново.')">
+    <button class="btn sm danger">Остановить обработку</button></form>{% endif %}</div>
 {% endif %}
 
 </div>

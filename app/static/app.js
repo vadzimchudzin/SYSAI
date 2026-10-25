@@ -163,10 +163,25 @@
     scan.disabled = !(data.enabled && data.has_key);
     last.textContent = data.last_scan_at ? 'Проверено в ' + new Date(data.last_scan_at * 1000).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'}) : '';
     recent.replaceChildren(...data.recent.map(r => {
-      const row = el(r.meeting_id ? 'a' : 'div', 'tn-row');
-      if (r.meeting_id) row.href = '/meetings/' + r.meeting_id;
-      const left = el('div'); left.append(el('b', '', r.title), el('small', 'muted', r.error || r.progress || ''));
-      row.append(left, el('span', 'pill ' + r.color, r.label));
+      const row = el('div', 'tn-row'), left = el('div'), right = el('div', 'tn-actions');
+      const name = el(r.meeting_id ? 'a' : 'b', '', r.title);
+      if (r.meeting_id) name.href = '/meetings/' + r.meeting_id;
+      left.append(name, el('small', 'muted', r.error || r.progress || ''));
+      right.append(el('span', 'pill ' + r.color, r.label));
+      const act = (action, text, cls, ask) => {
+        const b = el('button', 'btn sm ' + cls, text); b.type = 'button';
+        b.addEventListener('click', () => {
+          if (ask && !confirm(ask)) return;
+          b.disabled = true;
+          fetch('/ticnote/imports/' + encodeURIComponent(r.record_id) + '/' + action, {method: 'POST'})
+            .then(res => res.ok ? null : res.json().then(j => alert(j.detail || 'Не получилось')))
+            .finally(() => setTimeout(poll, 1500));
+        });
+        right.append(b);
+      };
+      if (r.can_stop) act('stop', 'Остановить', 'danger', 'Остановить эту запись? Потом её можно повторить.');
+      if (r.can_retry) act('retry', 'Повторить', '');
+      row.append(left, right);
       return row;
     }));
   };

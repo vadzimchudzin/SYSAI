@@ -20,7 +20,21 @@ AUDIO_EXT = {".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".webm", ".flac", 
 
 
 # ----------------------------------------------------------------------------- helpers
+class Cancelled(Exception):
+    """The meeting was stopped by hand while this thread was processing it."""
+
+
+_RUN = threading.local()   # which meeting run this worker thread is doing: (meeting id, generation)
+_GEN: dict = {}            # meeting id -> generation; a stop bumps it so the old run aborts at its next step
+
+
+def _alive(meeting_id: int):
+    if getattr(_RUN, "mid", None) == meeting_id and getattr(_RUN, "gen", None) != _GEN.get(meeting_id, 0):
+        raise Cancelled(meeting_id)
+
+
 def _set(meeting_id: int, **kw):
+    _alive(meeting_id)
     with SessionLocal() as s:
         m = s.get(Meeting, meeting_id)
         for k, v in kw.items():
@@ -107,11 +121,35 @@ def process(meeting_id: int):
         if meeting_id in _PROCESSING:
             return
         _PROCESSING.add(meeting_id)
+        gen = _GEN.get(meeting_id, 0)
+    _RUN.mid, _RUN.gen = meeting_id, gen
     try:
         _process(meeting_id)
+    except Cancelled:
+        log.info("meeting %s: processing stopped by hand", meeting_id)
     finally:
+        _RUN.mid = None
         with _PROCESSING_LOCK:
+            if _GEN.get(meeting_id, 0) == gen:  # a newer run started after a stop owns the slot now
+                _PROCESSING.discard(meeting_id)
+
+
+STOPPABLE = ("queued", "transcribing", "analyzing")
+
+
+def cancel_processing(meeting_id: int) -> bool:
+    """«Остановить обработку»: a stuck or unwanted run ends at its next step; «Продолжить обработку» starts it again."""
+    with SessionLocal() as s:
+        changed = s.query(Meeting).filter(Meeting.id == meeting_id, Meeting.status.in_(STOPPABLE)).update(
+            {Meeting.status: "error", Meeting.progress: "Остановлено",
+             Meeting.error: "Обработка остановлена вручную. Нажмите «Продолжить обработку», чтобы запустить заново."},
+            synchronize_session=False)
+        s.commit()
+    if changed:
+        with _PROCESSING_LOCK:
+            _GEN[meeting_id] = _GEN.get(meeting_id, 0) + 1
             _PROCESSING.discard(meeting_id)
+    return bool(changed)
 
 
 def _process(meeting_id: int):
@@ -163,6 +201,8 @@ def _process(meeting_id: int):
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
         _save_report(meeting_id, report, settings)
         _finish_processing(meeting_id, audio_path, settings)
+    except Cancelled:
+        raise
     except Exception as e:  # noqa: BLE001
         log.exception("meeting %s failed", meeting_id)
         _set(meeting_id, status="error", progress="Ошибка", error=str(e)[:2000])
@@ -237,6 +277,7 @@ def _force_review_options(m):
 
 
 def _finish_processing(meeting_id, audio_path, settings):
+    _alive(meeting_id)
     with SessionLocal() as s:
         if _force_review_options(s.get(Meeting, meeting_id)):
             settings = dict(settings, approval_required=True)
@@ -271,6 +312,7 @@ def retry_processing(meeting_id):
 
 
 def _save_report(meeting_id: int, report: dict, settings: dict):
+    _alive(meeting_id)
     with SessionLocal() as s:
         m = s.get(Meeting, meeting_id)
         m.report = report

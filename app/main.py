@@ -329,6 +329,21 @@ def ticnote_scan_now(request: Request):
     return JSONResponse({"ok": True})
 
 
+@app.post("/ticnote/imports/{record_id}/{action}")
+def ticnote_import_action(request: Request, record_id: str, action: str):
+    """Остановить / Повторить for one TicNote recording on the TicNote tab."""
+    guard(request)
+    from . import ticnote_ingest
+    if action not in ("stop", "retry"):
+        raise HTTPException(404, "Неизвестное действие")
+    done = (ticnote_ingest.stop if action == "stop" else ticnote_ingest.retry)(record_id)
+    if not done:
+        raise HTTPException(409, "Запись уже в другом состоянии, обновите страницу")
+    if action == "retry" and settings_store.get("ticnote_enabled") and config.ticnote_appkey() and not config.TESTING:
+        pipeline.POOL.submit(lambda: ticnote_ingest.scan(force=True))
+    return JSONResponse({"ok": True})
+
+
 def _options(form) -> dict:
     """Per-meeting overrides from the upload page."""
     if "deadline_mode" not in form:
@@ -956,6 +971,14 @@ async def meeting_approve(request: Request, mid: int):
 def meeting_retry_delivery(request: Request, mid: int):
     guard(request)
     pipeline.retry_delivery(mid)
+    return RedirectResponse(f"/meetings/{mid}", 303)
+
+
+@app.post("/meetings/{mid}/cancel-processing")
+def meeting_cancel_processing(request: Request, mid: int):
+    guard(request)
+    if not pipeline.cancel_processing(mid):
+        raise HTTPException(409, "Совещание уже не обрабатывается")
     return RedirectResponse(f"/meetings/{mid}", 303)
 
 

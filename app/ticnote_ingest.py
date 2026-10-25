@@ -17,6 +17,7 @@ log = logging.getLogger("sysai.ticnote")
 
 POLL_SECONDS = 60
 MAX_ATTEMPTS = 3
+STALE_MINUTES = 15   # a download this old was cut off (restart, crash): it is free to be taken again
 _last_scan = [0.0]
 STATE = {"last_scan_at": 0.0, "last_error": ""}  # shown on the TicNote tab
 
@@ -62,6 +63,15 @@ def candidates(nodes: list[dict], enabled_at_ms: int) -> list[dict]:
     return sorted(out, key=lambda n: _ms(n, "addTimestamp", "createTimestamp"))
 
 
+def _stale(row) -> bool:
+    updated = row.updated_at or row.created_at
+    if row.status != "downloading" or updated is None:
+        return False
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=dt.timezone.utc)
+    return now() - updated > dt.timedelta(minutes=STALE_MINUTES)
+
+
 def _claim(record_id: str, title: str) -> bool:
     """Reserve a recording for import. False when it is already imported, in progress or out of retries."""
     with SessionLocal() as s:
@@ -74,6 +84,8 @@ def _claim(record_id: str, title: str) -> bool:
                 s.rollback()
                 return False
             return True
+        if _stale(row):
+            row.status = "error"
         if row.status != "error" or row.attempts >= MAX_ATTEMPTS:
             return False
         row.status, row.attempts, row.error = "downloading", row.attempts + 1, ""
@@ -165,13 +177,54 @@ def status(limit: int = 6) -> dict:
         rows = s.query(TicnoteImport).order_by(TicnoteImport.created_at.desc()).limit(limit).all()
         for row in rows:
             m = s.get(Meeting, row.meeting_id) if row.meeting_id else None
-            state = "downloading" if row.status == "downloading" else (m.status if m else row.status)
+            if _stale(row):
+                state = "error"
+            else:
+                state = "downloading" if row.status == "downloading" else (m.status if m else row.status)
             if state in ("downloading", "queued", "transcribing", "analyzing"):
                 busy = True
-            recent.append({"title": row.title or "Запись TicNote", "state": state,
+            can_stop = state == "downloading" or (m is not None and state in pipeline.STOPPABLE)
+            can_retry = state == "error"
+            recent.append({"record_id": row.record_id, "can_stop": can_stop, "can_retry": can_retry,
+                           "title": row.title or "Запись TicNote", "state": state,
                            "progress": (m.progress if m else "") or "", "error": (row.error or (m.error if m else "") or "")[:300],
                            "meeting_id": row.meeting_id,
                            "at": row.created_at.isoformat() if row.created_at else ""})
     mode = "off" if not enabled else ("nokey" if not has_key else ("busy" if busy else "waiting"))
     return {"mode": mode, "enabled": enabled, "has_key": has_key, "last_scan_at": STATE["last_scan_at"],
             "last_error": STATE["last_error"], "recent": recent}
+
+
+def stop(record_id: str) -> bool:
+    """«Остановить» on the TicNote tab: a stuck download is dropped (no automatic retry), a run in our pipeline is stopped."""
+    with SessionLocal() as s:
+        row = s.get(TicnoteImport, record_id)
+        if row is None:
+            return False
+        if row.meeting_id:
+            mid = row.meeting_id
+        elif row.status == "downloading":
+            row.status, row.attempts, row.error = "error", MAX_ATTEMPTS, "Скачивание остановлено вручную"
+            s.commit()
+            return True
+        else:
+            return False
+    return pipeline.cancel_processing(mid)
+
+
+def retry(record_id: str) -> bool:
+    """«Повторить»: a failed download is taken again on the next pass, a failed meeting is processed again."""
+    with SessionLocal() as s:
+        row = s.get(TicnoteImport, record_id)
+        if row is None:
+            return False
+        if row.meeting_id:
+            mid = row.meeting_id
+        elif row.status == "error" or _stale(row):
+            row.status, row.attempts, row.error = "error", 0, ""
+            s.commit()
+            _last_scan[0] = 0  # do not wait for the next minute
+            return True
+        else:
+            return False
+    return pipeline.retry_processing(mid)
