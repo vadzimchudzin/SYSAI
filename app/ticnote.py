@@ -180,20 +180,24 @@ def audio_url(detail: dict) -> str:
 
 def download_wav(url: str, dest, *, timeout: int = 180) -> int:
     """Write WAV bytes to dest (path or file-like). Returns size."""
+    import shutil
+    from pathlib import Path
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
+            if hasattr(dest, "write"):
+                start = dest.tell() if hasattr(dest, "tell") else 0
+                shutil.copyfileobj(resp, dest, 1 << 20)
+                size = (dest.tell() - start) if hasattr(dest, "tell") else 0
+            else:
+                with open(dest, "wb") as f:
+                    shutil.copyfileobj(resp, f, 1 << 20)
+                size = Path(dest).stat().st_size
     except urllib.error.URLError as e:
         raise TicNoteError(f"Не удалось скачать WAV: {e.reason}") from e
-    if not data:
+    if not size:
         raise TicNoteError("Скачанный WAV пуст")
-    if hasattr(dest, "write"):
-        dest.write(data)
-    else:
-        from pathlib import Path
-        Path(dest).write_bytes(data)
-    return len(data)
+    return size
 
 
 def check_key(appkey: str) -> str:

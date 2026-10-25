@@ -801,7 +801,7 @@ def poke():
 
 
 def start_background():
-    from . import agent, cases, conversations, doctext, meeting_alerts, memory, reminders
+    from . import agent, cases, conversations, doctext, meeting_alerts, memory, reminders, ticnote_ingest
     resume_jobs()
     conversations.recover()
     assistant.recover()
@@ -811,7 +811,7 @@ def start_background():
         time.sleep(config.STARTUP_DELAY)  # let the web server answer the platform's checks first
         while True:
             for fn in (mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
-                       assistant.run_pending, cases.run_due, doctext.run_pending, memory.refresh_vectors, meeting_alerts.run_due, reminders.run_due, userbot.watchdog):
+                       assistant.run_pending, cases.run_due, doctext.run_pending, memory.refresh_vectors, meeting_alerts.run_due, reminders.run_due, userbot.watchdog, ticnote_ingest.scan):
                 try:
                     fn()
                 except Exception:

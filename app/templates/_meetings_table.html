@@ -3,6 +3,6 @@
 {% for m in meetings %}{% set st = STATUS.get(m.status, (m.status, 'gray')) %}
 <tr onclick="location='/meetings/{{ m.id }}'"><td><b>{{ m.title or m.filename }}</b><div class="muted small">{{ m.progress }}</div></td>
   <td>{{ m.meeting_date.strftime('%d.%m.%Y') if m.meeting_date }}</td><td>{{ mmss(m.duration_sec) if m.duration_sec }}</td>
-  <td>{{ counts[m.id] }}</td><td class="soft">{{ {'web':'файл','microphone':'микрофон','demo':'демо'}.get(m.source, m.source) }}</td>
+  <td>{{ counts[m.id] }}</td><td class="soft">{{ {'web':'файл','microphone':'микрофон','demo':'демо','notion':'Notion','ticnote':'TicNote'}.get(m.source, m.source) }}</td>
   <td><span class="pill {{ st[1] }}">{{ st[0] }}</span></td></tr>
 {% endfor %}</tbody></table></div>{% endif %}

@@ -13,8 +13,12 @@ class FakeResp:
         self._payload = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         self.status = status
 
-    def read(self):
-        return self._payload
+    def read(self, size=-1):
+        if size is None or size < 0:
+            data, self._payload = self._payload, b""
+        else:
+            data, self._payload = self._payload[:size], self._payload[size:]
+        return data
 
     def __enter__(self):
         return self

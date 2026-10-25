@@ -473,6 +473,19 @@ class NotionImportedPage(Base):
     error = Column(Text, default="")
 
 
+class TicnoteImport(Base):
+    """One TicNote device recording maps to at most one SYSAI meeting (record_id is the TicNote recordId)."""
+    __tablename__ = "ticnote_imports"
+    record_id = Column(String(64), primary_key=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True, index=True)
+    title = Column(String(300), default="")
+    status = Column(String(20), default="downloading")  # downloading | queued | error
+    attempts = Column(Integer, nullable=False, default=0)
+    error = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+
+
 class NotionWebhookEvent(Base):
     """Durable, deduplicated Notion webhook inbox and retry state."""
     __tablename__ = "notion_webhook_events"

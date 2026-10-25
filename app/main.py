@@ -253,7 +253,7 @@ def meetings_list(request: Request, q: str = "", status: str = "", source: str =
     q = q.strip()[:200]
     if status and status not in STATUS:
         raise HTTPException(400, "Некорректный статус")
-    if source and source not in ("web", "microphone", "demo", "api", "notion"):
+    if source and source not in ("web", "microphone", "demo", "api", "notion", "ticnote"):
         raise HTTPException(400, "Некорректный источник")
     try:
         first = dt.date.fromisoformat(date_from) if date_from else None
@@ -1284,6 +1284,9 @@ async def settings_save(request: Request):
                     updates[k] = [userbot.normalize_ref(x) for x in updates[k]]
                 except userbot.RefError as e:
                     raise HTTPException(400, str(e))
+    if updates.get("ticnote_enabled") and not settings_store.get("ticnote_enabled"):
+        # Mode switched on: take only what reaches TicNote from now on, not the whole history.
+        updates["ticnote_enabled_at"] = int(time.time() * 1000)
     if updates:
         settings_store.set_many(updates)
     msg = "Сохранено"
