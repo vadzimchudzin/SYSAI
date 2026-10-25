@@ -196,7 +196,93 @@ def handle_incoming(msg: dict) -> None:
     else:
         from . import pipeline
         pipeline.poke()
-        POOL.submit(process, row_id)
+        _schedule(chat_of(row_id))
+
+
+# ----------------------------------------------------------------------------- bursts: an album or a few quick messages
+BURST_QUIET = 4.0   # seconds without a new message from this person before answering
+BURST_MAX = 15.0    # but never wait longer than this after the first one
+BURST_WINDOW = 60   # messages further apart than this are separate conversations
+_BURSTS: dict = {}  # chat -> (timer, first_at)
+_BURSTS_LOCK = threading.Lock()
+
+
+def chat_of(row_id: int) -> str:
+    with SessionLocal() as s:
+        return s.get(ConversationMessage, row_id).chat_id
+
+
+def _schedule(chat: str) -> None:
+    """Answer a person once for what they sent in one go (an album of photos, «сейчас скину» + files)."""
+    with _BURSTS_LOCK:
+        timer, first = _BURSTS.get(chat, (None, time.time()))
+        if timer is not None:
+            timer.cancel()
+        delay = 0.0 if time.time() - first >= BURST_MAX else BURST_QUIET
+        timer = threading.Timer(delay, _burst_due, args=(chat,))
+        timer.daemon = True
+        _BURSTS[chat] = (timer, first)
+        timer.start()
+
+
+def _burst_due(chat: str) -> None:
+    with _BURSTS_LOCK:
+        _BURSTS.pop(chat, None)
+    with SessionLocal() as s:
+        first = (s.query(ConversationMessage.id).filter_by(chat_id=chat, role="user", status="agent_pending")
+                 .order_by(ConversationMessage.id).first())
+    if first:
+        POOL.submit(process, first[0])
+
+
+def _file_note(docs: list) -> str:
+    names = [str(d.get("filename") or "файл") for d in docs]
+    shown = ", ".join(f"«{n}»" for n in names[:8]) + (f" и ещё {len(names) - 8}" if len(names) > 8 else "")
+    return f"(прислал {len(names)} файл(ов) одним разом: {shown})"
+
+
+def _merge_burst(chat: str):
+    """Unanswered messages of one person become one message: texts joined, files listed together. Returns the row to
+    answer (the earliest), or None when nothing is waiting. Messages already being decided on are left alone."""
+    with SessionLocal() as s:
+        rows = (s.query(ConversationMessage).filter_by(chat_id=chat, role="user", status="agent_pending")
+                .order_by(ConversationMessage.id).all())
+        fresh = [r for r in rows if not (r.result or {}).get("decision") and not int((r.result or {}).get("attempts") or 0)]
+        if fresh:  # one go = sent within a minute of the first one; an older or retried message is answered on its own
+            start = fresh[0].created_at
+            fresh = [r for r in fresh if r.created_at is None or start is None
+                     or (r.created_at - start).total_seconds() <= BURST_WINDOW]
+        if len(fresh) < 2:
+            return rows[0].id if rows else None
+        lead, rest = fresh[0], fresh[1:]
+        result = dict(lead.result or {})
+        docs = [d for d in ((r.result or {}).get("document") for r in fresh) if d and d.get("document_id")]
+        texts = []
+        for r in fresh:
+            doc = (r.result or {}).get("document")
+            text = (r.text or "").strip()
+            if doc and text.startswith("(прислал файл"):
+                continue  # a bare file: listed once below instead of one bracket per photo
+            if text:
+                texts.append(text)
+        if len(docs) > 1:
+            texts.append(_file_note(docs))
+        elif docs and not any(t.startswith("(прислал") for t in texts):
+            texts.append(_file_note(docs))
+        lead.text = "\n".join(texts)[:4000]
+        result["documents"] = docs
+        if docs:
+            result["document"] = docs[0]
+        for r in rest:
+            if (r.result or {}).get("case") and not result.get("case"):
+                result["case"] = r.result["case"]
+            other = dict(r.result or {})
+            other["merged_into"] = lead.id
+            r.result, r.status = other, "agent_merged"
+        result["merged"] = [r.id for r in rest]
+        lead.result = result
+        s.commit()
+        return lead.id
 
 
 def _accept(msg: dict):
@@ -215,7 +301,8 @@ def _accept(msg: dict):
                     "director": director, "full_access": full, "employee_id": employee.id if employee else None,
                     "voice": bool(msg.get("voice_info")), "voice_problem": (msg.get("voice_info") or {}).get("problem"),
                     "username": msg.get("username", "") if wanted else "", "phone": msg.get("phone", "") if wanted else "",
-                    "reply_to": msg.get("reply_to"), "document": msg.get("document_info") if wanted else None})
+                    "reply_to": msg.get("reply_to"), "document": msg.get("document_info") if wanted else None,
+                    "grouped_id": str(msg["grouped_id"]) if msg.get("grouped_id") else None})
         s.add(row)
         try:
             s.commit()
@@ -288,6 +375,11 @@ def process(row_id: int) -> None:
             return
         chat = row.chat_id
     with _locks[chat]:
+        lead = _merge_burst(chat)
+        if lead is not None and lead != row_id:
+            with SessionLocal() as s:
+                if s.get(ConversationMessage, row_id).status != "agent_pending":
+                    row_id = lead  # this message went into an earlier one: answer that one
         try:
             _process(row_id)
         except Exception as exc:  # noqa: BLE001
@@ -386,7 +478,9 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
     found_skills = company_memory.skills_for(getattr(row, "text", "") or "")
     if found_skills:
         ctx["skills"] = found_skills
-    if result.get("document"):
+    if len(result.get("documents") or []) > 1:
+        ctx["files_received"] = result["documents"]
+    elif result.get("document"):
         ctx["file_received"] = result["document"]
     if result.get("case"):
         ctx["this_message_for_case"] = result["case"]
@@ -472,6 +566,7 @@ ACTIONS_HELP = (
     "скажи, что передашь (кому — в forward_to); сам ничего не пересылай и не обещай сверх этого. Если в нём ambiguous_cases, "
     "спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с просьбой. assistant_waiting_for_you — "
     "чего ты ждёшь от этого человека. file_received — человек прислал файл; он сохранён в библиотеке документов. "
+    "files_received — человек прислал сразу несколько файлов (альбом): ответь один раз на все вместе. "
     "known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки с источником и "
     "уверенностью, фрагменты документов). На вопросы о компании, людях и документах отвечай по known_facts и данным "
     "выше; при низкой уверенности так и скажи; если ответа нет — честно скажи, что не знаешь, и предложи уточнить у "
