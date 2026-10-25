@@ -184,6 +184,10 @@ def _process(meeting_id: int):
             if source == "demo":
                 total, segments = transcribe.mock_transcribe()
             else:
+                if (not audio_path or not pathlib.Path(audio_path).is_file()) and source == "ticnote":
+                    from . import ticnote_ingest  # the disk was wiped (restart): take the audio from TicNote again
+                    _set(meeting_id, progress="Скачиваю запись с TicNote заново")
+                    audio_path = ticnote_ingest.restore_audio(meeting_id)
                 if not audio_path or not pathlib.Path(audio_path).is_file():
                     raise llm.LLMError("Исходное аудио не найдено; загрузите запись заново")
                 total, segments = transcribe.transcribe(audio_path, settings,

@@ -89,10 +89,19 @@ def clear_token_cache():
     _token_cache.clear()
 
 
-def list_projects(appkey: str) -> list[dict]:
-    token = login(appkey)
+def _authed(appkey: str, method: str, path: str) -> dict:
+    """GET/POST with the cached token; a 401 (token revoked or key re-issued) logs in once more and repeats."""
     base = resolve_base_url(appkey)
-    payload = _request("GET", f"{base}/api/v2/file-index/chats", token=token)
+    try:
+        return _request(method, base + path, token=login(appkey))
+    except TicNoteError as e:
+        if "HTTP 401" not in str(e):
+            raise
+    return _request(method, base + path, token=login(appkey, use_cache=False))
+
+
+def list_projects(appkey: str) -> list[dict]:
+    payload = _authed(appkey, "GET", "/api/v2/file-index/chats")
     data = payload.get("data", payload)
     if isinstance(data, list):
         return data
@@ -130,18 +139,14 @@ def _flatten(nodes: list) -> list[dict]:
 
 
 def list_files(appkey: str, root_id: str) -> list[dict]:
-    token = login(appkey)
-    base = resolve_base_url(appkey)
     q = urllib.parse.quote(str(root_id))
-    payload = _request("GET", f"{base}/api/v1/file-index/file-tree?rootId={q}", token=token)
+    payload = _authed(appkey, "GET", f"/api/v1/file-index/file-tree?rootId={q}")
     tree = payload.get("fileTree") or (payload.get("data") or {}).get("fileTree") or []
     return _flatten(tree)
 
 
 def file_detail(appkey: str, record_id: str) -> dict:
-    token = login(appkey)
-    base = resolve_base_url(appkey)
-    payload = _request("GET", f"{base}/api/v2/file-index/file-detail/{record_id}", token=token)
+    payload = _authed(appkey, "GET", f"/api/v2/file-index/file-detail/{record_id}")
     data = payload.get("data", payload)
     if not isinstance(data, dict):
         raise TicNoteError("TicNote file-detail пуст")
