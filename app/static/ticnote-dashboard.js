@@ -13,8 +13,9 @@
     for (const item of buttons) {
       item.button.hidden = !current;
       item.button.disabled = stopping || !current;
-      if (current) item.button.textContent =
-        current.state === 'downloading' ? '⏹ Остановить получение записи' : '⏹ Остановить обработку записи';
+      if (current) item.button.textContent = !current.meeting_id
+        ? '⏹ Убрать зависшую запись'
+        : (current.state === 'downloading' ? '⏹ Остановить получение записи' : '⏹ Остановить обработку записи');
     }
   }
 
@@ -37,9 +38,11 @@
     item.button.addEventListener('click', async () => {
       if (!current || stopping) return;
       const target = current;
-      const message = target.state === 'downloading'
-        ? 'Остановить получение этой записи с TicNote? Автоматическая повторная загрузка будет отключена.'
-        : 'Остановить обработку этой записи? Уже сохранённый отчёт не удаляется.';
+      const message = !target.meeting_id
+        ? 'Убрать зависшую запись из очереди TicNote? У неё нет связанного совещания. Автоматический повтор будет отключён.'
+        : (target.state === 'downloading'
+          ? 'Остановить получение этой записи с TicNote? Автоматическая повторная загрузка будет отключена.'
+          : 'Остановить обработку этой записи? Уже сохранённый отчёт не удаляется.');
       if (!window.confirm(message)) return;
 
       stopping = true;
