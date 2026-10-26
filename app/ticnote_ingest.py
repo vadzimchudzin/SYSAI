@@ -126,6 +126,19 @@ def import_recording(appkey: str, node: dict) -> int | None:
             return None
         dst.parent.mkdir(parents=True, exist_ok=True)
         ticnote.download_wav(ticnote.audio_url(detail), dst)
+        # The user may press Stop while the cloud download is in progress.
+        # Re-check the durable import row before creating a meeting or queueing
+        # paid transcription work, so a late download cannot restart processing.
+        with SessionLocal() as s:
+            latest = s.get(TicnoteImport, record_id)
+            stopped = latest is None or (
+                latest.status == "error"
+                and (latest.error or "") == "Скачивание остановлено вручную"
+            )
+        if stopped:
+            dst.unlink(missing_ok=True)
+            log.info("TicNote import %s stopped by user during download", record_id)
+            return None
         mid = pipeline.create_meeting(f"{title}.wav", str(dst), source="ticnote", title=title,
                                       meeting_date=_meeting_date(node))
     except Exception as e:  # noqa: BLE001
