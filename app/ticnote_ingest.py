@@ -53,10 +53,7 @@ def candidates(nodes: list[dict], enabled_at_ms: int) -> list[dict]:
     """Ready device recordings that reached the TicNote cloud after the mode was switched on, oldest first."""
     out = []
     for node in nodes:
-        # Mobvoi returns both device recordings ("recording_file") and
-        # recordings uploaded through the app ("upload_recording"). The API's
-        # readiness check knows both types; do not silently discard uploads here.
-        if not ticnote.is_ready_recording(node):
+        if str(node.get("fileType") or "") != "recording_file" or not ticnote.is_ready_recording(node):
             continue
         if not node.get("id"):
             continue
@@ -175,11 +172,8 @@ def scan(force: bool = False) -> list[int]:
         STATE.update(last_scan_at=time.time(), last_error=str(e)[:300])
         raise
     STATE.update(last_scan_at=time.time(), last_error="")
-    eligible = candidates(nodes, enabled_at)
-    if eligible:
-        log.info("TicNote scan found %d ready recording(s) eligible for import", len(eligible))
     queued = []
-    for node in eligible:
+    for node in candidates(nodes, enabled_at):
         mid = import_recording(appkey, node)
         if mid:
             queued.append(mid)
