@@ -91,7 +91,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  z-index: 1;
+  z-index: 4;
 }
 .login-brand { display: inline-flex; align-items: center; opacity: .96; }
 .login-brand .brand { font-size: 18px; }
@@ -151,7 +151,7 @@
   color: rgba(201,198,187,.38);
   font: 600 9px/1 var(--mono);
   letter-spacing: .15em;
-  z-index: 1;
+  z-index: 4;
 }
 .login-visual-foot span { color: rgba(143,168,216,.6); }
 .login-visual-foot i { color: var(--login-clay); font-style: normal; margin: 0 5px; }
