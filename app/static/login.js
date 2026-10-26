@@ -76,20 +76,36 @@
         const dx = x - pointer.x;
         const dy = y - pointer.y;
         const distance = Math.sqrt(dx * dx + dy * dy);
-        // Smooth exponential falloff brightens individual pixels without drawing a cursor-shaped spotlight.
-        const glow = pointer.active ? Math.exp(-distance / 145) * 0.55 : 0;
-        const pulse = (Math.sin(elapsed * 2 + radius * 8 - angle) + 1) * 0.5;
-        alpha = Math.min(1, alpha + glow * (0.13 + flow * 0.25) + pulse * structure * 0.07);
+        // The grid stays calm at rest, then individual cells flare neon under the pointer.
+        // No radial canvas overlay or visible cursor outline is drawn.
+        const influence = pointer.active ? Math.max(0, 1 - distance / 185) : 0;
+        const pulse = (Math.sin(elapsed * 2.5 + radius * 8 - angle) + 1) * 0.5;
+        const baseAlpha = Math.min(0.30, (0.025 + structure * 0.20) * edge);
+        const flare = Math.pow(influence, 1.45) * (0.55 + 0.45 * Math.max(flow, pulse));
+        alpha = Math.min(1, baseAlpha + flare * 0.98 + pulse * structure * 0.02);
 
-        // Brighter pixels grow slightly as a moving cursor wave passes through.
-        const size = 1.9 + Math.pow(Math.max(rings, flow, sweep), 1.65) * 2.65 + glow * 1.35;
+        const size = 1.65 + Math.pow(Math.max(rings, flow, sweep), 1.7) * 1.45 + flare * 2.0;
         const colorIndex = ((Math.floor((angle + Math.PI) * 1.7) + Math.floor(radius * 9) + row % 5) % colors.length + colors.length) % colors.length;
         let color = colors[colorIndex];
-        if ((rings > 0.67 && sweep < 0.58) || flow > 0.88) color = colors[1];
-        else if (structure > 0.34 && pulse > 0.72) color = colors[0];
+        if (influence > 0.13) {
+          // Alternate SYS clay and blue across neighbouring squares for a lively neon response.
+          color = ((col + row + Math.floor(elapsed * 2)) % 2 === 0) ? colors[0] : colors[1];
+          if (influence > 0.72 && pulse > 0.55) color = colors[2];
+        } else if ((rings > 0.67 && sweep < 0.58) || flow > 0.88) {
+          color = colors[1];
+        } else if (structure > 0.34 && pulse > 0.72) {
+          color = colors[0];
+        }
 
         ctx.fillStyle = 'rgba(' + color[0] + ',' + color[1] + ',' + color[2] + ',' + alpha + ')';
+        if (influence > 0.17 && flare > 0.16) {
+          ctx.shadowColor = 'rgba(' + color[0] + ',' + color[1] + ',' + color[2] + ',' + Math.min(.9, flare) + ')';
+          ctx.shadowBlur = 3 + flare * 7;
+        } else {
+          ctx.shadowBlur = 0;
+        }
         ctx.fillRect(x, y, size, size);
+        ctx.shadowBlur = 0;
       }
     }
   }
