@@ -20,12 +20,16 @@
 .login-layout {
   min-height: 100vh;
   min-height: 100svh;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(460px, .9fr);
   background: var(--login-bg);
 }
 .login-visual {
   min-width: 0;
+  z-index: 2;
   min-height: calc(100vh - 16px);
   min-height: calc(100svh - 16px);
   margin: 8px 0 8px 8px;
@@ -36,7 +40,8 @@
   background:
     radial-gradient(ellipse at 64% 45%, rgba(217,142,138,.08), transparent 38%),
     radial-gradient(ellipse at 33% 86%, rgba(143,168,216,.07), transparent 43%),
-    #151412;
+    rgba(21,20,18,.62);
+  z-index: 2;
 }
 .login-pixels {
   position: absolute;
@@ -57,25 +62,26 @@
 }
 .login-ghost-wordmark {
   position: absolute;
-  left: 50%;
-  top: 43%;
+  left: 47%;
+  top: 45%;
   width: max-content;
-  max-width: 94%;
+  max-width: none;
   transform: translate(-50%, -50%) rotate(-5deg);
-  color: rgba(240,238,230,.105);
-  font: 850 clamp(68px, 11.6vw, 190px)/.88 var(--sans);
-  letter-spacing: -.075em;
+  color: rgba(240,238,230,.145);
+  font: 900 clamp(220px, 42vw, 760px)/.78 var(--sans);
+  letter-spacing: -.105em;
   white-space: nowrap;
-  filter: blur(7px);
-  text-shadow: 0 0 32px rgba(217,142,138,.18), 0 0 64px rgba(143,168,216,.12);
+  filter: blur(9px);
+  text-shadow: 0 0 34px rgba(217,142,138,.22), 0 0 72px rgba(143,168,216,.18);
   pointer-events: none;
   user-select: none;
   z-index: 1;
+  opacity: .9;
   animation: login-wordmark-breathe 7s ease-in-out infinite alternate;
 }
 .login-ghost-wordmark span {
-  color: rgba(143,168,216,.2);
-  text-shadow: 0 0 36px rgba(143,168,216,.3);
+  color: rgba(143,168,216,.24);
+  text-shadow: 0 0 38px rgba(143,168,216,.34);
 }
 @keyframes login-wordmark-breathe {
   0% { opacity: .55; filter: blur(8px); }
@@ -158,15 +164,15 @@
 
 .login-side {
   min-width: 0;
+  z-index: 3;
   min-height: 100vh;
   min-height: 100svh;
   display: grid;
   grid-template-rows: auto 1fr auto;
   padding: 25px clamp(28px, 4vw, 72px) 24px;
   position: relative;
-  background:
-    radial-gradient(ellipse at 70% 50%, rgba(143,168,216,.025), transparent 55%),
-    var(--login-bg);
+  background: linear-gradient(90deg, rgba(18,18,16,.66) 0%, rgba(18,18,16,.88) 100%);
+  backdrop-filter: blur(2px);
 }
 .login-topbar {
   display: flex;
@@ -355,7 +361,7 @@
   .login-visual-bottom h2 { font-size: clamp(32px, 7.4vw, 46px); }
   .login-visual-bottom p { display: none; }
   .login-visual-foot { display: none; }
-  .login-ghost-wordmark { top: 39%; left: 50%; max-width: 96%; font-size: clamp(66px, 18vw, 130px); letter-spacing: -.08em; }
+  .login-ghost-wordmark { top: 37%; left: 50%; font-size: clamp(190px, 42vw, 360px); letter-spacing: -.105em; }
   .login-overline { font-size: 8px; }
   .login-side { display: flex; flex-direction: column; flex: 1; min-height: auto; padding: 22px 25px 20px; }
   .login-topbar { order: 0; }
