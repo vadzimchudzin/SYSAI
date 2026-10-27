@@ -539,7 +539,8 @@ ACTIONS_HELP = (
     '{"type":"note","text":"...","employee_id":ID или null,"task_id":ID или null,"kind":"fact|status|commitment|done"}: '
     "запомнить факт о том, кто что сделал, пообещал или сказал (для себя, не для пересылки); "
     '{"type":"ask_reviewer","task_id":ID или null,"question":"суть","message":"точный текст проверяющему"}: сотруднику нужен '
-    "ответ, которого нет в данных; "
+    "ответ, которого нет в данных, или он просит изменить условия задачи (срок, выезд раньше, водитель, машина, состав) — "
+    "это решает руководитель, не ты; "
     '{"type":"relay_answer","question_id":ID,"message":"точный текст сотруднику"}: проверяющий ответил на вопрос сотрудника; '
     '{"type":"approve_meeting","meeting_id":ID} и {"type":"reject_meeting","meeting_id":ID}: проверяющий прямо согласился '
     "отправить именно это совещание или отклонил его (если совещаний несколько и неясно какое, спроси); "
@@ -599,7 +600,12 @@ def _system() -> str:
         "оставь reply пустым. Не пиши «не понял», если смысл ясен из истории; если неясно, задай один конкретный вопрос. "
         "Не выдумывай статусы, сроки и обещания. Не обещай то, чего нет среди действий: любое обещание "
         "«сделаю», «передам», «поставлю» должно быть действием в actions, иначе не обещай. "
-        "Если сотрудник спрашивает то, чего нет в данных, используй ask_reviewer и скажи, что уточняешь. Если ты уже "
+        "Если сотрудник спрашивает то, чего нет в данных, используй ask_reviewer и скажи, что уточняешь. "
+        "Если сам решить не можешь, а человеку это нужно по работе — не спорь и не закрывай тему. "
+        "Коротко уточни, чего именно не хватает, и сразу ask_reviewer руководителю/проверяющему: узнай у него. "
+        "Так же, если просит выехать раньше, водителя или машину на другую дату, сдвинуть срок или состав: "
+        "не утверждай, что «так решено и изменить нельзя». В message — кто просит, какая задача, что нужно, что в протоколе. "
+        "Шутки про зарплату и прочее не по делу не эскалируй. Если ты уже "
         "ждёшь ответа проверяющего (waiting_for_reviewer), честно скажи об этом и что вернёшься с ответом. "
         "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих и "
         "людей с полным доступом. При выборе исполнителя используй responsibilities (реальные обязанности и компетенции), " +
@@ -821,6 +827,32 @@ PROMISES = (  # (words in the reply, actions that keep the promise, does a runni
     (_W.format("подготовлю|соберу|сделаю"), {"team_report", "assign_task", "deliver_files", "remind"}, False),
 )
 _CONDITIONAL = re.compile(r"(?<![а-яё])(если|как только|когда|после того как|могу|можно|хочешь|нужно ли)(?![а-яё])")
+# Employee asks to change logistics (car/driver/date), not a joke about pay.
+_ORG_NEED = re.compile(
+    r"(?i)(?<![а-яёa-z])("
+    r"водитель|водител[яюем]|тачк[аиуе]|машин[аыуе]|авто|транспорт|"
+    r"выехать|выезд|переезд|перевест"
+    r")(?![а-яёa-z])"
+)
+_ORG_SHIFT = re.compile(
+    r"(?i)(?<![а-яёa-z])("
+    r"раньше|накануне|за сутки|сутки раньше|"
+    r"на\s+\d{1,2}(?!\d)|первого|1[- ]?го|"
+    r"сдвин|перенес|не успею|собрать вещи"
+    r")"
+)
+_ORG_PAY_JOKE = re.compile(r"(?i)(?<![а-яёa-z])(зарплат|зп|оклад|надбавк)(?![а-яёa-z])")
+_ORG_ASK = re.compile(r"(?i)(?<![а-яёa-z])(нужен|нужна|нужно|дайте|дать раньше)(?![а-яёa-z])")
+
+
+def organizational_change_request(text: str) -> bool:
+    """True when the employee asks to move a trip/car/driver, not when they joke about pay."""
+    raw = (text or "").strip()
+    if not raw or _ORG_PAY_JOKE.search(raw):
+        return False
+    shift = bool(_ORG_SHIFT.search(raw))
+    need = bool(_ORG_NEED.search(raw) or (shift and _ORG_ASK.search(raw)))
+    return need and shift
 
 
 def _sentences(text: str) -> list:
@@ -1046,6 +1078,13 @@ def _process(row_id: int) -> None:
         for attempt in (1, 2):
             decision = _decide(system, ctx, text, feedback)
             errors = [e for e in (_check(a, ctx, employee, reviewer, full) for a in decision["actions"]) if e]
+            if (employee is not None and not reviewer and not full
+                    and organizational_change_request(text)
+                    and not any(a.get("type") == "ask_reviewer" for a in decision["actions"])):
+                errors.append(
+                    "человек просит то, что ты сам решить не можешь (водитель, машина, выезд раньше): "
+                    "нужен ask_reviewer руководителю/проверяющему, узнай у него, не закрывай тему сам"
+                )
             stiff = voice.officialese(decision["reply"]) if attempt == 1 else []
             promises = unbacked_promises(decision["reply"], decision["actions"], ctx)
             if not errors and not stiff and not promises:
