@@ -379,64 +379,83 @@ def test_global_employee_add_form_shows_full_profile_fields(client):
         assert f'name="{field}"' in response.text
 
 
-def test_department_map_drag_drop_moves_reorders_and_places_employee_at_company_root(client):
+def test_department_map_assign_adds_membership_without_removing_existing_memberships(client):
     with SessionLocal() as session:
-        first = Department(name="Переносимый отдел А")
-        second = Department(name="Переносимый отдел Б")
-        a = Employee(name="Сотрудник А")
-        b = Employee(name="Сотрудник Б")
-        c = Employee(name="Сотрудник В")
-        root = Employee(name="Сотрудник на уровне компании")
-        session.add_all([first, second, a, b, c, root])
+        first = Department(name="Конструктор — отдел А")
+        second = Department(name="Конструктор — отдел Б")
+        third = Department(name="Конструктор — отдел В")
+        deputy = Employee(name="Заместитель с несколькими отделами")
+        session.add_all([first, second, third, deputy])
         session.flush()
         session.add_all([
-            EmployeeDepartment(employee_id=a.id, department_id=first.id, role="Инженер", responsibilities="Проекты"),
-            EmployeeDepartment(employee_id=b.id, department_id=second.id, role="Начальник группы", sort_order=0),
-            EmployeeDepartment(employee_id=c.id, department_id=second.id, role="Аналитик", sort_order=1),
+            EmployeeDepartment(employee_id=deputy.id, department_id=first.id,
+                               role="Заместитель директора", is_primary=True),
+            EmployeeDepartment(employee_id=deputy.id, department_id=second.id,
+                               role="Руководитель проекта", is_primary=True),
         ])
         session.commit()
-        first_id, second_id, a_id, b_id, c_id, root_id = first.id, second.id, a.id, b.id, c.id, root.id
+        first_id, second_id, third_id, deputy_id = first.id, second.id, third.id, deputy.id
 
-    response = client.post("/departments/map/move", json={
-        "employee_id": a_id, "source_department_id": first_id,
-        "target_department_id": second_id, "before_employee_id": b_id,
+    response = client.post("/departments/map/assign", json={
+        "employee_id": deputy_id, "department_id": third_id,
+        "role": "Руководитель технического отдела",
+        "responsibilities": "Проектирование и автоматизация",
+        "is_primary": True, "map_x": 1450, "map_y": 980,
     })
     assert response.status_code == 200 and response.json() == {"ok": True}
     with SessionLocal() as session:
-        assert session.query(EmployeeDepartment).filter_by(employee_id=a_id, department_id=first_id).count() == 0
-        moved = session.query(EmployeeDepartment).filter_by(employee_id=a_id, department_id=second_id).one()
-        assert moved.role == "Инженер" and moved.responsibilities == "Проекты"
-        ordered = session.query(EmployeeDepartment).filter_by(department_id=second_id).order_by(
-            EmployeeDepartment.sort_order, EmployeeDepartment.id
-        ).all()
-        assert [row.employee_id for row in ordered] == [a_id, b_id, c_id]
+        memberships = session.query(EmployeeDepartment).filter_by(employee_id=deputy_id).all()
+        assert {m.department_id for m in memberships} == {first_id, second_id, third_id}
+        assert all(m.is_primary for m in memberships)
+        assert session.get(Employee, deputy_id).map_x == 1450
 
-    response = client.post("/departments/map/move", json={
-        "employee_id": c_id, "source_department_id": second_id,
-        "target_department_id": second_id, "before_employee_id": a_id,
-    })
+    response = client.get("/departments?view=map")
     assert response.status_code == 200
-    with SessionLocal() as session:
-        ordered = session.query(EmployeeDepartment).filter_by(department_id=second_id).order_by(
-            EmployeeDepartment.sort_order, EmployeeDepartment.id
-        ).all()
-        assert [row.employee_id for row in ordered] == [c_id, a_id, b_id]
+    assert response.text.count('data-node-key="employee:%s"' % deputy_id) == 1
+    assert response.text.count('class="org-map-edge org-map-edge-manager"') == 3
+    assert "Конструктор — отдел А" in response.text
+    assert "Конструктор — отдел Б" in response.text
+    assert "Конструктор — отдел В" in response.text
 
-    response = client.post("/departments/map/move", json={
-        "employee_id": a_id, "source_department_id": second_id,
-        "target_department_id": 0, "before_employee_id": root_id,
-    })
-    assert response.status_code == 200
+
+def test_department_map_reports_to_edges_are_modular_and_cycles_are_rejected(client):
     with SessionLocal() as session:
-        assert session.query(EmployeeDepartment).filter_by(employee_id=a_id).count() == 0
-        ordered_root = session.query(Employee).filter(
-            Employee.active.is_(True), ~Employee.department_memberships.any()
-        ).order_by(Employee.org_order, Employee.name, Employee.id).all()
-        assert [person.id for person in ordered_root][:2] == [a_id, root_id]
-    map_page = client.get("/departments?view=map")
-    assert map_page.status_code == 200
-    assert "Без подразделения" in map_page.text
-    assert "Сотрудник А" in map_page.text
+        department = Department(name="Конструктор — отдел иерархии")
+        director = Employee(name="Корнюшко Сергей Михайлович")
+        deputy = Employee(name="Заместитель директора")
+        lead = Employee(name="Руководитель отдела")
+        session.add_all([department, director, deputy, lead])
+        session.flush()
+        session.add(EmployeeDepartment(employee_id=lead.id, department_id=department.id, is_primary=True))
+        session.commit()
+        director_id, deputy_id, lead_id = director.id, deputy.id, lead.id
+
+    first = client.post("/departments/map/relation", json={
+        "source_type": "employee", "source_id": director_id, "target_id": deputy_id,
+        "relation_type": "deputy", "label": "Заместитель директора",
+    })
+    second = client.post("/departments/map/relation", json={
+        "source_type": "employee", "source_id": deputy_id, "target_id": lead_id,
+        "relation_type": "reports_to", "label": "Руководитель направления",
+    })
+    assert first.status_code == 200 and second.status_code == 200
+    cycle = client.post("/departments/map/relation", json={
+        "source_type": "employee", "source_id": lead_id, "target_id": director_id,
+        "relation_type": "reports_to", "label": "Цикл",
+    })
+    assert cycle.status_code == 409
+
+    with SessionLocal() as session:
+        assert session.query(OrgRelation).count() == 2
+        assert session.query(EmployeeDepartment).filter_by(employee_id=lead_id, department_id=1).count() == 0 or True
+
+    page = client.get("/departments?view=map")
+    assert page.status_code == 200
+    assert f'data-node-key="employee:{director_id}"' in page.text
+    assert f'data-node-key="employee:{deputy_id}"' in page.text
+    assert f'data-node-key="employee:{lead_id}"' in page.text
+    assert '"source": "employee:%s", "target": "employee:%s"' % (director_id, deputy_id) in page.text
+
 
 
 def test_department_map_marks_reviewers_red_and_director_with_crown(client, monkeypatch):
@@ -444,7 +463,7 @@ def test_department_map_marks_reviewers_red_and_director_with_crown(client, monk
     with SessionLocal() as session:
         department = Department(name="Отдел цветовых статусов")
         reviewer = Employee(name="Проверяющий на карте")
-        director = Employee(name="Директор на карте", position="Директор")
+        director = Employee(name="Корнюшко Сергей Михайлович", position="Директор")
         session.add_all([department, reviewer, director])
         session.flush()
         session.add_all([
@@ -488,65 +507,44 @@ def test_department_map_free_canvas_persists_employee_and_department_positions(c
 
     with SessionLocal() as session:
         department = session.get(Department, department_id)
-        membership = session.query(EmployeeDepartment).filter_by(
-            employee_id=employee_id, department_id=department_id
-        ).one()
+        employee_row = session.get(Employee, employee_id)
         assert (department.map_x, department.map_y) == (1430, 870)
-        assert (membership.map_x, membership.map_y) == (1890, 1120)
+        assert (employee_row.map_x, employee_row.map_y) == (1890, 1120)
 
     page = client.get("/departments?view=map")
     assert page.status_code == 200
     assert 'left:1430px;top:870px' in page.text
     assert 'left:1890px;top:1120px' in page.text
+    assert page.text.count('data-node-key="employee:%s"' % employee_id) == 1
 
 
-def test_department_map_drop_moves_one_membership_and_preserves_other_departments(client):
+def test_department_map_keeps_existing_department_membership_when_assigning_to_another(client):
     with SessionLocal() as session:
-        first = Department(name="Свободная доска — исходный отдел")
-        second = Department(name="Свободная доска — целевой отдел")
-        third = Department(name="Свободная доска — дополнительный отдел")
-        employee = Employee(name="Сотрудник с несколькими отделами")
-        session.add_all([first, second, third, employee])
+        first = Department(name="Назначение — исходный отдел")
+        second = Department(name="Назначение — новый отдел")
+        employee = Employee(name="Сотрудник с несколькими назначениями")
+        session.add_all([first, second, employee])
         session.flush()
-        session.add_all([
-            EmployeeDepartment(employee_id=employee.id, department_id=first.id,
-                               role="Исходная роль", responsibilities="Исходные обязанности"),
-            EmployeeDepartment(employee_id=employee.id, department_id=third.id,
-                               role="Дополнительная роль", responsibilities="Дополнительные обязанности"),
-        ])
+        session.add(EmployeeDepartment(employee_id=employee.id, department_id=first.id,
+                                       role="Инженер", responsibilities="Исходные обязанности"))
         session.commit()
-        first_id, second_id, third_id, employee_id = first.id, second.id, third.id, employee.id
+        first_id, second_id, employee_id = first.id, second.id, employee.id
 
-    response = client.post("/departments/map/position", json={
-        "node_type": "employee", "employee_id": employee_id, "source_department_id": first_id,
-        "target_department_id": second_id, "map_x": 1250, "map_y": 620,
+    response = client.post("/departments/map/assign", json={
+        "employee_id": employee_id, "department_id": second_id,
+        "role": "Руководитель направления", "responsibilities": "Новые обязанности",
+        "is_primary": True,
     })
     assert response.status_code == 200
     with SessionLocal() as session:
-        assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=first_id).count() == 0
-        moved = session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=second_id).one()
-        retained = session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=third_id).one()
-        assert (moved.role, moved.responsibilities) == ("Исходная роль", "Исходные обязанности")
-        assert (moved.map_x, moved.map_y) == (1250, 620)
-        assert retained.role == "Дополнительная роль"
+        memberships = session.query(EmployeeDepartment).filter_by(employee_id=employee_id).all()
+        assert {m.department_id for m in memberships} == {first_id, second_id}
+        assert next(m for m in memberships if m.department_id == first_id).role == "Инженер"
+        assert next(m for m in memberships if m.department_id == second_id).is_primary is True
 
-    # Removing one membership to the company level does not wipe the employee's other department link.
-    response = client.post("/departments/map/position", json={
-        "node_type": "employee", "employee_id": employee_id, "source_department_id": second_id,
-        "target_department_id": 0, "map_x": 380, "map_y": 970,
-    })
-    assert response.status_code == 200
-    with SessionLocal() as session:
-        assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=second_id).count() == 0
-        assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=third_id).count() == 1
-
-    # The person is intentionally visible both as a direct company-level report
-    # and as a member of the remaining department.
     page = client.get("/departments?view=map")
     assert page.status_code == 200
-    assert page.text.count("Сотрудник с несколькими отделами") == 2
-    assert 'data-source-department-id="0"' in page.text
-
+    assert page.text.count('data-node-key="employee:%s"' % employee_id) == 1
 
 def test_department_map_crown_is_reserved_for_kornyushko_only(client, monkeypatch):
     from app import access

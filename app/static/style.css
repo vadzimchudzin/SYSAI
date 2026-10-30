@@ -842,3 +842,36 @@ body.org-map-page { height:100dvh; min-height:100dvh; overflow:hidden; }
   .map-fullscreen-shell > .main > .topbar { display:flex; flex:0 0 auto; }
   .map-fullscreen-content { height:auto; }
 }
+
+
+/* Modular organisation constructor */
+.org-map-edge-manager { stroke:rgba(218,157,111,.82); stroke-width:2; }
+.org-map-edge-reporting { stroke:rgba(195,158,105,.78); stroke-width:1.8; stroke-dasharray:5 4; }
+.org-map-edge-director { stroke:rgba(215,180,96,.94); stroke-width:2.6; }
+.org-map-edge-membership { stroke:rgba(143,168,216,.58); stroke-width:1.45; }
+.org-map-node-actions button { padding:0; border:0; background:transparent; color:var(--sblue); font:650 10.5px var(--sans); cursor:pointer; }
+.org-map-person-node { touch-action:none; }
+.org-map-person-copy .org-map-manager-summary { color:#e5bc8d; }
+.org-map-person-copy .org-map-role { white-space:normal; }
+.org-map-node.is-map-dragging { z-index:8; }
+.org-map-dialog { width:min(760px,calc(100vw - 32px)); max-width:none; max-height:min(86dvh,900px); padding:0; overflow:auto; color:var(--text); background:var(--card); border:1px solid var(--line2); border-radius:18px; box-shadow:0 28px 90px rgba(0,0,0,.64); }
+.org-map-dialog::backdrop { background:rgba(7,8,8,.72); backdrop-filter:blur(8px); }
+.org-map-dialog-compact { width:min(520px,calc(100vw - 32px)); }
+.org-map-dialog-head { padding:22px 24px 14px; border-bottom:1px solid var(--line); }
+.org-map-dialog-head h2 { margin:5px 0 4px; font-size:19px; }
+.org-map-dialog-head p { margin:0 0 7px; }
+.org-map-dialog-head b { display:block; margin-top:7px; color:var(--sblue); font-size:13px; }
+.org-map-dialog-kicker { color:var(--muted); font:10px var(--mono); letter-spacing:.12em; }
+.org-map-dialog-body { display:grid; gap:13px; padding:18px 24px 22px; }
+.org-map-dialog-body .employee-create-section { margin:0; }
+.org-map-dialog-actions { display:flex; justify-content:flex-end; align-items:center; gap:9px; padding-top:6px; }
+.org-map-dialog-error { min-height:0; margin:0; color:#ff9b9b; font-size:12px; }
+.org-map-dialog-error:empty { display:none; }
+.org-map-dialog-close-form { position:absolute; top:12px; right:12px; z-index:2; }
+.org-map-dialog-close { display:grid; place-items:center; width:30px; height:30px; padding:0; border:1px solid var(--line2); border-radius:9px; color:var(--muted); background:var(--card2); font-size:21px; cursor:pointer; }
+@media (max-width: 680px) {
+  .org-map-dialog-body { padding:14px; }
+  .org-map-dialog-head { padding:18px 16px 12px; }
+  .org-map-dialog-actions { flex-direction:column-reverse; align-items:stretch; }
+  .org-map-dialog-actions .btn { width:100%; }
+}

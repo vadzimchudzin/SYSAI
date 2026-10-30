@@ -174,6 +174,28 @@ class EmployeeDepartment(Base):
     __table_args__ = (UniqueConstraint("employee_id", "department_id", name="uq_employee_department"),)
 
 
+class OrgRelation(Base):
+    """An editable directed edge in the company organisation graph.
+
+    Existing EmployeeDepartment rows remain the source of department membership and
+    per-department leadership. This table stores cross-person reporting lines and
+    explicit company-level links without duplicating employee or department records.
+    """
+    __tablename__ = "org_relations"
+    id = Column(Integer, primary_key=True)
+    source_type = Column(String(20), nullable=False, default="employee")  # company | employee
+    source_id = Column(Integer, nullable=False, default=1)
+    target_type = Column(String(20), nullable=False, default="employee")
+    target_id = Column(Integer, nullable=False, index=True)
+    relation_type = Column(String(40), nullable=False, default="reports_to")
+    label = Column(String(200), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
+    __table_args__ = (
+        UniqueConstraint("source_type", "source_id", "target_type", "target_id", "relation_type",
+                         name="uq_org_relation_edge"),
+    )
+
+
 class EmployeeVoiceprint(Base):
     """Encrypted provider voiceprint and consent metadata; raw enrollment audio is not stored."""
     __tablename__ = "employee_voiceprints"
