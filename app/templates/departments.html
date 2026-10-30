@@ -78,9 +78,9 @@
 </div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 <section class="card department-create" id="create-department">
-  <details {% if edit == 0 and not departments %}open{% endif %}>
+  <details {% if (edit == 0 and not departments) or request.query_params.get("create") == "1" %}open{% endif %}>
     <summary><span class="create-summary-icon">＋</span><span><b>Создать подразделение</b><small class="muted">Название, зона ответственности и регламенты</small></span></summary>
-    <div class="department-create-form">{{ form(None) }}</div>
+    <div class="department-create-form" id="department-create-form">{{ form(None) }}</div>
   </details>
 </section>
 
