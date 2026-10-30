@@ -1636,14 +1636,25 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
         departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []
         if {d.id for d in departments} != selected_ids:
             raise HTTPException(400, "Одно из подразделений не найдено")
-        existing_ids = {m.department_id for m in e.department_memberships}
+        existing_memberships = {m.department_id: m for m in list(e.department_memberships)}
+        existing_ids = set(existing_memberships)
         if any(not d.active and d.id not in existing_ids for d in departments):
             raise HTTPException(400, "Нельзя добавить сотрудника в неактивное подразделение")
-        s.query(EmployeeDepartment).filter_by(employee_id=e.id).delete(synchronize_session=False)
+
+        # Keep canonical membership rows in place. Bulk delete/recreate used to
+        # silently clear is_primary and broke manager links when an employee profile was edited.
+        for department_id, membership in existing_memberships.items():
+            if department_id not in selected_ids:
+                s.delete(membership)
         for d in departments:
             role = str(form.get(f"department_role_{d.id}") or "").strip()[:200]
             duties = str(form.get(f"department_responsibilities_{d.id}") or "").strip()[:4000]
-            s.add(EmployeeDepartment(employee_id=e.id, department_id=d.id, role=role, responsibilities=duties))
+            membership = existing_memberships.get(d.id)
+            if membership is None:
+                membership = EmployeeDepartment(employee_id=e.id, department_id=d.id)
+            membership.role = role
+            membership.responsibilities = duties
+            s.add(membership)
         from . import access
         level = str(form.get("access_level") or "").strip()
         if level and (level not in access.LEVELS or access.level_of(e) == "director"):
