@@ -21,6 +21,7 @@
   let panStart = null;
   let pinchStart = null;
   let draggedEmployeeId = null;
+  let draggedSourceDepartmentId = null;
 
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
   const render = () => {
