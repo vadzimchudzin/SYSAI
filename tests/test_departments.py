@@ -444,7 +444,7 @@ def test_department_map_marks_reviewers_red_and_director_with_crown(client, monk
     with SessionLocal() as session:
         department = Department(name="Отдел цветовых статусов")
         reviewer = Employee(name="Проверяющий на карте")
-        director = Employee(name="Директор на карте")
+        director = Employee(name="Директор на карте", position="Директор")
         session.add_all([department, reviewer, director])
         session.flush()
         session.add_all([
@@ -456,8 +456,6 @@ def test_department_map_marks_reviewers_red_and_director_with_crown(client, monk
     def level_of(employee):
         if employee.name == "Проверяющий на карте":
             return "reviewer"
-        if employee.name == "Директор на карте":
-            return "director"
         return "employee"
 
     monkeypatch.setattr(access, "level_of", level_of)
@@ -465,3 +463,96 @@ def test_department_map_marks_reviewers_red_and_director_with_crown(client, monk
     assert response.status_code == 200
     assert "is-reviewer" in response.text and "ПРОВЕРЯЮЩИЙ" in response.text
     assert "is-director" in response.text and "director-crown" in response.text
+
+
+def test_department_map_free_canvas_persists_employee_and_department_positions(client):
+    with SessionLocal() as session:
+        department = Department(name="Свободная доска — отдел")
+        employee = Employee(name="Сотрудник свободной доски")
+        session.add_all([department, employee])
+        session.flush()
+        session.add(EmployeeDepartment(employee_id=employee.id, department_id=department.id,
+                                       role="Инженер", responsibilities="Автоматизация"))
+        session.commit()
+        department_id, employee_id = department.id, employee.id
+
+    response = client.post("/departments/map/position", json={
+        "node_type": "department", "department_id": department_id, "map_x": 1430, "map_y": 870,
+    })
+    assert response.status_code == 200 and response.json() == {"ok": True}
+    response = client.post("/departments/map/position", json={
+        "node_type": "employee", "employee_id": employee_id,
+        "source_department_id": department_id, "map_x": 1890, "map_y": 1120,
+    })
+    assert response.status_code == 200 and response.json() == {"ok": True}
+
+    with SessionLocal() as session:
+        department = session.get(Department, department_id)
+        membership = session.query(EmployeeDepartment).filter_by(
+            employee_id=employee_id, department_id=department_id
+        ).one()
+        assert (department.map_x, department.map_y) == (1430, 870)
+        assert (membership.map_x, membership.map_y) == (1890, 1120)
+
+    page = client.get("/departments?view=map")
+    assert page.status_code == 200
+    assert 'left:1430px;top:870px' in page.text
+    assert 'left:1890px;top:1120px' in page.text
+
+
+def test_department_map_drop_moves_one_membership_and_preserves_other_departments(client):
+    with SessionLocal() as session:
+        first = Department(name="Свободная доска — исходный отдел")
+        second = Department(name="Свободная доска — целевой отдел")
+        third = Department(name="Свободная доска — дополнительный отдел")
+        employee = Employee(name="Сотрудник с несколькими отделами")
+        session.add_all([first, second, third, employee])
+        session.flush()
+        session.add_all([
+            EmployeeDepartment(employee_id=employee.id, department_id=first.id,
+                               role="Исходная роль", responsibilities="Исходные обязанности"),
+            EmployeeDepartment(employee_id=employee.id, department_id=third.id,
+                               role="Дополнительная роль", responsibilities="Дополнительные обязанности"),
+        ])
+        session.commit()
+        first_id, second_id, third_id, employee_id = first.id, second.id, third.id, employee.id
+
+    response = client.post("/departments/map/position", json={
+        "node_type": "employee", "employee_id": employee_id, "source_department_id": first_id,
+        "target_department_id": second_id, "map_x": 1250, "map_y": 620,
+    })
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=first_id).count() == 0
+        moved = session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=second_id).one()
+        retained = session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=third_id).one()
+        assert (moved.role, moved.responsibilities) == ("Исходная роль", "Исходные обязанности")
+        assert (moved.map_x, moved.map_y) == (1250, 620)
+        assert retained.role == "Дополнительная роль"
+
+    # Removing one membership to the company level does not wipe the employee's other department link.
+    response = client.post("/departments/map/position", json={
+        "node_type": "employee", "employee_id": employee_id, "source_department_id": second_id,
+        "target_department_id": 0, "map_x": 380, "map_y": 970,
+    })
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=second_id).count() == 0
+        assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=third_id).count() == 1
+
+
+def test_department_map_crown_uses_director_position_even_without_director_access_level(client, monkeypatch):
+    from app import access
+    with SessionLocal() as session:
+        department = Department(name="Отдел директора с должностью")
+        director = Employee(name="Корнюшко Сергей Михайлович", position="Директор")
+        session.add_all([department, director])
+        session.flush()
+        session.add(EmployeeDepartment(employee_id=director.id, department_id=department.id))
+        session.commit()
+
+    monkeypatch.setattr(access, "level_of", lambda employee: "employee")
+    response = client.get("/departments?view=map")
+    assert response.status_code == 200
+    assert "Корнюшко Сергей Михайлович" in response.text
+    assert "director-crown" in response.text and "♛" in response.text

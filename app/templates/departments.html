@@ -75,14 +75,16 @@
 </form>
 {% endmacro %}
 {% macro map_person_node(member, department_id) %}
-<a class="org-map-node org-map-person-node{% if member.access_level == 'reviewer' %} is-reviewer{% elif member.access_level == 'director' %} is-director{% endif %}"
-   data-map-person data-employee-id="{{ member.id }}" data-source-department-id="{{ department_id }}"
-   draggable="true" href="/employees?edit={{ member.id }}" title="Перетащить сотрудника или открыть карточку">
+<a class="org-map-node org-map-person-node{% if member.access_level == 'reviewer' %} is-reviewer{% endif %}{% if member.is_director %} is-director{% endif %}"
+   data-map-node data-node-kind="employee" data-employee-id="{{ member.id }}"
+   data-source-department-id="{{ department_id }}"
+   style="left:{{ member.map_x }}px;top:{{ member.map_y }}px"
+   href="/employees?edit={{ member.id }}" title="Перетащить в любое место доски или открыть карточку">
   <span class="org-map-person-avatar">{{ (member.name or 'С')[:1]|upper }}</span>
   <span class="org-map-person-copy"><strong>{{ member.name }}</strong><small>{{ member.position or member.role or 'Должность не указана' }}</small>{% if member.role %}<small class="org-map-role">{{ member.role }}</small>{% endif %}
     {% if member.access_level == 'reviewer' %}<small class="org-map-reviewer-label">ПРОВЕРЯЮЩИЙ</small>{% endif %}
   </span>
-  {% if member.access_level == 'director' %}<span class="director-crown" title="Директор" aria-label="Директор">♛</span>{% endif %}
+  {% if member.is_director %}<span class="director-crown" title="Директор" aria-label="Директор">♛</span>{% endif %}
   {% if member.is_primary %}<span class="manager-star" title="Начальник подразделения">★</span>{% endif %}
 </a>
 {% endmacro %}
@@ -108,50 +110,44 @@
 {% if view == 'map' %}
 <section class="card org-map-panel" id="org-map">
   <header class="org-map-heading">
-    <div><h2>Организационная карта</h2><p class="small muted">Перетаскивайте сотрудников между отделами и меняйте их порядок. Верхняя строка — сотрудники напрямую на уровне компании.</p></div>
-    <div class="org-map-legend"><span><i class="org-legend-dot clay"></i> Подразделения</span><span><i class="org-legend-dot blue"></i> Сотрудники</span><span class="org-legend-reviewer"><i></i> Проверяющие</span><span class="org-legend-director">♛ Директор</span></div>
+    <div>
+      <h2>Организационная карта</h2>
+      <p class="small muted">Свободная доска: перетаскивайте подразделения и сотрудников в любую точку. Чтобы сменить подразделение, отпустите карточку на его блок; чтобы поднять сотрудника на уровень компании — на SYSAT.</p>
+    </div>
+    <div class="org-map-legend">
+      <span><i class="org-legend-dot clay"></i> Подразделения</span>
+      <span><i class="org-legend-dot blue"></i> Сотрудники</span>
+      <span class="org-legend-reviewer"><i></i> Проверяющие</span>
+      <span class="org-legend-director">♛ Директор</span>
+    </div>
   </header>
   {% if not map_departments and not map_unassigned %}
     <div class="empty-state"><h3>Структура пока пуста</h3><p class="muted">Создайте подразделение и добавьте сотрудников.</p></div>
   {% else %}
-  <div class="org-map-scroll">
-    <div class="org-map-grid" style="--map-rows: {{ map_row_count }};">
+  <div class="org-map-scroll" id="org-map-scroll">
+    <div class="org-map-canvas" id="org-map-canvas" style="width:{{ map_board_width }}px;height:{{ map_board_height }}px">
       <svg class="org-map-lines" aria-hidden="true" preserveAspectRatio="none"></svg>
-      <div class="org-map-root">
+      <div class="org-map-root" data-drop-root style="left:{{ map_root_x }}px;top:{{ map_root_y }}px">
         <span class="org-map-root-kicker">ORGANIZATION</span>
         <strong>SYSAT</strong>
         <span>{{ map_departments|length }} подразделений</span>
         <span>{{ map_member_count }} связей с сотрудниками</span>
-      </div>
-      <div class="org-map-department-cell org-map-company-people-cell" style="grid-row: 1;">
-        <article class="org-map-node org-map-dept-node org-map-company-people-node" data-map-department data-drop-root>
-          <span class="org-map-node-kicker">НА УРОВНЕ КОМПАНИИ</span><strong>Без подразделения</strong>
-          <span class="org-map-node-meta">{{ map_unassigned|length }} сотрудников напрямую руководству</span>
-          <span class="org-map-node-status">Переместите сюда карточку, чтобы поставить её выше подразделений</span>
-        </article>
-      </div>
-      <div class="org-map-members-cell org-map-company-people-members" style="grid-row: 1;">
-        <div class="org-map-member-stack" data-drop-root>
-          {% for member in map_unassigned %}{{ map_person_node(member, 0) }}{% else %}<div class="org-map-empty-members org-map-drop-empty">Перетащите сюда сотрудника, чтобы разместить его на уровне компании</div>{% endfor %}
-        </div>
+        <small>Перетащите сюда карточку, чтобы поднять её на уровень компании</small>
       </div>
       {% for d in map_departments %}
-      <div class="org-map-department-cell" id="department-{{ d.id }}" style="grid-row: {{ loop.index + 1 }};">
-        <article class="org-map-node org-map-dept-node" data-map-department data-drop-department="{{ d.id }}">
-          <span class="org-map-node-kicker">ПОДРАЗДЕЛЕНИЕ · {{ '%02d'|format(loop.index) }}</span>
-          <strong>{{ d.name }}</strong>
-          <span class="org-map-node-meta">{{ d.members|length }} сотрудников{% if d.head_name %} · руководитель: {{ d.head_name }}{% endif %}</span>
-          <span class="org-map-node-status"><i class="{{ 'is-active' if d.active else '' }}"></i>{{ 'Активно' if d.active else 'Неактивно' }}</span>
-          <div class="org-map-node-actions"><a href="/departments?view=list&edit={{ d.id }}#department-{{ d.id }}">Изменить</a><a href="/departments?view=list&open_add={{ d.id }}#department-{{ d.id }}-add">＋ Сотрудник</a></div>
-        </article>
-      </div>
-      <div class="org-map-members-cell" style="grid-row: {{ loop.index + 1 }};">
-        <div class="org-map-member-stack" data-drop-department="{{ d.id }}">
-          {% for member in d.members %}{{ map_person_node(member, d.id) }}{% else %}<div class="org-map-empty-members org-map-drop-empty">Перетащите сюда сотрудника</div>{% endfor %}
-        </div>
-      </div>
+      <article class="org-map-node org-map-dept-node"
+               data-map-node data-node-kind="department" data-department-id="{{ d.id }}" data-drop-department="{{ d.id }}"
+               style="left:{{ d.map_x }}px;top:{{ d.map_y }}px"
+               title="Перетащить подразделение в любую точку доски">
+        <span class="org-map-node-kicker">ПОДРАЗДЕЛЕНИЕ</span>
+        <strong>{{ d.name }}</strong>
+        <span class="org-map-node-meta">{{ d.members|length }} сотрудников{% if d.head_name %} · руководитель: {{ d.head_name }}{% endif %}</span>
+        <span class="org-map-node-status"><i class="{{ 'is-active' if d.active else '' }}"></i>{{ 'Активно' if d.active else 'Неактивно' }}</span>
+        <div class="org-map-node-actions"><a href="/departments?view=list&edit={{ d.id }}#department-{{ d.id }}">Изменить</a><a href="/departments?view=list&open_add={{ d.id }}#department-{{ d.id }}-add">＋ Сотрудник</a></div>
+      </article>
+      {% for member in d.members %}{{ map_person_node(member, d.id) }}{% endfor %}
       {% endfor %}
-
+      {% for member in map_unassigned %}{{ map_person_node(member, 0) }}{% endfor %}
     </div>
   </div>
   {% endif %}
@@ -207,130 +203,173 @@
 {% endif %}
 <script>
 (() => {
-  const grid = document.querySelector('.org-map-grid');
-  if (!grid) return;
-  const svg = grid.querySelector('.org-map-lines');
-  let frame = 0, draggedCard = null, suppressNextClick = false;
-  const point = (element, edge) => {
-    const r = element.getBoundingClientRect(), g = grid.getBoundingClientRect();
-    return { x: (edge === 'right' ? r.right : r.left) - g.left + grid.scrollLeft,
-             y: r.top - g.top + grid.scrollTop + r.height / 2 };
+  const canvas = document.getElementById('org-map-canvas');
+  const viewport = document.getElementById('org-map-scroll');
+  if (!canvas || !viewport) return;
+  const svg = canvas.querySelector('.org-map-lines');
+  let frame = 0;
+  let activeDrag = null;
+  let suppressClick = false;
+
+  const canvasPoint = (clientX, clientY) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: clientX - r.left, y: clientY - r.top };
   };
-  const curve = (a, b) => {
-    const bend = Math.max(42, (b.x - a.x) * .48);
-    return `M ${a.x} ${a.y} C ${a.x + bend} ${a.y}, ${b.x - bend} ${b.y}, ${b.x} ${b.y}`;
+  const nodeRect = node => {
+    const r = node.getBoundingClientRect(), c = canvas.getBoundingClientRect();
+    return { left:r.left-c.left, top:r.top-c.top, width:r.width, height:r.height,
+             cx:r.left-c.left+r.width/2, cy:r.top-c.top+r.height/2 };
+  };
+  const pointOnBorder = (rect, toward) => {
+    const dx = toward.cx - rect.cx, dy = toward.cy - rect.cy;
+    const scale = 1 / Math.max(Math.abs(dx) / Math.max(rect.width/2,1),
+                               Math.abs(dy) / Math.max(rect.height/2,1), 0.0001);
+    return { x:rect.cx + dx*scale, y:rect.cy + dy*scale };
+  };
+  const pathBetween = (source, target) => {
+    const a = pointOnBorder(source, target), b = pointOnBorder(target, source);
+    const dx = b.x-a.x, dy = b.y-a.y;
+    const bend = 0.38;
+    return `M ${a.x} ${a.y} C ${a.x+dx*bend} ${a.y+dy*bend}, ${b.x-dx*bend} ${b.y-dy*bend}, ${b.x} ${b.y}`;
   };
   function draw() {
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(() => {
-      const width = Math.max(grid.scrollWidth, grid.clientWidth);
-      const height = Math.max(grid.scrollHeight, grid.clientHeight);
+      const width = canvas.clientWidth, height = canvas.clientHeight;
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       svg.setAttribute('width', width); svg.setAttribute('height', height);
-      const root = grid.querySelector('.org-map-root');
+      const root = canvas.querySelector('.org-map-root');
       if (!root) return;
-      const start = point(root, 'right');
+      const rootRect = nodeRect(root);
       let markup = '';
-      grid.querySelectorAll('[data-map-department]').forEach((dept, index) => {
-        const d = point(dept, 'left'), id = `org-edge-dept-${index}`;
-        markup += `<path id="${id}" class="org-map-edge org-map-edge-dept" d="${curve(start, d)}"/>`;
-        markup += `<circle class="org-map-pulse clay-pulse" r="3"><animateMotion dur="${4.8 + (index % 4) * .45}s" begin="${index * .16}s" repeatCount="indefinite"><mpath href="#${id}"/></animateMotion></circle>`;
-        const cell = dept.closest('.org-map-department-cell');
-        const people = cell && cell.nextElementSibling;
-        if (!people || !people.classList.contains('org-map-members-cell')) return;
-        people.querySelectorAll('[data-map-person]').forEach((person, personIndex) => {
-          const target = point(person, 'left'), leaf = `org-edge-person-${index}-${personIndex}`;
-          markup += `<path id="${leaf}" class="org-map-edge org-map-edge-person" d="${curve(d, target)}"/>`;
-          markup += `<circle class="org-map-pulse blue-pulse" r="2.5"><animateMotion dur="${3.6 + (personIndex % 3) * .35}s" begin="${(index + personIndex) * .11}s" repeatCount="indefinite"><mpath href="#${leaf}"/></animateMotion></circle>`;
-        });
+      let edgeIndex = 0;
+      const departments = new Map();
+      canvas.querySelectorAll('[data-node-kind="department"]').forEach(node => {
+        const id = node.dataset.departmentId;
+        departments.set(id, node);
+        const pathId = `org-edge-${edgeIndex++}`;
+        const path = pathBetween(rootRect, nodeRect(node));
+        markup += `<path id="${pathId}" class="org-map-edge org-map-edge-dept" d="${path}"/>`;
+        markup += `<circle class="org-map-pulse clay-pulse" r="3"><animateMotion dur="5.4s" repeatCount="indefinite"><mpath href="#${pathId}"/></animateMotion></circle>`;
+      });
+      canvas.querySelectorAll('[data-node-kind="employee"]').forEach(node => {
+        const parentId = node.dataset.sourceDepartmentId || '0';
+        const parent = parentId === '0' ? root : departments.get(parentId) || root;
+        const pathId = `org-edge-${edgeIndex++}`;
+        const path = pathBetween(nodeRect(parent), nodeRect(node));
+        markup += `<path id="${pathId}" class="org-map-edge org-map-edge-person" d="${path}"/>`;
+        markup += `<circle class="org-map-pulse blue-pulse" r="2.5"><animateMotion dur="4.1s" repeatCount="indefinite"><mpath href="#${pathId}"/></animateMotion></circle>`;
       });
       svg.innerHTML = markup;
     });
   }
-  const clearDropStyles = () => grid.querySelectorAll('.is-drop-target,.is-drop-before,.is-drop-after')
-    .forEach(node => node.classList.remove('is-drop-target','is-drop-before','is-drop-after'));
-  const stackFor = target => {
-    const direct = target.closest('.org-map-member-stack');
-    if (direct) return direct;
-    const dept = target.closest('[data-drop-department]');
-    const root = target.closest('[data-drop-root]');
-    const node = dept || root;
-    if (!node) return null;
-    const cell = node.closest('.org-map-department-cell');
-    return cell && cell.nextElementSibling ? cell.nextElementSibling.querySelector('.org-map-member-stack') : null;
+  const savePosition = async (node, targetDepartmentId = null) => {
+    const payload = {
+      node_type: node.dataset.nodeKind,
+      map_x: Math.round(parseFloat(node.style.left) || 0),
+      map_y: Math.round(parseFloat(node.style.top) || 0)
+    };
+    if (node.dataset.nodeKind === 'department') {
+      payload.department_id = Number(node.dataset.departmentId);
+    } else {
+      payload.employee_id = Number(node.dataset.employeeId);
+      payload.source_department_id = Number(node.dataset.sourceDepartmentId || 0);
+      if (targetDepartmentId !== null) payload.target_department_id = targetDepartmentId;
+    }
+    const response = await fetch('/departments/map/position', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) throw new Error(result.detail || 'Не удалось сохранить расположение карточки');
   };
-  grid.addEventListener('dragstart', event => {
-    const card = event.target.closest('[data-map-person]');
-    if (!card) return;
-    draggedCard = card;
-    card.classList.add('is-dragging');
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', card.dataset.employeeId || '');
+  const clamp = (value, max) => Math.max(0, Math.min(Math.max(0,max), value));
+  canvas.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    const node = event.target.closest('[data-map-node]');
+    if (!node || event.target.closest('.org-map-node-actions a')) return;
+    const point = canvasPoint(event.clientX, event.clientY);
+    activeDrag = {
+      node, pointerId:event.pointerId, startX:event.clientX, startY:event.clientY,
+      left:parseFloat(node.style.left)||0, top:parseFloat(node.style.top)||0,
+      offsetX:point.x-(parseFloat(node.style.left)||0),
+      offsetY:point.y-(parseFloat(node.style.top)||0), moved:false
+    };
+    node.setPointerCapture(event.pointerId);
   });
-  grid.addEventListener('dragover', event => {
-    if (!draggedCard) return;
-    const stack = stackFor(event.target);
-    if (!stack) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'move';
-    clearDropStyles(); stack.classList.add('is-drop-target');
-    const person = event.target.closest('[data-map-person]');
-    if (person && person !== draggedCard) {
-      const r = person.getBoundingClientRect();
-      person.classList.add(event.clientX < r.left + r.width / 2 ? 'is-drop-before' : 'is-drop-after');
-    }
-  });
-  grid.addEventListener('drop', async event => {
-    if (!draggedCard) return;
-    const stack = stackFor(event.target);
-    if (!stack) return;
+  canvas.addEventListener('pointermove', event => {
+    if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
+    const drag = activeDrag;
+    const dx = event.clientX-drag.startX, dy = event.clientY-drag.startY;
+    if (!drag.moved && Math.hypot(dx,dy) < 5) return;
     event.preventDefault();
-    const targetPerson = event.target.closest('[data-map-person]');
-    if (targetPerson === draggedCard) return;
-    const targetDepartmentId = Number(stack.dataset.dropDepartment || 0);
-    const sourceDepartmentId = Number(draggedCard.dataset.sourceDepartmentId || 0);
-    const employeeId = Number(draggedCard.dataset.employeeId || 0);
-    const ordered = Array.from(stack.querySelectorAll('[data-map-person]')).filter(card => card !== draggedCard);
-    let beforeEmployeeId = 0;
-    if (targetPerson) {
-      const i = ordered.indexOf(targetPerson);
-      if (i >= 0) {
-        const r = targetPerson.getBoundingClientRect();
-        const nextIndex = i + (event.clientX >= r.left + r.width / 2 ? 1 : 0);
-        beforeEmployeeId = Number(ordered[nextIndex]?.dataset.employeeId || 0);
+    drag.moved = true;
+    drag.node.classList.add('is-map-dragging');
+    const point = canvasPoint(event.clientX,event.clientY);
+    drag.node.style.left = `${Math.round(clamp(point.x-drag.offsetX, canvas.clientWidth-drag.node.offsetWidth))}px`;
+    drag.node.style.top = `${Math.round(clamp(point.y-drag.offsetY, canvas.clientHeight-drag.node.offsetHeight))}px`;
+    draw();
+  });
+  const finishDrag = async event => {
+    if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
+    const drag = activeDrag;
+    activeDrag = null;
+    drag.node.classList.remove('is-map-dragging');
+    if (!drag.moved) return;
+    suppressClick = true;
+    window.setTimeout(() => { suppressClick = false; }, 350);
+
+    let targetDepartmentId = null;
+    if (drag.node.dataset.nodeKind === 'employee') {
+      const hit = document.elementFromPoint(event.clientX,event.clientY);
+      const targetDepartment = hit && hit.closest('[data-drop-department]');
+      const targetRoot = hit && hit.closest('[data-drop-root]');
+      const point = canvasPoint(event.clientX,event.clientY);
+      if (targetDepartment && targetDepartment.dataset.departmentId !== drag.node.dataset.sourceDepartmentId) {
+        targetDepartmentId = Number(targetDepartment.dataset.departmentId);
+        drag.node.style.left = `${Math.round(clamp(parseFloat(targetDepartment.style.left)+targetDepartment.offsetWidth+36, canvas.clientWidth-drag.node.offsetWidth))}px`;
+        drag.node.style.top = `${Math.round(clamp(point.y-drag.node.offsetHeight/2, canvas.clientHeight-drag.node.offsetHeight))}px`;
+      } else if (targetRoot && Number(drag.node.dataset.sourceDepartmentId || 0) !== 0) {
+        targetDepartmentId = 0;
+        const root = canvas.querySelector('.org-map-root');
+        drag.node.style.left = `${Math.round(clamp(parseFloat(root.style.left)+root.offsetWidth+42, canvas.clientWidth-drag.node.offsetWidth))}px`;
+        drag.node.style.top = `${Math.round(clamp(point.y-drag.node.offsetHeight/2, canvas.clientHeight-drag.node.offsetHeight))}px`;
       }
     }
-    clearDropStyles(); draggedCard.classList.remove('is-dragging');
+    draw();
     try {
-      const response = await fetch('/departments/map/move', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employee_id: employeeId, source_department_id: sourceDepartmentId,
-          target_department_id: targetDepartmentId, before_employee_id: beforeEmployeeId })
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.ok) {
-        window.alert(result.detail || 'Не удалось переместить сотрудника. Проверьте права и состояние подразделения.');
-        return;
+      await savePosition(drag.node,targetDepartmentId);
+      if (targetDepartmentId !== null) {
+        window.location.reload();
       }
-      window.location.hash = 'org-map';
-      window.location.reload();
     } catch (error) {
-      window.alert('Не удалось сохранить изменение структуры. Проверьте соединение и повторите попытку.');
+      window.alert(error.message);
+      window.location.reload();
     }
-  });
-  grid.addEventListener('dragend', () => {
-    if (draggedCard) draggedCard.classList.remove('is-dragging');
-    draggedCard = null; suppressNextClick = true; clearDropStyles();
-    window.setTimeout(() => { suppressNextClick = false; }, 350);
-  });
-  grid.addEventListener('click', event => {
-    if (!suppressNextClick) return;
+  };
+  canvas.addEventListener('pointerup', finishDrag);
+  canvas.addEventListener('pointercancel', finishDrag);
+  canvas.addEventListener('click', event => {
+    if (!suppressClick) return;
     event.preventDefault(); event.stopPropagation();
   }, true);
   if ('ResizeObserver' in window) {
     const observer = new ResizeObserver(draw);
-    observer.observe(grid); grid.querySelectorAll('.org-map-node').forEach(node => observer.observe(node));
+    observer.observe(canvas);
+    canvas.querySelectorAll('.org-map-node,.org-map-root').forEach(node => observer.observe(node));
   }
-  window.addEventListener('resize', draw, { passive: true });
+  window.addEventListener('resize', draw, {passive:true});
+  const savedScroll = sessionStorage.getItem('sysai-org-map-scroll');
+  if (savedScroll) {
+    try {
+      const state = JSON.parse(savedScroll);
+      viewport.scrollLeft = Number(state.left)||0;
+      viewport.scrollTop = Number(state.top)||0;
+    } catch (_) { /* Ignore stale scroll state. */ }
+    sessionStorage.removeItem('sysai-org-map-scroll');
+  }
+  window.addEventListener('beforeunload', () => {
+    sessionStorage.setItem('sysai-org-map-scroll', JSON.stringify({left:viewport.scrollLeft,top:viewport.scrollTop}));
+  });
   draw();
 })();
 </script>

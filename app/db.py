@@ -129,6 +129,8 @@ class Employee(Base):
     bitrix_user_id = Column(String(40), default="")
     active = Column(Boolean, default=True)
     org_order = Column(Integer, nullable=False, default=0)
+    map_x = Column(Float, nullable=True)
+    map_y = Column(Float, nullable=True)
     department_memberships = relationship("EmployeeDepartment", back_populates="employee",
                                           cascade="all, delete-orphan",
                                           order_by="(EmployeeDepartment.sort_order, EmployeeDepartment.id)")
@@ -148,6 +150,8 @@ class Department(Base):
     description = Column(Text, default="")
     regulations = Column(Text, default="")  # how the department works: rules, procedures, who signs what
     active = Column(Boolean, default=True)
+    map_x = Column(Float, nullable=True)
+    map_y = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now)
     memberships = relationship("EmployeeDepartment", back_populates="department",
                                cascade="all, delete-orphan",
@@ -163,6 +167,8 @@ class EmployeeDepartment(Base):
     responsibilities = Column(Text, default="")
     is_primary = Column(Boolean, default=False)
     sort_order = Column(Integer, nullable=False, default=0)
+    map_x = Column(Float, nullable=True)
+    map_y = Column(Float, nullable=True)
     employee = relationship("Employee", back_populates="department_memberships")
     department = relationship("Department", back_populates="memberships")
     __table_args__ = (UniqueConstraint("employee_id", "department_id", name="uq_employee_department"),)
@@ -694,6 +700,12 @@ def init_db():
     _add_column_if_missing("employees", "communication_style", "communication_style TEXT DEFAULT ''")
     _add_column_if_missing("employees", "org_order", "org_order INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("employee_departments", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("employees", "map_x", "map_x FLOAT")
+    _add_column_if_missing("employees", "map_y", "map_y FLOAT")
+    _add_column_if_missing("departments", "map_x", "map_x FLOAT")
+    _add_column_if_missing("departments", "map_y", "map_y FLOAT")
+    _add_column_if_missing("employee_departments", "map_x", "map_x FLOAT")
+    _add_column_if_missing("employee_departments", "map_y", "map_y FLOAT")
     _add_column_if_missing("departments", "regulations", "regulations TEXT DEFAULT ''")
     _add_column_if_missing("notes", "department_id", "department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL")
     _add_column_if_missing("notes", "confidence", "confidence VARCHAR(10) DEFAULT 'medium'")
