@@ -548,21 +548,45 @@ def test_department_map_drop_moves_one_membership_and_preserves_other_department
     assert 'data-source-department-id="0"' in page.text
 
 
-def test_department_map_crown_uses_director_position_even_without_director_access_level(client, monkeypatch):
+def test_department_map_crown_is_reserved_for_kornyushko_only(client, monkeypatch):
     from app import access
     with SessionLocal() as session:
-        department = Department(name="Отдел директора с должностью")
+        department = Department(name="Отдел с ограниченной короной")
         director = Employee(name="Корнюшко Сергей Михайлович", position="Директор")
-        session.add_all([department, director])
+        deputy = Employee(name="Гаджиев Владимир Владимирович", position="Заместитель директора по техническим вопросам")
+        session.add_all([department, director, deputy])
         session.flush()
-        session.add(EmployeeDepartment(employee_id=director.id, department_id=department.id))
+        session.add_all([
+            EmployeeDepartment(employee_id=director.id, department_id=department.id),
+            EmployeeDepartment(employee_id=deputy.id, department_id=department.id),
+        ])
+        director_id, deputy_id = director.id, deputy.id
         session.commit()
 
-    monkeypatch.setattr(access, "level_of", lambda employee: "employee")
+    # Even an access-level value of "director" must not create a second crown.
+    monkeypatch.setattr(access, "level_of", lambda employee: "director" if employee.id == deputy_id else "employee")
     response = client.get("/departments?view=map")
     assert response.status_code == 200
-    assert "Корнюшко Сергей Михайлович" in response.text
-    assert "director-crown" in response.text and "♛" in response.text
+    assert response.text.count('class="director-crown"') == 1
+    deputy_start = response.text.index(f'data-employee-id="{deputy_id}"')
+    deputy_card = response.text[deputy_start:response.text.index("</a>", deputy_start)]
+    director_start = response.text.index(f'data-employee-id="{director_id}"')
+    director_card = response.text[director_start:response.text.index("</a>", director_start)]
+    assert "is-director" not in deputy_card and "director-crown" not in deputy_card
+    assert "is-director" in director_card and "director-crown" in director_card
+
+
+def test_department_map_opens_fullscreen_and_supports_background_pan(client):
+    with SessionLocal() as session:
+        session.add(Department(name="Подразделение для полноэкранной карты"))
+        session.commit()
+    response = client.get("/departments?view=map")
+    assert response.status_code == 200
+    assert 'class="shell map-fullscreen-shell"' in response.text
+    assert 'class="content map-fullscreen-content"' in response.text
+    assert 'Зажмите ЛКМ на свободном месте' in response.text
+    assert "finishPan" in response.text
+    assert "department-create" not in response.text
 
 
 def test_department_map_company_root_can_be_moved_and_remembers_position(client):

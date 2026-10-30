@@ -1813,7 +1813,7 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
                     "id": employee.id, "name": employee.name, "position": position,
                     "role": membership.role or "", "is_primary": bool(membership.is_primary),
                     "access_level": level,
-                    "is_director": level == "director" or "директор" in position.casefold(),
+                    "is_director": " ".join((employee.name or "").split()).casefold() == "корнюшко сергей михайлович",
                     "map_x": saved_coordinate(membership.map_x, default_member_x),
                     "map_y": saved_coordinate(membership.map_y, default_member_y),
                 })
@@ -1841,7 +1841,7 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
             map_unassigned.append({
                 "id": employee.id, "name": employee.name, "position": position,
                 "role": "", "is_primary": False, "access_level": level,
-                "is_director": level == "director" or "директор" in position.casefold(),
+                "is_director": " ".join((employee.name or "").split()).casefold() == "корнюшко сергей михайлович",
                 "map_x": employee_x, "map_y": employee_y,
             })
             furthest_right = max(furthest_right, employee_x + 310)

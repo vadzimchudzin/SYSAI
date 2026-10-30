@@ -89,6 +89,7 @@
 </a>
 {% endmacro %}
 {% block body %}
+{% if view != 'map' %}
 <div class="page-h departments-page-head">
   <div><h1>Подразделения</h1><p>Организационная структура, состав отделов, роли и ответственность.</p></div>
   <div class="department-toolbar">
@@ -106,13 +107,21 @@
     <div class="department-create-form" id="department-create-form">{{ form(None) }}</div>
   </details>
 </section>
+{% endif %}
 
 {% if view == 'map' %}
 <section class="card org-map-panel" id="org-map">
   <header class="org-map-heading">
-    <div>
-      <h2>Организационная карта</h2>
-      <p class="small muted">Свободная доска: перетаскивайте подразделения и сотрудников в любую точку. Чтобы сменить подразделение, отпустите карточку на его блок; чтобы поднять сотрудника на уровень компании — на SYSAT.</p>
+    <div class="org-map-heading-main">
+      <div class="org-map-heading-copy">
+        <h2>Организационная карта</h2>
+        <p class="small muted">Зажмите ЛКМ на свободном месте и двигайте доску. Карточки сотрудников и подразделений перетаскиваются отдельно.</p>
+      </div>
+      <nav class="org-map-top-actions" aria-label="Действия с картой">
+        <a class="btn sm" href="/departments?view=list#departments-list">Список подразделений</a>
+        <a class="btn sm" href="/employees">Сотрудники</a>
+        <a class="btn sm primary" href="/departments?view=list&create=1#department-create-form">＋ Подразделение</a>
+      </nav>
     </div>
     <div class="org-map-legend">
       <span><i class="org-legend-dot clay"></i> Подразделения</span>
@@ -209,6 +218,7 @@
   const svg = canvas.querySelector('.org-map-lines');
   let frame = 0;
   let activeDrag = null;
+  let activePan = null;
   let suppressClick = false;
 
   const canvasPoint = (clientX, clientY) => {
@@ -286,7 +296,18 @@
   canvas.addEventListener('pointerdown', event => {
     if (event.button !== 0) return;
     const node = event.target.closest('[data-map-node]');
-    if (!node || event.target.closest('.org-map-node-actions a')) return;
+    if (!node) {
+      // Empty-board drag pans the viewport; cards keep their own drag gesture.
+      activePan = {
+        pointerId:event.pointerId, startX:event.clientX, startY:event.clientY,
+        scrollLeft:viewport.scrollLeft, scrollTop:viewport.scrollTop, moved:false
+      };
+      viewport.classList.add('is-panning');
+      canvas.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      return;
+    }
+    if (event.target.closest('.org-map-node-actions a')) return;
     const point = canvasPoint(event.clientX, event.clientY);
     activeDrag = {
       node, pointerId:event.pointerId, startX:event.clientX, startY:event.clientY,
@@ -297,6 +318,16 @@
     node.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener('pointermove', event => {
+    if (activePan && activePan.pointerId === event.pointerId) {
+      const pan = activePan;
+      const dx = event.clientX-pan.startX, dy = event.clientY-pan.startY;
+      if (!pan.moved && Math.hypot(dx,dy) < 3) return;
+      pan.moved = true;
+      event.preventDefault();
+      viewport.scrollLeft = pan.scrollLeft-dx;
+      viewport.scrollTop = pan.scrollTop-dy;
+      return;
+    }
     if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
     const drag = activeDrag;
     const dx = event.clientX-drag.startX, dy = event.clientY-drag.startY;
@@ -309,6 +340,19 @@
     drag.node.style.top = `${Math.round(clamp(point.y-drag.offsetY, canvas.clientHeight-drag.node.offsetHeight))}px`;
     draw();
   });
+  const finishPan = event => {
+    if (!activePan || activePan.pointerId !== event.pointerId) return;
+    const pan = activePan;
+    activePan = null;
+    viewport.classList.remove('is-panning');
+    if (pan.moved) {
+      suppressClick = true;
+      window.setTimeout(() => { suppressClick = false; }, 350);
+      event.preventDefault();
+    }
+  };
+  canvas.addEventListener('pointerup', finishPan);
+  canvas.addEventListener('pointercancel', finishPan);
   const finishDrag = async event => {
     if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
     const drag = activeDrag;
