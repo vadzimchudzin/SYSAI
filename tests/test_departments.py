@@ -572,13 +572,14 @@ def test_department_map_company_root_can_be_moved_and_remembers_position(client)
         session.commit()
 
     response = client.post("/departments/map/position", json={
-        "node_type": "company", "map_x": 730, "map_y": 540,
+        "node_type": "company", "map_x": 4300, "map_y": 2700,
     })
     assert response.status_code == 200 and response.json() == {"ok": True}
-    assert settings_store.get("org_map_root_x") == 730
-    assert settings_store.get("org_map_root_y") == 540
+    assert settings_store.get("org_map_root_x") == 4300
+    assert settings_store.get("org_map_root_y") == 2700
 
     page = client.get("/departments?view=map")
     assert page.status_code == 200
-    assert 'left:730px;top:540px' in page.text
+    assert 'left:4300px;top:2700px' in page.text
     assert 'data-node-kind="company"' in page.text
+    assert 'width:5050px' in page.text and 'height:3300px' in page.text

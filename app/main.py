@@ -1849,8 +1849,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
 
     map_root_x = saved_coordinate(settings_store.get("org_map_root_x"), 85)
     map_root_y = saved_coordinate(settings_store.get("org_map_root_y"), 735)
-    map_board_width = max(3200, furthest_right + 520)
-    map_board_height = max(2200, furthest_bottom + 420)
+    map_board_width = max(3200, furthest_right + 520, map_root_x + 750)
+    map_board_height = max(2200, furthest_bottom + 420, map_root_y + 600)
     map_member_count = sum(len(item["members"]) for item in map_departments) + len(map_unassigned)
     return page(
         request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
