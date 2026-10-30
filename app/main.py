@@ -1954,7 +1954,7 @@ async def department_create_member(
         department_name = department.name
         s.commit()
     if selected_level != "employee":
-        access.set_level(employee_id, selected_level)
+        access.set_level(employee, selected_level)
     agent.invalidate_roster()
     message = f"Создан сотрудник «{clean_name}» и добавлен в «{department_name}». Все данные профиля сохранены."
     safe_view = "map" if view == "map" else "list"
