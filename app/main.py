@@ -1636,14 +1636,25 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
         departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []
         if {d.id for d in departments} != selected_ids:
             raise HTTPException(400, "Одно из подразделений не найдено")
-        existing_ids = {m.department_id for m in e.department_memberships}
+        existing_memberships = {m.department_id: m for m in list(e.department_memberships)}
+        existing_ids = set(existing_memberships)
         if any(not d.active and d.id not in existing_ids for d in departments):
             raise HTTPException(400, "Нельзя добавить сотрудника в неактивное подразделение")
-        s.query(EmployeeDepartment).filter_by(employee_id=e.id).delete(synchronize_session=False)
+
+        # Keep canonical membership rows in place. Bulk delete/recreate used to
+        # silently clear is_primary and broke manager links when an employee profile was edited.
+        for department_id, membership in existing_memberships.items():
+            if department_id not in selected_ids:
+                s.delete(membership)
         for d in departments:
             role = str(form.get(f"department_role_{d.id}") or "").strip()[:200]
             duties = str(form.get(f"department_responsibilities_{d.id}") or "").strip()[:4000]
-            s.add(EmployeeDepartment(employee_id=e.id, department_id=d.id, role=role, responsibilities=duties))
+            membership = existing_memberships.get(d.id)
+            if membership is None:
+                membership = EmployeeDepartment(employee_id=e.id, department_id=d.id)
+            membership.role = role
+            membership.responsibilities = duties
+            s.add(membership)
         from . import access
         level = str(form.get("access_level") or "").strip()
         if level and (level not in access.LEVELS or access.level_of(e) == "director"):
@@ -1777,6 +1788,292 @@ def departments_view(request: Request, edit: int = 0, msg: str = ""):
                 available_employees_by_department=available_employees_by_department, department_heads=department_heads)
 
 
+
+@app.get("/organization", response_class=HTMLResponse)
+def organization_view(request: Request):
+    """Visual organization constructor. Employee records remain canonical; department membership rows are links."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        employees = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
+        for department in departments:
+            for membership in department.memberships:
+                if membership.employee is not None:
+                    _ = membership.employee.name, membership.employee.position, membership.employee.active
+        for employee in employees:
+            for membership in employee.department_memberships:
+                if membership.department is not None:
+                    _ = membership.department.name
+        active_employees = [employee for employee in employees if employee.active]
+        director = next((employee for employee in active_employees if agent.rights_of(employee) == "director"), None)
+        department_heads = {
+            department.id: next(
+                (membership for membership in department.memberships
+                 if membership.is_primary and membership.employee is not None and membership.employee.active),
+                None,
+            )
+            for department in departments
+        }
+        manager_groups_by_id = {}
+        director_departments = []
+        unassigned_departments = []
+        assigned_employee_ids = set()
+        for department in departments:
+            for membership in department.memberships:
+                if membership.employee is not None:
+                    assigned_employee_ids.add(membership.employee_id)
+            head = department_heads[department.id]
+            if head is None:
+                unassigned_departments.append(department)
+            elif director is not None and head.employee_id == director.id:
+                director_departments.append(department)
+            else:
+                group = manager_groups_by_id.setdefault(head.employee_id, {
+                    "employee": head.employee,
+                    "departments": [],
+                    "role_label": (
+                        "Заместитель директора"
+                        if "замест" in (head.employee.position or "").casefold()
+                        else "Руководитель подразделений"
+                    ),
+                })
+                group["departments"].append(department)
+        manager_groups = sorted(
+            manager_groups_by_id.values(),
+            key=lambda group: (group["employee"].name or "").casefold(),
+        )
+        unassigned_employees = [
+            employee for employee in active_employees
+            if employee.id not in assigned_employee_ids
+        ]
+    return page(
+        request, "organization.html",
+        departments=departments, employees=active_employees,
+        department_heads=department_heads, director=director,
+        director_departments=director_departments,
+        manager_groups=manager_groups, unassigned_departments=unassigned_departments,
+        unassigned_employees=unassigned_employees,
+    )
+
+
+@app.post("/api/org/departments/{department_id}/members/{employee_id}")
+async def organization_assign_member(request: Request, department_id: int, employee_id: int):
+    """Add a department membership or move an employee from one department to another atomically."""
+    guard_admin(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Ожидался объект с параметрами назначения")
+
+    move_from_id = payload.get("move_from_department_id")
+    try:
+        move_from_id = int(move_from_id) if move_from_id not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректный исходный отдел") from None
+    if move_from_id == department_id:
+        move_from_id = None
+
+    with SessionLocal() as s:
+        department = s.get(Department, department_id)
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        if not department.active:
+            raise HTTPException(400, "Сначала активируйте подразделение")
+        employee = s.get(Employee, employee_id)
+        if employee is None or not employee.active:
+            raise HTTPException(404, "Активный сотрудник не найден")
+
+        source_department = None
+        source_membership = None
+        if move_from_id is not None:
+            source_department = s.get(Department, move_from_id)
+            if source_department is None:
+                raise HTTPException(404, "Исходное подразделение не найдено")
+            source_membership = s.query(EmployeeDepartment).filter_by(
+                employee_id=employee.id, department_id=source_department.id
+            ).one_or_none()
+            if source_membership is None:
+                raise HTTPException(404, "Сотрудник больше не состоит в исходном подразделении")
+
+        membership = s.query(EmployeeDepartment).filter_by(
+            employee_id=employee.id, department_id=department.id
+        ).one_or_none()
+        created = membership is None
+        source_role = source_membership.role if source_membership is not None else ""
+        source_responsibilities = source_membership.responsibilities if source_membership is not None else ""
+        if membership is None:
+            membership = EmployeeDepartment(
+                employee_id=employee.id,
+                department_id=department.id,
+                role=(str(payload.get("role") or "").strip()[:200]
+                      if "role" in payload else (source_role or "")),
+                responsibilities=(str(payload.get("responsibilities") or "").strip()[:4000]
+                                  if "responsibilities" in payload else (source_responsibilities or "")),
+            )
+            s.add(membership)
+            s.flush()
+        else:
+            if "role" in payload:
+                membership.role = str(payload.get("role") or "").strip()[:200]
+            elif source_role and not membership.role:
+                membership.role = source_role
+            if "responsibilities" in payload:
+                membership.responsibilities = str(payload.get("responsibilities") or "").strip()[:4000]
+            elif source_responsibilities and not membership.responsibilities:
+                membership.responsibilities = source_responsibilities
+
+        make_head = payload.get("is_head") is True
+        if make_head:
+            for current in s.query(EmployeeDepartment).filter_by(department_id=department.id).all():
+                current.is_primary = current.employee_id == employee.id
+        if source_membership is not None:
+            s.delete(source_membership)
+
+        s.commit()
+        result = {
+            "ok": True,
+            "created": created,
+            "moved": source_membership is not None,
+            "is_head": bool(membership.is_primary),
+            "employee": {"id": employee.id, "name": employee.name},
+            "department": {"id": department.id, "name": department.name},
+            "message": (
+                f"{employee.name} назначен руководителем «{department.name}»."
+                if make_head else
+                f"{employee.name} перенесён из «{source_department.name}» в «{department.name}»."
+                if source_department is not None else
+                f"{employee.name} добавлен в «{department.name}»."
+                if created else
+                f"{employee.name} уже состоит в «{department.name}»."
+            ),
+        }
+
+    agent.invalidate_roster()
+    return JSONResponse(result)
+
+
+@app.post("/api/org/employees/{employee_id}/unassign")
+async def organization_unassign_member(request: Request, employee_id: int):
+    """Remove one employee↔department link while keeping the canonical employee record intact."""
+    guard_admin(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Ожидался объект с параметрами назначения")
+    try:
+        department_id = int(payload.get("department_id") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректное подразделение") from None
+    if department_id <= 0:
+        raise HTTPException(400, "Не указано подразделение")
+
+    with SessionLocal() as s:
+        employee = s.get(Employee, employee_id)
+        if employee is None:
+            raise HTTPException(404, "Сотрудник не найден")
+        department = s.get(Department, department_id)
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        membership = s.query(EmployeeDepartment).filter_by(
+            employee_id=employee.id, department_id=department.id
+        ).one_or_none()
+        if membership is None:
+            raise HTTPException(404, "Сотрудник не состоит в этом подразделении")
+        employee_name, department_name = employee.name, department.name
+        s.delete(membership)
+        s.commit()
+
+    agent.invalidate_roster()
+    return JSONResponse({
+        "ok": True,
+        "message": f"{employee_name} исключён из «{department_name}». Карточка сотрудника сохранена.",
+    })
+
+
+@app.post("/api/org/employees")
+async def organization_create_employee(request: Request):
+    """Create one canonical employee record and optionally attach it to a department in one transaction."""
+    guard_admin(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Ожидался объект с данными сотрудника")
+    clean_name = str(payload.get("name") or "").strip()[:200]
+    if not clean_name:
+        raise HTTPException(400, "Укажите имя и фамилию сотрудника")
+    contact = str(payload.get("telegram_contact") or "").strip()[:200]
+    if contact and userbot.ai_mode():
+        try:
+            contact = userbot.normalize_ref(contact)
+        except userbot.RefError as exc:
+            raise HTTPException(400, str(exc)) from None
+    department_id = payload.get("department_id")
+    try:
+        department_id = int(department_id) if department_id not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректное подразделение") from None
+    with SessionLocal() as s:
+        duplicate = next(
+            (item for item in s.query(Employee).all()
+             if (item.name or "").strip().casefold() == clean_name.casefold()),
+            None,
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                409,
+                f"Сотрудник «{duplicate.name}» уже есть в справочнике. Перетащите его карточку из списка слева.",
+            )
+        department = s.get(Department, department_id) if department_id else None
+        if department_id and department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        if department is not None and not department.active:
+            raise HTTPException(400, "Сначала активируйте подразделение")
+        employee = Employee(
+            name=clean_name,
+            aliases=str(payload.get("aliases") or "").strip()[:500],
+            position=str(payload.get("position") or "").strip()[:200],
+            competencies=str(payload.get("competencies") or "").strip()[:4000],
+            responsibilities=str(payload.get("responsibilities") or "").strip()[:4000],
+            context=str(payload.get("context") or "").strip()[:4000],
+            channel="telegram",
+            telegram_chat_id=contact,
+            bitrix_user_id=str(payload.get("bitrix_user_id") or "").strip()[:40],
+            active=True,
+        )
+        s.add(employee)
+        s.flush()
+        membership = None
+        if department is not None:
+            membership = EmployeeDepartment(
+                employee_id=employee.id,
+                department_id=department.id,
+                role=str(payload.get("department_role") or "").strip()[:200],
+                responsibilities=str(payload.get("department_responsibilities") or "").strip()[:4000],
+            )
+            s.add(membership)
+            if payload.get("is_head") is True:
+                for current in s.query(EmployeeDepartment).filter_by(department_id=department.id).all():
+                    current.is_primary = current.employee_id == employee.id
+        s.commit()
+        result = {
+            "ok": True,
+            "employee": {"id": employee.id, "name": employee.name, "position": employee.position},
+            "department": {"id": department.id, "name": department.name} if department else None,
+            "message": (
+                f"Создан сотрудник «{employee.name}» и добавлен в «{department.name}»."
+                if department else f"Создан сотрудник «{employee.name}»."
+            ),
+        }
+    agent.invalidate_roster()
+    return JSONResponse(result, status_code=201)
+
+
 @app.post("/departments")
 def department_save(request: Request, id: int = Form(0), name: str = Form(...),
                     description: str = Form(""), active: str = Form(""), regulations: str = Form(None)):
@@ -1822,6 +2119,7 @@ def department_set_head(request: Request, department_id: int, employee_id: int =
         department_name = department.name
         chosen_name = chosen.employee.name if chosen and chosen.employee else ""
         s.commit()
+    agent.invalidate_roster()
     message = (
         f"Назначен начальник подразделения «{department_name}»: {chosen_name}."
         if chosen_name else f"Назначение начальника подразделения «{department_name}» снято."
@@ -1853,6 +2151,7 @@ def department_add_member(request: Request, department_id: int,
         membership.responsibilities = responsibilities.strip()[:4000]
         s.commit()
         message = f"{employee.name} добавлен в подразделение «{department.name}». Он сохранён в общем справочнике сотрудников."
+    agent.invalidate_roster()
     return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
@@ -1901,6 +2200,7 @@ def department_create_member(request: Request, department_id: int, name: str = F
         ))
         s.commit()
         message = f"Создан сотрудник «{employee.name}» и добавлен в «{department.name}». Он отображается и в общем справочнике."
+    agent.invalidate_roster()
     return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
@@ -1919,6 +2219,7 @@ def department_remove_member(request: Request, department_id: int, employee_id: 
         department_name = department.name if department is not None else "подразделение"
         employee_name = employee.name if employee is not None else "Сотрудник"
     message = f"{employee_name} исключён из «{department_name}». Запись в общем справочнике сотрудников сохранена."
+    agent.invalidate_roster()
     return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
@@ -1930,6 +2231,7 @@ def department_delete(request: Request, department_id: int):
         if department:
             s.delete(department)
             s.commit()
+    agent.invalidate_roster()
     return RedirectResponse("/departments", 303)
 
 

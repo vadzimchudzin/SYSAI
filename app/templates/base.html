@@ -1,6 +1,6 @@
 {% from "_logo.html" import logo %}{% from "_icons.html" import icon %}<!doctype html>
 <html lang="ru"><head>{% include "_head.html" %}<title>{% block title %}SYSAI{% endblock %}</title></head>
-<body><div class="aura soft" aria-hidden="true"><i></i><i></i><i></i></div>
+<body class="{{ 'org-layout' if request.url.path.startswith('/organization') else '' }}"><div class="aura soft" aria-hidden="true"><i></i><i></i><i></i></div>
 {% set path = request.url.path %}
 <div class="shell">
   <aside class="side" id="side">
@@ -10,6 +10,7 @@
     <a class="nav {{ 'on' if path.startswith('/meetings') }}" href="/meetings">{{ icon('list') }} Совещания</a>
     <a class="nav {{ 'on' if path.startswith('/progress') }}" href="/progress">{{ icon('home') }} Прогресс</a>
     {% if me and me.role == 'superuser' %}
+    <a class="nav {{ 'on' if path.startswith('/organization') }}" href="/organization">{{ icon('users') }} Оргструктура</a>
     <a class="nav {{ 'on' if path.startswith('/employees') }}" href="/employees">{{ icon('users') }} Сотрудники</a>
     <a class="nav {{ 'on' if path.startswith('/memory') }}" href="/memory">{{ icon('users') }} Память</a>
     <a class="nav {{ 'on' if path.startswith('/skills') }}" href="/skills">{{ icon('gear') }} Навыки</a>
