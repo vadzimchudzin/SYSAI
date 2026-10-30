@@ -1804,10 +1804,12 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
             for employee in employees if employee.id not in assigned_employee_ids
         ]
     map_row_count = max(1, len(map_departments) + (1 if map_unassigned else 0))
+    map_member_count = sum(len(item["members"]) for item in map_departments) + len(map_unassigned)
     return page(
         request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
         open_add=open_add, map_departments=map_departments, map_unassigned=map_unassigned,
-        map_row_count=map_row_count, available_employees_by_department=available_employees_by_department,
+        map_row_count=map_row_count, map_member_count=map_member_count,
+        available_employees_by_department=available_employees_by_department,
         department_heads=department_heads,
     )
 
