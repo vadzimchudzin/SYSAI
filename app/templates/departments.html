@@ -308,12 +308,12 @@
   };
   const canvasPoint = (clientX, clientY) => {
     const r = canvas.getBoundingClientRect();
-    return { x:clientX-r.left+viewport.scrollLeft, y:clientY-r.top+viewport.scrollTop };
+    return { x:clientX-r.left, y:clientY-r.top };
   };
   const nodeRect = node => {
     const r = node.getBoundingClientRect(), c = canvas.getBoundingClientRect();
-    return { cx:r.left-c.left+viewport.scrollLeft+r.width/2,
-             cy:r.top-c.top+viewport.scrollTop+r.height/2,
+    return { cx:r.left-c.left+r.width/2,
+             cy:r.top-c.top+r.height/2,
              width:r.width, height:r.height };
   };
   const pointOnBorder = (rect, toward) => {
@@ -526,17 +526,20 @@
     const targetRoot=hit?.closest('[data-drop-root]');
     if(drag.node.dataset.nodeKind==='employee'&&targetDepartment){
       activeDropNode=drag.node;
+      try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
       openAssign(drag.node,targetDepartment);
       draw();return;
     }
     if(drag.node.dataset.nodeKind==='employee'&&targetEmployee&&targetEmployee!==drag.node){
       activeDropNode=drag.node;
+      try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
       const parentName=targetEmployee.querySelector('.org-map-person-copy strong')?.textContent||'Сотрудник';
       openRelation('employee',targetEmployee.dataset.employeeId,drag.node,parentName);
       draw();return;
     }
     if(drag.node.dataset.nodeKind==='employee'&&targetRoot){
       activeDropNode=drag.node;
+      try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
       openRelation('company',1,drag.node,'SYSAT');
       draw();return;
     }
