@@ -1835,8 +1835,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
         for index, employee in enumerate(unassigned_employees):
             level = access_levels.get(employee.id, "employee")
             position = employee.position or ""
-            employee_x = saved_coordinate(employee.map_x, 420 + (index // 7) * 320)
-            employee_y = saved_coordinate(employee.map_y, 700 + (index % 7) * 125)
+            employee_x = saved_coordinate(employee.map_x, 85 + (index // 7) * 320)
+            employee_y = saved_coordinate(employee.map_y, 1000 + (index % 7) * 125)
             map_unassigned.append({
                 "id": employee.id, "name": employee.name, "position": position,
                 "role": "", "is_primary": False, "access_level": level,
@@ -1847,8 +1847,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
             furthest_bottom = max(furthest_bottom, employee_y + 145)
 
     map_root_x, map_root_y = 85, 735
-    map_board_width = max(2800, furthest_right + 520)
-    map_board_height = max(1900, furthest_bottom + 420)
+    map_board_width = max(3200, furthest_right + 520)
+    map_board_height = max(2200, furthest_bottom + 420)
     map_member_count = sum(len(item["members"]) for item in map_departments) + len(map_unassigned)
     return page(
         request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
