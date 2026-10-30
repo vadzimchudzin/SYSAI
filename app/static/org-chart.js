@@ -152,30 +152,33 @@
   viewport.addEventListener('pointercancel', finishPointer);
   viewport.addEventListener('lostpointercapture', finishPointer);
 
-  if (roster) {
-    roster.addEventListener('dragstart', event => {
-      const card = event.target.closest('[data-employee-id]');
-      if (!card) return;
-      draggedEmployeeId = card.dataset.employeeId;
-      card.classList.add('is-dragging');
-      event.dataTransfer.effectAllowed = 'copy';
-      event.dataTransfer.setData('text/plain', draggedEmployeeId);
-      event.dataTransfer.setData('application/x-sysai-employee', draggedEmployeeId);
-    });
-    roster.addEventListener('dragend', event => {
-      const card = event.target.closest('[data-employee-id]');
-      if (card) card.classList.remove('is-dragging');
-      draggedEmployeeId = null;
-      document.querySelectorAll('.is-drop-target').forEach(node => node.classList.remove('is-drop-target'));
-    });
-  }
+  document.addEventListener('dragstart', event => {
+    const card = event.target.closest('[data-org-draggable="true"]');
+    if (!card) return;
+    draggedEmployeeId = card.dataset.employeeId || '';
+    draggedSourceDepartmentId = card.dataset.sourceDepartmentId || '';
+    if (!draggedEmployeeId) return;
+    card.classList.add('is-dragging');
+    event.dataTransfer.effectAllowed = draggedSourceDepartmentId ? 'move' : 'copy';
+    event.dataTransfer.setData('text/plain', draggedEmployeeId);
+    event.dataTransfer.setData('application/x-sysai-employee', draggedEmployeeId);
+    event.dataTransfer.setData('application/x-sysai-source-department', draggedSourceDepartmentId);
+  });
 
-  const dropTarget = node => node && (node.closest('[data-drop-head]') || node.closest('[data-drop-department]'));
+  document.addEventListener('dragend', event => {
+    const card = event.target.closest('[data-org-draggable="true"]');
+    if (card) card.classList.remove('is-dragging');
+    draggedEmployeeId = null;
+    draggedSourceDepartmentId = null;
+    document.querySelectorAll('.is-drop-target').forEach(node => node.classList.remove('is-drop-target'));
+  });
+
+  const dropTarget = node => node && node.closest('[data-drop-head], [data-drop-department], [data-drop-unassign]');
   document.addEventListener('dragover', event => {
     const target = dropTarget(event.target);
     if (!target || !draggedEmployeeId) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = 'copy';
+    event.dataTransfer.dropEffect = draggedSourceDepartmentId ? 'move' : 'copy';
     target.classList.add('is-drop-target');
   });
   document.addEventListener('dragleave', event => {
@@ -187,15 +190,34 @@
     if (!target) return;
     event.preventDefault();
     target.classList.remove('is-drop-target');
-    const employeeId = draggedEmployeeId || event.dataTransfer.getData('application/x-sysai-employee') || event.dataTransfer.getData('text/plain');
-    const departmentId = target.dataset.dropHead || target.dataset.dropDepartment;
-    if (!employeeId || !departmentId) return;
+
+    const employeeId = draggedEmployeeId ||
+      event.dataTransfer.getData('application/x-sysai-employee') ||
+      event.dataTransfer.getData('text/plain');
+    const sourceDepartmentId = draggedSourceDepartmentId ||
+      event.dataTransfer.getData('application/x-sysai-source-department');
+    if (!employeeId) return;
+
     target.classList.add('is-saving');
     try {
-      const result = await api('/api/org/departments/' + departmentId + '/members/' + employeeId, {
-        is_head: target.hasAttribute('data-drop-head')
-      });
-      showToast(result.message || 'Назначение сохранено');
+      if (target.hasAttribute('data-drop-unassign')) {
+        if (!sourceDepartmentId) return;
+        const result = await api('/api/org/employees/' + employeeId + '/unassign', {
+          department_id: Number(sourceDepartmentId)
+        });
+        showToast(result.message || 'Сотрудник исключён из отдела');
+      } else {
+        const departmentId = target.dataset.dropHead || target.dataset.dropDepartment;
+        if (!departmentId) return;
+        const isHead = target.hasAttribute('data-drop-head');
+        if (sourceDepartmentId === String(departmentId) && !isHead) return;
+        const payload = { is_head: isHead };
+        if (sourceDepartmentId && sourceDepartmentId !== String(departmentId)) {
+          payload.move_from_department_id = Number(sourceDepartmentId);
+        }
+        const result = await api('/api/org/departments/' + departmentId + '/members/' + employeeId, payload);
+        showToast(result.message || 'Назначение сохранено');
+      }
       setTimeout(() => window.location.reload(), 450);
     } catch (error) {
       showToast(error.message, true);
