@@ -112,8 +112,7 @@
       event.preventDefault();
       return;
     }
-    if (event.pointerType !== 'mouse') return;
-    if (event.button !== 0) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
     if (event.target.closest('button,a,input,textarea,select,[draggable="true"],.org-dept-card,.org-manager-node,.org-director-node')) return;
     panPointer = event.pointerId;
     panStart = { x: event.clientX, y: event.clientY, panX, panY };
