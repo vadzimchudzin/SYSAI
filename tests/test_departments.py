@@ -567,6 +567,9 @@ def test_department_map_crown_uses_director_position_even_without_director_acces
 
 def test_department_map_company_root_can_be_moved_and_remembers_position(client):
     from app import settings_store
+    with SessionLocal() as session:
+        session.add(Department(name="Подразделение для перемещаемого корня"))
+        session.commit()
 
     response = client.post("/departments/map/position", json={
         "node_type": "company", "map_x": 730, "map_y": 540,
