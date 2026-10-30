@@ -50,6 +50,15 @@
     <div class="employee-profile-grid">
       <label class="f">Telegram<input name="telegram_contact" maxlength="200" placeholder="@username, телефон или chat_id"><small class="muted">Можно оставить пустым и привязать позднее.</small></label>
       <label class="f">ID пользователя Bitrix24<input name="bitrix_user_id" maxlength="40" placeholder="Если известен"></label>
+      <label class="f">Права доступа
+        <select name="access_level">
+          <option value="employee" selected>Сотрудник</option>
+          <option value="full">Полный доступ</option>
+          <option value="reviewer">Проверяющий</option>
+          <option value="observer">Наблюдатель</option>
+        </select>
+        <small class="muted">Повышенные права требуют привязанного Telegram. Обычно достаточно «Сотрудник».</small>
+      </label>
     </div>
   </div>
   <div class="actions employee-create-actions"><button class="btn primary">Создать сотрудника и добавить в подразделение</button></div>
