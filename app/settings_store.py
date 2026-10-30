@@ -69,6 +69,8 @@ DEFAULTS = {
     # look
     "company_name": "Компания",
     "accent_color": "#c98179",
+    "org_map_root_x": 85,
+    "org_map_root_y": 735,
     # integrations (keys pasted in the panel; environment variables are the fallback)
     "bitrix_enabled": False,
     "openrouter_api_key": "",

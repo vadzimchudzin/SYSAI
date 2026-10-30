@@ -1,86 +1,103 @@
 {% extends "base.html" %}{% block title %}Сотрудники — SYSAI{% endblock %}
 {% macro form(e) %}
-<form method="post" action="/employees" class="emp-form {% if not e %}employee-quick-form{% endif %}">
+<form method="post" action="/employees" class="emp-form employee-create-full">
   <input type="hidden" name="id" value="{{ e.id if e else 0 }}">
-  <label class="f">Имя и фамилия
-    <input name="name" required maxlength="200" value="{{ e.name if e else '' }}" placeholder="Иван Петров" autofocus>
-  </label>
-  {% if not e %}
-    <div class="actions"><button class="btn primary" type="submit">Создать карточку</button><a class="btn ghost" href="/employees">Отмена</a></div>
-  {% else %}
+  <div class="employee-create-section">
+    <div class="employee-create-section-head"><b>Основная информация</b><span class="small muted">Имя и фамилия обязательны</span></div>
     <div class="employee-profile-grid">
-      <label class="f">Как называют на совещаниях<input name="aliases" maxlength="500" value="{{ e.aliases or '' }}" placeholder="Ваня, Иван Сергеевич"></label>
-      <label class="f">Должность<input name="position" list="positions" maxlength="200" value="{{ e.position or '' }}" placeholder="Должность сотрудника"></label>
-      <label class="f">Старое текстовое подразделение<input name="department" maxlength="200" value="{{ e.department or '' }}" placeholder="Если ещё используется"></label>
-      <label class="f">Компетенции<textarea name="competencies" rows="2" placeholder="Навыки, направления, оборудование">{{ e.competencies or '' }}</textarea></label>
-      <label class="f employee-profile-wide">Общие обязанности<textarea name="responsibilities" rows="3" maxlength="4000" placeholder="За что отвечает в целом">{{ e.responsibilities or '' }}</textarea><small class="muted">Помогают выбрать исполнителя по смыслу задачи.</small></label>
-      <label class="f employee-profile-wide">Дополнительный контекст<textarea name="context" rows="2" placeholder="Уточнения для различения одноимённых сотрудников">{{ e.context or '' }}</textarea></label>
+      <label class="f employee-profile-wide">Имя и фамилия *<input name="name" required maxlength="200" value="{{ e.name if e else '' }}" placeholder="Иван Петров" autofocus></label>
+      <label class="f">Как называют на совещаниях<input name="aliases" maxlength="500" value="{{ (e.aliases or '') if e else '' }}" placeholder="Ваня, Иван Сергеевич"></label>
+      <label class="f">Должность<input name="position" list="positions" maxlength="200" value="{{ (e.position or '') if e else '' }}" placeholder="Должность сотрудника"></label>
+      {% if e %}<label class="f">Старое текстовое подразделение<input name="department" maxlength="200" value="{{ e.department or '' }}" placeholder="Если ещё используется"></label>{% endif %}
+      <label class="f employee-profile-wide">Компетенции<textarea name="competencies" rows="2" maxlength="4000" placeholder="Навыки, направления, оборудование и технологии">{{ (e.competencies or '') if e else '' }}</textarea></label>
+      <label class="f employee-profile-wide">Общие обязанности<textarea name="responsibilities" rows="3" maxlength="4000" placeholder="За что сотрудник отвечает в целом">{{ (e.responsibilities or '') if e else '' }}</textarea><small class="muted">Помогают SYS AI выбирать исполнителя по смыслу задачи.</small></label>
+      <label class="f employee-profile-wide">Дополнительный контекст<textarea name="context" rows="2" maxlength="4000" placeholder="Уточнения для различения одноимённых сотрудников">{{ (e.context or '') if e else '' }}</textarea></label>
     </div>
-    {% if departments %}
-    <details class="department-memberships" {% if e.department_memberships %}open{% endif %}>
-      <summary>Подразделения и обязанности в каждом отделе</summary>
-      <div class="employee-membership-fields">
-      {% for d in departments %}
+  </div>
+  {% if departments %}
+  <details class="department-memberships" {% if not e or e.department_memberships %}open{% endif %}>
+    <summary>Подразделения и обязанности в каждом отделе</summary>
+    <p class="small muted">Можно выбрать несколько подразделений и задать отдельную роль в каждом.</p>
+    <div class="employee-membership-fields">
+    {% for d in departments %}
+      {% if e %}
         {% set matches = (e.department_memberships | selectattr('department_id', 'equalto', d.id) | list) %}
         {% set m = matches[0] if matches else none %}
-        <section class="employee-membership-field">
-          <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {% if m %}checked{% endif %} {% if not d.active and not m %}disabled{% endif %}><b>{{ d.name }}</b></label>
-          <label class="f">Роль в подразделении<input name="department_role_{{ d.id }}" maxlength="200" value="{{ m.role if m else '' }}" placeholder="Например, начальник смены"></label>
-          <label class="f">Обязанности в этом отделе<textarea name="department_responsibilities_{{ d.id }}" rows="2" maxlength="4000" placeholder="За что отвечает именно здесь">{{ m.responsibilities if m else '' }}</textarea></label>
-        </section>
-      {% endfor %}
-      </div>
-    </details>
-    {% endif %}
+      {% else %}
+        {% set m = none %}
+      {% endif %}
+      <section class="employee-membership-field">
+        <label class="check"><input type="checkbox" name="department_ids" value="{{ d.id }}" {% if m %}checked{% endif %} {% if not d.active and not m %}disabled{% endif %}><b>{{ d.name }}</b>{% if not d.active %}<span class="pill gray">Неактивно</span>{% endif %}</label>
+        <label class="f">Роль в подразделении<input name="department_role_{{ d.id }}" maxlength="200" value="{{ m.role if m else '' }}" placeholder="Например, начальник смены"></label>
+        <label class="f">Обязанности в этом отделе<textarea name="department_responsibilities_{{ d.id }}" rows="2" maxlength="4000" placeholder="За что отвечает именно здесь">{{ m.responsibilities if m else '' }}</textarea></label>
+      </section>
+    {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  <div class="employee-create-section">
+    <div class="employee-create-section-head"><b>Контакты и доступ</b></div>
     <div class="employee-profile-grid">
       <label class="f">Канал связи<select name="channel"><option value="telegram">Telegram</option></select></label>
       {% if ai %}
-      <label class="f">Telegram<input name="telegram_manual" maxlength="200" placeholder="@username или телефон" value="{{ e.telegram_chat_id or '' }}"></label>
+      <label class="f">Telegram<input name="telegram_manual" maxlength="200" placeholder="@username или телефон" value="{{ (e.telegram_chat_id or '') if e else '' }}"><small class="muted">Можно привязать позднее.</small></label>
       {% else %}
       <label class="f">Telegram
         <select name="telegram_chat_id"><option value="">— не привязан —</option>
-          {% for c in chats %}<option value="{{ c.chat_id }}" {{ 'selected' if e.telegram_chat_id == c.chat_id }}>{{ c.title }}{% if c.username %} @{{ c.username }}{% endif %}{% if c.chat_id in linked and e.telegram_chat_id != c.chat_id %} (уже привязан){% endif %}</option>{% endfor %}
+          {% for c in chats %}<option value="{{ c.chat_id }}" {% if e and e.telegram_chat_id == c.chat_id %}selected{% endif %}>{{ c.title }}{% if c.username %} @{{ c.username }}{% endif %}{% if c.chat_id in linked and (not e or e.telegram_chat_id != c.chat_id) %} (уже привязан){% endif %}</option>{% endfor %}
         </select>
-        <input name="telegram_manual" maxlength="200" placeholder="Или chat_id вручную" value="{{ e.telegram_chat_id if e.telegram_chat_id not in chats|map(attribute='chat_id')|list else '' }}">
+        <input name="telegram_manual" maxlength="200" placeholder="Или @username / chat_id вручную" value="{{ e.telegram_chat_id if e and e.telegram_chat_id not in chats|map(attribute='chat_id')|list else '' }}">
       </label>
       {% endif %}
-      {% set level = rights.get(e.id) or 'employee' %}
-      {% if level == 'director' %}
-      <div class="f">Права доступа<p class="small"><span class="pill red">Директор</span> задан в настройках</p></div>
+      {% if e %}
+        {% set level = rights.get(e.id) or 'employee' %}
+        {% if level == 'director' %}
+        <div class="f">Права доступа<p class="small"><span class="pill red">Директор</span> задан в настройках</p></div>
+        {% else %}
+        <label class="f">Права доступа
+          <select name="access_level">
+            {% for lv in access_levels %}<option value="{{ lv }}" {% if lv == level %}selected{% endif %}>{{ rights_ru[lv] }} — {{ access_hints[lv] }}</option>{% endfor %}
+          </select>
+          <small class="muted">Повышенные права требуют привязанного Telegram.</small>
+        </label>
+        {% endif %}
       {% else %}
-      <label class="f">Права доступа
-        <select name="access_level">
-          {% for lv in access_levels %}<option value="{{ lv }}" {{ 'selected' if lv == level }}>{{ rights_ru[lv] }} — {{ access_hints[lv] }}</option>{% endfor %}
-        </select>
-        <small class="muted">Полный доступ и Проверяющий нужны Telegram в карточке. Директор только наблюдает — его ставьте «Наблюдателем».</small>
-      </label>
+        <label class="f">Права доступа
+          <select name="access_level">
+            <option value="employee" selected>Сотрудник</option><option value="full">Полный доступ</option><option value="reviewer">Проверяющий</option><option value="observer">Наблюдатель</option>
+          </select>
+          <small class="muted">Повышенные права требуют привязанного Telegram.</small>
+        </label>
       {% endif %}
-      <label class="f">ID в Bitrix24<input name="bitrix_user_id" value="{{ e.bitrix_user_id or '' }}" placeholder="При подключении интеграции"></label>
+      <label class="f">ID в Bitrix24<input name="bitrix_user_id" maxlength="40" value="{{ (e.bitrix_user_id or '') if e else '' }}" placeholder="Если подключена интеграция"></label>
     </div>
-    <label class="check employee-active-check"><input type="checkbox" name="active" {% if e.active %}checked{% endif %}> Сотрудник активен</label>
-    <div class="actions"><button class="btn primary" type="submit">Сохранить изменения</button><a class="btn ghost" href="/employees">Закрыть</a></div>
-  {% endif %}
+  </div>
+  {% if e %}<label class="check employee-active-check"><input type="checkbox" name="active" {% if e.active %}checked{% endif %}> Сотрудник активен</label>{% endif %}
+  <div class="actions employee-create-actions">
+    <button class="btn primary" type="submit">{{ 'Сохранить изменения' if e else 'Создать карточку сотрудника' }}</button>
+    {% if e %}<a class="btn ghost" href="/employees">Закрыть</a>{% else %}<a class="btn ghost" href="/employees">Отмена</a>{% endif %}
+  </div>
 </form>
 {% endmacro %}
 {% block body %}
 <datalist id="positions">{% for p in positions %}<option value="{{ p }}">{% endfor %}</datalist>
 <div class="page-h employees-page-head">
-  <div><h1>Сотрудники</h1><p>Единый справочник. Подробные обязанности и роли настраиваются в карточке человека.</p></div>
-  <div class="actions"><a class="btn" href="/departments">Подразделения</a><a class="btn primary" href="/employees?add=1"><span aria-hidden="true">＋</span> Добавить сотрудника</a></div>
+  <div><h1>Сотрудники</h1><p>Единый справочник. Профиль, компетенции, подразделения и контакты можно заполнить за один раз.</p></div>
+  <div class="actions"><a class="btn" href="/departments">Подразделения</a><a class="btn primary" href="/employees?add=1#employee-create">＋ Добавить сотрудника</a></div>
 </div>
 {% if voice_msg %}<div class="card note" role="status">{{ voice_msg }}</div>{% endif %}
-{% if ai %}<div class="card note">Для сообщений через подключённый аккаунт Telegram укажите @username или телефон сотрудника в его карточке.</div>{% else %}<div class="card note">Чтобы бот мог написать сотруднику, тот должен открыть бота и нажать <b>/start</b> — после этого он появится в списке Telegram.</div>{% endif %}
+{% if ai %}<div class="card note">Для сообщений через подключённый аккаунт Telegram укажите @username или телефон сотрудника в его карточке. Контакт можно добавить сразу или позднее.</div>{% else %}<div class="card note">Чтобы бот мог написать сотруднику, тот должен открыть бота и нажать <b>/start</b> — после этого он появится в списке Telegram. Контакт можно привязать позднее.</div>{% endif %}
 {% if add %}
-<section class="card employee-add-panel"><div class="employee-add-heading"><h2>Новая карточка</h2><p class="muted small">Для начала достаточно имени. Остальное заполните после создания.</p></div>{{ form(None) }}</section>
+<section class="card employee-add-panel" id="employee-create"><div class="employee-add-heading"><h2>Новая карточка сотрудника</h2><p class="muted small">Заполните все известные сведения сейчас. Пустые необязательные поля можно дополнить позже.</p></div>{{ form(None) }}</section>
 {% endif %}
 <section class="card employee-directory">
   <header class="employee-directory-head"><div><h2>Общий список</h2><p class="muted small">{{ employees|length }} сотрудников</p></div></header>
   {% if not employees %}
-  <div class="empty-state"><div class="empty-state-icon" aria-hidden="true">♙</div><h3>Справочник пока пуст</h3><p class="muted">Создайте карточку первого сотрудника.</p><a class="btn primary" href="/employees?add=1">＋ Добавить сотрудника</a></div>
+  <div class="empty-state"><div class="empty-state-icon" aria-hidden="true">♙</div><h3>Справочник пока пуст</h3><p class="muted">Создайте карточку первого сотрудника.</p><a class="btn primary" href="/employees?add=1#employee-create">＋ Добавить сотрудника</a></div>
   {% else %}
   <div class="employee-list">
   {% for e in employees %}
-    <article class="employee-card {{ '' if e.active else 'off' }} {{ 'full-rights' if rights.get(e.id) in strong_rights }}">
+    <article class="employee-card {{ '' if e.active else 'off' }} {{ 'full-rights' if rights.get(e.id) in strong_rights }}" id="employee-{{ e.id }}">
       <div class="employee-row">
         <div class="employee-main">
           <div class="employee-name-line"><b>{{ e.name }}</b>{% if rights.get(e.id) in strong_rights %}<span class="pill red" title="Решения этого человека ИИ-сотрудник выполняет без согласований">{{ rights_ru[rights[e.id]] }}</span>{% elif rights.get(e.id) %}<span class="pill blue" title="Видит всё, ассистент его не тревожит">{{ rights_ru[rights[e.id]] }}</span>{% endif %}{% if e.position %}<span class="muted">{{ e.position }}</span>{% endif %}{% if not e.active %}<span class="pill gray">Неактивен</span>{% endif %}</div>
@@ -94,7 +111,7 @@
           {% if e.competencies or e.responsibilities %}<div class="employee-details-line">{% if e.competencies %}<span><b>Компетенции:</b> {{ e.competencies }}</span>{% endif %}{% if e.responsibilities %}<span><b>Обязанности:</b> {{ e.responsibilities }}</span>{% endif %}</div>{% endif %}
           <div class="employee-status">{% if e.telegram_chat_id %}<span class="pill green">Telegram подключён</span>{% else %}<span class="pill gray">Telegram не привязан</span>{% endif %}{% if e.voiceprint %}<span class="pill green">Голос зарегистрирован</span>{% endif %}</div>
         </div>
-        <div class="actions employee-actions"><a class="btn sm" href="/employees?edit={{ e.id }}">Настроить</a><form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">Удалить</button></form></div>
+        <div class="actions employee-actions"><a class="btn sm" href="/employees?edit={{ e.id }}#employee-{{ e.id }}">Настроить</a><form method="post" action="/employees/{{ e.id }}/delete" onsubmit="return confirm('Удалить сотрудника?')"><button class="btn sm danger">Удалить</button></form></div>
       </div>
       {% if edit == e.id %}
       <div class="employee-edit-panel">

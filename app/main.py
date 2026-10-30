@@ -29,7 +29,7 @@ from . import (accounts, agent, bitrix, cases, doctext, memory, transcribe, conf
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceprint, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1673,10 +1673,15 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
             s.rollback()
             raise HTTPException(400, "Сначала укажите Telegram сотрудника: права привязываются к его аккаунту")
         s.commit()
+        saved_employee_id = e.id
     if level and level != access.level_of(e):
         access.set_level(e, level)  # after the card is saved: the settings are written in their own transaction
     agent.invalidate_roster()
-    return RedirectResponse("/employees", 303)
+    target = (
+        f"/employees?edit={saved_employee_id}#employee-{saved_employee_id}"
+        if id else f"/employees#employee-{saved_employee_id}"
+    )
+    return RedirectResponse(target, 303)
 
 
 def _voice_redirect(employee_id: int, message: str):
@@ -1963,44 +1968,364 @@ def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(
 
 
 @app.get("/departments", response_class=HTMLResponse)
-def departments_view(request: Request, edit: int = 0, msg: str = ""):
+def departments_view(request: Request, edit: int = 0, msg: str = "",
+                     view: str = "map", open_add: int = 0):
     guard_admin(request)
+    view = "list" if view == "list" else "map"
     with SessionLocal() as s:
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
-        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
-        for department in departments:
-            for membership in department.memberships:
-                if membership.employee is not None:
-                    _ = membership.employee.name, membership.employee.position, membership.employee.active
-            _ = len(department.memberships)
-        for employee in employees:
-            for membership in employee.department_memberships:
-                if membership.department is not None:
-                    _ = membership.department.name
-        department_heads = {
-            department.id: next(
+        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name, Employee.id).all()
+        from . import access
+        access_levels = {employee.id: access.level_of(employee) for employee in employees}
+
+        department_positions = {}
+        department_heads = {}
+        for index, department in enumerate(departments):
+            department_positions[department.id] = (
+                max(0, min(20000, round(float(department.map_x)))) if department.map_x is not None
+                else 480 + (index // 5) * 760,
+                max(0, min(20000, round(float(department.map_y)))) if department.map_y is not None
+                else 120 + (index % 5) * 315,
+            )
+            department_heads[department.id] = next(
                 (membership for membership in department.memberships
                  if membership.is_primary and membership.employee is not None and membership.employee.active),
                 None,
             )
-            for department in departments
-        }
-        member_ids_by_department = {
-            department.id: {membership.employee_id for membership in department.memberships}
-            for department in departments
-        }
-        available_employees_by_department = {
-            department.id: [employee for employee in employees
-                            if employee.id not in member_ids_by_department[department.id]]
-            for department in departments
-        }
-    return page(request, "departments.html", departments=departments, edit=edit, msg=msg,
-                available_employees_by_department=available_employees_by_department, department_heads=department_heads)
+
+        visible_department_ids = {d.id for d in departments}
+        employee_memberships = {}
+        for employee in employees:
+            employee_memberships[employee.id] = [
+                membership for membership in employee.department_memberships
+                if membership.department_id in visible_department_ids
+                and membership.department is not None
+            ]
+
+        available_employees_by_department = {}
+        for department in departments:
+            assigned = {m.employee_id for m in department.memberships}
+            available_employees_by_department[department.id] = [
+                employee for employee in employees if employee.id not in assigned
+            ]
+
+        graph_relations = s.query(OrgRelation).all()
+        map_departments = []
+        furthest_right, furthest_bottom = 1400, 1100
+        for department in departments:
+            x, y = department_positions[department.id]
+            members = [
+                m for m in department.memberships
+                if m.employee is not None and m.employee.active
+            ]
+            map_departments.append({
+                "id": department.id, "name": department.name,
+                "description": department.description or "",
+                "active": bool(department.active),
+                "members": members,
+                "head_name": department_heads[department.id].employee.name
+                    if department_heads[department.id] else "",
+                "map_x": x, "map_y": y,
+            })
+            furthest_right = max(furthest_right, x + 340)
+            furthest_bottom = max(furthest_bottom, y + 190)
+
+        # A person is rendered exactly once, regardless of how many departments
+        # they belong to or lead. Legacy membership coordinates are used only as
+        # a one-time fallback until the employee is next moved on the canvas.
+        map_employees = []
+        map_edges = []
+        slots_by_department = {}
+        for index, employee in enumerate(employees):
+            memberships = employee_memberships.get(employee.id, [])
+            first_membership = next(
+                (m for m in memberships if m.map_x is not None and m.map_y is not None),
+                None,
+            )
+            anchor = next((m for m in memberships if m.is_primary), memberships[0] if memberships else None)
+            if employee.map_x is not None and employee.map_y is not None:
+                employee_x, employee_y = float(employee.map_x), float(employee.map_y)
+            elif first_membership is not None:
+                employee_x, employee_y = float(first_membership.map_x), float(first_membership.map_y)
+            elif anchor is not None:
+                dept_x, dept_y = department_positions[anchor.department_id]
+                slot = slots_by_department.get(anchor.department_id, 0)
+                slots_by_department[anchor.department_id] = slot + 1
+                employee_x = dept_x + 390 + (slot // 7) * 330
+                employee_y = dept_y + 12 + (slot % 7) * 108
+            else:
+                employee_x = 420 + (index // 8) * 330
+                employee_y = 980 + (index % 8) * 110
+
+            employee_x = max(0, min(20000, round(employee_x)))
+            employee_y = max(0, min(20000, round(employee_y)))
+            position = employee.position or ""
+            manager_departments = [
+                m.department.name for m in memberships
+                if m.is_primary and m.department is not None
+            ]
+            department_names = [
+                m.department.name for m in memberships if m.department is not None
+            ]
+            department_roles = [
+                f"{m.department.name}: {m.role}" if m.role else m.department.name
+                for m in memberships if m.department is not None
+            ]
+            map_employees.append({
+                "id": employee.id, "name": employee.name, "position": position,
+                "access_level": access_levels.get(employee.id, "employee"),
+                "is_director": " ".join((employee.name or "").split()).casefold()
+                    == "корнюшко сергей михайлович",
+                "map_x": employee_x, "map_y": employee_y,
+                "department_summary": ", ".join(department_names),
+                "role_summary": " · ".join(department_roles),
+                "manager_summary": ", ".join(manager_departments),
+                "department_ids": [m.department_id for m in memberships],
+            })
+            furthest_right = max(furthest_right, employee_x + 330)
+            furthest_bottom = max(furthest_bottom, employee_y + 150)
+
+            for membership in memberships:
+                if membership.is_primary:
+                    map_edges.append({
+                        "source": f"employee:{employee.id}",
+                        "target": f"department:{membership.department_id}",
+                        "kind": "manager", "label": membership.role or "Руководитель",
+                    })
+                else:
+                    map_edges.append({
+                        "source": f"department:{membership.department_id}",
+                        "target": f"employee:{employee.id}",
+                        "kind": "membership", "label": membership.role or "Сотрудник",
+                    })
+
+        valid_employee_ids = {e.id for e in employees}
+        valid_department_ids = {d.id for d in departments}
+        employee_parent_ids = set()
+        company_linked_employee_ids = set()
+        for relation in graph_relations:
+            if relation.target_type != "employee" or relation.target_id not in valid_employee_ids:
+                continue
+            if relation.source_type == "employee" and relation.source_id not in valid_employee_ids:
+                continue
+            if relation.source_type == "department" and relation.source_id not in valid_department_ids:
+                continue
+            if relation.source_type not in {"company", "employee", "department"}:
+                continue
+            source_key = f"{relation.source_type}:{relation.source_id}"
+            target_key = f"employee:{relation.target_id}"
+            map_edges.append({
+                "source": source_key, "target": target_key,
+                "kind": "reporting", "label": relation.label or relation.relation_type,
+                "relation_id": relation.id,
+            })
+            employee_parent_ids.add(relation.target_id)
+            if relation.source_type == "company":
+                company_linked_employee_ids.add(relation.target_id)
+
+        # The designated director is the initial root link until the graph is
+        # explicitly configured in the constructor. This does not grant access.
+        director = next(
+            (e for e in employees
+             if " ".join((e.name or "").split()).casefold() == "корнюшко сергей михайлович"),
+            None,
+        )
+        if director is not None and director.id not in company_linked_employee_ids:
+            map_edges.append({
+                "source": "company:1", "target": f"employee:{director.id}",
+                "kind": "director", "label": "Директор",
+            })
+            employee_parent_ids.add(director.id)
+
+        # Staff without a department or explicit reporting line remain visible
+        # as direct company reports; no active employee is dropped from the map.
+        for employee in employees:
+            if not employee_memberships.get(employee.id) and employee.id not in employee_parent_ids:
+                map_edges.append({
+                    "source": "company:1", "target": f"employee:{employee.id}",
+                    "kind": "company-member", "label": "Прямое подчинение",
+                })
+
+        map_root_x = max(0, min(20000, round(float(settings_store.get("org_map_root_x") or 85))))
+        map_root_y = max(0, min(20000, round(float(settings_store.get("org_map_root_y") or 735))))
+        map_board_width = max(3200, furthest_right + 520, map_root_x + 750)
+        map_board_height = max(2200, furthest_bottom + 420, map_root_y + 600)
+
+    return page(
+        request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
+        open_add=open_add, map_departments=map_departments, map_employees=map_employees,
+        map_unassigned=[e for e in map_employees if not e["department_ids"]],
+        map_edges=map_edges, map_board_width=map_board_width, map_board_height=map_board_height,
+        map_root_x=map_root_x, map_root_y=map_root_y, map_member_count=len(map_employees),
+        available_employees_by_department=available_employees_by_department,
+        department_heads=department_heads,
+    )
+
+
+@app.post("/departments/map/position")
+async def department_map_position(request: Request):
+    """Save the free position of one graph node without changing its relationships."""
+    guard_admin(request)
+    try:
+        data = await request.json()
+        node_type = str(data.get("node_type") or "")
+        map_x, map_y = float(data.get("map_x")), float(data.get("map_y"))
+        if not (0 <= map_x <= 20000 and 0 <= map_y <= 20000):
+            raise ValueError("coordinates out of bounds")
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "Некорректные координаты карточки")
+
+    if node_type == "company":
+        settings_store.set_many({"org_map_root_x": map_x, "org_map_root_y": map_y})
+        return JSONResponse({"ok": True})
+    with SessionLocal() as s:
+        if node_type == "department":
+            try:
+                node_id = int(data.get("department_id") or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "Некорректное подразделение")
+            node = s.get(Department, node_id)
+        elif node_type == "employee":
+            try:
+                node_id = int(data.get("employee_id") or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "Некорректный сотрудник")
+            node = s.get(Employee, node_id)
+            if node is not None and not node.active:
+                raise HTTPException(404, "Активный сотрудник не найден")
+        else:
+            raise HTTPException(400, "Неизвестный тип карточки")
+        if node is None:
+            raise HTTPException(404, "Карточка не найдена")
+        node.map_x, node.map_y = map_x, map_y
+        s.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/departments/map/assign")
+async def department_map_assign(request: Request):
+    """Add/update an employee's membership in a department without removing other memberships."""
+    guard_admin(request)
+    try:
+        data = await request.json()
+        employee_id = int(data.get("employee_id") or 0)
+        department_id = int(data.get("department_id") or 0)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "Некорректный сотрудник или подразделение")
+    role = str(data.get("role") or "").strip()[:200]
+    responsibilities = str(data.get("responsibilities") or "").strip()[:4000]
+    is_primary = bool(data.get("is_primary"))
+    try:
+        map_x = float(data.get("map_x")) if data.get("map_x") is not None else None
+        map_y = float(data.get("map_y")) if data.get("map_y") is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректные координаты карточки")
+    with SessionLocal() as s:
+        employee = s.get(Employee, employee_id)
+        department = s.get(Department, department_id)
+        if employee is None or not employee.active:
+            raise HTTPException(404, "Активный сотрудник не найден")
+        if department is None or not department.active:
+            raise HTTPException(400, "Подразделение не найдено или неактивно")
+        membership = s.query(EmployeeDepartment).filter_by(
+            employee_id=employee_id, department_id=department_id
+        ).one_or_none()
+        if membership is None:
+            membership = EmployeeDepartment(employee_id=employee_id, department_id=department_id)
+            s.add(membership)
+            s.flush()
+        if is_primary:
+            s.query(EmployeeDepartment).filter(
+                EmployeeDepartment.department_id == department_id,
+                EmployeeDepartment.id != membership.id,
+            ).update({EmployeeDepartment.is_primary: False}, synchronize_session=False)
+        membership.role = role
+        membership.responsibilities = responsibilities
+        membership.is_primary = is_primary
+        if map_x is not None and map_y is not None:
+            employee.map_x, employee.map_y = map_x, map_y
+        s.commit()
+    agent.invalidate_roster()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/departments/map/relation")
+async def department_map_relation(request: Request):
+    """Create or update a directed reporting line between people or the company and a person."""
+    guard_admin(request)
+    try:
+        data = await request.json()
+        source_type = str(data.get("source_type") or "")
+        source_id = int(data.get("source_id") or 0)
+        target_id = int(data.get("target_id") or 0)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "Некорректные параметры связи")
+    label = str(data.get("label") or "").strip()[:200]
+    relation_type = str(data.get("relation_type") or "reports_to").strip()[:40]
+    if source_type not in {"company", "employee"} or target_id <= 0:
+        raise HTTPException(400, "Поддерживаются связи от SYSAT или сотрудника к сотруднику")
+    if source_type == "company" and source_id != 1:
+        raise HTTPException(400, "Некорректный узел компании")
+    if source_type == "employee" and source_id <= 0:
+        raise HTTPException(400, "Некорректный руководитель")
+    if source_type == "employee" and source_id == target_id:
+        raise HTTPException(400, "Нельзя связать сотрудника с самим собой")
+
+    with SessionLocal() as s:
+        target = s.get(Employee, target_id)
+        if target is None or not target.active:
+            raise HTTPException(404, "Подчинённый сотрудник не найден")
+        if source_type == "employee":
+            parent = s.get(Employee, source_id)
+            if parent is None or not parent.active:
+                raise HTTPException(404, "Руководитель не найден")
+            # Prevent circular reporting chains.
+            children_by_parent = {}
+            for edge in s.query(OrgRelation).filter_by(
+                source_type="employee", target_type="employee"
+            ).all():
+                children_by_parent.setdefault(edge.source_id, set()).add(edge.target_id)
+            pending, visited = [target_id], set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                if current == source_id:
+                    raise HTTPException(409, "Эта связь создаст замкнутый цикл подчинения")
+                pending.extend(children_by_parent.get(current, ()))
+        relation = s.query(OrgRelation).filter_by(
+            source_type=source_type, source_id=source_id,
+            target_type="employee", target_id=target_id, relation_type=relation_type,
+        ).one_or_none()
+        if relation is None:
+            relation = OrgRelation(
+                source_type=source_type, source_id=source_id,
+                target_type="employee", target_id=target_id,
+                relation_type=relation_type,
+            )
+            s.add(relation)
+        relation.label = label or ("Директор" if source_type == "company" else "Подчинение")
+        s.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/departments/map/relation/{relation_id}/delete")
+def department_map_relation_delete(request: Request, relation_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        relation = s.get(OrgRelation, relation_id)
+        if relation is None:
+            raise HTTPException(404, "Связь не найдена")
+        s.delete(relation)
+        s.commit()
+    return JSONResponse({"ok": True})
 
 
 @app.post("/departments")
 def department_save(request: Request, id: int = Form(0), name: str = Form(...),
-                    description: str = Form(""), active: str = Form(""), regulations: str = Form(None)):
+                    description: str = Form(""), active: str = Form(""), regulations: str = Form(None),
+                    return_view: str = Form("list")):
     guard_admin(request)
     clean_name = name.strip()[:100]
     if not clean_name:
@@ -2021,11 +2346,17 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         department.active = bool(active) if id else True
         s.add(department)
         s.commit()
-    return RedirectResponse("/departments", 303)
+    safe_view = "map" if return_view == "map" else "list"
+    if id:
+        target = f"/departments?view={safe_view}#department-{department.id}"
+    else:
+        target = f"/departments?view={safe_view}&create=1#department-create-form"
+    return RedirectResponse(target, 303)
 
 
 @app.post("/departments/{department_id}/head")
-def department_set_head(request: Request, department_id: int, employee_id: int = Form(0)):
+def department_set_head(request: Request, department_id: int, employee_id: int = Form(0),
+                        view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -2047,13 +2378,14 @@ def department_set_head(request: Request, department_id: int, employee_id: int =
         f"Назначен начальник подразделения «{department_name}»: {chosen_name}."
         if chosen_name else f"Назначение начальника подразделения «{department_name}» снято."
     )
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}&msg=" + quote(message) + f"#department-{department_id}", 303)
 
 
 @app.post("/departments/{department_id}/members")
 def department_add_member(request: Request, department_id: int,
                           employee_id: int = Form(0), role: str = Form(""),
-                          responsibilities: str = Form("")):
+                          responsibilities: str = Form(""), view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -2074,14 +2406,23 @@ def department_add_member(request: Request, department_id: int,
         membership.responsibilities = responsibilities.strip()[:4000]
         s.commit()
         message = f"{employee.name} добавлен в подразделение «{department.name}». Он сохранён в общем справочнике сотрудников."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(
+        f"/departments?view={safe_view}&open_add={department_id}&msg=" + quote(message)
+        + f"#department-{department_id}-add", 303,
+    )
 
 
 @app.post("/departments/{department_id}/members/create")
-def department_create_member(request: Request, department_id: int, name: str = Form(...),
-                             aliases: str = Form(""), position: str = Form(""),
-                             telegram_contact: str = Form(""), role: str = Form(""),
-                             responsibilities: str = Form("")):
+async def department_create_member(
+    request: Request, department_id: int, name: str = Form(...),
+    aliases: str = Form(""), position: str = Form(""), competencies: str = Form(""),
+    employee_responsibilities: str = Form(""), context: str = Form(""),
+    telegram_contact: str = Form(""), bitrix_user_id: str = Form(""),
+    role: str = Form(""), responsibilities: str = Form(""),
+    view: str = Form("list"), access_level: str = Form("employee"),
+    is_primary: str = Form(""),
+):
     guard_admin(request)
     clean_name = name.strip()[:200]
     if not clean_name:
@@ -2092,41 +2433,60 @@ def department_create_member(request: Request, department_id: int, name: str = F
             contact = userbot.normalize_ref(contact)
         except userbot.RefError as exc:
             raise HTTPException(400, str(exc))
+    from . import access
+    selected_level = access_level.strip() or "employee"
+    if selected_level not in access.LEVELS:
+        raise HTTPException(400, "Неизвестный уровень доступа")
+    if selected_level != "employee" and not contact:
+        raise HTTPException(400, "Для повышенных прав сначала укажите Telegram сотрудника")
+    primary = is_primary.strip().lower() in {"1", "true", "on", "yes"}
     with SessionLocal() as s:
         department = s.get(Department, department_id)
-        if department is None:
-            raise HTTPException(404, "Подразделение не найдено")
-        if not department.active:
-            raise HTTPException(400, "Сначала активируйте подразделение")
+        if department is None or not department.active:
+            raise HTTPException(400, "Подразделение не найдено или неактивно")
         duplicate = next((item for item in s.query(Employee).all()
                           if (item.name or "").strip().casefold() == clean_name.casefold()), None)
         if duplicate is not None:
-            membership = s.query(EmployeeDepartment).filter_by(
-                employee_id=duplicate.id, department_id=department.id
-            ).first()
-            if membership is None:
-                raise HTTPException(
-                    409,
-                    f"Сотрудник «{duplicate.name}» уже есть в общем справочнике. Добавьте существующую запись."
-                )
-            raise HTTPException(409, f"«{duplicate.name}» уже состоит в этом подразделении.")
+            raise HTTPException(
+                409,
+                f"Сотрудник «{duplicate.name}» уже есть в общем справочнике. Перетащите его карточку в подразделение или добавьте через «Существующий сотрудник»."
+            )
         employee = Employee(
             name=clean_name, aliases=aliases.strip()[:500], position=position.strip()[:200],
-            channel="telegram", telegram_chat_id=contact, active=True,
+            competencies=competencies.strip()[:4000],
+            responsibilities=employee_responsibilities.strip()[:4000],
+            context=context.strip()[:4000], channel="telegram",
+            telegram_chat_id=contact, bitrix_user_id=bitrix_user_id.strip()[:40], active=True,
         )
         s.add(employee)
         s.flush()
-        s.add(EmployeeDepartment(
+        membership = EmployeeDepartment(
             employee_id=employee.id, department_id=department.id,
             role=role.strip()[:200], responsibilities=responsibilities.strip()[:4000],
-        ))
+            is_primary=primary,
+        )
+        s.add(membership)
+        if primary:
+            s.query(EmployeeDepartment).filter(
+                EmployeeDepartment.department_id == department.id,
+                EmployeeDepartment.employee_id != employee.id,
+            ).update({EmployeeDepartment.is_primary: False}, synchronize_session=False)
+        employee_id = employee.id
+        department_name = department.name
         s.commit()
-        message = f"Создан сотрудник «{employee.name}» и добавлен в «{department.name}». Он отображается и в общем справочнике."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    if selected_level != "employee":
+        access.set_level(employee, selected_level)
+    agent.invalidate_roster()
+    message = f"Создан сотрудник «{clean_name}» и добавлен в «{department_name}». Все данные профиля сохранены."
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(
+        f"/departments?view={safe_view}&msg=" + quote(message) + f"#employee-{employee_id}", 303,
+    )
 
 
 @app.post("/departments/{department_id}/members/{employee_id}/remove")
-def department_remove_member(request: Request, department_id: int, employee_id: int):
+def department_remove_member(request: Request, department_id: int, employee_id: int,
+                             view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -2140,18 +2500,20 @@ def department_remove_member(request: Request, department_id: int, employee_id: 
         department_name = department.name if department is not None else "подразделение"
         employee_name = employee.name if employee is not None else "Сотрудник"
     message = f"{employee_name} исключён из «{department_name}». Запись в общем справочнике сотрудников сохранена."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}&msg=" + quote(message) + f"#department-{department_id}", 303)
 
 
 @app.post("/departments/{department_id}/delete")
-def department_delete(request: Request, department_id: int):
+def department_delete(request: Request, department_id: int, view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
         if department:
             s.delete(department)
             s.commit()
-    return RedirectResponse("/departments", 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}#departments-list", 303)
 
 
 # ----------------------------------------------------------------------------- meeting reminders
