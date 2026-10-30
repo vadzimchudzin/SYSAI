@@ -790,7 +790,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .org-map-node-actions { display:flex; gap:12px; flex-wrap:wrap; border-top:1px solid var(--line); padding-top:8px; width:100%; margin-top:1px; }
 .org-map-node-actions a { font-size:10.5px; color:var(--clay); font-weight:650; }
 .org-map-node-actions a + a { color:var(--sblue); }
-.org-map-member-stack { display:flex; flex-wrap:wrap; align-items:stretch; gap:9px; }
+.org-map-member-stack { display:flex; flex-wrap:wrap; align-items:stretch; gap:9px; min-height:68px; padding:3px; border-radius:12px; transition:background .15s,outline-color .15s; }
 .org-map-person-node { align-items:center; gap:10px; min-width:215px; max-width:275px; min-height:65px; padding:10px 12px; color:var(--text); text-decoration:none; border-color:rgba(143,168,216,.27); }
 .org-map-person-node:hover { color:var(--text); border-color:rgba(143,168,216,.72); background:#242422; transform:translateY(-1px); box-shadow:0 8px 18px rgba(0,0,0,.17); }
 .org-map-person-avatar { display:grid; place-items:center; flex:0 0 34px; width:34px; height:34px; border-radius:10px; color:var(--sblue); background:var(--sblue-bg); font-size:14px; font-weight:700; }
@@ -817,3 +817,24 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
   .org-map-panel { padding:15px; }
   .org-map-grid { padding:24px; }
 }
+
+/* Organisation map: drag-and-drop ordering and role indicators */
+.org-map-company-people-node { border-color:rgba(143,168,216,.42); background:linear-gradient(145deg,rgba(143,168,216,.08),rgba(30,29,26,.96)); }
+.org-map-company-people-node .org-map-node-status { line-height:1.45; }
+.org-map-person-node[draggable="true"] { cursor:grab; user-select:none; }
+.org-map-person-node[draggable="true"]:active { cursor:grabbing; }
+.org-map-person-node.is-dragging { opacity:.34; transform:scale(.98); }
+.org-map-member-stack.is-drop-target { outline:1px dashed rgba(143,168,216,.75); outline-offset:7px; border-radius:13px; }
+.org-map-person-node.is-drop-before { box-shadow:inset 3px 0 0 var(--sblue),0 0 0 1px rgba(143,168,216,.38); }
+.org-map-person-node.is-drop-after { box-shadow:inset -3px 0 0 var(--sblue),0 0 0 1px rgba(143,168,216,.38); }
+.org-map-drop-empty { min-width:250px; background:rgba(143,168,216,.035); }
+.org-map-person-node.is-reviewer { border-color:rgba(226,83,83,.68); background:linear-gradient(120deg,rgba(128,36,40,.22),rgba(30,29,26,.97)); }
+.org-map-person-node.is-reviewer:hover { border-color:rgba(245,105,105,.92); background:linear-gradient(120deg,rgba(128,36,40,.3),#24211f); }
+.org-map-person-node.is-reviewer .org-map-person-avatar { color:#ff9b9b; background:rgba(169,52,58,.22); }
+.org-map-reviewer-label { color:#ff9999!important; font-size:9px!important; font-weight:750; letter-spacing:.09em; }
+.org-map-legend-reviewer { display:inline-flex; align-items:center; gap:5px; color:#ff9999; }
+.org-map-legend-reviewer i { display:inline-block; width:7px; height:7px; border-radius:50%; background:#e86b70; box-shadow:0 0 8px rgba(232,107,112,.4); }
+.org-map-person-node.is-director { border-color:rgba(215,180,96,.62); background:linear-gradient(120deg,rgba(133,102,43,.15),rgba(30,29,26,.97)); }
+.org-map-person-node.is-director:hover { border-color:rgba(235,199,118,.92); }
+.director-crown { display:grid; place-items:center; flex:0 0 26px; width:26px; height:26px; border:1px solid rgba(215,180,96,.38); border-radius:8px; color:#edc86e; background:rgba(155,117,43,.15); font-size:19px; line-height:1; }
+.org-map-legend-director { color:#edc86e; font-weight:700; }
