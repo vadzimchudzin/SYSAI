@@ -125,7 +125,7 @@
     <div class="empty-state"><h3>Структура пока пуста</h3><p class="muted">Создайте подразделение и добавьте сотрудников.</p></div>
   {% else %}
   <div class="org-map-scroll" id="org-map-scroll">
-    <div class="org-map-canvas" id="org-map-canvas" style="width:{{ map_board_width }}px;height:{{ map_board_height }}px">
+    <div class="org-map-canvas org-map-grid" id="org-map-canvas" style="width:{{ map_board_width }}px;height:{{ map_board_height }}px">
       <svg class="org-map-lines" aria-hidden="true" preserveAspectRatio="none"></svg>
       <div class="org-map-root" data-drop-root style="left:{{ map_root_x }}px;top:{{ map_root_y }}px">
         <span class="org-map-root-kicker">ORGANIZATION</span>
