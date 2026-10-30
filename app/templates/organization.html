@@ -13,7 +13,7 @@
       <a class="org-icon-link" href="/departments?edit={{ d.id }}#department-{{ d.id }}" title="Настроить подразделение" aria-label="Настроить подразделение">↗</a>
     </header>
     {% if d.description %}<p class="org-dept-description">{{ d.description }}</p>{% endif %}
-    <div class="org-head-dropzone {{ 'has-head' if head else '' }}" {% if d.active %}data-drop-head="{{ d.id }}"{% endif %}>
+    <div class="org-head-dropzone {{ 'has-head' if head else '' }}" {% if d.active %}data-drop-head="{{ d.id }}"{% endif %} {% if head and d.active %}draggable="true" data-org-draggable="true" data-employee-id="{{ head.employee_id }}" data-source-department-id="{{ d.id }}"{% endif %}>
       <span class="org-head-avatar" aria-hidden="true">{% if head %}{{ head.employee.name[:1]|upper }}{% else %}＋{% endif %}</span>
       <span class="org-head-copy">
         <small>РУКОВОДИТЕЛЬ</small>
@@ -29,7 +29,7 @@
         {% for membership in d.memberships %}
           {% if membership.employee and (not head or membership.employee_id != head.employee_id) %}
             {% set visible_count.value = visible_count.value + 1 %}
-            <div class="org-member-row {{ 'is-off' if not membership.employee.active else '' }}">
+            <div class="org-member-row {{ 'is-off' if not membership.employee.active else '' }}" draggable="true" data-org-draggable="true" data-employee-id="{{ membership.employee_id }}" data-source-department-id="{{ d.id }}" title="Перетащите в другой отдел, чтобы перенести сотрудника">
               <span class="org-member-dot" aria-hidden="true"></span>
               <span class="org-member-main">
                 <b>{{ membership.employee.name }}</b>
@@ -56,6 +56,7 @@
     <p>Связывайте сотрудников и подразделения. Одна карточка сотрудника может быть назначена в несколько отделов.</p>
   </div>
   <div class="actions org-page-actions">
+    <a class="btn" href="/departments#create-department">＋ Новый отдел</a>
     <a class="btn" href="/departments">Настроить подразделения</a>
     <button class="btn primary" type="button" data-new-employee>＋ Новый сотрудник</button>
   </div>
@@ -65,7 +66,7 @@
   <div class="org-overview-stat"><span>Сотрудники</span><b>{{ employees|length }}</b></div>
   <div class="org-overview-stat"><span>Подразделения</span><b>{{ departments|length }}</b></div>
   <div class="org-overview-stat"><span>Руководители</span><b>{{ manager_groups|length + (1 if director else 0) }}</b></div>
-  <div class="org-overview-note">Перетащите сотрудника из списка на отдел, чтобы добавить его в состав. Перетащите на блок руководителя — чтобы назначить начальником.</div>
+  <div class="org-overview-note">Из списка — добавить в отдел. Из карточки отдела — перенести в другой. На блок руководителя — назначить начальником. Перетащите в список сотрудников, чтобы убрать из отдела.</div>
 </div>
 
 <div class="org-workspace">
@@ -78,10 +79,10 @@
       <span aria-hidden="true">⌕</span>
       <input id="orgEmployeeSearch" type="search" placeholder="Найти сотрудника…" autocomplete="off">
     </label>
-    <div class="org-roster-hint"><span>⠿</span> Перетаскивайте карточки в структуру</div>
-    <div class="org-roster-list" id="orgRosterList">
+    <div class="org-roster-hint"><span>⠿</span> Список — добавление · карточка отдела — перенос</div>
+    <div class="org-roster-list" id="orgRosterList" data-drop-unassign title="Перетащите сюда сотрудника из отдела, чтобы исключить его из этого отдела">
       {% for e in employees %}
-      <article class="org-roster-item" draggable="true"
+      <article class="org-roster-item" draggable="true" data-org-draggable="true"
                data-employee-id="{{ e.id }}"
                data-employee-name="{{ e.name|lower }}"
                data-employee-position="{{ e.position|lower }}">
