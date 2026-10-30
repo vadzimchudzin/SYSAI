@@ -128,8 +128,10 @@ class Employee(Base):
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
     bitrix_user_id = Column(String(40), default="")
     active = Column(Boolean, default=True)
+    org_order = Column(Integer, nullable=False, default=0)
     department_memberships = relationship("EmployeeDepartment", back_populates="employee",
-                                          cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
+                                          cascade="all, delete-orphan",
+                                          order_by="(EmployeeDepartment.sort_order, EmployeeDepartment.id)")
     voiceprint = relationship("EmployeeVoiceprint", back_populates="employee", uselist=False,
                               cascade="all, delete-orphan", single_parent=True)
     voice_samples = relationship("EmployeeVoiceSample", back_populates="employee",
@@ -148,7 +150,8 @@ class Department(Base):
     active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=now)
     memberships = relationship("EmployeeDepartment", back_populates="department",
-                               cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
+                               cascade="all, delete-orphan",
+                               order_by="(EmployeeDepartment.sort_order, EmployeeDepartment.id)")
 
 
 class EmployeeDepartment(Base):
@@ -159,6 +162,7 @@ class EmployeeDepartment(Base):
     role = Column(String(200), default="")
     responsibilities = Column(Text, default="")
     is_primary = Column(Boolean, default=False)
+    sort_order = Column(Integer, nullable=False, default=0)
     employee = relationship("Employee", back_populates="department_memberships")
     department = relationship("Department", back_populates="memberships")
     __table_args__ = (UniqueConstraint("employee_id", "department_id", name="uq_employee_department"),)
@@ -688,6 +692,8 @@ def init_db():
     _add_column_if_missing("employees", "context", "context TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_at", "consent_at TIMESTAMP")
     _add_column_if_missing("employees", "communication_style", "communication_style TEXT DEFAULT ''")
+    _add_column_if_missing("employees", "org_order", "org_order INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("employee_departments", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("departments", "regulations", "regulations TEXT DEFAULT ''")
     _add_column_if_missing("notes", "department_id", "department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL")
     _add_column_if_missing("notes", "confidence", "confidence VARCHAR(10) DEFAULT 'medium'")
