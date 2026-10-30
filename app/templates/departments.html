@@ -74,6 +74,18 @@
   <button class="btn" {% if not d.memberships %}disabled{% endif %}>Сохранить</button>
 </form>
 {% endmacro %}
+{% macro map_person_node(member, department_id) %}
+<a class="org-map-node org-map-person-node{% if member.access_level == 'reviewer' %} is-reviewer{% elif member.access_level == 'director' %} is-director{% endif %}"
+   data-map-person data-employee-id="{{ member.id }}" data-source-department-id="{{ department_id }}"
+   draggable="true" href="/employees?edit={{ member.id }}" title="Перетащить сотрудника или открыть карточку">
+  <span class="org-map-person-avatar">{{ (member.name or 'С')[:1]|upper }}</span>
+  <span class="org-map-person-copy"><strong>{{ member.name }}</strong><small>{{ member.position or member.role or 'Должность не указана' }}</small>{% if member.role %}<small class="org-map-role">{{ member.role }}</small>{% endif %}
+    {% if member.access_level == 'reviewer' %}<small class="org-map-reviewer-label">ПРОВЕРЯЮЩИЙ</small>{% endif %}
+  </span>
+  {% if member.access_level == 'director' %}<span class="director-crown" title="Директор" aria-label="Директор">♛</span>{% endif %}
+  {% if member.is_primary %}<span class="manager-star" title="Начальник подразделения">★</span>{% endif %}
+</a>
+{% endmacro %}
 {% block body %}
 <div class="page-h departments-page-head">
   <div><h1>Подразделения</h1><p>Организационная структура, состав отделов, роли и ответственность.</p></div>
@@ -96,8 +108,8 @@
 {% if view == 'map' %}
 <section class="card org-map-panel" id="org-map">
   <header class="org-map-heading">
-    <div><h2>Организационная карта</h2><p class="small muted">Связи между подразделениями и сотрудниками. Один сотрудник может отображаться в нескольких подразделениях.</p></div>
-    <div class="org-map-legend"><span><i class="org-legend-dot clay"></i> Подразделения</span><span><i class="org-legend-dot blue"></i> Сотрудники</span></div>
+    <div><h2>Организационная карта</h2><p class="small muted">Перетаскивайте сотрудников между отделами и меняйте их порядок. Верхняя строка — сотрудники напрямую на уровне компании.</p></div>
+    <div class="org-map-legend"><span><i class="org-legend-dot clay"></i> Подразделения</span><span><i class="org-legend-dot blue"></i> Сотрудники</span><span class="org-legend-reviewer"><i></i> Проверяющие</span><span class="org-legend-director">♛ Директор</span></div>
   </header>
   {% if not map_departments and not map_unassigned %}
     <div class="empty-state"><h3>Структура пока пуста</h3><p class="muted">Создайте подразделение и добавьте сотрудников.</p></div>
@@ -111,9 +123,21 @@
         <span>{{ map_departments|length }} подразделений</span>
         <span>{{ map_member_count }} связей с сотрудниками</span>
       </div>
+      <div class="org-map-department-cell org-map-company-people-cell" style="grid-row: 1;">
+        <article class="org-map-node org-map-dept-node org-map-company-people-node" data-map-department data-drop-root>
+          <span class="org-map-node-kicker">НА УРОВНЕ КОМПАНИИ</span><strong>Без подразделения</strong>
+          <span class="org-map-node-meta">{{ map_unassigned|length }} сотрудников напрямую руководству</span>
+          <span class="org-map-node-status">Переместите сюда карточку, чтобы поставить её выше подразделений</span>
+        </article>
+      </div>
+      <div class="org-map-members-cell org-map-company-people-members" style="grid-row: 1;">
+        <div class="org-map-member-stack" data-drop-root>
+          {% for member in map_unassigned %}{{ map_person_node(member, 0) }}{% else %}<div class="org-map-empty-members org-map-drop-empty">Перетащите сюда сотрудника, чтобы разместить его на уровне компании</div>{% endfor %}
+        </div>
+      </div>
       {% for d in map_departments %}
-      <div class="org-map-department-cell" id="department-{{ d.id }}" style="grid-row: {{ loop.index }};">
-        <article class="org-map-node org-map-dept-node" data-map-department>
+      <div class="org-map-department-cell" id="department-{{ d.id }}" style="grid-row: {{ loop.index + 1 }};">
+        <article class="org-map-node org-map-dept-node" data-map-department data-drop-department="{{ d.id }}">
           <span class="org-map-node-kicker">ПОДРАЗДЕЛЕНИЕ · {{ '%02d'|format(loop.index) }}</span>
           <strong>{{ d.name }}</strong>
           <span class="org-map-node-meta">{{ d.members|length }} сотрудников{% if d.head_name %} · руководитель: {{ d.head_name }}{% endif %}</span>
@@ -121,39 +145,13 @@
           <div class="org-map-node-actions"><a href="/departments?view=list&edit={{ d.id }}#department-{{ d.id }}">Изменить</a><a href="/departments?view=list&open_add={{ d.id }}#department-{{ d.id }}-add">＋ Сотрудник</a></div>
         </article>
       </div>
-      <div class="org-map-members-cell" style="grid-row: {{ loop.index }};">
-        <div class="org-map-member-stack">
-          {% for member in d.members %}
-          <a class="org-map-node org-map-person-node" data-map-person href="/employees?edit={{ member.id }}" title="Открыть карточку сотрудника">
-            <span class="org-map-person-avatar">{{ (member.name or 'С')[:1]|upper }}</span>
-            <span class="org-map-person-copy"><strong>{{ member.name }}</strong><small>{{ member.position or member.role or 'Должность не указана' }}</small>{% if member.role %}<small class="org-map-role">{{ member.role }}</small>{% endif %}</span>
-            {% if member.is_primary %}<span class="manager-star" title="Начальник подразделения">★</span>{% endif %}
-          </a>
-          {% else %}
-          <div class="org-map-empty-members">В подразделении пока нет сотрудников</div>
-          {% endfor %}
+      <div class="org-map-members-cell" style="grid-row: {{ loop.index + 1 }};">
+        <div class="org-map-member-stack" data-drop-department="{{ d.id }}">
+          {% for member in d.members %}{{ map_person_node(member, d.id) }}{% else %}<div class="org-map-empty-members org-map-drop-empty">Перетащите сюда сотрудника</div>{% endfor %}
         </div>
       </div>
       {% endfor %}
-      {% if map_unassigned %}
-      <div class="org-map-department-cell org-map-unassigned-cell" style="grid-row: {{ map_departments|length + 1 }};">
-        <article class="org-map-node org-map-dept-node org-map-unassigned-node" data-map-department>
-          <span class="org-map-node-kicker">ОБЩИЙ СПРАВОЧНИК</span><strong>Без подразделения</strong>
-          <span class="org-map-node-meta">{{ map_unassigned|length }} сотрудников</span>
-          <div class="org-map-node-actions"><a href="/employees">Открыть справочник</a></div>
-        </article>
-      </div>
-      <div class="org-map-members-cell" style="grid-row: {{ map_departments|length + 1 }};">
-        <div class="org-map-member-stack">
-          {% for member in map_unassigned %}
-          <a class="org-map-node org-map-person-node" data-map-person href="/employees?edit={{ member.id }}">
-            <span class="org-map-person-avatar">{{ (member.name or 'С')[:1]|upper }}</span>
-            <span class="org-map-person-copy"><strong>{{ member.name }}</strong><small>{{ member.position or 'Должность не указана' }}</small></span>
-          </a>
-          {% endfor %}
-        </div>
-      </div>
-      {% endif %}
+
     </div>
   </div>
   {% endif %}
@@ -212,10 +210,9 @@
   const grid = document.querySelector('.org-map-grid');
   if (!grid) return;
   const svg = grid.querySelector('.org-map-lines');
-  let frame = 0;
+  let frame = 0, draggedCard = null, suppressNextClick = false;
   const point = (element, edge) => {
-    const r = element.getBoundingClientRect();
-    const g = grid.getBoundingClientRect();
+    const r = element.getBoundingClientRect(), g = grid.getBoundingClientRect();
     return { x: (edge === 'right' ? r.right : r.left) - g.left + grid.scrollLeft,
              y: r.top - g.top + grid.scrollTop + r.height / 2 };
   };
@@ -229,35 +226,109 @@
       const width = Math.max(grid.scrollWidth, grid.clientWidth);
       const height = Math.max(grid.scrollHeight, grid.clientHeight);
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-      svg.setAttribute('width', width);
-      svg.setAttribute('height', height);
+      svg.setAttribute('width', width); svg.setAttribute('height', height);
       const root = grid.querySelector('.org-map-root');
       if (!root) return;
       const start = point(root, 'right');
       let markup = '';
       grid.querySelectorAll('[data-map-department]').forEach((dept, index) => {
-        const d = point(dept, 'left');
-        const id = `org-edge-dept-${index}`;
+        const d = point(dept, 'left'), id = `org-edge-dept-${index}`;
         markup += `<path id="${id}" class="org-map-edge org-map-edge-dept" d="${curve(start, d)}"/>`;
         markup += `<circle class="org-map-pulse clay-pulse" r="3"><animateMotion dur="${4.8 + (index % 4) * .45}s" begin="${index * .16}s" repeatCount="indefinite"><mpath href="#${id}"/></animateMotion></circle>`;
-        const deptRow = dept.closest('.org-map-department-cell');
-        if (!deptRow) return;
-        const personCell = deptRow.nextElementSibling;
-        if (!personCell || !personCell.classList.contains('org-map-members-cell')) return;
-        personCell.querySelectorAll('[data-map-person]').forEach((person, personIndex) => {
-          const target = point(person, 'left');
-          const leafId = `org-edge-person-${index}-${personIndex}`;
-          markup += `<path id="${leafId}" class="org-map-edge org-map-edge-person" d="${curve(d, target)}"/>`;
-          markup += `<circle class="org-map-pulse blue-pulse" r="2.5"><animateMotion dur="${3.6 + (personIndex % 3) * .35}s" begin="${(index + personIndex) * .11}s" repeatCount="indefinite"><mpath href="#${leafId}"/></animateMotion></circle>`;
+        const cell = dept.closest('.org-map-department-cell');
+        const people = cell && cell.nextElementSibling;
+        if (!people || !people.classList.contains('org-map-members-cell')) return;
+        people.querySelectorAll('[data-map-person]').forEach((person, personIndex) => {
+          const target = point(person, 'left'), leaf = `org-edge-person-${index}-${personIndex}`;
+          markup += `<path id="${leaf}" class="org-map-edge org-map-edge-person" d="${curve(d, target)}"/>`;
+          markup += `<circle class="org-map-pulse blue-pulse" r="2.5"><animateMotion dur="${3.6 + (personIndex % 3) * .35}s" begin="${(index + personIndex) * .11}s" repeatCount="indefinite"><mpath href="#${leaf}"/></animateMotion></circle>`;
         });
       });
       svg.innerHTML = markup;
     });
   }
+  const clearDropStyles = () => grid.querySelectorAll('.is-drop-target,.is-drop-before,.is-drop-after')
+    .forEach(node => node.classList.remove('is-drop-target','is-drop-before','is-drop-after'));
+  const stackFor = target => {
+    const direct = target.closest('.org-map-member-stack');
+    if (direct) return direct;
+    const dept = target.closest('[data-drop-department]');
+    const root = target.closest('[data-drop-root]');
+    const node = dept || root;
+    if (!node) return null;
+    const cell = node.closest('.org-map-department-cell');
+    return cell && cell.nextElementSibling ? cell.nextElementSibling.querySelector('.org-map-member-stack') : null;
+  };
+  grid.addEventListener('dragstart', event => {
+    const card = event.target.closest('[data-map-person]');
+    if (!card) return;
+    draggedCard = card;
+    card.classList.add('is-dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', card.dataset.employeeId || '');
+  });
+  grid.addEventListener('dragover', event => {
+    if (!draggedCard) return;
+    const stack = stackFor(event.target);
+    if (!stack) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'move';
+    clearDropStyles(); stack.classList.add('is-drop-target');
+    const person = event.target.closest('[data-map-person]');
+    if (person && person !== draggedCard) {
+      const r = person.getBoundingClientRect();
+      person.classList.add(event.clientY < r.top + r.height / 2 ? 'is-drop-before' : 'is-drop-after');
+    }
+  });
+  grid.addEventListener('drop', async event => {
+    if (!draggedCard) return;
+    const stack = stackFor(event.target);
+    if (!stack) return;
+    event.preventDefault();
+    const targetPerson = event.target.closest('[data-map-person]');
+    if (targetPerson === draggedCard) return;
+    const targetDepartmentId = Number(stack.dataset.dropDepartment || 0);
+    const sourceDepartmentId = Number(draggedCard.dataset.sourceDepartmentId || 0);
+    const employeeId = Number(draggedCard.dataset.employeeId || 0);
+    const ordered = Array.from(stack.querySelectorAll('[data-map-person]')).filter(card => card !== draggedCard);
+    let beforeEmployeeId = 0;
+    if (targetPerson) {
+      const i = ordered.indexOf(targetPerson);
+      if (i >= 0) {
+        const r = targetPerson.getBoundingClientRect();
+        const nextIndex = i + (event.clientY >= r.top + r.height / 2 ? 1 : 0);
+        beforeEmployeeId = Number(ordered[nextIndex]?.dataset.employeeId || 0);
+      }
+    }
+    clearDropStyles(); draggedCard.classList.remove('is-dragging');
+    try {
+      const response = await fetch('/departments/map/move', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employee_id: employeeId, source_department_id: sourceDepartmentId,
+          target_department_id: targetDepartmentId, before_employee_id: beforeEmployeeId })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        window.alert(result.detail || 'Не удалось переместить сотрудника. Проверьте права и состояние подразделения.');
+        return;
+      }
+      window.location.hash = 'org-map';
+      window.location.reload();
+    } catch (error) {
+      window.alert('Не удалось сохранить изменение структуры. Проверьте соединение и повторите попытку.');
+    }
+  });
+  grid.addEventListener('dragend', () => {
+    if (draggedCard) draggedCard.classList.remove('is-dragging');
+    draggedCard = null; suppressNextClick = true; clearDropStyles();
+    window.setTimeout(() => { suppressNextClick = false; }, 350);
+  });
+  grid.addEventListener('click', event => {
+    if (!suppressNextClick) return;
+    event.preventDefault(); event.stopPropagation();
+  }, true);
   if ('ResizeObserver' in window) {
     const observer = new ResizeObserver(draw);
-    observer.observe(grid);
-    grid.querySelectorAll('.org-map-node').forEach(node => observer.observe(node));
+    observer.observe(grid); grid.querySelectorAll('.org-map-node').forEach(node => observer.observe(node));
   }
   window.addEventListener('resize', draw, { passive: true });
   draw();
