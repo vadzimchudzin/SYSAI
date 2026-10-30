@@ -77,7 +77,7 @@
 {% macro map_person_node(member) %}
 <a class="org-map-node org-map-person-node{% if member.access_level == 'reviewer' %} is-reviewer{% endif %}{% if member.is_director %} is-director{% endif %}"
    data-map-node data-node-kind="employee" data-node-key="employee:{{ member.id }}"
-   data-employee-id="{{ member.id }}"
+   data-employee-id="{{ member.id }}" draggable="false"
    style="left:{{ member.map_x }}px;top:{{ member.map_y }}px"
    href="/employees?edit={{ member.id }}" title="Перетащить сотрудника; связи с отделами и руководителями сохраняются отдельно">
   <span class="org-map-person-avatar">{{ (member.name or 'С')[:1]|upper }}</span>
