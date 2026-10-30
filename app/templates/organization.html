@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+{% block title %}Оргструктура — SYSAI{% endblock %}
+
+{% macro department_node(d, heads) %}
+  {% set head = heads[d.id] %}
+  <article class="org-dept-card {{ '' if d.active else 'is-inactive' }}" id="org-department-{{ d.id }}">
+    <header class="org-dept-header">
+      <div class="org-dept-heading">
+        <span class="org-kicker">ПОДРАЗДЕЛЕНИЕ</span>
+        <h3>{{ d.name }}</h3>
+        <span class="org-dept-meta">{{ d.memberships|length }} сотрудников · {{ 'Активно' if d.active else 'Неактивно' }}</span>
+      </div>
+      <a class="org-icon-link" href="/departments?edit={{ d.id }}#department-{{ d.id }}" title="Настроить подразделение" aria-label="Настроить подразделение">↗</a>
+    </header>
+    {% if d.description %}<p class="org-dept-description">{{ d.description }}</p>{% endif %}
+    <div class="org-head-dropzone {{ 'has-head' if head else '' }}" {% if d.active %}data-drop-head="{{ d.id }}"{% endif %}>
+      <span class="org-head-avatar" aria-hidden="true">{% if head %}{{ head.employee.name[:1]|upper }}{% else %}＋{% endif %}</span>
+      <span class="org-head-copy">
+        <small>РУКОВОДИТЕЛЬ</small>
+        {% if head %}<b>{{ head.employee.name }}</b><span>{{ head.role or head.employee.position or 'Руководитель подразделения' }}</span>
+        {% else %}<b>Не назначен</b><span>Перетащите сотрудника сюда</span>{% endif %}
+      </span>
+      {% if head %}<span class="org-head-check" aria-hidden="true">✓</span>{% endif %}
+    </div>
+    <div class="org-members-dropzone" {% if d.active %}data-drop-department="{{ d.id }}"{% endif %}>
+      <div class="org-members-heading"><b>Состав отдела</b><span>{{ d.memberships|length }}</span></div>
+      <div class="org-member-list">
+        {% set visible_count = namespace(value=0) %}
+        {% for membership in d.memberships %}
+          {% if membership.employee and (not head or membership.employee_id != head.employee_id) %}
+            {% set visible_count.value = visible_count.value + 1 %}
+            <div class="org-member-row {{ 'is-off' if not membership.employee.active else '' }}">
+              <span class="org-member-dot" aria-hidden="true"></span>
+              <span class="org-member-main">
+                <b>{{ membership.employee.name }}</b>
+                {% if membership.role %}<small>{{ membership.role }}</small>
+                {% elif membership.employee.position %}<small>{{ membership.employee.position }}</small>{% endif %}
+              </span>
+              <a href="/employees?edit={{ membership.employee_id }}" title="Открыть карточку сотрудника" aria-label="Открыть карточку сотрудника">↗</a>
+            </div>
+          {% endif %}
+        {% endfor %}
+        {% if visible_count.value == 0 %}<p class="org-members-empty">Пока нет других сотрудников</p>{% endif %}
+      </div>
+      {% if d.active %}<button type="button" class="org-add-member" data-add-department="{{ d.id }}"><span>＋</span> Добавить сотрудника</button>{% endif %}
+    </div>
+    {% if not d.active %}<p class="org-inactive-note">Подразделение неактивно. Включите его в настройках, чтобы менять состав.</p>{% endif %}
+  </article>
+{% endmacro %}
+
+{% block body %}
+<div class="page-h org-page-head">
+  <div>
+    <div class="org-eyebrow"><span class="org-live-dot"></span> КОНСТРУКТОР ОРГАНИЗАЦИИ</div>
+    <h1>Организационная структура</h1>
+    <p>Связывайте сотрудников и подразделения. Одна карточка сотрудника может быть назначена в несколько отделов.</p>
+  </div>
+  <div class="actions org-page-actions">
+    <a class="btn" href="/departments">Настроить подразделения</a>
+    <button class="btn primary" type="button" data-new-employee>＋ Новый сотрудник</button>
+  </div>
+</div>
+
+<div class="org-overview">
+  <div class="org-overview-stat"><span>Сотрудники</span><b>{{ employees|length }}</b></div>
+  <div class="org-overview-stat"><span>Подразделения</span><b>{{ departments|length }}</b></div>
+  <div class="org-overview-stat"><span>Руководители</span><b>{{ manager_groups|length + (1 if director else 0) }}</b></div>
+  <div class="org-overview-note">Перетащите сотрудника из списка на отдел, чтобы добавить его в состав. Перетащите на блок руководителя — чтобы назначить начальником.</div>
+</div>
+
+<div class="org-workspace">
+  <aside class="org-roster">
+    <div class="org-roster-header">
+      <div><h2>Сотрудники</h2><p>{{ employees|length }} активных карточек</p></div>
+      <a href="/employees" title="Открыть полный справочник" aria-label="Открыть полный справочник">↗</a>
+    </div>
+    <label class="org-search">
+      <span aria-hidden="true">⌕</span>
+      <input id="orgEmployeeSearch" type="search" placeholder="Найти сотрудника…" autocomplete="off">
+    </label>
+    <div class="org-roster-hint"><span>⠿</span> Перетаскивайте карточки в структуру</div>
+    <div class="org-roster-list" id="orgRosterList">
+      {% for e in employees %}
+      <article class="org-roster-item" draggable="true"
+               data-employee-id="{{ e.id }}"
+               data-employee-name="{{ e.name|lower }}"
+               data-employee-position="{{ e.position|lower }}">
+        <span class="org-roster-grip" aria-hidden="true">⠿</span>
+        <span class="org-roster-avatar">{{ e.name[:1]|upper }}</span>
+        <span class="org-roster-copy"><b>{{ e.name }}</b><small>{{ e.position or 'Должность не указана' }}</small><em>{% if e.department_memberships %}В {{ e.department_memberships|length }} отделах{% else %}Не распределён{% endif %}</em></span>
+      </article>
+      {% endfor %}
+      {% if not employees %}<div class="org-roster-empty">Сотрудников пока нет.</div>{% endif %}
+    </div>
+    <div class="org-roster-footer"><a href="/employees">Открыть справочник сотрудников →</a></div>
+  </aside>
+
+  <section class="org-board">
+    <div class="org-board-toolbar">
+      <div class="org-board-label"><span class="org-board-dot"></span><b>Схема управления</b><small>Масштаб и перемещение холста</small></div>
+      <div class="org-zoom-controls" role="group" aria-label="Масштаб схемы">
+        <button type="button" data-zoom-out aria-label="Уменьшить масштаб" title="Уменьшить">−</button>
+        <span id="orgZoomValue">100%</span>
+        <button type="button" data-zoom-in aria-label="Увеличить масштаб" title="Увеличить">＋</button>
+        <i></i>
+        <button type="button" data-zoom-fit title="Вписать всю структуру">Вписать</button>
+        <button type="button" data-zoom-reset title="Масштаб 100%">100%</button>
+      </div>
+    </div>
+
+    <div class="org-viewport" id="orgViewport" aria-label="Интерактивная организационная схема">
+      <div class="org-stage" id="orgStage">
+        <div class="org-tree">
+          <div class="org-company-node" id="orgCompanyNode">
+            <span class="org-company-symbol" aria-hidden="true">S</span>
+            <span><small>ОРГАНИЗАЦИЯ</small><b>SYSAI</b><em>Единая организационная структура</em></span>
+          </div>
+          <div class="org-trunk-line" aria-hidden="true"></div>
+
+          {% if director %}
+          <section class="org-director-section">
+            <div class="org-director-node" data-employee-id="{{ director.id }}">
+              <div class="org-director-badge">ДИРЕКТОР</div>
+              <div class="org-director-content">
+                <span class="org-director-avatar">{{ director.name[:1]|upper }}</span>
+                <span><b>{{ director.name }}</b><small>{{ director.position or 'Руководитель организации' }}</small></span>
+              </div>
+              <a href="/employees?edit={{ director.id }}">Карточка сотрудника ↗</a>
+            </div>
+            {% if director_departments %}
+            <div class="org-director-departments">
+              {% for d in director_departments %}{{ department_node(d, department_heads) }}{% endfor %}
+            </div>
+            {% endif %}
+          </section>
+          {% else %}
+          <div class="org-missing-director">
+            <b>Директор не назначен</b>
+            <span>Назначение директора настраивается в правах доступа сотрудника.</span>
+            <a href="/settings">Открыть настройки →</a>
+          </div>
+          {% endif %}
+
+          {% if manager_groups %}
+          <div class="org-branch-caption"><span></span><b>РУКОВОДИТЕЛИ И ЗАМЕСТИТЕЛИ</b><span></span></div>
+          <div class="org-manager-grid">
+            {% for group in manager_groups %}
+            <section class="org-manager-branch">
+              <header class="org-manager-node" data-employee-id="{{ group.employee.id }}">
+                <div class="org-manager-topline"><span class="org-manager-symbol">↳</span><span>{{ group.role_label }}</span></div>
+                <b>{{ group.employee.name }}</b>
+                <small>{{ group.employee.position or 'Руководитель подразделений' }}</small>
+                <em>Руководит {{ group.departments|length }} подразделениями</em>
+                <a href="/employees?edit={{ group.employee.id }}">Карточка сотрудника ↗</a>
+              </header>
+              <div class="org-managed-departments">
+                {% for d in group.departments %}{{ department_node(d, department_heads) }}{% endfor %}
+              </div>
+            </section>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          {% if unassigned_departments %}
+          <div class="org-branch-caption org-unassigned-caption"><span></span><b>ПОДРАЗДЕЛЕНИЯ БЕЗ РУКОВОДИТЕЛЯ</b><span></span></div>
+          <div class="org-unassigned-grid">
+            {% for d in unassigned_departments %}{{ department_node(d, department_heads) }}{% endfor %}
+          </div>
+          {% endif %}
+
+          {% if not departments %}
+          <div class="org-empty-canvas">
+            <div class="org-empty-icon">＋</div>
+            <h3>Структура пока не создана</h3>
+            <p>Добавьте первый отдел, затем назначьте руководителя и распределите сотрудников.</p>
+            <a class="btn primary" href="/departments#create-department">Создать подразделение</a>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      <div class="org-canvas-hint"><span>Перемещение:</span> перетаскивайте пустое пространство · <span>Масштаб:</span> Ctrl + колесо мыши</div>
+    </div>
+  </section>
+</div>
+
+<dialog class="org-dialog" id="orgEmployeeDialog">
+  <form class="org-dialog-panel" id="orgEmployeeForm">
+    <header class="org-dialog-header">
+      <div><span class="org-kicker">КАРТОЧКА СОТРУДНИКА</span><h2>Новый сотрудник</h2><p>Создаётся одна общая запись, подразделение получает только связь с ней.</p></div>
+      <button type="button" class="org-dialog-close" data-close-employee aria-label="Закрыть">×</button>
+    </header>
+    <input type="hidden" name="department_id" value="">
+    <div class="org-form-grid">
+      <label class="f">Имя и фамилия<input name="name" required maxlength="200" placeholder="Иван Петров"></label>
+      <label class="f">Должность<input name="position" maxlength="200" placeholder="Например, инженер АСУ ТП"></label>
+      <label class="f">Как называют на совещаниях<input name="aliases" maxlength="500" placeholder="Ваня, Иван Сергеевич"></label>
+      <label class="f">Telegram или телефон<input name="telegram_contact" maxlength="200" placeholder="@username или +375…"></label>
+      <label class="f org-form-wide">Компетенции<textarea name="competencies" rows="2" maxlength="4000" placeholder="Ключевые навыки и направления работы"></textarea></label>
+      <label class="f org-form-wide">Общие обязанности<textarea name="responsibilities" rows="2" maxlength="4000" placeholder="За что сотрудник отвечает в целом"></textarea></label>
+      <label class="f org-form-wide">Дополнительный контекст<textarea name="context" rows="2" maxlength="4000" placeholder="Уточнения, помогающие правильно назначать задачи"></textarea></label>
+      <div class="org-form-divider"><span>Назначение в подразделение</span></div>
+      <label class="f">Роль в отделе<input name="department_role" maxlength="200" placeholder="Например, руководитель проекта"></label>
+      <label class="f">ID в Bitrix24<input name="bitrix_user_id" maxlength="40" placeholder="Необязательно"></label>
+      <label class="f org-form-wide">Обязанности в этом отделе<textarea name="department_responsibilities" rows="2" maxlength="4000" placeholder="Зона ответственности именно в выбранном подразделении"></textarea></label>
+      <label class="org-head-checkbox"><input type="checkbox" name="is_head"> Сразу назначить руководителем подразделения</label>
+    </div>
+    <div class="org-dialog-error" id="orgEmployeeError" role="alert"></div>
+    <footer class="org-dialog-footer">
+      <button type="button" class="btn ghost" data-close-employee>Отмена</button>
+      <button type="submit" class="btn primary" id="orgEmployeeSubmit">Создать сотрудника</button>
+    </footer>
+  </form>
+</dialog>
+<div class="org-toast" id="orgToast" role="status" aria-live="polite"></div>
+<script src="{{ asset('org-chart.js') }}" defer></script>
+{% endblock %}
