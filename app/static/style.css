@@ -849,6 +849,7 @@ body.org-map-page { height:100dvh; min-height:100dvh; overflow:hidden; }
 .org-map-edge-reporting { stroke:rgba(195,158,105,.78); stroke-width:1.8; stroke-dasharray:5 4; }
 .org-map-edge-director { stroke:rgba(215,180,96,.94); stroke-width:2.6; }
 .org-map-edge-membership { stroke:rgba(143,168,216,.58); stroke-width:1.45; }
+.org-map-edge-block { stroke:rgba(126,184,164,.88); stroke-width:2.1; }
 .org-map-node-actions button { padding:0; border:0; background:transparent; color:var(--sblue); font:650 10.5px var(--sans); cursor:pointer; }
 .org-map-person-node { touch-action:none; }
 .org-map-person-copy .org-map-manager-summary { color:#e5bc8d; }

@@ -131,7 +131,7 @@
       <span><i class="org-legend-dot blue"></i> Сотрудники</span>
       <span class="org-legend-reviewer"><i></i> Проверяющие</span>
       <span class="org-legend-director">♛ Директор</span>
-      <span class="org-map-hint">ЛКМ по пустому месту — двигать доску · ЛКМ по карточке — двигать узел</span>
+      <span class="org-map-hint">ЛКМ по пустому месту — двигать доску · карточку на карточку — связать блоки · клик по линии — удалить</span>
     </div>
   </header>
   {% if not map_departments and not map_employees %}
@@ -142,7 +142,7 @@
       <svg class="org-map-lines" aria-hidden="true" preserveAspectRatio="none"></svg>
       <div class="org-map-root" data-map-node data-node-kind="company" data-node-key="company:1" data-drop-root style="left:{{ map_root_x }}px;top:{{ map_root_y }}px">
         <span class="org-map-root-kicker">ORGANIZATION</span>
-        <strong>SYSAT</strong>
+        <strong>SYSAI</strong>
         <span>{{ map_departments|length }} подразделений</span>
         <span>{{ map_employees|length }} сотрудников</span>
         <small>Перетащите сотрудника сюда, чтобы связать его напрямую с компанией</small>
@@ -221,12 +221,12 @@
 
   <dialog class="org-map-dialog org-map-dialog-compact" id="org-relation-dialog">
     <form method="dialog" class="org-map-dialog-close-form"><button class="org-map-dialog-close" aria-label="Закрыть">×</button></form>
-    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">ИЕРАРХИЧЕСКАЯ СВЯЗЬ</span><h2>Назначить подчинение</h2><p class="muted small" id="org-relation-summary"></p></div>
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">СВЯЗЬ БЛОКОВ</span><h2>Соединить блоки</h2><p class="muted small" id="org-relation-summary"></p></div>
     <form id="org-relation-form" class="org-map-dialog-body">
-      <input type="hidden" name="source_type"><input type="hidden" name="source_id"><input type="hidden" name="target_id">
-      <label class="f">Тип связи<select name="relation_type"><option value="reports_to">Подчиняется</option><option value="deputy">Заместитель</option><option value="project_lead">Курирует направление</option></select></label>
-      <label class="f">Подпись связи<input name="label" maxlength="200" placeholder="Например, заместитель директора по техническим вопросам"></label>
-      <p class="small muted">Линия будет направлена от выбранного руководителя к сотруднику. Остальные связи не затрагиваются.</p>
+      <input type="hidden" name="source_type"><input type="hidden" name="source_id"><input type="hidden" name="target_type"><input type="hidden" name="target_id">
+      <label class="f">Тип связи<select name="relation_type"><option value="reports_to">Подчиняется / входит</option><option value="linked_to">Связан с</option><option value="deputy">Заместитель</option><option value="project_lead">Курирует направление</option></select></label>
+      <label class="f">Подпись связи<input name="label" maxlength="200" placeholder="Например, подчиняется закупкам"></label>
+      <p class="small muted">Линия от блока, на который бросили, к перетащенному. Клик по линии удаляет связь, карточки остаются.</p>
       <p class="org-map-dialog-error" role="alert"></p>
       <div class="org-map-dialog-actions"><button type="button" class="btn" data-dialog-close>Отмена</button><button class="btn primary">Сохранить связь</button></div>
     </form>
@@ -338,7 +338,7 @@
         const source=nodeSelector(edge.source),target=nodeSelector(edge.target);
         if(!source||!target)continue;
         const path=pathBetween(nodeRect(source),nodeRect(target));
-        const kind=edge.kind==='manager'?'manager':edge.kind==='director'?'director':edge.kind==='reporting'?'reporting':'membership';
+        const kind=edge.kind==='manager'?'manager':edge.kind==='director'?'director':edge.kind==='block'?'block':edge.kind==='reporting'?'reporting':'membership';
         const title=String(edge.label||'Связь').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
         markup+=`<path class="org-map-edge org-map-edge-${kind}" data-edge-kind="${edge.relation_id?'org':'membership'}" data-edge-id="${edge.relation_id||''}" d="${path}"><title>${title}</title></path>`;
       }
@@ -433,14 +433,29 @@
   });
 
   let activeDropNode=null;
-  const openRelation=(sourceType,sourceId,targetNode,sourceName)=>{
+  const nodeTitle=node=>{
+    if(!node) return 'блок';
+    if(node.dataset.nodeKind==='company') return 'SYSAI';
+    if(node.dataset.nodeKind==='department') return node.querySelector(':scope > strong')?.textContent||'подразделение';
+    return node.querySelector('.org-map-person-copy strong')?.textContent||'сотрудник';
+  };
+  const nodeIdentity=node=>{
+    if(node.dataset.nodeKind==='company') return {type:'company', id:1};
+    if(node.dataset.nodeKind==='department') return {type:'department', id:Number(node.dataset.departmentId)};
+    return {type:'employee', id:Number(node.dataset.employeeId)};
+  };
+  const openRelation=(sourceNode,targetNode)=>{
     const form=document.getElementById('org-relation-form');
     form.reset();form.querySelector('.org-map-dialog-error').textContent='';
-    form.elements.source_type.value=sourceType;
-    form.elements.source_id.value=sourceId;
-    form.elements.target_id.value=targetNode.dataset.employeeId;
-    const targetName=targetNode.querySelector('.org-map-person-copy strong')?.textContent||'Сотрудник';
-    document.getElementById('org-relation-summary').textContent=`${sourceName} → ${targetName}`;
+    const source=nodeIdentity(sourceNode), target=nodeIdentity(targetNode);
+    form.elements.source_type.value=source.type;
+    form.elements.source_id.value=source.id;
+    form.elements.target_type.value=target.type;
+    form.elements.target_id.value=target.id;
+    document.getElementById('org-relation-summary').textContent=`${nodeTitle(sourceNode)} → ${nodeTitle(targetNode)}`;
+    const typeSelect=form.elements.relation_type;
+    if(target.type==='department' && source.type!=='employee') typeSelect.value='linked_to';
+    else typeSelect.value='reports_to';
     openDialog('org-relation-dialog');
   };
   document.getElementById('org-relation-form')?.addEventListener('submit',async event=>{
@@ -449,6 +464,7 @@
     const payload={
       source_type:form.elements.source_type.value,
       source_id:Number(form.elements.source_id.value),
+      target_type:form.elements.target_type.value,
       target_id:Number(form.elements.target_id.value),
       relation_type:form.elements.relation_type.value,
       label:form.elements.label.value
@@ -524,23 +540,34 @@
     const targetDepartment=hit?.closest('[data-drop-department]');
     const targetEmployee=hit?.closest('[data-node-kind="employee"]');
     const targetRoot=hit?.closest('[data-drop-root]');
+    const targetBlock=hit?.closest('[data-map-node]');
     if(drag.node.dataset.nodeKind==='employee'&&targetDepartment){
       activeDropNode=drag.node;
       try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
       openAssign(drag.node,targetDepartment);
       draw();return;
     }
+    if(targetBlock && targetBlock!==drag.node){
+      const pairOk=(drag.node.dataset.nodeKind==='employee'&&(targetBlock.dataset.nodeKind==='employee'||targetBlock.dataset.nodeKind==='company'))
+        || (drag.node.dataset.nodeKind==='department'&&(targetBlock.dataset.nodeKind==='department'||targetBlock.dataset.nodeKind==='company'||targetBlock.dataset.nodeKind==='employee'))
+        || (drag.node.dataset.nodeKind==='company'&&targetBlock.dataset.nodeKind==='department');
+      if(pairOk){
+        activeDropNode=drag.node;
+        try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
+        openRelation(targetBlock, drag.node);
+        draw();return;
+      }
+    }
     if(drag.node.dataset.nodeKind==='employee'&&targetEmployee&&targetEmployee!==drag.node){
       activeDropNode=drag.node;
       try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
-      const parentName=targetEmployee.querySelector('.org-map-person-copy strong')?.textContent||'Сотрудник';
-      openRelation('employee',targetEmployee.dataset.employeeId,drag.node,parentName);
+      openRelation(targetEmployee, drag.node);
       draw();return;
     }
     if(drag.node.dataset.nodeKind==='employee'&&targetRoot){
       activeDropNode=drag.node;
       try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
-      openRelation('company',1,drag.node,'SYSAI');
+      openRelation(targetRoot, drag.node);
       draw();return;
     }
     draw();

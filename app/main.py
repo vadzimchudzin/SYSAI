@@ -2104,24 +2104,30 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
         employee_parent_ids = set()
         company_linked_employee_ids = set()
         for relation in graph_relations:
-            if relation.target_type != "employee" or relation.target_id not in valid_employee_ids:
+            if relation.source_type not in {"company", "employee", "department"}:
+                continue
+            if relation.target_type not in {"employee", "department"}:
                 continue
             if relation.source_type == "employee" and relation.source_id not in valid_employee_ids:
                 continue
             if relation.source_type == "department" and relation.source_id not in valid_department_ids:
                 continue
-            if relation.source_type not in {"company", "employee", "department"}:
+            if relation.target_type == "employee" and relation.target_id not in valid_employee_ids:
+                continue
+            if relation.target_type == "department" and relation.target_id not in valid_department_ids:
                 continue
             source_key = f"{relation.source_type}:{relation.source_id}"
-            target_key = f"employee:{relation.target_id}"
+            target_key = f"{relation.target_type}:{relation.target_id}"
+            kind = "block" if relation.target_type == "department" else "reporting"
             map_edges.append({
                 "source": source_key, "target": target_key,
-                "kind": "reporting", "label": relation.label or relation.relation_type,
+                "kind": kind, "label": relation.label or relation.relation_type,
                 "relation_id": relation.id,
             })
-            employee_parent_ids.add(relation.target_id)
-            if relation.source_type == "company":
-                company_linked_employee_ids.add(relation.target_id)
+            if relation.target_type == "employee":
+                employee_parent_ids.add(relation.target_id)
+                if relation.source_type == "company":
+                    company_linked_employee_ids.add(relation.target_id)
 
         # The designated director is the initial root link until the graph is
         # explicitly configured in the constructor. This does not grant access.
@@ -2249,63 +2255,89 @@ async def department_map_assign(request: Request):
     return JSONResponse({"ok": True})
 
 
+def _org_cycle_exists(session, source_type: str, source_id: int, target_type: str, target_id: int) -> bool:
+    """True when adding source -> target would close a directed cycle among people and departments."""
+    children = {}
+    for edge in session.query(OrgRelation).all():
+        children.setdefault((edge.source_type, edge.source_id), set()).add((edge.target_type, edge.target_id))
+    pending, visited = [(target_type, target_id)], set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == (source_type, source_id):
+            return True
+        pending.extend(children.get(current, ()))
+    return False
+
+
 @app.post("/departments/map/relation")
 async def department_map_relation(request: Request):
-    """Create or update a directed reporting line between people or the company and a person."""
+    """Create or update a directed line between people, departments, or the company root."""
     guard_admin(request)
     try:
         data = await request.json()
         source_type = str(data.get("source_type") or "")
         source_id = int(data.get("source_id") or 0)
+        target_type = str(data.get("target_type") or "employee")
         target_id = int(data.get("target_id") or 0)
     except (TypeError, ValueError, AttributeError):
         raise HTTPException(400, "Некорректные параметры связи")
     label = str(data.get("label") or "").strip()[:200]
-    relation_type = str(data.get("relation_type") or "reports_to").strip()[:40]
-    if source_type not in {"company", "employee"} or target_id <= 0:
-        raise HTTPException(400, "Поддерживаются связи от SYSAT или сотрудника к сотруднику")
+    relation_type = str(data.get("relation_type") or "reports_to").strip()[:40] or "reports_to"
+    allowed = {"company", "employee", "department"}
+    if source_type not in allowed or target_type not in {"employee", "department"}:
+        raise HTTPException(400, "Можно связать компанию, отдел или сотрудника")
     if source_type == "company" and source_id != 1:
         raise HTTPException(400, "Некорректный узел компании")
-    if source_type == "employee" and source_id <= 0:
-        raise HTTPException(400, "Некорректный руководитель")
-    if source_type == "employee" and source_id == target_id:
-        raise HTTPException(400, "Нельзя связать сотрудника с самим собой")
+    if source_type != "company" and source_id <= 0:
+        raise HTTPException(400, "Некорректный исходный блок")
+    if target_id <= 0:
+        raise HTTPException(400, "Некорректный целевой блок")
+    if source_type == target_type and source_id == target_id:
+        raise HTTPException(400, "Нельзя связать блок с самим собой")
 
     with SessionLocal() as s:
-        target = s.get(Employee, target_id)
-        if target is None or not target.active:
-            raise HTTPException(404, "Подчинённый сотрудник не найден")
         if source_type == "employee":
             parent = s.get(Employee, source_id)
             if parent is None or not parent.active:
-                raise HTTPException(404, "Руководитель не найден")
-            # Prevent circular reporting chains.
-            children_by_parent = {}
-            for edge in s.query(OrgRelation).filter_by(
-                source_type="employee", target_type="employee"
-            ).all():
-                children_by_parent.setdefault(edge.source_id, set()).add(edge.target_id)
-            pending, visited = [target_id], set()
-            while pending:
-                current = pending.pop()
-                if current in visited:
-                    continue
-                visited.add(current)
-                if current == source_id:
-                    raise HTTPException(409, "Эта связь создаст замкнутый цикл подчинения")
-                pending.extend(children_by_parent.get(current, ()))
+                raise HTTPException(404, "Исходный сотрудник не найден")
+        if source_type == "department":
+            parent_dept = s.get(Department, source_id)
+            if parent_dept is None:
+                raise HTTPException(404, "Исходное подразделение не найдено")
+        if target_type == "employee":
+            target = s.get(Employee, target_id)
+            if target is None or not target.active:
+                raise HTTPException(404, "Целевой сотрудник не найден")
+        else:
+            target_dept = s.get(Department, target_id)
+            if target_dept is None:
+                raise HTTPException(404, "Целевое подразделение не найдено")
+        if _org_cycle_exists(s, source_type, source_id, target_type, target_id):
+            raise HTTPException(409, "Эта связь создаст замкнутый цикл")
         relation = s.query(OrgRelation).filter_by(
             source_type=source_type, source_id=source_id,
-            target_type="employee", target_id=target_id, relation_type=relation_type,
+            target_type=target_type, target_id=target_id, relation_type=relation_type,
         ).one_or_none()
         if relation is None:
             relation = OrgRelation(
                 source_type=source_type, source_id=source_id,
-                target_type="employee", target_id=target_id,
+                target_type=target_type, target_id=target_id,
                 relation_type=relation_type,
             )
             s.add(relation)
-        relation.label = label or ("Директор" if source_type == "company" else "Подчинение")
+        if label:
+            relation.label = label
+        elif target_type == "department" and source_type == "department":
+            relation.label = "Связь отделов"
+        elif target_type == "department" and source_type == "company":
+            relation.label = "Подразделение"
+        elif source_type == "company":
+            relation.label = "Директор"
+        else:
+            relation.label = "Подчинение"
         s.commit()
     return JSONResponse({"ok": True})
 

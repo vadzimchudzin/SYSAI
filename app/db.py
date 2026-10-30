@@ -209,9 +209,9 @@ class OrgRelation(Base):
     """
     __tablename__ = "org_relations"
     id = Column(Integer, primary_key=True)
-    source_type = Column(String(20), nullable=False, default="employee")  # company | employee
+    source_type = Column(String(20), nullable=False, default="employee")  # company | employee | department
     source_id = Column(Integer, nullable=False, default=1)
-    target_type = Column(String(20), nullable=False, default="employee")
+    target_type = Column(String(20), nullable=False, default="employee")  # employee | department
     target_id = Column(Integer, nullable=False, index=True)
     relation_type = Column(String(40), nullable=False, default="reports_to")
     label = Column(String(200), nullable=False, default="")

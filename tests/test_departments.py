@@ -462,6 +462,41 @@ def test_department_map_reports_to_edges_are_modular_and_cycles_are_rejected(cli
 
 
 
+
+def test_department_map_connects_department_blocks(client):
+    with SessionLocal() as session:
+        parent = Department(name="Закупки")
+        child = Department(name="Склад")
+        session.add_all([parent, child])
+        session.commit()
+        parent_id, child_id = parent.id, child.id
+
+    linked = client.post("/departments/map/relation", json={
+        "source_type": "department", "source_id": parent_id,
+        "target_type": "department", "target_id": child_id,
+        "relation_type": "linked_to", "label": "подчиняется закупкам",
+    })
+    assert linked.status_code == 200 and linked.json() == {"ok": True}
+    loop = client.post("/departments/map/relation", json={
+        "source_type": "department", "source_id": child_id,
+        "target_type": "department", "target_id": parent_id,
+        "relation_type": "linked_to",
+    })
+    assert loop.status_code == 409
+    self_link = client.post("/departments/map/relation", json={
+        "source_type": "department", "source_id": parent_id,
+        "target_type": "department", "target_id": parent_id,
+        "relation_type": "linked_to",
+    })
+    assert self_link.status_code == 400
+
+    page = client.get("/departments?view=map")
+    assert page.status_code == 200
+    assert f'"source": "department:{parent_id}", "target": "department:{child_id}"' in page.text
+    assert "подчиняется закупкам" in page.text
+    assert "Соединить блоки" in page.text
+
+
 def test_department_map_marks_reviewers_red_and_director_with_crown(client, monkeypatch):
     from app import access
     with SessionLocal() as session:
