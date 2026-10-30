@@ -1772,14 +1772,13 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
                 None,
             )
 
-        active_department_ids = {d.id for d in departments if d.active}
+        visible_department_ids = {d.id for d in departments}
         employee_memberships = {}
         for employee in employees:
             employee_memberships[employee.id] = [
                 membership for membership in employee.department_memberships
-                if membership.department_id in active_department_ids
+                if membership.department_id in visible_department_ids
                 and membership.department is not None
-                and membership.department.active
             ]
 
         available_employees_by_department = {}
@@ -1882,7 +1881,7 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
         valid_employee_ids = {e.id for e in employees}
         valid_department_ids = {d.id for d in departments}
         employee_parent_ids = set()
-        has_company_director = False
+        company_linked_employee_ids = set()
         for relation in graph_relations:
             if relation.target_type != "employee" or relation.target_id not in valid_employee_ids:
                 continue
@@ -1901,7 +1900,7 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
             })
             employee_parent_ids.add(relation.target_id)
             if relation.source_type == "company":
-                has_company_director = True
+                company_linked_employee_ids.add(relation.target_id)
 
         # The designated director is the initial root link until the graph is
         # explicitly configured in the constructor. This does not grant access.
@@ -1910,7 +1909,7 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
              if " ".join((e.name or "").split()).casefold() == "корнюшко сергей михайлович"),
             None,
         )
-        if director is not None and not has_company_director:
+        if director is not None and director.id not in company_linked_employee_ids:
             map_edges.append({
                 "source": "company:1", "target": f"employee:{director.id}",
                 "kind": "director", "label": "Директор",
@@ -2062,7 +2061,7 @@ async def department_map_relation(request: Request):
             # Prevent circular reporting chains.
             children_by_parent = {}
             for edge in s.query(OrgRelation).filter_by(
-                source_type="employee", target_type="employee", relation_type="reports_to"
+                source_type="employee", target_type="employee"
             ).all():
                 children_by_parent.setdefault(edge.source_id, set()).add(edge.target_id)
             pending, visited = [target_id], set()
