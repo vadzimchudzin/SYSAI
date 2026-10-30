@@ -2,9 +2,11 @@
 import datetime as dt
 import json
 import logging
+import socket
 import time
+from urllib.parse import urlparse
 
-from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint,
+from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint,
                         create_engine, text)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -12,6 +14,26 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from . import config
 
 log = logging.getLogger("sysai.db")
+
+
+def ipv4_hostaddr(hostname: str) -> str | None:
+    """First A-record for the host, or None if IPv4 is unavailable.
+
+    Render (and some other PaaS) resolve Neon to AAAA first. Outbound IPv6 is often
+    missing, which surfaces as 'Network is unreachable' to port 5432. Pinning hostaddr
+    to IPv4 keeps the same hostname/TLS while using a reachable path.
+    """
+    host = (hostname or "").strip().strip("[]")
+    if not host or host in {"localhost", "127.0.0.1"}:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, 5432, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    for family, _type, _proto, _canon, sockaddr in infos:
+        if family == socket.AF_INET and sockaddr:
+            return sockaddr[0]
+    return None
 
 
 def engine_options(url: str) -> dict:
@@ -26,6 +48,10 @@ def engine_options(url: str) -> dict:
     connect_args = {"connect_timeout": 30}
     if url.startswith("postgresql+psycopg://"):
         connect_args["prepare_threshold"] = None
+        host = urlparse(url).hostname
+        hostaddr = ipv4_hostaddr(host or "")
+        if hostaddr:
+            connect_args["hostaddr"] = hostaddr
     return {"pool_pre_ping": True, "pool_recycle": 300, "pool_size": 8, "max_overflow": 8,
             "connect_args": connect_args}
 
@@ -180,13 +206,17 @@ class EmployeeVoiceprint(Base):
 
 
 class EmployeeVoiceSample(Base):
-    """One consented reference recording and its encrypted local speaker embedding."""
+    """One consented reference recording. Audio lives encrypted in the DB; embeddings are optional."""
     __tablename__ = "employee_voice_samples"
     id = Column(Integer, primary_key=True)
     employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
     sample_blob_path = Column(String(600), nullable=False, default="")
-    encrypted_embedding = Column(LargeBinary, nullable=False)
-    embedding_dimensions = Column(Integer, nullable=False, default=192)
+    encrypted_audio = Column(LargeBinary, nullable=True)
+    audio_mime = Column(String(80), nullable=False, default="audio/wav")
+    audio_bytes = Column(Integer, nullable=False, default=0)
+    encrypted_embedding = Column(LargeBinary, nullable=False, default=bytes)
+    embedding_status = Column(String(24), nullable=False, default="pending")  # pending | ready | failed
+    embedding_dimensions = Column(Integer, nullable=False, default=0)
     model_version = Column(String(120), nullable=False, default="")
     sample_duration = Column(Float, nullable=False, default=0.0)
     waveform_data = Column(JSON, nullable=False, default=list)
@@ -194,10 +224,25 @@ class EmployeeVoiceSample(Base):
     source_meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True, index=True)
     source_start = Column(Float, nullable=True)
     source_end = Column(Float, nullable=True)
+    content_sha256 = Column(String(64), nullable=False, default="", index=True)
+    source_audio_sha256 = Column(String(64), nullable=False, default="")
+    quality_metrics = Column(JSON, nullable=False, default=dict)
+    confirmed_by = Column(String(120), nullable=False, default="")
+    access_owner = Column(String(128), nullable=False, default="")
+    expires_at = Column(DateTime(timezone=True), nullable=True)
     consent_at = Column(DateTime(timezone=True), nullable=False, default=now)
     consent_version = Column(String(40), nullable=False, default="voiceprint-consent-v2")
     created_at = Column(DateTime(timezone=True), nullable=False, default=now)
     employee = relationship("Employee", back_populates="voice_samples")
+
+
+class VoiceSampleCleanup(Base):
+    """Legacy external-copy cleanup outbox; no audio/embedding or identity evidence."""
+    __tablename__ = "voice_sample_cleanup"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, nullable=False)
+    storage_path = Column(String(600), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
 
 
 class Meeting(Base):
@@ -374,6 +419,25 @@ class Delivery(Base):
     sent_at = Column(DateTime(timezone=True), nullable=True)
 
 
+def _db_error_text(exc: Exception) -> str:
+    return str(exc)
+
+
+def is_permanent_db_error(exc: Exception) -> bool:
+    """Errors that will not clear by waiting (quota, auth, TLS). Do not retry these at boot."""
+    text = _db_error_text(exc).lower()
+    markers = (
+        "exceeded the quota",
+        "upgrade your plan",
+        "password authentication failed",
+        "no password supplied",
+        "ssl connection has been closed unexpectedly",
+        "invalid authorization",
+        "permission denied",
+    )
+    return any(marker in text for marker in markers)
+
+
 def wait_for_db(attempts: int = 6, delay: float = 3.0):
     """Block until the database answers. A suspended Neon compute needs a few seconds to wake up,
     so a failed first connection retries with a growing pause instead of crashing the boot."""
@@ -383,9 +447,13 @@ def wait_for_db(attempts: int = 6, delay: float = 3.0):
                 con.execute(text("SELECT 1"))
             return
         except OperationalError as exc:
+            message = str(exc).splitlines()[0]
+            if is_permanent_db_error(exc):
+                log.error("Database refused the connection (not a wake-up delay): %s", message)
+                raise
             if attempt == attempts:
                 raise
-            log.warning("Database is not ready (attempt %s of %s): %s", attempt, attempts, str(exc).splitlines()[0])
+            log.warning("Database is not ready (attempt %s of %s): %s", attempt, attempts, message)
             time.sleep(delay * attempt)
 
 
@@ -650,12 +718,14 @@ class MemoryVector(Base):
 def _add_column_if_missing(table: str, column: str, ddl: str):
     """Lightweight migration for databases created by earlier versions."""
     from sqlalchemy import inspect
+    sqlite_ddl = ddl.replace(" BYTEA", " BLOB") if engine.dialect.name == "sqlite" else ddl
     for attempt in (1, 2):
-        if column in {c["name"] for c in inspect(engine).get_columns(table)}:
+        names = {c["name"] for c in inspect(engine).get_columns(table)}
+        if column in names:
             return
         try:
             with engine.begin() as con:
-                con.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+                con.execute(text(f"ALTER TABLE {table} ADD COLUMN {sqlite_ddl}"))
             return
         except OperationalError as exc:
             # SQLite parses ALTER against the schema cached by the pooled connection. A connection that missed a
@@ -699,6 +769,39 @@ def init_db():
     _add_column_if_missing("documents", "text_status", "text_status VARCHAR(12) DEFAULT 'pending'")
     _add_column_if_missing("documents", "summary", "summary TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "source_kind", "source_kind VARCHAR(32) NOT NULL DEFAULT 'manual'")
+    _add_column_if_missing("employee_voice_samples", "source_meeting_id", "source_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL")
+    _add_column_if_missing("employee_voice_samples", "source_start", "source_start FLOAT")
+    _add_column_if_missing("employee_voice_samples", "source_end", "source_end FLOAT")
+    _add_column_if_missing("employee_voice_samples", "encrypted_audio", "encrypted_audio BYTEA")
+    _add_column_if_missing("employee_voice_samples", "audio_mime", "audio_mime VARCHAR(80) NOT NULL DEFAULT 'audio/wav'")
+    _add_column_if_missing("employee_voice_samples", "audio_bytes", "audio_bytes INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("employee_voice_samples", "embedding_status", "embedding_status VARCHAR(24) NOT NULL DEFAULT 'pending'")
+    _add_column_if_missing("employee_voice_samples", "content_sha256", "content_sha256 VARCHAR(64) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "source_audio_sha256", "source_audio_sha256 VARCHAR(64) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "quality_metrics", "quality_metrics JSON NOT NULL DEFAULT '{}'")
+    _add_column_if_missing("employee_voice_samples", "confirmed_by", "confirmed_by VARCHAR(120) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "access_owner", "access_owner VARCHAR(128) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "expires_at", "expires_at TIMESTAMP")
+    _ensure_voice_sample_constraints()
+
+
+def _ensure_voice_sample_constraints():
+    """Add indexes even for an existing table. Unknown legacy rows remain ineligible."""
+    with engine.begin() as con:
+        con.execute(text("CREATE INDEX IF NOT EXISTS ix_employee_voice_samples_source_meeting_id "
+                         "ON employee_voice_samples (source_meeting_id)"))
+        con.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_sample_content_sha256 "
+                         "ON employee_voice_samples (content_sha256) WHERE content_sha256 <> ''"))
+        # SQLite FK enforcement was historically disabled in this app. Restrict the fix
+        # to biometric rows; do not rebuild unrelated legacy tables or change their data.
+        if engine.dialect.name == "sqlite":
+            con.execute(text("CREATE TRIGGER IF NOT EXISTS voice_samples_delete_meeting "
+                             "AFTER DELETE ON meetings BEGIN DELETE FROM employee_voice_samples "
+                             "WHERE source_meeting_id = OLD.id; END"))
+            con.execute(text("CREATE TRIGGER IF NOT EXISTS voice_samples_delete_employee "
+                             "AFTER DELETE ON employees BEGIN DELETE FROM employee_voice_samples "
+                             "WHERE employee_id = OLD.id; END"))
 
 
 def dumps(v) -> str:

@@ -78,7 +78,8 @@ DEFAULTS = {
     "notion_parent_id": "",
     "ticnote_enabled": False,      # TicNote mode: device recordings are picked up automatically
     "ticnote_appkey": "",          # TicNote AppKey (tnovs_sk_... / tncn_sk_...)
-    "ticnote_enabled_at": 0,       # ms; only recordings that reached the TicNote cloud after this are taken       # only import TicNote exports below this Notion page/database
+    "ticnote_enabled_at": 0,       # ms; only recordings that reached the TicNote cloud after this are taken
+    "voice_debug_mode": False,     # keep asking for confirmed meeting clips until identification looks ready       # only import TicNote exports below this Notion page/database
     # site owner: shown in the footer, on /legal and in the privacy policy (defaults from sysat.by)
     "legal_name": "ООО «СисЭйТи»",
     "legal_unp": "",

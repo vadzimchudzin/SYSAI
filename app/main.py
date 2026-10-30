@@ -2,6 +2,7 @@
 import datetime as dt
 import hmac
 import logging
+import math
 import mimetypes
 import os
 import pathlib
@@ -28,7 +29,7 @@ from . import (accounts, agent, bitrix, cases, doctext, memory, transcribe, conf
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -479,7 +480,7 @@ async def demo(request: Request):
 
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
-def meeting_view(request: Request, mid: int):
+def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
@@ -490,10 +491,16 @@ def meeting_view(request: Request, mid: int):
         loaded = pipeline.load(s, mid)
         plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
                 if userbot.ai_mode() and loaded.status in ("awaiting_approval", "rejected") else None)
+        voice_admin = current_user(request)["role"] == "superuser" and user_may_access_meeting_audio(request, loaded)
+        voice_clips, voice_debug, voice_ready = ([], False, {})
+        if voice_admin:
+            voice_clips, voice_debug, voice_ready = _meeting_voice_enrollment_context(s, loaded, manual=voice_enroll)
     until = userbot.quiet_until()
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
                 plan=plan, quiet_at=userbot.local_time(until) if until is not None else "",
-                case_by_task=cases.for_meeting(mid))
+                case_by_task=cases.for_meeting(mid),
+                voice_clips=voice_clips, voice_debug_mode=voice_debug, voice_readiness=voice_ready,
+                voice_msg=voice_msg, voice_admin=voice_admin)
 
 
 @app.post("/cases/{case_id}/{action}")
@@ -1094,12 +1101,19 @@ def meeting_delete(request: Request, mid: int):
         s.query(Meeting).filter_by(id=mid).update({Meeting.progress: Meeting.progress}, synchronize_session=False)
         m = s.get(Meeting, mid)
         if m:
+            if not user_may_access_meeting_audio(request, m):
+                raise HTTPException(404, "Совещание не найдено.")
             if m.status in ("queued", "transcribing", "analyzing", "sending", "delivery_queued", "delivery_retry"):
                 raise HTTPException(409, "Дождитесь завершения обработки")
             if s.query(Delivery).filter(Delivery.meeting_id == mid, Delivery.status.in_(("pending", "sending"))).first():
                 raise HTTPException(409, "Нельзя удалить совещание с незавершённой доставкой")
             if m.audio_path:
                 pathlib.Path(m.audio_path).unlink(missing_ok=True)
+            from .db import VoiceSampleCleanup
+            for sample in s.query(EmployeeVoiceSample).filter_by(source_meeting_id=mid).all():
+                if sample.sample_blob_path:
+                    s.add(VoiceSampleCleanup(employee_id=sample.employee_id, storage_path=sample.sample_blob_path))
+                s.delete(sample)
             s.delete(m)
             s.commit()
     return RedirectResponse("/meetings", 303)
@@ -1247,7 +1261,7 @@ async def settings_save(request: Request):
     updates = {}
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
-              "bitrix_enabled", "ai_employee", "ticnote_enabled"):
+              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -1582,10 +1596,15 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        visible_voice_samples = {}
         for employee in emps:
+            visible_voice_samples[employee.id] = [sample for sample in employee.voice_samples
+                if (not sample.access_owner or sample.access_owner in {
+                    f"user:{current_user(request)['id']}", request.session.get("recording_owner")})]
             for membership in employee.department_memberships:
                 _ = membership.department.name if membership.department else ""
             _ = employee.voiceprint.created_at if employee.voiceprint else None
+            _ = list(employee.voice_samples)
         for department in departments:
             _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
@@ -1596,7 +1615,9 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked, rights=rights,
                 rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
                 strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
-                voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()))
+                voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()),
+                voice_service_enabled=config.voice_service_enabled(), visible_voice_samples=visible_voice_samples,
+                voice_readiness=speaker_id.identification_readiness({e.id: list(e.voice_samples) for e in emps if e.active}))
 
 
 @app.post("/employees")
@@ -1662,6 +1683,221 @@ def _voice_redirect(employee_id: int, message: str):
     return RedirectResponse(f"/employees?edit={employee_id}&voice_msg={quote(message, safe='')}", 303)
 
 
+def _meeting_redirect(mid: int, message: str):
+    return RedirectResponse(f"/meetings/{mid}?voice_msg={quote(message, safe='')}", 303)
+
+
+def _voice_write_guard(request):
+    guard_admin(request)
+    from urllib.parse import urlsplit
+    origin = request.headers.get("origin")
+    if request.headers.get("sec-fetch-site") == "cross-site" or (origin and urlsplit(origin).netloc != request.url.netloc):
+        raise HTTPException(403, "Запрос должен исходить из этой панели.")
+
+
+def _meeting_audio_owner(session, meeting):
+    # Match both the explicit link and reused audio paths. No superuser bypass:
+    # /recordings/{rid}/audio enforces ownership even for other superusers.
+    rows = session.query(Recording).filter(
+        (Recording.meeting_id == meeting.id) | (Recording.path == (meeting.audio_path or ""))
+    ).all()
+    return [r for r in rows if r.meeting_id == meeting.id or (meeting.audio_path and r.path == meeting.audio_path)]
+
+
+def user_may_access_meeting_audio(request, meeting):
+    guard(request)
+    with SessionLocal() as session:
+        rows = _meeting_audio_owner(session, meeting)
+    return all(r.owner == recording_owner(request, r.id) for r in rows)
+
+
+def _voice_meeting(session, request, mid):
+    meeting = session.get(Meeting, mid)
+    if meeting is None or not user_may_access_meeting_audio(request, meeting):
+        raise HTTPException(404, "Совещание не найдено.")
+    return meeting
+
+
+def _candidate(meeting, start, end, speaker=None):
+    start, end = speaker_id._finite(start), speaker_id._finite(end)
+    if start is None or end is None or start < 0 or not 5 <= end - start <= 30:
+        raise HTTPException(400, "Некорректный интервал фрагмента.")
+    for clip in speaker_id.propose_clear_speaker_clips(meeting.transcript or []):
+        if abs(clip["start"] - start) < 0.0005 and abs(clip["end"] - end) < 0.0005:
+            if speaker is None or clip["speaker"] == speaker:
+                return clip
+    raise HTTPException(400, "Фрагмент не входит в доступные кандидаты или содержит наложение реплик.")
+
+
+def _meeting_voice_enrollment_context(session, meeting, manual=False):
+    debug = settings_store.get("voice_debug_mode") is True
+    active = session.query(Employee).filter(Employee.active.is_(True)).all()
+    by_employee = {e.id: list(e.voice_samples) for e in active}
+    readiness = speaker_id.identification_readiness(by_employee)
+    if not (debug or manual) or meeting.status in ("queued", "transcribing", "analyzing"):
+        return [], debug, readiness
+    if not meeting.audio_path or not pathlib.Path(meeting.audio_path).is_file():
+        return [], debug, readiness
+    # Stop collecting for sufficiently sampled known people, never hide an unknown
+    # just because another subset of employees has enough samples.
+    per_person = {p["employee_id"]: p["ready"] for p in readiness.get("people", [])}
+    pending = []
+    for clip in speaker_id.propose_clear_speaker_clips(meeting.transcript or []):
+        if speaker_id.overlapping_confirmed_sample(session, meeting.id, clip["start"], clip["end"]):
+            continue
+        known_id = clip.get("speaker_employee_id")
+        if not manual and known_id is not None and per_person.get(known_id):
+            continue
+        pending.append(clip)
+    return pending[:8], debug, readiness
+
+
+@app.get("/meetings/{mid}/speaker-clip")
+def meeting_speaker_clip(request: Request, mid: int, start: float, end: float):
+    guard(request)
+    with SessionLocal() as session:
+        meeting = _voice_meeting(session, request, mid)
+        clip = _candidate(meeting, start, end)
+        source = meeting.audio_path
+        if not source or not pathlib.Path(source).is_file():
+            raise HTTPException(404, "Аудиозапись недоступна.")
+    with tempfile.TemporaryDirectory(prefix="sysai_clip_") as tmp:
+        target = pathlib.Path(tmp) / "clip.wav"
+        if speaker_id.extract_interval(source, target, clip["start"], clip["end"]) is None:
+            raise HTTPException(400, "Не удалось вырезать полный фрагмент.")
+        if not speaker_id.clip_has_speech(target):
+            raise HTTPException(400, "Фрагмент слишком тихий, перегружен или содержит слишком много пауз.")
+        raw = target.read_bytes()
+    return Response(raw, media_type="audio/wav", headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/meetings/{mid}/speaker-clips/confirm")
+def meeting_confirm_speaker_clip(request: Request, mid: int, speaker: str = Form(...),
+                                 start: float = Form(...), end: float = Form(...),
+                                 employee_id: int = Form(...), consent: str = Form(""),
+                                 listened: str = Form("")):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        meeting = _voice_meeting(session, request, mid)
+        clip = _candidate(meeting, start, end, speaker)
+        if consent not in ("yes", "1", "on", "true") or listened != "yes":
+            return _meeting_redirect(mid, "Нужно прослушать фрагмент, подтвердить один голос и отдельное согласие сотрудника.")
+        source = pathlib.Path(meeting.audio_path or "")
+        if not meeting.audio_path or not source.is_file():
+            return _meeting_redirect(mid, "Аудиозапись недоступна.")
+        # Lock employee before provider work so a simultaneous revoke wins serially.
+        employee = session.query(Employee).filter_by(id=employee_id, active=True).with_for_update().one_or_none()
+        if employee is None:
+            return _meeting_redirect(mid, "Активный сотрудник не найден.")
+        owners = _meeting_audio_owner(session, meeting)
+        access_owner = owners[0].owner if owners else ""
+        import hashlib
+        source_hash = hashlib.sha256()
+        before = source.stat()
+        with source.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                source_hash.update(block)
+        with tempfile.TemporaryDirectory(prefix="sysai_confirm_clip_") as tmp:
+            target = pathlib.Path(tmp) / "clip.wav"
+            extracted = speaker_id.extract_interval(source, target, clip["start"], clip["end"])
+            after = source.stat()
+            if extracted is None or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                return _meeting_redirect(mid, "Запись изменилась или фрагмент неполный; прослушайте заново.")
+            actual_start, duration = extracted
+            try:
+                row = speaker_id.store_confirmed_meeting_sample(
+                    session, employee_id=employee_id, meeting_id=mid,
+                    start=actual_start, end=actual_start + duration, wav_path=target,
+                    confirmed_by=str(current_user(request)["id"]), access_owner=access_owner,
+                    source_audio_sha256=source_hash.hexdigest(),
+                )
+                session.commit()
+                status = row.embedding_status
+            except speaker_id.SpeakerIdentityError as exc:
+                session.rollback()
+                return _meeting_redirect(mid, str(exc)[:300])
+        message = {"ready": "Зашифрованный образец и голосовые признаки сохранены. Точность ещё не проверена.",
+                   "pending": "Аудио сохранено в БД. Сервис признаков не настроен: образец пока не участвует в идентификации.",
+                   "failed": "Аудио сохранено в БД, извлечение признаков не удалось. Можно повторить в карточке сотрудника."}
+        return _meeting_redirect(mid, message[status])
+
+
+def _voice_sample(session, request, eid, sid):
+    guard_admin(request)
+    row = session.query(EmployeeVoiceSample).filter_by(employee_id=eid, id=sid).with_for_update().one_or_none()
+    if row is None or not speaker_id._not_expired(row):
+        raise HTTPException(404, "Образец не найден или срок хранения истёк.")
+    if row.access_owner and row.access_owner not in {f"user:{current_user(request)['id']}", request.session.get("recording_owner")}:
+        raise HTTPException(404, "Образец не найден.")
+    if row.source_meeting_id is not None:
+        _voice_meeting(session, request, row.source_meeting_id)
+    return row
+
+
+@app.get("/employees/{eid}/voice-samples/{sid}/audio")
+def employee_voice_sample_audio(request: Request, eid: int, sid: int):
+    guard_admin(request)
+    with SessionLocal() as session:
+        row = _voice_sample(session, request, eid, sid)
+        try:
+            raw = speaker_id.decrypt_sample_audio(row)
+        except speaker_id.SpeakerIdentityError:
+            raise HTTPException(409, "Образец не удалось расшифровать. Проверьте постоянный SECRET_KEY.")
+    return Response(raw, media_type="audio/wav", headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/employees/{eid}/voice-samples/{sid}/retry")
+def employee_voice_sample_retry(request: Request, eid: int, sid: int):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        row = _voice_sample(session, request, eid, sid)
+        try:
+            ready = speaker_id.embed_pending_sample(session, row)
+        except speaker_id.SpeakerIdentityError as exc:
+            return _voice_redirect(eid, str(exc))
+        session.commit()
+    return _voice_redirect(eid, "Признаки получены." if ready else "Признаки пока недоступны; аудио сохранено в БД.")
+
+
+@app.post("/employees/{eid}/voice-samples/{sid}/delete")
+def employee_voice_sample_delete_one(request: Request, eid: int, sid: int):
+    _voice_write_guard(request)
+    from .db import VoiceSampleCleanup
+    with SessionLocal() as session:
+        row = _voice_sample(session, request, eid, sid)
+        if row.sample_blob_path:
+            session.add(VoiceSampleCleanup(employee_id=eid, storage_path=row.sample_blob_path))
+        session.delete(row)
+        session.commit()
+    return _voice_redirect(eid, "Образец и голосовые признаки удалены из БД.")
+
+
+@app.post("/employees/{eid}/voice-sample/delete")
+def employee_voice_sample_delete(request: Request, eid: int):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        employee = session.query(Employee).filter_by(id=eid).with_for_update().one_or_none()
+        if employee is None:
+            return _voice_redirect(eid, "Сотрудник не найден.")
+        removed = speaker_id.revoke_employee_voice_data(session, eid)
+        session.commit()
+    # New samples have no external copy. Legacy cleanup is durable and can be retried.
+    with SessionLocal() as session:
+        speaker_id.retry_sample_cleanup(session)
+        session.commit()
+    return _voice_redirect(eid, f"Образцы и признаки отозваны ({removed}). Старые внешние копии при ошибке остаются в очереди очистки.")
+
+
+@app.post("/employees/voice-samples/cleanup")
+def employee_voice_samples_cleanup(request: Request):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        speaker_id.purge_expired_samples(session)
+        speaker_id.retry_sample_cleanup(session)
+        session.commit()
+    return RedirectResponse("/employees", 303)
+
+
 @app.post("/employees/{eid}/voice-sample")
 def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(...), consent: str = Form("")):
     guard_admin(request)
@@ -1724,21 +1960,6 @@ def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(
             sample.file.close()
         except Exception:
             pass
-
-
-@app.post("/employees/{eid}/voice-sample/delete")
-def employee_voice_sample_delete(request: Request, eid: int):
-    guard_admin(request)
-    with SessionLocal() as session:
-        employee = session.get(Employee, eid)
-        if employee is None:
-            return _voice_redirect(eid, "Сотрудник не найден.")
-        profile = session.query(EmployeeVoiceprint).filter_by(employee_id=eid).one_or_none()
-        if profile is not None:
-            session.delete(profile)
-            session.commit()
-        employee_name = employee.name
-    return _voice_redirect(eid, f"Локальный голосовой шаблон «{employee_name}» удалён.")
 
 
 @app.get("/departments", response_class=HTMLResponse)
@@ -1984,7 +2205,13 @@ def employee_delete(request: Request, eid: int):
         s.query(Task).filter_by(target_employee_id=eid).update({Task.target_employee_id: None}, synchronize_session=False)
         e = s.get(Employee, eid)
         if e:
+            speaker_id.revoke_employee_voice_data(s, eid)
+            s.flush()
+            s.expire(e, ["voice_samples", "voiceprint"])
             s.delete(e)
+        s.commit()
+    with SessionLocal() as s:
+        speaker_id.retry_sample_cleanup(s)
         s.commit()
     return RedirectResponse("/employees", 303)
 

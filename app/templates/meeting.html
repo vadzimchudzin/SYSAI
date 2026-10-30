@@ -216,13 +216,42 @@
   {% if tp.notes %}<ul>{% for n in tp.notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}</div>{% endfor %}</section>{% endif %}
 {% endif %}
 
+{% if voice_admin %}
+<section class="card"><a class="btn" href="/meetings/{{ m.id }}?voice_enroll=1#voice-sample-clips">Выбрать образец голоса вручную</a>
+<p class="small muted">Автоматические запросы включаются флажком «Отладочный режим». Ручной выбор доступен независимо от него.</p></section>
+{% endif %}
+{% if voice_msg %}<div class="card note" role="status">{{ voice_msg }}</div>{% endif %}
+{% if voice_clips and voice_admin %}
+<section class="card" id="voice-sample-clips">
+<h2>Кто говорит на этом фрагменте?</h2>
+<p>Это кандидаты по разметке, не гарантия чистой речи. Прослушайте каждый: если слышны шум, музыка, второй голос или личность неизвестна — не сохраняйте.</p>
+<p class="small muted">{{ voice_readiness.heuristic }}</p>
+{% if voice_debug_mode %}<span class="pill amber">Отладочный режим</span>{% endif %}
+{% for person in voice_readiness.people %}<p class="small">Сотрудник #{{ person.employee_id }}: {{ person.independent_samples }} независимых записей.
+{{ 'Количество и согласованность достаточны для остановки набора известных голосов; точность не проверена.' if person.ready else 'Нужно больше независимых подтверждений или проверка расхождений.' }}</p>{% endfor %}
+{% for clip in voice_clips %}
+<article class="voice-clip" style="margin-top:12px">
+<p><span class="t">{{ mmss(clip.start) }}–{{ mmss(clip.end) }}</span> {{ clip.speaker }} · {{ clip.duration }} с</p>
+<p class="soft">{{ clip.text }}</p>
+<audio controls preload="none" src="/meetings/{{ m.id }}/speaker-clip?start={{ clip.start }}&amp;end={{ clip.end }}"></audio>
+<form method="post" action="/meetings/{{ m.id }}/speaker-clips/confirm">
+<input type="hidden" name="speaker" value="{{ clip.speaker }}"><input type="hidden" name="start" value="{{ clip.start }}"><input type="hidden" name="end" value="{{ clip.end }}">
+<label class="f">Сотрудник<select name="employee_id" required><option value="">— Не знаю / не сохранять —</option>{% for e in employees %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}</select></label>
+<label class="check"><input type="checkbox" name="listened" value="yes" required> Я прослушал весь фрагмент: один отчётливый голос выбранного сотрудника, без музыки и наложений.</label>
+<label class="check"><input type="checkbox" name="consent" value="yes" required> Отдельное согласие сотрудника получено и зафиксировано: хранение зашифрованного аудио и признаков в БД до 180 дней, использование для идентификации. Если сервис голоса настроен, аудио передаётся ему для извлечения признаков без сохранения внешней копии.</label>
+<button class="btn primary">Сохранить подтверждённый образец</button>
+</form></article>
+{% endfor %}
+<p class="small">Не сохраняйте сомнительный фрагмент. После подтверждения появятся следующие кандидаты (до 8 за раз). Управление и отзыв — в карточке сотрудника.</p>
+</section>
+{% endif %}
 {% if m.transcript %}
 <details class="card" id="meeting-transcript"><summary><b>Расшифровка по подразделам</b> <span class="muted">· {{ m.transcript|length }} реплик · {{ group_transcript(m.transcript, r.topics or [])|length }} разделов</span></summary>
   <div class="transcript" style="margin-top:12px">
   {% for section in group_transcript(m.transcript, r.topics or []) %}
     <section class="topic transcript-section">
       <h3 style="margin:0 0 8px">{% if section.time %}<span class="t">{{ section.time }}</span> · {% endif %}{{ section.title }}</h3>
-      {% for sg in section.segments %}<p><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}{% if sg.speaker_source == "voiceprint" %} <span class="pill green" title="Сопоставлен с зарегистрированным голосовым шаблоном">голос совпал{% if sg.speaker_confidence is not none %} · {{ sg.speaker_confidence }}%{% endif %}</span>{% endif %}:</b> {{ sg.text }}</p>{% endfor %}
+      {% for sg in section.segments %}<p><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}{% if sg.speaker_source == "voiceprint" %} <span class="pill green" title="Сопоставление с подтверждённым образцом. Оценка сходства не является вероятностью.">голос совпал</span>{% endif %}:</b> {{ sg.text }}</p>{% endfor %}
     </section>
   {% endfor %}
   </div>

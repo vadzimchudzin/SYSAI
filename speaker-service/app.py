@@ -416,7 +416,6 @@ async def identify(
     if len(clips) > MAX_SPEAKERS:
         raise HTTPException(status_code=422, detail="Too many distinct speakers in one chunk")
     results = {}
-    blob_available = bool(os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN"))
     for speaker, clip in clips.items():
         clip_duration = _duration(clip)
         if clip_duration < SEGMENT_MIN_SECONDS:
@@ -427,22 +426,7 @@ async def identify(
                 "duration_seconds": round(clip_duration, 3),
                 "turn_count": sum(1 for part in segments if isinstance(part, dict) and str(part.get("speaker", "")).strip() == speaker),
             }
-            # A human can map this unknown speaker after the meeting, when the source meeting
-            # audio has already been deleted by Render. Save only a clean short clip privately.
-            if blob_available and PROFILE_MIN_SECONDS <= clip_duration <= PROFILE_MAX_SECONDS:
-                try:
-                    sample_bytes = await asyncio.to_thread(_encode_wav, clip)
-                    uploaded = await blob.put_async(
-                        f"candidates/{uuid.uuid4().hex}/{uuid.uuid4().hex}.wav",
-                        sample_bytes,
-                        access="private",
-                        content_type="audio/wav",
-                        add_random_suffix=True,
-                    )
-                    item["sample_blob_path"] = uploaded.pathname
-                    item["waveform"] = _waveform(clip)
-                except Exception:
-                    log.exception("Could not store temporary private speaker candidate clip")
+            # Identification is transient. Only the main app stores human-consented DB samples.
             results[speaker] = item
         except HTTPException:
             raise

@@ -102,6 +102,18 @@
         {{ form(e) }}
         <section class="card voice-profile">
           <h3>Образец речи для идентификации</h3>
+          {% if visible_voice_samples.get(e.id) %}
+          <h4>Подтверждённые образцы встреч</h4>
+          <p class="small">Аудио зашифровано в БД. Срок — 180 дней либо до отзыва/удаления встречи. Точность идентификации не калибрована.</p>
+          {% for sample in visible_voice_samples.get(e.id, []) %}
+          <article><p>#{{ sample.id }} · {{ sample.sample_duration }} с · {{ sample.embedding_status }} · встреча {{ sample.source_meeting_id or 'удалена' }}</p>
+          <audio controls preload="none" src="/employees/{{ e.id }}/voice-samples/{{ sample.id }}/audio"></audio>
+          {% if sample.embedding_status != 'ready' %}<form method="post" action="/employees/{{ e.id }}/voice-samples/{{ sample.id }}/retry"><button class="btn sm">Повторить извлечение признаков</button></form>{% endif %}
+          <form method="post" action="/employees/{{ e.id }}/voice-samples/{{ sample.id }}/delete"><button class="btn sm danger">Удалить этот образец</button></form>
+          </article>{% endfor %}
+          <form method="post" action="/employees/{{ e.id }}/voice-sample/delete"><button class="btn danger">Отозвать все образцы и признаки</button></form>
+          {% endif %}
+
           {% if e.voiceprint %}
             <p class="small"><span class="pill green">Голосовой шаблон активен</span> · {{ e.voiceprint.sample_duration }} сек. · зарегистрирован {{ e.voiceprint.created_at.strftime('%d.%m.%Y') if e.voiceprint.created_at else '' }}</p>
             <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Удалить голосовой шаблон?')"><button class="btn sm danger">Удалить шаблон</button></form>
