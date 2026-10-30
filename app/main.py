@@ -2119,6 +2119,7 @@ def department_set_head(request: Request, department_id: int, employee_id: int =
         department_name = department.name
         chosen_name = chosen.employee.name if chosen and chosen.employee else ""
         s.commit()
+    agent.invalidate_roster()
     message = (
         f"Назначен начальник подразделения «{department_name}»: {chosen_name}."
         if chosen_name else f"Назначение начальника подразделения «{department_name}» снято."
@@ -2150,6 +2151,7 @@ def department_add_member(request: Request, department_id: int,
         membership.responsibilities = responsibilities.strip()[:4000]
         s.commit()
         message = f"{employee.name} добавлен в подразделение «{department.name}». Он сохранён в общем справочнике сотрудников."
+    agent.invalidate_roster()
     return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
@@ -2198,6 +2200,7 @@ def department_create_member(request: Request, department_id: int, name: str = F
         ))
         s.commit()
         message = f"Создан сотрудник «{employee.name}» и добавлен в «{department.name}». Он отображается и в общем справочнике."
+    agent.invalidate_roster()
     return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
@@ -2216,6 +2219,7 @@ def department_remove_member(request: Request, department_id: int, employee_id: 
         department_name = department.name if department is not None else "подразделение"
         employee_name = employee.name if employee is not None else "Сотрудник"
     message = f"{employee_name} исключён из «{department_name}». Запись в общем справочнике сотрудников сохранена."
+    agent.invalidate_roster()
     return RedirectResponse("/departments?msg=" + quote(message), 303)
 
 
@@ -2227,6 +2231,7 @@ def department_delete(request: Request, department_id: int):
         if department:
             s.delete(department)
             s.commit()
+    agent.invalidate_roster()
     return RedirectResponse("/departments", 303)
 
 
