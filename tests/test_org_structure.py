@@ -128,3 +128,67 @@ def test_editing_employee_preserves_primary_and_multiple_department_links(client
         assert memberships[second_id].is_primary is True
         assert memberships[first_id].role == "Руководитель первого отдела"
         assert memberships[second_id].role == "Руководитель второго отдела"
+
+
+
+def test_drag_move_transfers_membership_and_keeps_employee_record(client):
+    suffix = uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        source = Department(name=f"Исходный отдел {suffix}")
+        target = Department(name=f"Целевой отдел {suffix}")
+        employee = Employee(name=f"Перемещаемый сотрудник {suffix}")
+        session.add_all([source, target, employee])
+        session.flush()
+        session.add(EmployeeDepartment(
+            employee_id=employee.id, department_id=source.id,
+            role="Старший инженер", responsibilities="Пусконаладка", is_primary=True,
+        ))
+        session.commit()
+        source_id, target_id, employee_id = source.id, target.id, employee.id
+
+    response = client.post(
+        f"/api/org/departments/{target_id}/members/{employee_id}",
+        json={"move_from_department_id": source_id, "is_head": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["moved"] is True
+
+    with SessionLocal() as session:
+        employee = session.get(Employee, employee_id)
+        assert employee is not None
+        memberships = list(employee.department_memberships)
+        assert len(memberships) == 1
+        assert memberships[0].department_id == target_id
+        assert memberships[0].role == "Старший инженер"
+        assert memberships[0].responsibilities == "Пусконаладка"
+        assert memberships[0].is_primary is True
+        assert session.query(Employee).filter_by(name=f"Перемещаемый сотрудник {suffix}").count() == 1
+
+
+def test_unassign_removes_department_link_but_keeps_employee_and_other_departments(client):
+    suffix = uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        first = Department(name=f"Отдел для снятия {suffix}")
+        second = Department(name=f"Сохраняемый отдел {suffix}")
+        employee = Employee(name=f"Сотрудник с несколькими отделами {suffix}")
+        session.add_all([first, second, employee])
+        session.flush()
+        session.add_all([
+            EmployeeDepartment(employee_id=employee.id, department_id=first.id),
+            EmployeeDepartment(employee_id=employee.id, department_id=second.id, is_primary=True),
+        ])
+        session.commit()
+        first_id, second_id, employee_id = first.id, second.id, employee.id
+
+    response = client.post(
+        f"/api/org/employees/{employee_id}/unassign",
+        json={"department_id": first_id},
+    )
+    assert response.status_code == 200
+
+    with SessionLocal() as session:
+        employee = session.get(Employee, employee_id)
+        assert employee is not None
+        assert len(employee.department_memberships) == 1
+        assert employee.department_memberships[0].department_id == second_id
+        assert employee.department_memberships[0].is_primary is True
