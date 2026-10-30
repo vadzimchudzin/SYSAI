@@ -89,3 +89,42 @@ def test_quick_create_saves_full_employee_profile_and_department_assignment(clie
         assert membership.role == "Ведущий инженер"
         assert membership.responsibilities == "Пусконаладка"
         assert membership.is_primary is True
+
+
+def test_editing_employee_preserves_primary_and_multiple_department_links(client):
+    suffix = uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        first = Department(name=f"Отдел сохранения A {suffix}")
+        second = Department(name=f"Отдел сохранения B {suffix}")
+        employee = Employee(name=f"Руководитель до правки {suffix}", position="Инженер")
+        session.add_all([first, second, employee])
+        session.flush()
+        session.add_all([
+            EmployeeDepartment(employee_id=employee.id, department_id=first.id,
+                               role="Начальник первого", is_primary=True),
+            EmployeeDepartment(employee_id=employee.id, department_id=second.id,
+                               role="Заместитель второго", is_primary=True),
+        ])
+        session.commit()
+        first_id, second_id, employee_id = first.id, second.id, employee.id
+
+    response = client.post("/employees", data={
+        "id": str(employee_id),
+        "name": f"Руководитель после правки {suffix}",
+        "position": "Главный инженер",
+        "active": "on",
+        "department_ids": [str(first_id), str(second_id)],
+        f"department_role_{first_id}": "Руководитель первого отдела",
+        f"department_role_{second_id}": "Руководитель второго отдела",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+
+    with SessionLocal() as session:
+        employee = session.get(Employee, employee_id)
+        assert employee.name == f"Руководитель после правки {suffix}"
+        memberships = {item.department_id: item for item in employee.department_memberships}
+        assert set(memberships) == {first_id, second_id}
+        assert memberships[first_id].is_primary is True
+        assert memberships[second_id].is_primary is True
+        assert memberships[first_id].role == "Руководитель первого отдела"
+        assert memberships[second_id].role == "Руководитель второго отдела"
