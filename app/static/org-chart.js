@@ -28,7 +28,7 @@
     if (zoomValue) zoomValue.textContent = Math.round(zoom * 100) + '%';
   };
   const zoomAt = (next, x, y) => {
-    const value = clamp(next, 0.35, 1.8);
+    const value = clamp(next, 0.15, 3);
     const worldX = (x - panX) / zoom;
     const worldY = (y - panY) / zoom;
     zoom = value;
@@ -41,7 +41,7 @@
     const height = Math.max(stage.offsetHeight, 1);
     const availableWidth = Math.max(viewport.clientWidth - 44, 1);
     const availableHeight = Math.max(viewport.clientHeight - 76, 1);
-    zoom = clamp(Math.min(availableWidth / width, availableHeight / height, 1), 0.35, 1);
+    zoom = clamp(Math.min(availableWidth / width, availableHeight / height, 1), 0.15, 1);
     panX = (viewport.clientWidth - width * zoom) / 2;
     panY = Math.max(22, (viewport.clientHeight - height * zoom) / 2);
     render();
@@ -127,7 +127,7 @@
       const rect = viewport.getBoundingClientRect();
       const x = center.x - rect.left;
       const y = center.y - rect.top;
-      zoom = clamp(pinchStart.zoom * distance(points[0], points[1]) / pinchStart.distance, 0.35, 1.8);
+      zoom = clamp(pinchStart.zoom * distance(points[0], points[1]) / pinchStart.distance, 0.15, 3);
       panX = x - pinchStart.worldX * zoom;
       panY = y - pinchStart.worldY * zoom;
       render();
