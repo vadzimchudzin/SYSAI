@@ -189,11 +189,9 @@ def status(limit: int = 6) -> dict:
     with SessionLocal() as s:
         rows = s.query(TicnoteImport).order_by(TicnoteImport.created_at.desc()).limit(limit).all()
         for row in rows:
-            # A manually stopped download stays in the database to prevent the
-            # scanner from automatically importing it again, but it should no
-            # longer clutter the UI or keep the user-facing state stuck.
-            if row.status == "error" and (row.error or "") == "Скачивание остановлено вручную":
-                continue
+            # A manually stopped download remains visible with an explicit Retry action.
+            # _claim() still blocks automatic retries while attempts == MAX_ATTEMPTS;
+            # the manual retry endpoint resets attempts before the next scan.
             m = s.get(Meeting, row.meeting_id) if row.meeting_id else None
             if _stale(row):
                 state = "error"
