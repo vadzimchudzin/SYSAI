@@ -132,7 +132,7 @@
         <strong>SYSAT</strong>
         <span>{{ map_departments|length }} подразделений</span>
         <span>{{ map_member_count }} связей с сотрудниками</span>
-        <small>Перетащите сюда карточку, чтобы поднять её на уровень компании</small>
+        <small>Без подразделения: {{ map_unassigned|length }} сотрудников. Перетащите сюда карточку, чтобы поднять её на уровень компании</small>
       </div>
       {% for d in map_departments %}
       <article class="org-map-node org-map-dept-node"
