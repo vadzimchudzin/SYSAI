@@ -563,3 +563,19 @@ def test_department_map_crown_uses_director_position_even_without_director_acces
     assert response.status_code == 200
     assert "Корнюшко Сергей Михайлович" in response.text
     assert "director-crown" in response.text and "♛" in response.text
+
+
+def test_department_map_company_root_can_be_moved_and_remembers_position(client):
+    from app import settings_store
+
+    response = client.post("/departments/map/position", json={
+        "node_type": "company", "map_x": 730, "map_y": 540,
+    })
+    assert response.status_code == 200 and response.json() == {"ok": True}
+    assert settings_store.get("org_map_root_x") == 730
+    assert settings_store.get("org_map_root_y") == 540
+
+    page = client.get("/departments?view=map")
+    assert page.status_code == 200
+    assert 'left:730px;top:540px' in page.text
+    assert 'data-node-kind="company"' in page.text

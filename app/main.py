@@ -1847,7 +1847,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
             furthest_right = max(furthest_right, employee_x + 310)
             furthest_bottom = max(furthest_bottom, employee_y + 145)
 
-    map_root_x, map_root_y = 85, 735
+    map_root_x = saved_coordinate(settings_store.get("org_map_root_x"), 85)
+    map_root_y = saved_coordinate(settings_store.get("org_map_root_y"), 735)
     map_board_width = max(3200, furthest_right + 520)
     map_board_height = max(2200, furthest_bottom + 420)
     map_member_count = sum(len(item["members"]) for item in map_departments) + len(map_unassigned)
@@ -1950,6 +1951,10 @@ async def department_map_position(request: Request):
             raise ValueError("coordinates out of bounds")
     except (TypeError, ValueError, AttributeError):
         raise HTTPException(400, "Некорректные координаты карточки")
+
+    if node_type == "company":
+        settings_store.set_many({"org_map_root_x": map_x, "org_map_root_y": map_y})
+        return JSONResponse({"ok": True})
 
     with SessionLocal() as s:
         if node_type == "department":

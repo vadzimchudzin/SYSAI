@@ -758,7 +758,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .clay-pulse { fill:var(--clay); color:var(--clay); }
 .blue-pulse { fill:var(--sblue); color:var(--sblue); }
 .org-map-root,.org-map-node { position:absolute; z-index:2; box-sizing:border-box; }
-.org-map-root { width:230px; display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:21px 19px; border:1px solid rgba(217,142,138,.48); border-radius:15px; background:linear-gradient(135deg,rgba(217,142,138,.12),rgba(143,168,216,.075)),#1c1b19; box-shadow:0 12px 28px rgba(0,0,0,.22); cursor:default; }
+.org-map-root { width:230px; display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:21px 19px; border:1px solid rgba(217,142,138,.48); border-radius:15px; background:linear-gradient(135deg,rgba(217,142,138,.12),rgba(143,168,216,.075)),#1c1b19; box-shadow:0 12px 28px rgba(0,0,0,.22); cursor:grab; touch-action:none; user-select:none; }
 .org-map-root-kicker,.org-map-node-kicker { color:var(--muted); font:10px/1.4 var(--mono); letter-spacing:.11em; text-transform:uppercase; }
 .org-map-root strong { font-size:25px; line-height:1.08; letter-spacing:.035em; }
 .org-map-root > span:not(.org-map-root-kicker) { color:var(--muted); font-size:11px; }
