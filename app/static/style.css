@@ -768,7 +768,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 .org-zoom-controls button:hover { border-color: var(--clay); }
 .org-zoom-controls span { min-width: 43px; text-align: center; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .org-zoom-controls i { width: 1px; height: 20px; margin: 0 4px; background: var(--line); }
-.org-viewport { position: relative; height: min(820px, calc(100vh - 280px)); min-height: 570px; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background-color: var(--bg2); background-image: radial-gradient(rgba(130,140,150,.24) .8px, transparent .8px); background-size: 20px 20px; touch-action: pan-y; cursor: grab; }
+.org-viewport { position: relative; height: min(820px, calc(100vh - 280px)); min-height: 570px; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background-color: var(--bg2); background-image: radial-gradient(rgba(130,140,150,.24) .8px, transparent .8px); background-size: 20px 20px; touch-action: none; cursor: grab; }
 .org-viewport.is-panning { cursor: grabbing; }
 .org-stage { position: absolute; inset: 0 auto auto 0; display: block; width: max-content; min-width: 100%; transform-origin: 0 0; will-change: transform; }
 .org-tree { display: flex; flex-direction: column; align-items: center; width: max-content; min-width: 100%; min-height: 100%; padding: 34px 42px 82px; box-sizing: border-box; }
