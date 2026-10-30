@@ -1742,8 +1742,10 @@ def employee_voice_sample_delete(request: Request, eid: int):
 
 
 @app.get("/departments", response_class=HTMLResponse)
-def departments_view(request: Request, edit: int = 0, msg: str = ""):
+def departments_view(request: Request, edit: int = 0, msg: str = "",
+                     view: str = "list", open_add: int = 0):
     guard_admin(request)
+    view = "map" if view == "map" else "list"
     with SessionLocal() as s:
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
         employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
@@ -1773,13 +1775,42 @@ def departments_view(request: Request, edit: int = 0, msg: str = ""):
                             if employee.id not in member_ids_by_department[department.id]]
             for department in departments
         }
-    return page(request, "departments.html", departments=departments, edit=edit, msg=msg,
-                available_employees_by_department=available_employees_by_department, department_heads=department_heads)
+        map_departments = []
+        assigned_employee_ids = set()
+        for department in departments:
+            members = []
+            for membership in department.memberships:
+                employee = membership.employee
+                if employee is None or not employee.active:
+                    continue
+                assigned_employee_ids.add(employee.id)
+                members.append({
+                    "id": employee.id, "name": employee.name, "position": employee.position or "",
+                    "role": membership.role or "", "is_primary": bool(membership.is_primary),
+                })
+            map_departments.append({
+                "id": department.id, "name": department.name, "description": department.description or "",
+                "active": bool(department.active), "members": members,
+                "head_name": department_heads[department.id].employee.name if department_heads[department.id] else "",
+            })
+        map_unassigned = [
+            {"id": employee.id, "name": employee.name, "position": employee.position or "",
+             "role": "", "is_primary": False}
+            for employee in employees if employee.id not in assigned_employee_ids
+        ]
+    map_row_count = max(1, len(map_departments) + (1 if map_unassigned else 0))
+    return page(
+        request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
+        open_add=open_add, map_departments=map_departments, map_unassigned=map_unassigned,
+        map_row_count=map_row_count, available_employees_by_department=available_employees_by_department,
+        department_heads=department_heads,
+    )
 
 
 @app.post("/departments")
 def department_save(request: Request, id: int = Form(0), name: str = Form(...),
-                    description: str = Form(""), active: str = Form(""), regulations: str = Form(None)):
+                    description: str = Form(""), active: str = Form(""), regulations: str = Form(None),
+                    return_view: str = Form("list")):
     guard_admin(request)
     clean_name = name.strip()[:100]
     if not clean_name:
@@ -1800,11 +1831,13 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         department.active = bool(active) if id else True
         s.add(department)
         s.commit()
-    return RedirectResponse("/departments", 303)
+    safe_view = "map" if return_view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}#department-{department.id}", 303)
 
 
 @app.post("/departments/{department_id}/head")
-def department_set_head(request: Request, department_id: int, employee_id: int = Form(0)):
+def department_set_head(request: Request, department_id: int, employee_id: int = Form(0),
+                        view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -1826,13 +1859,14 @@ def department_set_head(request: Request, department_id: int, employee_id: int =
         f"Назначен начальник подразделения «{department_name}»: {chosen_name}."
         if chosen_name else f"Назначение начальника подразделения «{department_name}» снято."
     )
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}&msg=" + quote(message) + f"#department-{department_id}", 303)
 
 
 @app.post("/departments/{department_id}/members")
 def department_add_member(request: Request, department_id: int,
                           employee_id: int = Form(0), role: str = Form(""),
-                          responsibilities: str = Form("")):
+                          responsibilities: str = Form(""), view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -1853,14 +1887,22 @@ def department_add_member(request: Request, department_id: int,
         membership.responsibilities = responsibilities.strip()[:4000]
         s.commit()
         message = f"{employee.name} добавлен в подразделение «{department.name}». Он сохранён в общем справочнике сотрудников."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(
+        f"/departments?view={safe_view}&open_add={department_id}&msg=" + quote(message)
+        + f"#department-{department_id}-add", 303,
+    )
 
 
 @app.post("/departments/{department_id}/members/create")
-def department_create_member(request: Request, department_id: int, name: str = Form(...),
-                             aliases: str = Form(""), position: str = Form(""),
-                             telegram_contact: str = Form(""), role: str = Form(""),
-                             responsibilities: str = Form("")):
+async def department_create_member(
+    request: Request, department_id: int, name: str = Form(...),
+    aliases: str = Form(""), position: str = Form(""), competencies: str = Form(""),
+    employee_responsibilities: str = Form(""), context: str = Form(""),
+    telegram_contact: str = Form(""), bitrix_user_id: str = Form(""),
+    role: str = Form(""), responsibilities: str = Form(""),
+    view: str = Form("list"), access_level: str = Form("employee"),
+):
     guard_admin(request)
     clean_name = name.strip()[:200]
     if not clean_name:
@@ -1871,6 +1913,12 @@ def department_create_member(request: Request, department_id: int, name: str = F
             contact = userbot.normalize_ref(contact)
         except userbot.RefError as exc:
             raise HTTPException(400, str(exc))
+    from . import access
+    selected_level = access_level.strip() or "employee"
+    if selected_level not in access.LEVELS:
+        raise HTTPException(400, "Неизвестный уровень доступа")
+    if selected_level != "employee" and not contact:
+        raise HTTPException(400, "Для повышенных прав сначала укажите Telegram сотрудника")
     with SessionLocal() as s:
         department = s.get(Department, department_id)
         if department is None:
@@ -1886,12 +1934,15 @@ def department_create_member(request: Request, department_id: int, name: str = F
             if membership is None:
                 raise HTTPException(
                     409,
-                    f"Сотрудник «{duplicate.name}» уже есть в общем справочнике. Добавьте существующую запись."
+                    f"Сотрудник «{duplicate.name}» уже есть в общем справочнике. Выберите существующую карточку."
                 )
             raise HTTPException(409, f"«{duplicate.name}» уже состоит в этом подразделении.")
         employee = Employee(
             name=clean_name, aliases=aliases.strip()[:500], position=position.strip()[:200],
-            channel="telegram", telegram_chat_id=contact, active=True,
+            competencies=competencies.strip()[:4000],
+            responsibilities=employee_responsibilities.strip()[:4000],
+            context=context.strip()[:4000], channel="telegram",
+            telegram_chat_id=contact, bitrix_user_id=bitrix_user_id.strip()[:40], active=True,
         )
         s.add(employee)
         s.flush()
@@ -1899,13 +1950,23 @@ def department_create_member(request: Request, department_id: int, name: str = F
             employee_id=employee.id, department_id=department.id,
             role=role.strip()[:200], responsibilities=responsibilities.strip()[:4000],
         ))
+        employee_id = employee.id
+        department_name = department.name
         s.commit()
-        message = f"Создан сотрудник «{employee.name}» и добавлен в «{department.name}». Он отображается и в общем справочнике."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    if selected_level != "employee":
+        access.set_level(employee_id, selected_level)
+    agent.invalidate_roster()
+    message = f"Создан сотрудник «{clean_name}» и добавлен в «{department_name}». Все данные профиля сохранены."
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(
+        f"/departments?view={safe_view}&open_add={department_id}&msg=" + quote(message)
+        + f"#department-{department_id}-add", 303,
+    )
 
 
 @app.post("/departments/{department_id}/members/{employee_id}/remove")
-def department_remove_member(request: Request, department_id: int, employee_id: int):
+def department_remove_member(request: Request, department_id: int, employee_id: int,
+                             view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -1919,18 +1980,20 @@ def department_remove_member(request: Request, department_id: int, employee_id: 
         department_name = department.name if department is not None else "подразделение"
         employee_name = employee.name if employee is not None else "Сотрудник"
     message = f"{employee_name} исключён из «{department_name}». Запись в общем справочнике сотрудников сохранена."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}&msg=" + quote(message) + f"#department-{department_id}", 303)
 
 
 @app.post("/departments/{department_id}/delete")
-def department_delete(request: Request, department_id: int):
+def department_delete(request: Request, department_id: int, view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
         if department:
             s.delete(department)
             s.commit()
-    return RedirectResponse("/departments", 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}#departments-list", 303)
 
 
 # ----------------------------------------------------------------------------- meeting reminders
