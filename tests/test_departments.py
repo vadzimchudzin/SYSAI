@@ -3,7 +3,7 @@ import json
 import uuid
 
 from app import analyze
-from app.db import Department, Employee, EmployeeDepartment, SessionLocal
+from app.db import Department, Employee, EmployeeDepartment, OrgRelation, SessionLocal
 
 
 def test_employee_can_have_distinct_roles_and_duties_in_multiple_departments():
@@ -412,7 +412,7 @@ def test_department_map_assign_adds_membership_without_removing_existing_members
     response = client.get("/departments?view=map")
     assert response.status_code == 200
     assert response.text.count('data-node-key="employee:%s"' % deputy_id) == 1
-    assert response.text.count('class="org-map-edge org-map-edge-manager"') == 3
+    assert response.text.count('"kind": "manager"') == 3
     assert "Конструктор — отдел А" in response.text
     assert "Конструктор — отдел Б" in response.text
     assert "Конструктор — отдел В" in response.text
@@ -447,7 +447,6 @@ def test_department_map_reports_to_edges_are_modular_and_cycles_are_rejected(cli
 
     with SessionLocal() as session:
         assert session.query(OrgRelation).count() == 2
-        assert session.query(EmployeeDepartment).filter_by(employee_id=lead_id, department_id=1).count() == 0 or True
 
     page = client.get("/departments?view=map")
     assert page.status_code == 200
