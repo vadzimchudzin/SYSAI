@@ -315,3 +315,62 @@ def test_create_department_returns_to_and_opens_create_form(client):
     assert 'id="department-create-form"' in page.text
     assert f'Создать подразделение' in page.text
     assert 'request.query_params' not in page.text
+
+
+def test_global_employee_creation_saves_complete_profile_and_returns_to_card(client):
+    suffix = uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        first = Department(name=f"Первый отдел {suffix}")
+        second = Department(name=f"Второй отдел {suffix}")
+        session.add_all([first, second])
+        session.commit()
+        first_id, second_id = first.id, second.id
+
+    response = client.post(
+        "/employees",
+        data={
+            "id": "0",
+            "name": f"Сотрудник из полной формы {suffix}",
+            "aliases": "Саша, Александр",
+            "position": "Инженер",
+            "competencies": "PLC, HMI",
+            "responsibilities": "Разработка и наладка",
+            "context": "Ведёт проекты автоматизации",
+            "channel": "telegram",
+            "telegram_manual": "",
+            "telegram_chat_id": "",
+            "bitrix_user_id": "913",
+            "access_level": "employee",
+            "department_ids": [str(first_id), str(second_id)],
+            f"department_role_{first_id}": "Инженер ПЛК",
+            f"department_responsibilities_{first_id}": "Разработка программ",
+            f"department_role_{second_id}": "Инженер HMI",
+            f"department_responsibilities_{second_id}": "Разработка экранов",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "/employees#employee-" in response.headers["location"]
+
+    with SessionLocal() as session:
+        employee = session.query(Employee).filter_by(name=f"Сотрудник из полной формы {suffix}").one()
+        assert employee.aliases == "Саша, Александр"
+        assert employee.position == "Инженер"
+        assert employee.competencies == "PLC, HMI"
+        assert employee.responsibilities == "Разработка и наладка"
+        assert employee.context == "Ведёт проекты автоматизации"
+        assert employee.bitrix_user_id == "913"
+        memberships = {m.department_id: m for m in employee.department_memberships}
+        assert set(memberships) == {first_id, second_id}
+        assert memberships[first_id].role == "Инженер ПЛК"
+        assert memberships[first_id].responsibilities == "Разработка программ"
+        assert memberships[second_id].role == "Инженер HMI"
+        assert memberships[second_id].responsibilities == "Разработка экранов"
+
+
+def test_global_employee_add_form_shows_full_profile_fields(client):
+    response = client.get("/employees?add=1")
+    assert response.status_code == 200
+    for field in ("aliases", "position", "competencies", "responsibilities", "context",
+                  "department_ids", "telegram_manual", "bitrix_user_id", "access_level"):
+        assert f'name="{field}"' in response.text
