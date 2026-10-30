@@ -276,7 +276,7 @@
     const person = event.target.closest('[data-map-person]');
     if (person && person !== draggedCard) {
       const r = person.getBoundingClientRect();
-      person.classList.add(event.clientY < r.top + r.height / 2 ? 'is-drop-before' : 'is-drop-after');
+      person.classList.add(event.clientX < r.left + r.width / 2 ? 'is-drop-before' : 'is-drop-after');
     }
   });
   grid.addEventListener('drop', async event => {
@@ -295,7 +295,7 @@
       const i = ordered.indexOf(targetPerson);
       if (i >= 0) {
         const r = targetPerson.getBoundingClientRect();
-        const nextIndex = i + (event.clientY >= r.top + r.height / 2 ? 1 : 0);
+        const nextIndex = i + (event.clientX >= r.left + r.width / 2 ? 1 : 0);
         beforeEmployeeId = Number(ordered[nextIndex]?.dataset.employeeId || 0);
       }
     }
