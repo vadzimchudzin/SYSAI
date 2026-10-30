@@ -1,6 +1,6 @@
 {% from "_logo.html" import logo %}{% from "_icons.html" import icon %}<!doctype html>
 <html lang="ru"><head>{% include "_head.html" %}<title>{% block title %}SYSAI{% endblock %}</title></head>
-<body><div class="aura soft" aria-hidden="true"><i></i><i></i><i></i></div>
+<body class="{{ 'org-layout' if request.url.path.startswith('/organization') else '' }}"><div class="aura soft" aria-hidden="true"><i></i><i></i><i></i></div>
 {% set path = request.url.path %}
 <div class="shell">
   <aside class="side" id="side">
