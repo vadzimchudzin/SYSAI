@@ -313,14 +313,26 @@
     if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
     const drag = activeDrag;
     activeDrag = null;
-    drag.node.classList.remove('is-map-dragging');
-    if (!drag.moved) return;
+    if (!drag.moved) {
+      drag.node.classList.remove('is-map-dragging');
+      return;
+    }
     suppressClick = true;
     window.setTimeout(() => { suppressClick = false; }, 350);
 
+    // The dragged card sits above the drop target. Temporarily make it
+    // transparent to hit-testing so the department/SYSAT underneath is found.
+    let hit = null;
+    if (drag.node.dataset.nodeKind === 'employee') {
+      const oldPointerEvents = drag.node.style.pointerEvents;
+      drag.node.style.pointerEvents = 'none';
+      hit = document.elementFromPoint(event.clientX,event.clientY);
+      drag.node.style.pointerEvents = oldPointerEvents;
+    }
+    drag.node.classList.remove('is-map-dragging');
+
     let targetDepartmentId = null;
     if (drag.node.dataset.nodeKind === 'employee') {
-      const hit = document.elementFromPoint(event.clientX,event.clientY);
       const targetDepartment = hit && hit.closest('[data-drop-department]');
       const targetRoot = hit && hit.closest('[data-drop-root]');
       const point = canvasPoint(event.clientX,event.clientY);
