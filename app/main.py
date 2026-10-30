@@ -1858,7 +1858,7 @@ def organization_view(request: Request):
 
 @app.post("/api/org/departments/{department_id}/members/{employee_id}")
 async def organization_assign_member(request: Request, department_id: int, employee_id: int):
-    """Create or update one employee↔department link without deleting the employee or other memberships."""
+    """Add a department membership or move an employee from one department to another atomically."""
     guard_admin(request)
     try:
         payload = await request.json()
@@ -1866,6 +1866,15 @@ async def organization_assign_member(request: Request, department_id: int, emplo
         raise HTTPException(400, "Некорректный JSON") from None
     if not isinstance(payload, dict):
         raise HTTPException(400, "Ожидался объект с параметрами назначения")
+
+    move_from_id = payload.get("move_from_department_id")
+    try:
+        move_from_id = int(move_from_id) if move_from_id not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректный исходный отдел") from None
+    if move_from_id == department_id:
+        move_from_id = None
+
     with SessionLocal() as s:
         department = s.get(Department, department_id)
         if department is None:
@@ -1875,37 +1884,114 @@ async def organization_assign_member(request: Request, department_id: int, emplo
         employee = s.get(Employee, employee_id)
         if employee is None or not employee.active:
             raise HTTPException(404, "Активный сотрудник не найден")
+
+        source_department = None
+        source_membership = None
+        if move_from_id is not None:
+            source_department = s.get(Department, move_from_id)
+            if source_department is None:
+                raise HTTPException(404, "Исходное подразделение не найдено")
+            source_membership = s.query(EmployeeDepartment).filter_by(
+                employee_id=employee.id, department_id=source_department.id
+            ).one_or_none()
+            if source_membership is None:
+                raise HTTPException(404, "Сотрудник больше не состоит в исходном подразделении")
+
         membership = s.query(EmployeeDepartment).filter_by(
             employee_id=employee.id, department_id=department.id
         ).one_or_none()
         created = membership is None
+        source_role = source_membership.role if source_membership is not None else ""
+        source_responsibilities = source_membership.responsibilities if source_membership is not None else ""
         if membership is None:
-            membership = EmployeeDepartment(employee_id=employee.id, department_id=department.id)
+            membership = EmployeeDepartment(
+                employee_id=employee.id,
+                department_id=department.id,
+                role=(str(payload.get("role") or "").strip()[:200]
+                      if "role" in payload else (source_role or "")),
+                responsibilities=(str(payload.get("responsibilities") or "").strip()[:4000]
+                                  if "responsibilities" in payload else (source_responsibilities or "")),
+            )
             s.add(membership)
             s.flush()
-        if "role" in payload:
-            membership.role = str(payload.get("role") or "").strip()[:200]
-        if "responsibilities" in payload:
-            membership.responsibilities = str(payload.get("responsibilities") or "").strip()[:4000]
+        else:
+            if "role" in payload:
+                membership.role = str(payload.get("role") or "").strip()[:200]
+            elif source_role and not membership.role:
+                membership.role = source_role
+            if "responsibilities" in payload:
+                membership.responsibilities = str(payload.get("responsibilities") or "").strip()[:4000]
+            elif source_responsibilities and not membership.responsibilities:
+                membership.responsibilities = source_responsibilities
+
         make_head = payload.get("is_head") is True
         if make_head:
             for current in s.query(EmployeeDepartment).filter_by(department_id=department.id).all():
                 current.is_primary = current.employee_id == employee.id
+        if source_membership is not None:
+            s.delete(source_membership)
+
         s.commit()
-        return JSONResponse({
+        result = {
             "ok": True,
             "created": created,
+            "moved": source_membership is not None,
             "is_head": bool(membership.is_primary),
             "employee": {"id": employee.id, "name": employee.name},
             "department": {"id": department.id, "name": department.name},
             "message": (
                 f"{employee.name} назначен руководителем «{department.name}»."
                 if make_head else
+                f"{employee.name} перенесён из «{source_department.name}» в «{department.name}»."
+                if source_department is not None else
                 f"{employee.name} добавлен в «{department.name}»."
                 if created else
                 f"{employee.name} уже состоит в «{department.name}»."
             ),
-        })
+        }
+
+    agent.invalidate_roster()
+    return JSONResponse(result)
+
+
+@app.post("/api/org/employees/{employee_id}/unassign")
+async def organization_unassign_member(request: Request, employee_id: int):
+    """Remove one employee↔department link while keeping the canonical employee record intact."""
+    guard_admin(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Ожидался объект с параметрами назначения")
+    try:
+        department_id = int(payload.get("department_id") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректное подразделение") from None
+    if department_id <= 0:
+        raise HTTPException(400, "Не указано подразделение")
+
+    with SessionLocal() as s:
+        employee = s.get(Employee, employee_id)
+        if employee is None:
+            raise HTTPException(404, "Сотрудник не найден")
+        department = s.get(Department, department_id)
+        if department is None:
+            raise HTTPException(404, "Подразделение не найдено")
+        membership = s.query(EmployeeDepartment).filter_by(
+            employee_id=employee.id, department_id=department.id
+        ).one_or_none()
+        if membership is None:
+            raise HTTPException(404, "Сотрудник не состоит в этом подразделении")
+        employee_name, department_name = employee.name, department.name
+        s.delete(membership)
+        s.commit()
+
+    agent.invalidate_roster()
+    return JSONResponse({
+        "ok": True,
+        "message": f"{employee_name} исключён из «{department_name}». Карточка сотрудника сохранена.",
+    })
 
 
 @app.post("/api/org/employees")
