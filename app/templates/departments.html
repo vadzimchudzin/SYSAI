@@ -109,7 +109,7 @@
         <span class="org-map-root-kicker">ORGANIZATION</span>
         <strong>SYSAT</strong>
         <span>{{ map_departments|length }} подразделений</span>
-        <span>{{ (map_departments|map(attribute='members')|map('length')|sum) + map_unassigned|length }} связей с сотрудниками</span>
+        <span>{{ map_member_count }} связей с сотрудниками</span>
       </div>
       {% for d in map_departments %}
       <div class="org-map-department-cell" id="department-{{ d.id }}" style="grid-row: {{ loop.index }};">
