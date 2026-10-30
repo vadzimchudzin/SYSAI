@@ -562,7 +562,7 @@ button.linkish { background: none; border: 0; color: var(--clay); padding: 0; cu
 
 /* Employee directory layout: one create action, edit details per person. */
 .employees-page-head { align-items: center; }
-.employee-add-panel { max-width: 760px; }
+.employee-add-panel { max-width: 980px; }
 .employee-add-panel h2 { margin: 0; }
 .employee-add-heading { margin-bottom: 14px; }
 .employee-add-heading p { margin: 4px 0 0; }
