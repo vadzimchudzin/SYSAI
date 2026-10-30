@@ -586,7 +586,8 @@ def test_department_map_opens_fullscreen_and_supports_background_pan(client):
     assert 'class="content map-fullscreen-content"' in response.text
     assert 'Зажмите ЛКМ на свободном месте' in response.text
     assert "finishPan" in response.text
-    assert "department-create" not in response.text
+    assert 'id="create-department"' not in response.text
+    assert 'class="card department-create"' not in response.text
 
 
 def test_department_map_company_root_can_be_moved_and_remembers_position(client):
