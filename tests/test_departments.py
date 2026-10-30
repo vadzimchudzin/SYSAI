@@ -377,3 +377,91 @@ def test_global_employee_add_form_shows_full_profile_fields(client):
     for field in ("aliases", "position", "competencies", "responsibilities", "context",
                   "department_ids", "telegram_manual", "bitrix_user_id", "access_level"):
         assert f'name="{field}"' in response.text
+
+
+def test_department_map_drag_drop_moves_reorders_and_places_employee_at_company_root(client):
+    with SessionLocal() as session:
+        first = Department(name="Переносимый отдел А")
+        second = Department(name="Переносимый отдел Б")
+        a = Employee(name="Сотрудник А")
+        b = Employee(name="Сотрудник Б")
+        c = Employee(name="Сотрудник В")
+        root = Employee(name="Сотрудник на уровне компании")
+        session.add_all([first, second, a, b, c, root])
+        session.flush()
+        session.add_all([
+            EmployeeDepartment(employee_id=a.id, department_id=first.id, role="Инженер", responsibilities="Проекты"),
+            EmployeeDepartment(employee_id=b.id, department_id=second.id, role="Начальник группы", sort_order=0),
+            EmployeeDepartment(employee_id=c.id, department_id=second.id, role="Аналитик", sort_order=1),
+        ])
+        session.commit()
+        first_id, second_id, a_id, b_id, c_id, root_id = first.id, second.id, a.id, b.id, c.id, root.id
+
+    response = client.post("/departments/map/move", json={
+        "employee_id": a_id, "source_department_id": first_id,
+        "target_department_id": second_id, "before_employee_id": b_id,
+    })
+    assert response.status_code == 200 and response.json() == {"ok": True}
+    with SessionLocal() as session:
+        assert session.query(EmployeeDepartment).filter_by(employee_id=a_id, department_id=first_id).count() == 0
+        moved = session.query(EmployeeDepartment).filter_by(employee_id=a_id, department_id=second_id).one()
+        assert moved.role == "Инженер" and moved.responsibilities == "Проекты"
+        ordered = session.query(EmployeeDepartment).filter_by(department_id=second_id).order_by(
+            EmployeeDepartment.sort_order, EmployeeDepartment.id
+        ).all()
+        assert [row.employee_id for row in ordered] == [a_id, b_id, c_id]
+
+    response = client.post("/departments/map/move", json={
+        "employee_id": c_id, "source_department_id": second_id,
+        "target_department_id": second_id, "before_employee_id": a_id,
+    })
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        ordered = session.query(EmployeeDepartment).filter_by(department_id=second_id).order_by(
+            EmployeeDepartment.sort_order, EmployeeDepartment.id
+        ).all()
+        assert [row.employee_id for row in ordered] == [c_id, a_id, b_id]
+
+    response = client.post("/departments/map/move", json={
+        "employee_id": a_id, "source_department_id": second_id,
+        "target_department_id": 0, "before_employee_id": root_id,
+    })
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        assert session.query(EmployeeDepartment).filter_by(employee_id=a_id).count() == 0
+        ordered_root = session.query(Employee).filter(
+            Employee.active.is_(True), ~Employee.department_memberships.any()
+        ).order_by(Employee.org_order, Employee.name, Employee.id).all()
+        assert [person.id for person in ordered_root][:2] == [a_id, root_id]
+    map_page = client.get("/departments?view=map")
+    assert map_page.status_code == 200
+    assert "Без подразделения" in map_page.text
+    assert "Сотрудник А" in map_page.text
+
+
+def test_department_map_marks_reviewers_red_and_director_with_crown(client, monkeypatch):
+    from app import access
+    with SessionLocal() as session:
+        department = Department(name="Отдел цветовых статусов")
+        reviewer = Employee(name="Проверяющий на карте")
+        director = Employee(name="Директор на карте")
+        session.add_all([department, reviewer, director])
+        session.flush()
+        session.add_all([
+            EmployeeDepartment(employee_id=reviewer.id, department_id=department.id),
+            EmployeeDepartment(employee_id=director.id, department_id=department.id),
+        ])
+        session.commit()
+
+    def level_of(employee):
+        if employee.name == "Проверяющий на карте":
+            return "reviewer"
+        if employee.name == "Директор на карте":
+            return "director"
+        return "employee"
+
+    monkeypatch.setattr(access, "level_of", level_of)
+    response = client.get("/departments?view=map")
+    assert response.status_code == 200
+    assert "is-reviewer" in response.text and "ПРОВЕРЯЮЩИЙ" in response.text
+    assert "is-director" in response.text and "director-crown" in response.text
