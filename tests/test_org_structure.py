@@ -23,8 +23,8 @@ def test_organization_canvas_groups_all_departments_under_one_manager(client):
     assert response.status_code == 200
     assert f"Технический отдел {suffix}" in response.text
     assert f"ОПО {suffix}" in response.text
-    # The manager is one graph node with two outgoing department branches.
-    assert response.text.count(f"Заместитель {suffix}") == 2  # roster + one manager node
+    # The manager is rendered once as a graph node, not duplicated per department.
+    assert response.text.count('class="org-manager-node"') == 1
 
 
 def test_drag_assignment_creates_membership_without_duplicating_employee(client):
