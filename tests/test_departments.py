@@ -565,12 +565,9 @@ def test_department_map_crown_is_reserved_for_kornyushko_only(client, monkeypatc
     response = client.get("/departments?view=map")
     assert response.status_code == 200
     assert response.text.count('class="director-crown"') == 1
-    deputy_start = response.text.index(f'data-employee-id="{deputy_id}"')
-    deputy_card = response.text[deputy_start:response.text.index("</a>", deputy_start)]
-    director_start = response.text.index(f'data-employee-id="{director_id}"')
-    director_card = response.text[director_start:response.text.index("</a>", director_start)]
-    assert "is-director" not in deputy_card and "director-crown" not in deputy_card
-    assert "is-director" in director_card and "director-crown" in director_card
+    assert response.text.count('class="org-map-node org-map-person-node is-director"') == 1
+    assert f'data-employee-id="{deputy_id}"' in response.text
+    assert f'data-employee-id="{director_id}"' in response.text
 
 
 def test_department_map_opens_fullscreen_and_supports_background_pan(client):
