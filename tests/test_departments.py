@@ -369,6 +369,9 @@ def test_global_employee_creation_saves_complete_profile_and_returns_to_card(cli
 
 
 def test_global_employee_add_form_shows_full_profile_fields(client):
+    with SessionLocal() as session:
+        session.add(Department(name=f"Подразделение формы {uuid.uuid4().hex[:8]}"))
+        session.commit()
     response = client.get("/employees?add=1")
     assert response.status_code == 200
     for field in ("aliases", "position", "competencies", "responsibilities", "context",
