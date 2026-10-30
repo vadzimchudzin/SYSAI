@@ -1832,7 +1832,11 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         s.add(department)
         s.commit()
     safe_view = "map" if return_view == "map" else "list"
-    return RedirectResponse(f"/departments?view={safe_view}#department-{department.id}", 303)
+    if id:
+        target = f"/departments?view={safe_view}#department-{department.id}"
+    else:
+        target = f"/departments?view={safe_view}&create=1#department-create-form"
+    return RedirectResponse(target, 303)
 
 
 @app.post("/departments/{department_id}/head")
