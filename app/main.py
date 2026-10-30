@@ -1753,7 +1753,9 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
     view = "map" if view == "map" else "list"
     with SessionLocal() as s:
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
-        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
+        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name, Employee.id).all()
+        from . import access
+        access_levels = {employee.id: access.level_of(employee) for employee in employees}
         for department in departments:
             for membership in department.memberships:
                 if membership.employee is not None:
@@ -1792,18 +1794,23 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
                 members.append({
                     "id": employee.id, "name": employee.name, "position": employee.position or "",
                     "role": membership.role or "", "is_primary": bool(membership.is_primary),
+                    "access_level": access_levels.get(employee.id, "employee"),
                 })
             map_departments.append({
                 "id": department.id, "name": department.name, "description": department.description or "",
                 "active": bool(department.active), "members": members,
                 "head_name": department_heads[department.id].employee.name if department_heads[department.id] else "",
             })
+        unassigned_employees = sorted(
+            (employee for employee in employees if employee.id not in assigned_employee_ids),
+            key=lambda employee: (employee.org_order or 0, (employee.name or "").casefold(), employee.id),
+        )
         map_unassigned = [
             {"id": employee.id, "name": employee.name, "position": employee.position or "",
-             "role": "", "is_primary": False}
-            for employee in employees if employee.id not in assigned_employee_ids
+             "role": "", "is_primary": False, "access_level": access_levels.get(employee.id, "employee")}
+            for employee in unassigned_employees
         ]
-    map_row_count = max(1, len(map_departments) + (1 if map_unassigned else 0))
+    map_row_count = len(map_departments) + 1
     map_member_count = sum(len(item["members"]) for item in map_departments) + len(map_unassigned)
     return page(
         request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
@@ -1812,6 +1819,82 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
         available_employees_by_department=available_employees_by_department,
         department_heads=department_heads,
     )
+
+
+@app.post("/departments/map/move")
+async def department_map_move(request: Request):
+    """Move and reorder an employee on the organisation map."""
+    guard_admin(request)
+    try:
+        data = await request.json()
+        employee_id = int(data.get("employee_id") or 0)
+        source_department_id = int(data.get("source_department_id") or 0)
+        target_department_id = int(data.get("target_department_id") or 0)
+        before_employee_id = int(data.get("before_employee_id") or 0)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "Некорректные параметры перемещения")
+    if employee_id <= 0 or source_department_id < 0 or target_department_id < 0:
+        raise HTTPException(400, "Некорректный сотрудник или подразделение")
+
+    with SessionLocal() as s:
+        employee = s.get(Employee, employee_id)
+        if employee is None or not employee.active:
+            raise HTTPException(404, "Активный сотрудник не найден")
+
+        if target_department_id == 0:
+            # A drop onto the company root means that the person no longer belongs
+            # to any department. The employee record itself is never deleted.
+            s.query(EmployeeDepartment).filter_by(employee_id=employee_id).delete(synchronize_session=False)
+            s.flush()
+            root_people = s.query(Employee).filter(
+                Employee.active.is_(True), ~Employee.department_memberships.any()
+            ).order_by(Employee.org_order, Employee.name, Employee.id).all()
+            root_people = [person for person in root_people if person.id != employee_id]
+            insert_at = next((i for i, person in enumerate(root_people)
+                              if person.id == before_employee_id), len(root_people))
+            root_people.insert(insert_at, employee)
+            for index, person in enumerate(root_people):
+                person.org_order = index
+        else:
+            target_department = s.get(Department, target_department_id)
+            if target_department is None or not target_department.active:
+                raise HTTPException(400, "Целевое подразделение не найдено или неактивно")
+
+            source_membership = None
+            if source_department_id:
+                source_membership = s.query(EmployeeDepartment).filter_by(
+                    employee_id=employee_id, department_id=source_department_id
+                ).one_or_none()
+            target_membership = s.query(EmployeeDepartment).filter_by(
+                employee_id=employee_id, department_id=target_department_id
+            ).one_or_none()
+            carried_role = source_membership.role if source_membership else ""
+            carried_duties = source_membership.responsibilities if source_membership else ""
+            if source_department_id and source_department_id != target_department_id and source_membership is not None:
+                s.delete(source_membership)
+                s.flush()
+            if target_membership is None:
+                target_membership = EmployeeDepartment(
+                    employee_id=employee_id, department_id=target_department_id,
+                    role=carried_role or "", responsibilities=carried_duties or "", sort_order=0,
+                )
+                s.add(target_membership)
+                s.flush()
+
+            target_people = s.query(EmployeeDepartment).filter_by(
+                department_id=target_department_id
+            ).order_by(EmployeeDepartment.sort_order, EmployeeDepartment.id).all()
+            target_people = [membership for membership in target_people
+                             if membership.employee_id != employee_id]
+            insert_at = next((i for i, membership in enumerate(target_people)
+                              if membership.employee_id == before_employee_id), len(target_people))
+            target_people.insert(insert_at, target_membership)
+            for index, membership in enumerate(target_people):
+                membership.sort_order = index
+            employee.org_order = 0
+
+        s.commit()
+    return JSONResponse({"ok": True})
 
 
 @app.post("/departments")
