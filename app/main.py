@@ -1652,10 +1652,15 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
             s.rollback()
             raise HTTPException(400, "Сначала укажите Telegram сотрудника: права привязываются к его аккаунту")
         s.commit()
+        saved_employee_id = e.id
     if level and level != access.level_of(e):
         access.set_level(e, level)  # after the card is saved: the settings are written in their own transaction
     agent.invalidate_roster()
-    return RedirectResponse("/employees", 303)
+    target = (
+        f"/employees?edit={saved_employee_id}#employee-{saved_employee_id}"
+        if id else f"/employees#employee-{saved_employee_id}"
+    )
+    return RedirectResponse(target, 303)
 
 
 def _voice_redirect(employee_id: int, message: str):
