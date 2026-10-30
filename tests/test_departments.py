@@ -540,6 +540,13 @@ def test_department_map_drop_moves_one_membership_and_preserves_other_department
         assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=second_id).count() == 0
         assert session.query(EmployeeDepartment).filter_by(employee_id=employee_id, department_id=third_id).count() == 1
 
+    # The person is intentionally visible both as a direct company-level report
+    # and as a member of the remaining department.
+    page = client.get("/departments?view=map")
+    assert page.status_code == 200
+    assert page.text.count("Сотрудник с несколькими отделами") == 2
+    assert 'data-source-department-id="0"' in page.text
+
 
 def test_department_map_crown_uses_director_position_even_without_director_access_level(client, monkeypatch):
     from app import access

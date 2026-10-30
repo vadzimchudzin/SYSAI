@@ -1829,7 +1829,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
             furthest_bottom = max(furthest_bottom, department_y + 180)
 
         unassigned_employees = [
-            employee for employee in employees if employee.id not in direct_employee_ids
+            employee for employee in employees
+            if employee.id not in direct_employee_ids or (employee.map_x is not None and employee.map_y is not None)
         ]
         map_unassigned = []
         for index, employee in enumerate(unassigned_employees):

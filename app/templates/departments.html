@@ -136,7 +136,7 @@
       </div>
       {% for d in map_departments %}
       <article class="org-map-node org-map-dept-node"
-               data-map-node data-node-kind="department" data-department-id="{{ d.id }}" data-drop-department="{{ d.id }}"
+               data-map-node data-node-kind="department" data-department-id="{{ d.id }}"{% if d.active %} data-drop-department="{{ d.id }}"{% endif %}
                style="left:{{ d.map_x }}px;top:{{ d.map_y }}px"
                title="Перетащить подразделение в любую точку доски">
         <span class="org-map-node-kicker">ПОДРАЗДЕЛЕНИЕ</span>
