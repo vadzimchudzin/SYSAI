@@ -223,3 +223,95 @@ def test_department_head_is_marked_in_department_and_employee_pages(client):
     assert "Начальник: Руководитель со звездой" in department_page.text
     assert "Руководитель со звездой" in employee_page.text
     assert "★" in department_page.text and "★" in employee_page.text
+
+
+def test_departments_mind_map_renders_department_members_and_unassigned_people(client):
+    suffix = uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        department = Department(name=f"Карта подразделений {suffix}", description="Тестовая структура")
+        member = Employee(name=f"Участник карты {suffix}", position="Инженер")
+        unassigned = Employee(name=f"Без подразделения {suffix}", position="Специалист")
+        session.add_all([department, member, unassigned])
+        session.flush()
+        session.add(EmployeeDepartment(
+            employee_id=member.id, department_id=department.id,
+            role="Ведущий инженер", responsibilities="Проектирование",
+        ))
+        session.commit()
+
+    response = client.get("/departments?view=map")
+    assert response.status_code == 200
+    assert "org-map-grid" in response.text
+    assert f"Карта подразделений {suffix}" in response.text
+    assert f"Участник карты {suffix}" in response.text
+    assert f"Без подразделения {suffix}" in response.text
+    assert "Mind map" in response.text
+
+
+def test_create_department_employee_full_profile_in_one_submit_and_keep_add_panel_open(client):
+    suffix = uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        department = Department(name=f"Полная карточка {suffix}")
+        session.add(department)
+        session.commit()
+        department_id = department.id
+
+    response = client.post(
+        f"/departments/{department_id}/members/create",
+        data={
+            "name": f"Новый инженер {suffix}",
+            "aliases": "Иван, Ваня",
+            "position": "Инженер АСУ ТП",
+            "competencies": "PLC, SCADA, Schneider M241",
+            "employee_responsibilities": "Разработка программ ПЛК",
+            "context": "Ведёт проекты автоматизации зерносушилок",
+            "telegram_contact": "",
+            "bitrix_user_id": "712",
+            "role": "Инженер-проектировщик",
+            "responsibilities": "Разработка и сопровождение HMI",
+            "view": "list",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert f"open_add={department_id}" in response.headers["location"]
+    assert f"#department-{department_id}-add" in response.headers["location"]
+
+    with SessionLocal() as session:
+        employee = session.query(Employee).filter_by(name=f"Новый инженер {suffix}").one()
+        assert employee.aliases == "Иван, Ваня"
+        assert employee.position == "Инженер АСУ ТП"
+        assert employee.competencies == "PLC, SCADA, Schneider M241"
+        assert employee.responsibilities == "Разработка программ ПЛК"
+        assert employee.context == "Ведёт проекты автоматизации зерносушилок"
+        assert employee.bitrix_user_id == "712"
+        membership = session.query(EmployeeDepartment).filter_by(
+            employee_id=employee.id, department_id=department_id,
+        ).one()
+        assert membership.role == "Инженер-проектировщик"
+        assert membership.responsibilities == "Разработка и сопровождение HMI"
+
+    page = client.get(response.headers["location"])
+    assert page.status_code == 200
+    assert f'id="department-{department_id}-add" open' in page.text
+
+
+def test_create_department_returns_to_and_opens_create_form(client):
+    suffix = uuid.uuid4().hex[:8]
+    response = client.post(
+        "/departments",
+        data={
+            "name": f"Новый отдел {suffix}",
+            "description": "Команда испытаний",
+            "regulations": "Согласование через начальника",
+            "return_view": "list",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "create=1" in response.headers["location"]
+    page = client.get(response.headers["location"])
+    assert page.status_code == 200
+    assert 'id="department-create-form"' in page.text
+    assert f'Создать подразделение' in page.text
+    assert 'request.query_params' not in page.text
