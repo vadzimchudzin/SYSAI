@@ -619,7 +619,10 @@ def test_department_map_opens_fullscreen_and_supports_background_pan(client):
     assert 'class="shell map-fullscreen-shell"' in response.text
     assert 'class="content map-fullscreen-content"' in response.text
     assert 'ЛКМ по пустому месту' in response.text
-    assert "finishPan" in response.text
+    assert "org-map.js" in response.text and "org-map.css" in response.text
+    from pathlib import Path
+    script = (Path(__file__).resolve().parents[1] / "app" / "static" / "org-map.js").read_text(encoding="utf-8")
+    assert "finishPan" in script and "fitView" in script and "autoLayout" in script
     assert 'id="create-department"' not in response.text
     assert 'class="card department-create"' not in response.text
 
@@ -642,3 +645,30 @@ def test_department_map_company_root_can_be_moved_and_remembers_position(client)
     assert 'left:4300px;top:2700px' in page.text
     assert 'data-node-kind="company"' in page.text
     assert 'width:5050px' in page.text and 'height:3300px' in page.text
+
+
+def test_department_map_payload_describes_people_and_department_accents(client):
+    import json
+    import re
+    with SessionLocal() as session:
+        department = Department(name="Данные карты — отдел", description="Описание", regulations="Регламент")
+        head = Employee(name="Данные карты — руководитель", position="Начальник")
+        session.add_all([department, head])
+        session.flush()
+        session.add(EmployeeDepartment(employee_id=head.id, department_id=department.id, role="Руководитель", is_primary=True))
+        session.commit()
+        department_id, head_id = department.id, head.id
+
+    page = client.get("/departments?view=map")
+    assert page.status_code == 200
+    raw = re.search(r'<script type="application/json" id="org-map-data">(.*?)</script>', page.text, re.S).group(1)
+    payload = json.loads(raw)
+    dept = next(d for d in payload["departments"] if d["id"] == department_id)
+    assert dept["regulations"] == "Регламент" and isinstance(dept["accent"], int)
+    person = next(e for e in payload["employees"] if e["id"] == head_id)
+    assert len(person["memberships"]) == 1
+    membership = person["memberships"][0]
+    assert (membership["department_id"], membership["role"], membership["is_primary"]) == (department_id, "Руководитель", True)
+    assert person["position"] == "Начальник" and person["editable"] in (True, False)
+    assert len(payload["accents"]) >= 6
+    assert f'data-node-key="employee:{head_id}"' in page.text and 'data-head="1"' in page.text
