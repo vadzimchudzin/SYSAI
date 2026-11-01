@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block title %}Подразделения — SYSAI{% endblock %}
+{% macro initials(name) %}{% set parts = (name or '').replace('-', ' ').split() %}{% if not parts %}С{% elif parts|length == 1 %}{{ parts[0][:2]|upper }}{% else %}{{ (parts[0][:1] ~ parts[1][:1])|upper }}{% endif %}{% endmacro %}
 {% macro form(d) %}
 <form method="post" action="/departments" class="department-form">
   <input type="hidden" name="id" value="{{ d.id if d else 0 }}">
@@ -77,17 +78,17 @@
 {% macro map_person_node(member) %}
 <a class="org-map-node org-map-person-node{% if member.access_level == 'reviewer' %} is-reviewer{% endif %}{% if member.is_director %} is-director{% endif %}"
    data-map-node data-node-kind="employee" data-node-key="employee:{{ member.id }}"
-   data-employee-id="{{ member.id }}" draggable="false"
+   data-employee-id="{{ member.id }}"{% if member.manager_summary %} data-head="1"{% endif %}{% if not member.department_ids %} data-unassigned="1"{% endif %} draggable="false"
    style="left:{{ member.map_x }}px;top:{{ member.map_y }}px"
-   href="/employees?edit={{ member.id }}" title="Перетащить сотрудника; связи с отделами и руководителями сохраняются отдельно">
-  <span class="org-map-person-avatar">{{ (member.name or 'С')[:1]|upper }}</span>
+   href="/employees?edit={{ member.id }}" title="{{ member.name }}{% if member.role_summary %} · {{ member.role_summary }}{% endif %}">
+  <span class="org-map-person-avatar" aria-hidden="true">{{ initials(member.name) }}</span>
   <span class="org-map-person-copy">
     <strong>{{ member.name }}</strong>
     <small>{{ member.position or 'Должность не указана' }}</small>
-    {% if member.manager_summary %}<small class="org-map-manager-summary">Руководит: {{ member.manager_summary }}</small>{% elif member.department_summary %}<small class="org-map-role">{{ member.department_summary }}</small>{% endif %}
+    {% if member.manager_summary %}<small class="org-map-manager-summary">Руководит: {{ member.manager_summary }}</small>{% elif member.department_summary %}<small class="org-map-role">{{ member.department_summary }}</small>{% else %}<small class="org-map-role is-free">Без подразделения</small>{% endif %}
     {% if member.access_level == 'reviewer' %}<small class="org-map-reviewer-label">ПРОВЕРЯЮЩИЙ</small>{% endif %}
   </span>
-  {% if member.is_director %}<span class="director-crown" title="Директор" aria-label="Директор">♛</span>{% endif %}
+  {% if member.is_director %}<span class="director-crown" title="Директор" aria-label="Директор"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.2 8.2 7.6 12 12 4.8l4.4 7.2 4.4-3.8-1.9 10.3H5.1Z"/><path d="M5.4 20.6h13.2"/></svg></span>{% elif member.manager_summary %}<span class="org-head-badge" title="Руководитель подразделения" aria-label="Руководитель">★</span>{% endif %}
 </a>
 {% endmacro %}
 {% block body %}
@@ -112,67 +113,149 @@
 {% endif %}
 
 {% if view == 'map' %}
-<section class="card org-map-panel" id="org-map">
-  <header class="org-map-heading">
+{% set company_title = 'SysAT' %}
+{% set head_total = map_employees|selectattr('manager_summary')|list|length %}
+{% set ACCENTS = ['#d98e8a', '#8fa8d8', '#7fb7a4', '#e0a85a', '#b59ad9', '#d7b46a', '#e39bb7', '#86b6cf'] %}
+{% set accent_by_dept = {} %}
+{% for d in departments|sort(attribute='id') %}{% set _ = accent_by_dept.update({d.id: loop.index0 % ACCENTS|length}) %}{% endfor %}
+<link rel="stylesheet" href="{{ asset('org-map.css') }}">
+<section class="org-map-panel org-studio" id="org-map">
+  <header class="org-map-heading org-studio-head">
     <div class="org-map-heading-main">
       <div class="org-map-heading-copy">
-        <h2>Конструктор структуры SYSAI</h2>
-        <p class="small muted">Одна карточка — один сотрудник. Перетаскивайте сотрудников на отделы, руководителей или SYSAT: создаются отдельные связи, прежние назначения сохраняются.</p>
+        <span class="org-studio-kicker"><i class="org-studio-tile" aria-hidden="true"></i>Организационная структура</span>
+        <h2>{{ company_title }} <em>— карта команды</em></h2>
       </div>
+      <ul class="org-studio-stats" aria-label="Сводка">
+        <li><b>{{ map_departments|length }}</b><span>подразделений</span></li>
+        <li><b>{{ map_employees|length }}</b><span>сотрудников</span></li>
+        <li><b>{{ head_total }}</b><span>руководителей</span></li>
+        <li class="{{ 'is-warn' if map_unassigned else '' }}"><b>{{ map_unassigned|length }}</b><span>без отдела</span></li>
+      </ul>
       <nav class="org-map-top-actions" aria-label="Инструменты конструктора">
-        <a class="btn sm active" href="/departments?view=map#org-map">Mind map</a>
-        <a class="btn sm" href="/departments?view=list#departments-list">Список</a>
-        <a class="btn sm" href="/employees">Сотрудники</a>
+        <div class="org-view-toggle" role="group" aria-label="Представление структуры">
+          <a class="active" href="/departments?view=map#org-map">Mind map</a>
+          <a href="/departments?view=list#departments-list">Список</a>
+        </div>
+        <a class="btn sm ghost" href="/employees">Справочник</a>
         <button class="btn sm" type="button" data-create-department>＋ Подразделение</button>
+        <button class="btn sm primary" type="button" data-create-employee-for="0" {% if not map_departments|selectattr('active')|list %}disabled title="Сначала создайте активное подразделение"{% endif %}>＋ Сотрудник</button>
       </nav>
-    </div>
-    <div class="org-map-legend">
-      <span><i class="org-legend-dot clay"></i> Подразделения</span>
-      <span><i class="org-legend-dot blue"></i> Сотрудники</span>
-      <span class="org-legend-reviewer"><i></i> Проверяющие</span>
-      <span class="org-legend-director">♛ Директор</span>
-      <span class="org-map-hint">ЛКМ по пустому месту — двигать доску · карточку на карточку — связать блоки · клик по линии — удалить</span>
     </div>
   </header>
   {% if not map_departments and not map_employees %}
-    <div class="empty-state"><h3>Структура пока пуста</h3><p class="muted">Создайте первое подразделение или добавьте первого сотрудника через конструктор.</p><button class="btn primary" type="button" data-create-department>＋ Создать подразделение</button></div>
-  {% else %}
-  <div class="org-map-scroll" id="org-map-scroll">
-    <div class="org-map-canvas org-map-grid" id="org-map-canvas" style="width:{{ map_board_width }}px;height:{{ map_board_height }}px">
-      <svg class="org-map-lines" aria-hidden="true" preserveAspectRatio="none"></svg>
-      <div class="org-map-root" data-map-node data-node-kind="company" data-node-key="company:1" data-drop-root style="left:{{ map_root_x }}px;top:{{ map_root_y }}px">
-        <span class="org-map-root-kicker">ORGANIZATION</span>
-        <strong>SYSAI</strong>
-        <span>{{ map_departments|length }} подразделений</span>
-        <span>{{ map_employees|length }} сотрудников</span>
-        <small>Перетащите сотрудника сюда, чтобы связать его напрямую с компанией</small>
-      </div>
-      {% for d in map_departments %}
-      <article class="org-map-node org-map-dept-node"
-               data-map-node data-node-kind="department" data-node-key="department:{{ d.id }}"
-               data-department-id="{{ d.id }}"{% if d.active %} data-drop-department="{{ d.id }}"{% endif %}
-               style="left:{{ d.map_x }}px;top:{{ d.map_y }}px">
-        <span class="org-map-node-kicker">ПОДРАЗДЕЛЕНИЕ</span>
-        <strong>{{ d.name }}</strong>
-        <span class="org-map-node-meta">{{ d.members|length }} сотрудников{% if d.head_name %} · руководитель: {{ d.head_name }}{% endif %}</span>
-        <span class="org-map-node-status"><i class="{{ 'is-active' if d.active else '' }}"></i>{{ 'Активно' if d.active else 'Неактивно' }}</span>
-        <div class="org-map-node-actions">
-          <a href="/departments?view=list&edit={{ d.id }}#department-{{ d.id }}">Изменить</a>
-          {% if d.active %}<button type="button" data-create-employee-for="{{ d.id }}" data-department-name="{{ d.name }}">＋ Сотрудник</button>{% endif %}
-        </div>
-      </article>
-      {% endfor %}
-      {% for member in map_employees %}{{ map_person_node(member) }}{% endfor %}
+    <div class="org-empty">
+      <i class="org-studio-tile is-big" aria-hidden="true"></i>
+      <h3>Структура пока пуста</h3>
+      <p class="muted">Создайте первое подразделение — затем добавляйте людей прямо на карте.</p>
+      <button class="btn primary" type="button" data-create-department>＋ Создать подразделение</button>
     </div>
+  {% else %}
+  <div class="org-map-stage" id="org-map-stage">
+    <div class="org-map-scroll" id="org-map-scroll" tabindex="0" aria-label="Карта структуры: колесо — масштаб, перетаскивание пустого места — перемещение">
+      <div class="org-map-canvas org-map-grid" id="org-map-canvas" style="width:{{ map_board_width }}px;height:{{ map_board_height }}px">
+        <svg class="org-map-lines" aria-hidden="true"></svg>
+        <div class="org-map-root" data-map-node data-node-kind="company" data-node-key="company:1" data-drop-root style="left:{{ map_root_x }}px;top:{{ map_root_y }}px">
+          <span class="org-map-root-halo" aria-hidden="true"></span>
+          <i class="org-studio-tile is-root" aria-hidden="true"></i>
+          <span class="org-map-root-kicker">Компания</span>
+          <strong>{{ company_title }}</strong>
+          <span class="org-map-root-stats"><span><b>{{ map_departments|length }}</b> отделов</span><span><b>{{ map_employees|length }}</b> человек</span></span>
+        </div>
+        {% for d in map_departments %}
+        <article class="org-map-node org-map-dept-node{{ '' if d.active else ' is-inactive' }}"
+                 data-map-node data-node-kind="department" data-node-key="department:{{ d.id }}"
+                 data-department-id="{{ d.id }}" data-accent="{{ accent_by_dept.get(d.id, 0) }}"{% if d.active %} data-drop-department="{{ d.id }}"{% endif %}
+                 style="left:{{ d.map_x }}px;top:{{ d.map_y }}px">
+          <div class="org-dept-top">
+            <span class="org-map-node-kicker">Подразделение</span>
+            <span class="org-map-node-status"><i class="{{ 'is-active' if d.active else '' }}"></i>{{ 'Активно' if d.active else 'Неактивно' }}</span>
+          </div>
+          <strong>{{ d.name }}</strong>
+          {% if d.description %}<p class="org-dept-desc">{{ d.description }}</p>{% endif %}
+          <div class="org-dept-foot">
+            <span class="org-dept-faces" aria-hidden="true">{% for m in d.members[:4] %}<i>{{ initials(m.employee.name) }}</i>{% endfor %}{% if d.members|length > 4 %}<i class="more">+{{ d.members|length - 4 }}</i>{% endif %}</span>
+            <span class="org-map-node-meta">{{ d.members|length }} {{ 'сотрудник' if d.members|length % 10 == 1 and d.members|length % 100 != 11 else ('сотрудника' if d.members|length % 10 in [2,3,4] and d.members|length % 100 not in [12,13,14] else 'сотрудников') }}</span>
+          </div>
+          <div class="org-dept-head">{% if d.head_name %}<span class="org-head-badge" aria-hidden="true">★</span><span>{{ d.head_name }}</span>{% else %}<span class="muted">Руководитель не назначен</span>{% endif %}</div>
+          <div class="org-map-node-actions">
+            <button type="button" data-inspect-department="{{ d.id }}">Состав</button>
+            {% if d.active %}<button type="button" class="is-add" data-create-employee-for="{{ d.id }}" data-department-name="{{ d.name }}">＋ Сотрудник</button>{% endif %}
+          </div>
+        </article>
+        {% endfor %}
+        {% for member in map_employees %}{{ map_person_node(member) }}{% endfor %}
+      </div>
+    </div>
+
+    <div class="org-map-search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+      <input id="org-map-search" type="search" placeholder="Найти сотрудника или отдел" autocomplete="off" aria-label="Поиск по карте">
+      <kbd>/</kbd>
+      <div class="org-map-search-results" id="org-map-search-results" hidden></div>
+    </div>
+
+    <div class="org-map-toolbar" role="toolbar" aria-label="Масштаб и раскладка">
+      <button type="button" data-zoom="out" title="Уменьшить (−)" aria-label="Уменьшить">−</button>
+      <button type="button" class="org-zoom-value" data-zoom="reset" title="Масштаб 100%" id="org-zoom-value">100%</button>
+      <button type="button" data-zoom="in" title="Увеличить (+)" aria-label="Увеличить">＋</button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" data-zoom="fit" title="Показать всю структуру (F)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>Вписать</button>
+      <button type="button" data-auto-layout title="Аккуратно разложить всю структуру"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="5.5" r="2.2"/><circle cx="19" cy="12" r="2.2"/><circle cx="19" cy="18.5" r="2.2"/><path d="M7.2 12h9.6M7 11c4-5.5 6-5.5 9.8-5.5M7 13c4 5.5 6 5.5 9.8 5.5"/></svg>Упорядочить</button>
+    </div>
+
+    <div class="org-map-legend" aria-label="Обозначения">
+      <span><i class="org-legend-line is-member"></i> Состав отдела</span>
+      <span><i class="org-legend-line is-head"></i> Руководитель</span>
+      <span><i class="org-legend-line is-report"></i> Подчинение</span>
+      <span class="org-legend-reviewer"><i></i> Проверяющий</span>
+      <span class="org-legend-director"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.2 8.2 7.6 12 12 4.8l4.4 7.2 4.4-3.8-1.9 10.3H5.1Z"/></svg> Директор</span>
+      <details class="org-map-help"><summary>Как работать</summary>
+        <p class="org-map-hint">ЛКМ по пустому месту — двигать доску · колесо — масштаб · карточку сотрудника на отдел — добавить в состав · карточку на карточку — связать блоки · клик по линии — удалить связь · клик по карточке — редактировать.</p>
+      </details>
+    </div>
+
+    <aside class="org-inspector" id="org-inspector" aria-live="polite" hidden></aside>
   </div>
   <script type="application/json" id="org-map-edges">{{ map_edges|tojson }}</script>
+  <script type="application/json" id="org-map-data">
+  {%- set orm_emps = {} -%}
+  {%- set memberships_by_emp = {} -%}
+  {%- for d in departments -%}{%- for m in d.memberships -%}{%- if m.employee and m.employee.active -%}
+    {%- set _ = orm_emps.update({m.employee_id: m.employee}) -%}
+    {%- if m.employee_id not in memberships_by_emp -%}{%- set _ = memberships_by_emp.update({m.employee_id: []}) -%}{%- endif -%}
+    {%- set _ = memberships_by_emp[m.employee_id].append({'department_id': d.id, 'role': m.role or '', 'responsibilities': m.responsibilities or '', 'is_primary': true if m.is_primary else false, 'legacy_xy': m.map_x is not none and m.map_y is not none}) -%}
+  {%- endif -%}{%- endfor -%}{%- endfor -%}
+  {%- for people in available_employees_by_department.values() -%}{%- for e in people -%}{%- set _ = orm_emps.update({e.id: e}) -%}{%- endfor -%}{%- endfor -%}
+  {%- set payload_emps = [] -%}
+  {%- for me in map_employees -%}{%- set e = orm_emps.get(me.id) -%}{%- set ms = memberships_by_emp.get(me.id, []) -%}
+    {%- set _ = payload_emps.append({
+      'id': me.id, 'name': me.name, 'position': me.position, 'access_level': me.access_level,
+      'editable': e is not none,
+      'aliases': (e.aliases or '') if e else '', 'competencies': (e.competencies or '') if e else '',
+      'responsibilities': (e.responsibilities or '') if e else '', 'context': (e.context or '') if e else '',
+      'telegram': (e.telegram_chat_id or '') if e else '', 'bitrix': (e.bitrix_user_id or '') if e else '',
+      'channel': (e.channel or 'telegram') if e else 'telegram', 'legacy_department': (e.department or '') if e else '',
+      'saved': (e is not none and e.map_x is not none and e.map_y is not none) or (ms|selectattr('legacy_xy')|list|length > 0),
+      'memberships': ms}) -%}
+  {%- endfor -%}
+  {%- set payload_depts = [] -%}
+  {%- for d in departments -%}{%- set _ = payload_depts.append({'id': d.id, 'name': d.name, 'description': d.description or '', 'regulations': d.regulations or '', 'active': true if d.active else false, 'accent': accent_by_dept.get(d.id, 0), 'saved': d.map_x is not none and d.map_y is not none}) -%}{%- endfor -%}
+  {%- set payload_rel = [] -%}
+  {%- for edge in map_edges if edge.relation_id -%}{%- set _ = payload_rel.append({'id': edge.relation_id, 'source': edge.source, 'target': edge.target, 'label': edge.label}) -%}{%- endfor -%}
+  {{- {'departments': payload_depts, 'employees': payload_emps, 'relations': payload_rel, 'accents': ACCENTS}|tojson -}}
+  </script>
   {% endif %}
+  <div class="org-toast" id="org-toast" role="status" data-initial="{{ msg }}"></div>
 
   <dialog class="org-map-dialog" id="org-employee-dialog">
     <form method="dialog" class="org-map-dialog-close-form"><button class="org-map-dialog-close" aria-label="Закрыть">×</button></form>
-    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">НОВАЯ КАРТОЧКА</span><h2>Добавить сотрудника</h2><p class="muted small">Профиль создаётся сразу со всеми доступными полями и членством в выбранном подразделении.</p><b id="org-employee-department-name"></b></div>
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">НОВАЯ КАРТОЧКА</span><h2>Добавить сотрудника</h2><p class="muted small">Профиль создаётся сразу с членством в выбранном подразделении. Существующего сотрудника можно просто перетащить на отдел.</p></div>
     <form id="org-employee-create-form" method="post" action="/departments/0/members/create" class="org-map-dialog-body">
       <input type="hidden" name="view" value="map">
+      <label class="f org-dialog-department">Подразделение *<select id="org-employee-department" required>
+        {% for d in map_departments if d.active %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+      </select></label>
       <div class="employee-create-section">
         <div class="employee-create-section-head"><b>Основная информация</b></div>
         <div class="employee-profile-grid">
@@ -226,7 +309,7 @@
       <input type="hidden" name="source_type"><input type="hidden" name="source_id"><input type="hidden" name="target_type"><input type="hidden" name="target_id">
       <label class="f">Тип связи<select name="relation_type"><option value="reports_to">Подчиняется / входит</option><option value="linked_to">Связан с</option><option value="deputy">Заместитель</option><option value="project_lead">Курирует направление</option></select></label>
       <label class="f">Подпись связи<input name="label" maxlength="200" placeholder="Например, подчиняется закупкам"></label>
-      <p class="small muted">Линия от блока, на который бросили, к перетащенному. Клик по линии удаляет связь, карточки остаются.</p>
+      <p class="small muted">Линия идёт от блока, на который бросили, к перетащенному. Клик по линии удаляет связь, карточки остаются.</p>
       <p class="org-map-dialog-error" role="alert"></p>
       <div class="org-map-dialog-actions"><button type="button" class="btn" data-dialog-close>Отмена</button><button class="btn primary">Сохранить связь</button></div>
     </form>
@@ -234,7 +317,7 @@
 
   <dialog class="org-map-dialog org-map-dialog-compact" id="org-department-dialog">
     <form method="dialog" class="org-map-dialog-close-form"><button class="org-map-dialog-close" aria-label="Закрыть">×</button></form>
-    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">НОВЫЙ УЗЕЛ</span><h2>Создать подразделение</h2><p class="muted small">Новый блок появится на доске, после этого в него можно назначать людей.</p></div>
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">НОВЫЙ УЗЕЛ</span><h2>Создать подразделение</h2><p class="muted small">Блок появится на карте рядом с остальными — сразу можно добавлять людей.</p></div>
     <form id="org-department-create-form" method="post" action="/departments" class="org-map-dialog-body">
       <input type="hidden" name="return_view" value="map">
       <label class="f">Название подразделения *<input name="name" required maxlength="100" placeholder="Например, Технический отдел"></label>
@@ -243,7 +326,14 @@
       <p class="org-map-dialog-error" role="alert"></p>
       <div class="org-map-dialog-actions"><button type="button" class="btn" data-dialog-close>Отмена</button><button class="btn primary">Создать подразделение</button></div>
     </form>
-  </dialog>{% else %}
+  </dialog>
+
+  <dialog class="org-map-dialog org-map-dialog-compact org-confirm" id="org-confirm-dialog">
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">ПОДТВЕРЖДЕНИЕ</span><h2 id="org-confirm-title">Подтвердите действие</h2><p class="muted small" id="org-confirm-text"></p></div>
+    <div class="org-map-dialog-body"><div class="org-map-dialog-actions"><button type="button" class="btn" data-confirm="no">Отмена</button><button type="button" class="btn danger" data-confirm="yes" id="org-confirm-yes">Удалить</button></div></div>
+  </dialog>
+</section>
+{% else %}
 <section class="departments-list" id="departments-list">
   <header class="departments-list-head"><div><h2>Структура компании</h2><p class="muted small">{{ departments|length }} подразделений</p></div></header>
   {% if not departments %}<div class="card empty-state"><h3>Подразделений пока нет</h3><p class="muted">Создайте отдел, добавьте сотрудников и выберите начальника.</p></div>{% endif %}
@@ -292,317 +382,5 @@
   {% endfor %}
 </section>
 {% endif %}
-<script>
-(() => {
-  const canvas = document.getElementById('org-map-canvas');
-  const viewport = document.getElementById('org-map-scroll');
-  if (!canvas || !viewport) return;
-  const svg = canvas.querySelector('.org-map-lines');
-  const edgesElement = document.getElementById('org-map-edges');
-  let edges = [];
-  try { edges = JSON.parse(edgesElement?.textContent || '[]'); } catch (_) { edges = []; }
-  let frame = 0, activeDrag = null, activePan = null, suppressClick = false;
-  const nodeSelector = key => {
-    const escaped = window.CSS && CSS.escape ? CSS.escape(key) : key.replace(/["\\]/g, '\\$&');
-    return canvas.querySelector(`[data-node-key="${escaped}"]`);
-  };
-  const canvasPoint = (clientX, clientY) => {
-    const r = canvas.getBoundingClientRect();
-    return { x:clientX-r.left, y:clientY-r.top };
-  };
-  const nodeRect = node => {
-    const r = node.getBoundingClientRect(), c = canvas.getBoundingClientRect();
-    return { cx:r.left-c.left+r.width/2,
-             cy:r.top-c.top+r.height/2,
-             width:r.width, height:r.height };
-  };
-  const pointOnBorder = (rect, toward) => {
-    const dx=toward.cx-rect.cx, dy=toward.cy-rect.cy;
-    const scale=1/Math.max(Math.abs(dx)/Math.max(rect.width/2,1),
-                           Math.abs(dy)/Math.max(rect.height/2,1),0.0001);
-    return {x:rect.cx+dx*scale,y:rect.cy+dy*scale};
-  };
-  const pathBetween = (source,target) => {
-    const a=pointOnBorder(source,target), b=pointOnBorder(target,source);
-    const dx=b.x-a.x,dy=b.y-a.y,bend=.38;
-    return `M ${a.x} ${a.y} C ${a.x+dx*bend} ${a.y+dy*bend}, ${b.x-dx*bend} ${b.y-dy*bend}, ${b.x} ${b.y}`;
-  };
-  function draw() {
-    cancelAnimationFrame(frame);
-    frame=requestAnimationFrame(()=>{
-      const width=canvas.clientWidth,height=canvas.clientHeight;
-      svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
-      svg.setAttribute('width',width);svg.setAttribute('height',height);
-      let markup='';
-      for(const edge of edges){
-        const source=nodeSelector(edge.source),target=nodeSelector(edge.target);
-        if(!source||!target)continue;
-        const path=pathBetween(nodeRect(source),nodeRect(target));
-        const kind=edge.kind==='manager'?'manager':edge.kind==='director'?'director':edge.kind==='block'?'block':edge.kind==='reporting'?'reporting':'membership';
-        const title=String(edge.label||'Связь').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
-        markup+=`<path class="org-map-edge org-map-edge-${kind}" data-edge-kind="${edge.relation_id?'org':'membership'}" data-edge-id="${edge.relation_id||''}" d="${path}"><title>${title}</title></path>`;
-      }
-      svg.innerHTML=markup;
-    });
-  }
-  const clamp=(value,max)=>Math.max(0,Math.min(Math.max(0,max),value));
-  const errorInto=(form,message)=>{
-    const target=form.querySelector('.org-map-dialog-error');
-    if(target)target.textContent=message||'Не удалось сохранить изменения.';
-  };
-  const openDialog=id=>{
-    const dialog=document.getElementById(id);
-    if(dialog&&!dialog.open)dialog.showModal();
-    return dialog;
-  };
-  document.querySelectorAll('[data-dialog-close]').forEach(button=>button.addEventListener('click',()=>{
-    button.closest('dialog')?.close();
-  }));
-  document.querySelectorAll('.org-map-dialog-close').forEach(button=>button.addEventListener('click',()=>{
-    button.closest('dialog')?.close();
-  }));
-  const fetchJson=async(url,payload)=>{
-    const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const result=await response.json().catch(()=>({}));
-    if(!response.ok||!result.ok)throw new Error(result.detail||'Не удалось сохранить связь.');
-    return result;
-  };
-  const postForm=async(form)=>{
-    const errorTarget=form.querySelector('.org-map-dialog-error');
-    if(errorTarget)errorTarget.textContent='';
-    const response=await fetch(form.action,{method:'POST',body:new FormData(form)});
-    if(!response.ok){
-      let message='Не удалось сохранить данные.';
-      try{const result=await response.json();message=result.detail||message;}catch(_){}
-      throw new Error(message);
-    }
-    window.location.reload();
-  };
-
-  document.querySelectorAll('[data-create-employee-for]').forEach(button=>button.addEventListener('click',()=>{
-    const id=Number(button.dataset.createEmployeeFor||0);
-    const form=document.getElementById('org-employee-create-form');
-    form.action=`/departments/${id}/members/create`;
-    form.querySelector('.org-map-dialog-error').textContent='';
-    form.reset();
-    document.getElementById('org-employee-department-name').textContent=button.dataset.departmentName||'';
-    openDialog('org-employee-dialog');
-  }));
-  document.querySelectorAll('[data-create-department]').forEach(button=>button.addEventListener('click',()=>{
-    const form=document.getElementById('org-department-create-form');
-    form.reset();form.querySelector('.org-map-dialog-error').textContent='';
-    openDialog('org-department-dialog');
-  }));
-  document.getElementById('org-employee-create-form')?.addEventListener('submit',async event=>{
-    event.preventDefault();
-    const form=event.currentTarget;
-    try{await postForm(form);}catch(error){errorInto(form,error.message);}
-  });
-  document.getElementById('org-department-create-form')?.addEventListener('submit',async event=>{
-    event.preventDefault();
-    const form=event.currentTarget;
-    try{await postForm(form);}catch(error){errorInto(form,error.message);}
-  });
-
-  const openAssign=(employeeNode,departmentNode)=>{
-    const form=document.getElementById('org-assign-form');
-    form.reset();form.querySelector('.org-map-dialog-error').textContent='';
-    form.elements.employee_id.value=employeeNode.dataset.employeeId;
-    form.elements.department_id.value=departmentNode.dataset.departmentId;
-    const employeeName=employeeNode.querySelector('.org-map-person-copy strong')?.textContent||'Сотрудник';
-    const departmentName=departmentNode.querySelector(':scope > strong')?.textContent||'подразделение';
-    document.getElementById('org-assign-summary').textContent=`${employeeName} → ${departmentName}. Другие назначения останутся без изменений.`;
-    openDialog('org-assign-dialog');
-  };
-  document.getElementById('org-assign-form')?.addEventListener('submit',async event=>{
-    event.preventDefault();
-    const form=event.currentTarget;
-    const payload={
-      employee_id:Number(form.elements.employee_id.value),
-      department_id:Number(form.elements.department_id.value),
-      role:form.elements.role.value,
-      responsibilities:form.elements.responsibilities.value,
-      is_primary:form.elements.is_primary.checked,
-      map_x:activeDropNode?Number.parseFloat(activeDropNode.style.left):null,
-      map_y:activeDropNode?Number.parseFloat(activeDropNode.style.top):null
-    };
-    try{
-      await fetchJson('/departments/map/assign',payload);
-      window.location.reload();
-    }catch(error){errorInto(form,error.message);}
-  });
-
-  let activeDropNode=null;
-  const nodeTitle=node=>{
-    if(!node) return 'блок';
-    if(node.dataset.nodeKind==='company') return 'SYSAI';
-    if(node.dataset.nodeKind==='department') return node.querySelector(':scope > strong')?.textContent||'подразделение';
-    return node.querySelector('.org-map-person-copy strong')?.textContent||'сотрудник';
-  };
-  const nodeIdentity=node=>{
-    if(node.dataset.nodeKind==='company') return {type:'company', id:1};
-    if(node.dataset.nodeKind==='department') return {type:'department', id:Number(node.dataset.departmentId)};
-    return {type:'employee', id:Number(node.dataset.employeeId)};
-  };
-  const openRelation=(sourceNode,targetNode)=>{
-    const form=document.getElementById('org-relation-form');
-    form.reset();form.querySelector('.org-map-dialog-error').textContent='';
-    const source=nodeIdentity(sourceNode), target=nodeIdentity(targetNode);
-    form.elements.source_type.value=source.type;
-    form.elements.source_id.value=source.id;
-    form.elements.target_type.value=target.type;
-    form.elements.target_id.value=target.id;
-    document.getElementById('org-relation-summary').textContent=`${nodeTitle(sourceNode)} → ${nodeTitle(targetNode)}`;
-    const typeSelect=form.elements.relation_type;
-    if(target.type==='department' && source.type!=='employee') typeSelect.value='linked_to';
-    else typeSelect.value='reports_to';
-    openDialog('org-relation-dialog');
-  };
-  document.getElementById('org-relation-form')?.addEventListener('submit',async event=>{
-    event.preventDefault();
-    const form=event.currentTarget;
-    const payload={
-      source_type:form.elements.source_type.value,
-      source_id:Number(form.elements.source_id.value),
-      target_type:form.elements.target_type.value,
-      target_id:Number(form.elements.target_id.value),
-      relation_type:form.elements.relation_type.value,
-      label:form.elements.label.value
-    };
-    try{
-      await fetchJson('/departments/map/relation',payload);
-      window.location.reload();
-    }catch(error){errorInto(form,error.message);}
-  });
-
-  const savePosition=async node=>{
-    const payload={
-      node_type:node.dataset.nodeKind,
-      map_x:Math.round(parseFloat(node.style.left)||0),
-      map_y:Math.round(parseFloat(node.style.top)||0)
-    };
-    if(node.dataset.nodeKind==='department')payload.department_id=Number(node.dataset.departmentId);
-    else if(node.dataset.nodeKind==='employee')payload.employee_id=Number(node.dataset.employeeId);
-    await fetchJson('/departments/map/position',payload);
-  };
-
-  canvas.addEventListener('pointerdown',event=>{
-    if(event.button!==0)return;
-    const node=event.target.closest('[data-map-node]');
-    if(!node){
-      activePan={pointerId:event.pointerId,startX:event.clientX,startY:event.clientY,
-        scrollLeft:viewport.scrollLeft,scrollTop:viewport.scrollTop,moved:false};
-      viewport.classList.add('is-panning');
-      canvas.setPointerCapture(event.pointerId);
-      event.preventDefault();
-      return;
-    }
-    if(event.target.closest('.org-map-node-actions a,.org-map-node-actions button'))return;
-    const point=canvasPoint(event.clientX,event.clientY);
-    activeDrag={node,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY,
-      offsetX:point.x-(parseFloat(node.style.left)||0),
-      offsetY:point.y-(parseFloat(node.style.top)||0),moved:false};
-    node.setPointerCapture(event.pointerId);
-  });
-  canvas.addEventListener('pointermove',event=>{
-    if(activePan&&activePan.pointerId===event.pointerId){
-      const pan=activePan,dx=event.clientX-pan.startX,dy=event.clientY-pan.startY;
-      if(!pan.moved&&Math.hypot(dx,dy)<3)return;
-      pan.moved=true;event.preventDefault();
-      viewport.scrollLeft=pan.scrollLeft-dx;viewport.scrollTop=pan.scrollTop-dy;
-      return;
-    }
-    if(!activeDrag||activeDrag.pointerId!==event.pointerId)return;
-    const drag=activeDrag,dx=event.clientX-drag.startX,dy=event.clientY-drag.startY;
-    if(!drag.moved&&Math.hypot(dx,dy)<4)return;
-    drag.moved=true;event.preventDefault();
-    drag.node.classList.add('is-map-dragging');
-    const point=canvasPoint(event.clientX,event.clientY);
-    drag.node.style.left=`${Math.round(clamp(point.x-drag.offsetX,canvas.clientWidth-drag.node.offsetWidth))}px`;
-    drag.node.style.top=`${Math.round(clamp(point.y-drag.offsetY,canvas.clientHeight-drag.node.offsetHeight))}px`;
-    draw();
-  });
-  const finishPan=event=>{
-    if(!activePan||activePan.pointerId!==event.pointerId)return;
-    const pan=activePan;activePan=null;viewport.classList.remove('is-panning');
-    if(pan.moved){suppressClick=true;window.setTimeout(()=>{suppressClick=false;},350);event.preventDefault();}
-  };
-  const finishDrag=async event=>{
-    if(!activeDrag||activeDrag.pointerId!==event.pointerId)return;
-    const drag=activeDrag;activeDrag=null;
-    drag.node.classList.remove('is-map-dragging');
-    if(!drag.moved)return;
-    suppressClick=true;window.setTimeout(()=>{suppressClick=false;},350);
-    const oldPointerEvents=drag.node.style.pointerEvents;
-    drag.node.style.pointerEvents='none';
-    const hit=document.elementFromPoint(event.clientX,event.clientY);
-    drag.node.style.pointerEvents=oldPointerEvents;
-    const targetDepartment=hit?.closest('[data-drop-department]');
-    const targetEmployee=hit?.closest('[data-node-kind="employee"]');
-    const targetRoot=hit?.closest('[data-drop-root]');
-    const targetBlock=hit?.closest('[data-map-node]');
-    if(drag.node.dataset.nodeKind==='employee'&&targetDepartment){
-      activeDropNode=drag.node;
-      try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
-      openAssign(drag.node,targetDepartment);
-      draw();return;
-    }
-    if(targetBlock && targetBlock!==drag.node){
-      const pairOk=(drag.node.dataset.nodeKind==='employee'&&(targetBlock.dataset.nodeKind==='employee'||targetBlock.dataset.nodeKind==='company'))
-        || (drag.node.dataset.nodeKind==='department'&&(targetBlock.dataset.nodeKind==='department'||targetBlock.dataset.nodeKind==='company'||targetBlock.dataset.nodeKind==='employee'))
-        || (drag.node.dataset.nodeKind==='company'&&targetBlock.dataset.nodeKind==='department');
-      if(pairOk){
-        activeDropNode=drag.node;
-        try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
-        openRelation(targetBlock, drag.node);
-        draw();return;
-      }
-    }
-    if(drag.node.dataset.nodeKind==='employee'&&targetEmployee&&targetEmployee!==drag.node){
-      activeDropNode=drag.node;
-      try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
-      openRelation(targetEmployee, drag.node);
-      draw();return;
-    }
-    if(drag.node.dataset.nodeKind==='employee'&&targetRoot){
-      activeDropNode=drag.node;
-      try{await savePosition(drag.node);}catch(error){window.alert(error.message);return;}
-      openRelation(targetRoot, drag.node);
-      draw();return;
-    }
-    draw();
-    try{await savePosition(drag.node);}catch(error){window.alert(error.message);window.location.reload();}
-  };
-  canvas.addEventListener('pointerup',finishPan);
-  canvas.addEventListener('pointercancel',finishPan);
-  canvas.addEventListener('pointerup',finishDrag);
-  canvas.addEventListener('pointercancel',finishDrag);
-  canvas.addEventListener('click',event=>{
-    const edge=event.target.closest('[data-edge-kind="org"][data-edge-id]');
-    if(edge){
-      event.preventDefault();event.stopPropagation();
-      if(!window.confirm('Удалить эту связь подчинения? Карточки сотрудников останутся.'))return;
-      fetch(`/departments/map/relation/${edge.dataset.edgeId}/delete`,{method:'POST'})
-        .then(response=>response.json()).then(result=>{if(result.ok)window.location.reload();else window.alert(result.detail||'Не удалось удалить связь.');})
-        .catch(()=>window.alert('Не удалось удалить связь.'));
-      return;
-    }
-    if(suppressClick){event.preventDefault();event.stopPropagation();}
-  },true);
-  if('ResizeObserver'in window){
-    const observer=new ResizeObserver(draw);observer.observe(canvas);
-    canvas.querySelectorAll('.org-map-node,.org-map-root').forEach(node=>observer.observe(node));
-  }
-  window.addEventListener('resize',draw,{passive:true});
-  const savedScroll=sessionStorage.getItem('sysai-org-map-scroll');
-  if(savedScroll){
-    try{const state=JSON.parse(savedScroll);viewport.scrollLeft=Number(state.left)||0;viewport.scrollTop=Number(state.top)||0;}catch(_){}
-    sessionStorage.removeItem('sysai-org-map-scroll');
-  }
-  window.addEventListener('beforeunload',()=>{
-    sessionStorage.setItem('sysai-org-map-scroll',JSON.stringify({left:viewport.scrollLeft,top:viewport.scrollTop}));
-  });
-  draw();
-})();
-</script>
+{% if view == 'map' %}<script src="{{ asset('org-map-views.js') }}"></script><script src="{{ asset('org-map.js') }}"></script>{% endif %}
 {% endblock %}
