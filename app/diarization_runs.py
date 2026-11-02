@@ -108,8 +108,8 @@ def _recording(meeting) -> tuple[str, bool]:
     raise diarize.DiarizationError("Записи этого совещания нет ни на сервере, ни в хранилище — сравнивать не на чем.")
 
 
-def _measure(truth, base, labels, allowed) -> dict:
-    return _compact(diarization_eval.evaluate(truth, _named(diarize.apply(base, labels), allowed)))
+def _measure(truth, base, labels, allowed, details=None) -> dict:
+    return _compact(diarization_eval.evaluate(truth, _named(diarize.apply(base, labels, details), allowed)))
 
 
 def _run_way(name, path, base, truth, total, settings, people, allowed, progress) -> dict:
@@ -120,8 +120,9 @@ def _run_way(name, path, base, truth, total, settings, people, allowed, progress
             result = {"thresholds": {f"{threshold:.2f}": _measure(truth, base, diarize.voice_labels(
                 base, groups, threshold, people, total), allowed) for threshold in diarize.THRESHOLDS}}
         else:
-            result = {"metrics": _measure(truth, base, diarize.gemini_labels(path, base, total, settings, people,
-                                                                            progress), allowed)}
+            details = {}  # the replicas the model cut where a second voice begins are measured as cut
+            labels = diarize.gemini_labels(path, base, total, settings, people, progress, details)
+            result = {"metrics": _measure(truth, base, labels, allowed, details)}
     except (diarize.DiarizationError, speaker_id.SpeakerIdentityError, llm.LLMError, OSError, ValueError) as exc:
         return {"error": str(exc)[:300], "at": _now()}
     except Exception as exc:  # noqa: BLE001  ffmpeg and friends: the other ways still run

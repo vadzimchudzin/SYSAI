@@ -1,5 +1,7 @@
 {% from "_icons.html" import icon %}{% from "_people_options.html" import employee_options %}
 {% macro plural(n, one, few, many) %}{{ one if n % 10 == 1 and n % 100 != 11 else (few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many) }}{% endmacro %}
+{% macro play(seq, start, end) %}{% if (recording or {}).playable %}<button type="button" class="vd-play-quote" data-vd-play-seq="{{ seq }}" data-from="{{ start }}" data-to="{{ end }}"
+          aria-label="Прослушать фрагмент {{ mmss(start) }}" title="Прослушать фрагмент" hidden><span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span></button>{% endif %}{% endmacro %}
 {% set d = diagram %}
 {% set people = d.speakers|length %}
 {% set rec = recording or {} %}
@@ -39,7 +41,7 @@
         title="{{ mmss(sp.seconds) }} речи · {{ sp.turns }} {{ plural(sp.turns, 'реплика', 'реплики', 'реплик') }}. Нажмите, чтобы выделить только этого говорящего.">
       <i class="vd-dot" aria-hidden="true"></i><span class="vd-chip-name">{{ sp.n }} · {{ sp.name }}</span>
       <span class="vd-chip-share">{{ sp.share }}%</span>
-      <span class="pill {{ sp.status_tone }}" title="{{ sp.status_hint }}">{{ sp.status_label }}</span>
+      <span class="pill {{ sp.status_tone }}" title="{{ sp.status_hint }}">{{ sp.status_label }}{% if sp.confidence is defined %} · {{ sp.confidence }}%{% endif %}</span>
     </button></li>
     {% endfor %}
   </ul>
@@ -95,25 +97,40 @@
 <section class="card vd-ask" id="voice-speakers" aria-labelledby="voice-speakers-title">
   <div class="row between"><h2 id="voice-speakers-title">Вопрос: кто это?</h2>
     <span class="pill amber">{{ d.unknown|length }} {{ plural(d.unknown|length, 'говорящий не распознан', 'говорящих не распознаны', 'говорящих не распознаны') }}</span></div>
-  <p class="small muted">Голос не совпал ни с одним образцом, а в разговоре нет представления или обращения по имени. {% if rec.playable %}Прослушайте фрагменты кнопкой ▶ или прочитайте их{% else %}Прочитайте фрагменты{% endif %} и укажите, кто это: имя заменится во всех его репликах.</p>
+  <p class="small muted">Голос не совпал ни с одним образцом, а разговор не доказывает имя достаточно уверенно. {% if rec.playable %}Прослушайте фрагменты кнопкой ▶ или прочитайте их{% else %}Прочитайте фрагменты{% endif %} и укажите, кто это: имя заменится во всех его репликах.</p>
   {% for sp in d.unknown %}
-  <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-ask-row" data-vd-assign>
-    <input type="hidden" name="speaker" value="{{ sp.name }}">
+  <div class="vd-ask-row">
     <div class="vd-ask-who"><i class="vd-dot" style="--c: {{ sp.color }}" aria-hidden="true"></i><b>{{ sp.name }}</b>
       <span class="small muted">{{ mmss(sp.seconds) }} речи · {{ sp.turns }} {{ plural(sp.turns, 'реплика', 'реплики', 'реплик') }} · {{ sp.share }}%</span></div>
     {% if sp.samples %}<ul class="vd-quotes">{% for q in sp.samples %}
-      <li>{% if rec.playable %}<button type="button" class="vd-play-quote" data-vd-play-seq="{{ q.seq }}" data-from="{{ q.start }}" data-to="{{ q.end }}"
-          aria-label="Прослушать фрагмент {{ mmss(q.start) }}" title="Прослушать фрагмент" hidden><span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span></button>{% endif %}<a class="t" href="#voice-diagram" data-vd-seq="{{ q.seq }}" title="Показать на диаграмме">{{ mmss(q.start) }}</a> «{{ q.text }}»</li>{% endfor %}</ul>{% endif %}
-    <div class="vd-ask-controls">
+      <li>{{ play(q.seq, q.start, q.end) }}<a class="t" href="#voice-diagram" data-vd-seq="{{ q.seq }}" title="Показать на диаграмме">{{ mmss(q.start) }}</a> «{{ q.text }}»</li>{% endfor %}</ul>{% endif %}
+    {% if sp.candidates %}
+    <div class="vd-cands" aria-label="Похоже на">
+      <p class="small muted">Похоже на — уверенности не хватило, чтобы подписать без вопроса:</p>
+      {% for c in sp.candidates %}
+      <div class="vd-cand">
+        <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-cand-pick">
+          <input type="hidden" name="speaker" value="{{ sp.name }}"><input type="hidden" name="employee_id" value="{{ c.employee_id }}">
+          <button class="btn sm" title="Применить ко всем репликам {{ sp.name }}">Это {{ c.name }}</button></form>
+        <span class="pill {{ 'amber' if c.percent >= 50 else 'gray' }}" title="Уверенность по разговору: ниже порога, поэтому имя не поставлено само">{{ c.percent }}%</span>
+        {% if c.position %}<span class="small muted">{{ c.position }}</span>{% endif %}
+        {% if c.reasons %}<ul class="vd-cand-why small">{% for r in c.reasons %}
+          <li>{% if r.seq is not none %}{{ play(r.seq, r.start, r.end) }}<a class="t" href="#voice-diagram" data-vd-seq="{{ r.seq }}" title="Показать на диаграмме">{{ mmss(r.at) }}</a>{% else %}<span class="t">{{ mmss(r.at) }}</span>{% endif %} {{ r.text }}</li>{% endfor %}</ul>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-ask-controls" data-vd-assign>
+      <input type="hidden" name="speaker" value="{{ sp.name }}">
       <select name="employee_id" required data-vd-choice aria-label="Кто это: {{ sp.name }}">
-        <option value="">Выберите сотрудника…</option>
+        <option value="">{{ 'Другой человек…' if sp.candidates else 'Выберите сотрудника…' }}</option>
         {{ employee_options(employees, participant_ids) }}
         <option value="guest">Гость — не сотрудник</option>
       </select>
       <input name="guest_name" maxlength="80" placeholder="Имя гостя (необязательно)" aria-label="Имя гостя" data-vd-guest>
       <button class="btn primary">Применить ко всем репликам</button>
-    </div>
-  </form>
+    </form>
+  </div>
   {% endfor %}
 </section>
 {% endif %}

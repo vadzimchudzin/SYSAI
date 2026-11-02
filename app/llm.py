@@ -151,6 +151,7 @@ def embed(texts: list, model: str, timeout: float = 60) -> list:
 # (OpenRouter speech-to-text guide; OpenAI accepts only json/text for its gpt-4o transcribe models).
 PLAIN_JSON_STT_MODELS = frozenset({"openai/gpt-4o-transcribe", "openai/gpt-4o-mini-transcribe",
                                    "microsoft/mai-transcribe-1.5"})
+_STT_FORMAT: dict = {}  # model -> the first response format variant its provider accepted (this process)
 
 
 def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", language: str = "ru",
@@ -173,14 +174,19 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
     if prompt:  # names and terms the model should spell right (OpenAI-style STT "prompt")
         base["prompt"] = prompt[:900]
     variants = [
+        # word times let the transcript be cut where the voice changes, not where the provider ends its phrase
+        {**base, "response_format": "verbose_json", "timestamp_granularities": ["word", "segment"]},
         {**base, "response_format": "verbose_json", "timestamp_granularities": ["segment"]},
         {**base, "response_format": "verbose_json"},
         {**base, "response_format": "json"},
     ]
     if str(model or "").split(":")[0] in PLAIN_JSON_STT_MODELS:
         variants = variants[-1:]  # verbose_json is always rejected: skip two failing requests per chunk
+    first = min(_STT_FORMAT.get(model, 0), len(variants) - 1)  # a format the provider rejected is not asked again
     last_error = "неизвестная ошибка"
     for index, body in enumerate(variants):
+        if index < first:
+            continue
         retryable_error = None
         for attempt in range(2):
             try:
@@ -206,6 +212,8 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
                 if not isinstance(data.get("text"), str):
                     raise LLMError("OpenRouter STT вернул ответ без текста")
                 record_cost(model, data.get("usage"))
+                if index:
+                    _STT_FORMAT[model] = index
                 return data
             except httpx.TimeoutException as exc:
                 last_error = str(exc) or "timeout"
