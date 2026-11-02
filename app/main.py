@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
                storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
@@ -1230,7 +1230,9 @@ def memory_person(request: Request, eid: int):
         notes = [_note_view(n, people, departments) for n in
                  s.query(Note).filter(Note.employee_id == eid, Note.archived.is_(False)).order_by(Note.id.desc()).limit(300)]
         archived = s.query(Note).filter(Note.employee_id == eid, Note.archived.is_(True)).count()
-        summaries = [m.summary for m in s.query(PersonMemory).filter_by(employee_id=eid).all() if m.summary]
+        memories = s.query(PersonMemory).filter_by(employee_id=eid).all()
+        summaries = [m.summary for m in memories if m.summary]
+        dialogs = dialog_memory.view(s, {m.chat_id for m in memories} | {e.telegram_user_id})
         card = {"id": e.id, "name": e.name, "aliases": e.aliases or "", "position": e.position or "",
                 "departments": [f"{m.department.name}" + (f" — {m.role}" if m.role else "") for m in e.department_memberships
                                 if m.department is not None],
@@ -1240,7 +1242,7 @@ def memory_person(request: Request, eid: int):
         documents = [{"id": d.id, "filename": d.filename, "at": d.created_at} for d in
                      s.query(Document).filter_by(employee_id=eid).order_by(Document.id.desc()).limit(20)]
     return page(request, "memory_person.html", card=card, notes=notes, archived=archived, summaries=summaries,
-                documents=documents)
+                dialogs=dialogs, documents=documents)
 
 
 @app.post("/memory/people/{eid}")
@@ -1261,11 +1263,15 @@ async def memory_person_save(request: Request, eid: int):
 
 @app.post("/memory/people/{eid}/forget-summary")
 def memory_person_forget(request: Request, eid: int):
-    """The assistant's own rolling summary about the person is erased (the person asked, or it is wrong)."""
+    """The assistant's own rolling summary about the person and the retelling of the older conversation are erased (the
+    person asked, or it is wrong)."""
     guard_admin(request)
     with SessionLocal() as s:
-        for m in s.query(PersonMemory).filter_by(employee_id=eid).all():
+        memories = s.query(PersonMemory).filter_by(employee_id=eid).all()
+        for m in memories:
             m.summary = ""
+        e = s.get(Employee, eid)
+        dialog_memory.forget(s, {m.chat_id for m in memories} | {e.telegram_user_id if e else None})
         s.commit()
     return RedirectResponse(f"/memory/people/{eid}", 303)
 

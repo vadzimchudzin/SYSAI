@@ -192,6 +192,13 @@ MEMORY_TOOL = {"type": "function", "function": {
                    "(до 1200 символов, сохрани важное из прошлой памяти). Не вызывай, если нового нет.",
     "parameters": {"type": "object", "properties": {"summary": _str("обновлённая краткая память о человеке")},
                    "required": ["summary"]}}}
+# Not a skill: the model looks through the whole history of the chat and answers with what was found (agent._decide).
+RECALL_TOOL = {"type": "function", "function": {
+    "name": "recall_conversation",
+    "description": "Вспомнить: найти в полной истории этого чата старые сообщения по словам, когда нужного нет в "
+                   "history, dialog_memory и from_earlier. Найденное придёт результатом функции, после этого ответь.",
+    "parameters": {"type": "object", "properties": {"query": _str("что искать: ключевые слова, названия, номера")},
+                   "required": ["query"]}}}
 
 
 # ----------------------------------------------------------------------------- who and how
