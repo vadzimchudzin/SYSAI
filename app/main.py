@@ -58,6 +58,18 @@ STATUS.update(delivery_queued=("В очереди отправки", "blue"), de
               delivery_failed=("Ошибка доставки", "red"), ready=("Отчёт готов", "green"))
 tpl.env.globals.update(STATUS=STATUS, ICONS=ICONS)
 
+
+def stamp_seconds(stamp) -> int | None:
+    """A task quote's «19:39» or «1:02:03» in seconds: where its ▶ starts the kept recording."""
+    match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})", str(stamp or "").strip())
+    if not match:
+        return None
+    hours, minutes, seconds = (int(x or 0) for x in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+tpl.env.globals.update(stamp_seconds=stamp_seconds)
+
 _ASSET_VERSIONS: dict = {}
 
 
@@ -1019,7 +1031,7 @@ def _apply_form(mid: int, form, approve=False):
             if form.get(f"del_{t.id}"):
                 m.tasks.remove(t)
                 continue
-            t.title = (form.get(f"title_{t.id}") or t.title).strip()
+            t.title = " ".join(str(form.get(f"title_{t.id}") or "").split())[:500] or t.title  # the field wraps: no line breaks
             t.description = form.get(f"desc_{t.id}", t.description)
             a = form.get(f"assignee_{t.id}", "")
             if a or t.executor != "assistant":  # an empty choice keeps a task the assistant does itself
@@ -1034,7 +1046,8 @@ def _apply_form(mid: int, form, approve=False):
         if (form.get("new_title") or "").strip():
             a = form.get("new_assignee", "")
             dl = form.get("new_deadline", "")
-            m.tasks.append(Task(title=form["new_title"].strip(), assignee_id=int(a) if a else None,
+            m.tasks.append(Task(title=" ".join(form["new_title"].split())[:500], description=(form.get("new_desc") or "").strip(),
+                                assignee_id=int(a) if a else None,
                                 deadline=dt.date.fromisoformat(dl) if dl else None,
                                 deadline_source="manual" if dl else "none", priority=form.get("new_priority", "medium")))
         s.query(Delivery).filter_by(meeting_id=mid, phase="draft", status="pending").update(

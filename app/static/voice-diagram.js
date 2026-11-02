@@ -493,6 +493,11 @@
       button.classList.toggle('is-playing', on);
       button.setAttribute('aria-label', `${on ? 'Пауза' : 'Прослушать фрагмент'} ${button.dataset.label || ''}`.trim());
     });
+    document.querySelectorAll('[data-vd-play-at]').forEach(button => {
+      const on = playing && player.quote === button.dataset.vdPlayKey;
+      button.classList.toggle('is-playing', on);
+      button.setAttribute('aria-label', `${on ? 'Пауза' : 'Прослушать момент'} ${button.dataset.label || ''}`.trim());
+    });
     const listen = detail && detail.querySelector('[data-vd-play-turn]');
     if (listen) {
       const on = playing && player.turn >= 0 && player.turn === state.current;
@@ -717,6 +722,7 @@
       });
     }
     playButton.addEventListener('click', toggle);
+    document.documentElement.classList.add('vd-can-play');  // the task quotes' ▶ (meeting.html), re-rendered by app.js
     document.querySelectorAll('[data-vd-play-seq]').forEach(button => {
       button.dataset.label = (button.getAttribute('aria-label') || '').replace(/^Прослушать фрагмент\s*/, '');
       button.hidden = false;
@@ -737,6 +743,35 @@
         select(index, { at: from });
       }
       play({ from, until: to > from ? to : null, quote: seq });
+    });
+    // A task's quote «▶ 19:39»: the stamp is a whole second, so the sound starts with the segment that begins within it
+    // (or at the stamp itself) and stops at the end of that replica.
+    const segmentFrom = at => {
+      let lo = 0;
+      let hi = segments.length - 1;
+      let found = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (segments[mid][2] >= at) { found = mid; hi = mid - 1; } else lo = mid + 1;
+      }
+      return found >= 0 && segments[found][2] < at + 1 ? segments[found] : null;
+    };
+    document.addEventListener('click', event => {
+      const button = event.target.closest('[data-vd-play-at]');
+      if (!button) return;
+      event.preventDefault();
+      const key = button.dataset.vdPlayKey;
+      if (player.playing && player.quote === key) { pause(); return; }
+      const at = clampTime(button.dataset.vdPlayAt);
+      const segment = segmentFrom(at);
+      const from = segment ? segment[2] : at;
+      const index = segment && turnOfSegment.has(segment[0]) ? turnOfSegment.get(segment[0]) : nearestTurn(from);
+      const end = index >= 0 ? turns[index][2] : null;
+      if (index >= 0) {
+        if (state.focus >= 0 && turns[index][0] !== state.focus) setFocus(state.focus);
+        select(index, { at: from });
+      }
+      play({ from, until: end !== null && end > from + 0.5 ? end : null, quote: key });
     });
     const looked = () => { player.scrolledAt = performance.now(); };
     scroller.addEventListener('wheel', looked, { passive: true });

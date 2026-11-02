@@ -120,6 +120,7 @@
               current.replaceWith(updated);
               if (id === 'report-editor') updated.querySelectorAll('input,textarea,select').forEach(el => el.addEventListener('input', () => { editing = true; }));
               open.forEach(detail => { const el = document.getElementById(detail); if (el) el.open = true; });
+              document.dispatchEvent(new CustomEvent('sysai:region-updated', { detail: { id } }));
             }
           });
           openDialogue();
