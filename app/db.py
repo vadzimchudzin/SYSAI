@@ -277,6 +277,19 @@ class VoiceSampleCleanup(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=now)
 
 
+class StorageCleanup(Base):
+    """Objects to delete from the recordings storage (a deleted meeting, an expired or removed recording). An outbox: the
+    deletion is committed with the change that needs it and retried until the storage confirms it (audio_archive.py)."""
+    __tablename__ = "storage_cleanup"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(600), nullable=False)
+    reason = Column(String(20), nullable=False, default="")
+    attempts = Column(Integer, nullable=False, default=0)
+    error = Column(String(300), nullable=False, default="")
+    next_at = Column(DateTime(timezone=True), nullable=False, default=now, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
+
+
 class Meeting(Base):
     __tablename__ = "meetings"
     id = Column(Integer, primary_key=True)
@@ -291,6 +304,8 @@ class Meeting(Base):
     meeting_date = Column(Date, nullable=True)
     transcript = Column(JSON, nullable=True)  # [{speaker, start, end, text}]
     waveform = Column(JSON, nullable=True)  # loudness outline for the voice diagram, see waveform.py
+    recording_status = Column(String(12), default="")  # "" | pending | stored | failed | deleted | expired, see audio_archive.py
+    recording = Column(JSON, nullable=True)  # the kept copy: storage key, size, duration, until when it is kept, last error
     report = Column(JSON, nullable=True)
     options = Column(JSON, nullable=True)  # per-meeting overrides of settings (approval, deadlines, recipients…)
     created_at = Column(DateTime(timezone=True), default=now)
@@ -777,6 +792,8 @@ def init_db():
     Base.metadata.create_all(engine)
     _add_column_if_missing("meetings", "options", "options JSON")
     _add_column_if_missing("meetings", "waveform", "waveform JSON")
+    _add_column_if_missing("meetings", "recording_status", "recording_status VARCHAR(12) DEFAULT ''")
+    _add_column_if_missing("meetings", "recording", "recording JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")

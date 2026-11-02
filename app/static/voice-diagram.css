@@ -45,7 +45,7 @@
 .vd-svg .is-dim { opacity: .2; }
 .vd-svg .vd-tint.is-dim { opacity: .025; }
 
-.vd-callouts { position: absolute; inset: 0; pointer-events: none; }
+.vd-callouts { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 .vd-callout { position: absolute; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px 0 7px; pointer-events: auto;
   border: 1px solid color-mix(in srgb, var(--c) 55%, transparent); border-radius: 99px; background: var(--card); color: var(--text);
   font: 500 12.5px/1 var(--sans); white-space: nowrap; cursor: pointer; transition: background .15s, border-color .15s, opacity .15s; }
@@ -92,6 +92,42 @@
 .vd-ask-controls input { flex: 1 1 200px; width: auto; }
 .vd-ask-controls .btn { flex: none; }
 
+/* listening (audio_archive.py): the player button, the speed, the playhead over the diagram */
+.vd-ico-play, .vd-ico-pause { display: inline-flex; }
+.vd-ico-pause, .is-playing > .vd-ico-play { display: none; }
+.is-playing > .vd-ico-pause { display: inline-flex; }
+.vd-play { min-width: 104px; }
+.vd-play.is-playing { border-color: var(--text); background: rgba(240,238,230,.1); }
+.vd-play.is-loading .vd-ico-pause { animation: vd-pulse 1s ease-in-out infinite; }
+@keyframes vd-pulse { 50% { opacity: .3; } }
+.vd-rate { min-width: 54px; font-variant-numeric: tabular-nums; }
+.vd-rate.is-changed { border-color: var(--soft); }
+.vd-playhead { position: absolute; left: -1px; top: 0; z-index: 1; width: 2px; background: var(--text); box-shadow: 0 0 0 1px rgba(18,18,16,.55);
+  pointer-events: none; will-change: transform; }
+.vd-playhead[hidden] { display: none; }
+.vd-playhead time { position: absolute; top: 0; left: 5px; padding: 0 5px; border-radius: 5px; background: var(--text); color: #121210;
+  font: 600 11px/16px var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.vd-playhead.is-right time { left: auto; right: 5px; }
+.voice-diagram.has-playhead .vd-cursor-label { visibility: hidden; }
+.vd-msg[hidden] { display: none; }
+.vd-msg.is-error { border-color: rgba(224,108,90,.45); background: rgba(224,108,90,.09); }
+.vd-detail-nav .btn svg.i { width: 12px; height: 12px; fill: currentColor; stroke: none; }
+.vd-play-turn.is-playing { border-color: var(--text); background: rgba(240,238,230,.1); }
+.vd-rec { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 8px 0 0; }
+.vd-rec-link { display: inline-flex; align-items: center; gap: 6px; color: var(--soft); }
+.vd-rec-link:hover { color: var(--text); }
+.vd-rec-link svg.i { width: 14px; height: 14px; }
+.vd-rec-delete { margin: 0; }
+.vd-rec-delete .btn { padding: 4px 9px; font-size: 12.5px; }
+.vd-rec-audio { flex: 1 1 100%; width: 100%; max-width: 520px; }
+.vd-play-quote { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin: 0 6px 0 0; padding: 0;
+  border: 1px solid var(--line2); border-radius: 50%; background: var(--bg2); color: var(--soft); cursor: pointer; vertical-align: -7px; transition: .15s; }
+.vd-play-quote[hidden] { display: none; }
+.vd-play-quote svg.i { width: 10px; height: 10px; fill: currentColor; stroke: none; }
+.vd-play-quote .vd-ico-play svg.i { margin-left: 2px; }
+.vd-play-quote:hover, .vd-play-quote:focus-visible { border-color: var(--muted); color: var(--text); outline: none; }
+.vd-play-quote.is-playing { border-color: var(--text); background: rgba(240,238,230,.12); color: var(--text); }
+
 .transcript p.seg { margin: 3px 0; padding: 3px 8px; border-radius: 8px; scroll-margin: 90px; transition: background .2s, box-shadow .2s; }
 .transcript p.seg.vd-current { background: var(--card2); box-shadow: inset 2px 0 0 var(--c, var(--clay)); }
 a.t[data-vd-seq]:hover { color: var(--clay2); text-decoration: underline; }
@@ -103,7 +139,10 @@ a.t[data-vd-seq]:hover { color: var(--clay2); text-decoration: underline; }
   .vd-detail-nav { width: 100%; }
   .vd-detail-nav .btn { flex: 1 1 auto; }
   .vd-chip .pill { font-size: 11px; padding: 1px 7px; }
+  .vd-play { flex: 1 1 auto; min-width: 0; }
+  .vd-play-quote { width: 30px; height: 30px; vertical-align: -10px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .vd-chip, .vd-callout, .transcript p.seg { transition: none; }
+  .vd-chip, .vd-callout, .transcript p.seg, .vd-play-quote { transition: none; }
+  .vd-play.is-loading .vd-ico-pause { animation: none; opacity: .5; }
 }

@@ -87,7 +87,11 @@
   const calloutLayer = html('div', { class: 'vd-callouts' });
   const tip = html('div', { class: 'vd-tip', role: 'tooltip' });
   tip.hidden = true;
-  canvas.append(drawing, calloutLayer);
+  const playhead = html('div', { class: 'vd-playhead', 'aria-hidden': 'true' });
+  const playheadTime = html('time');
+  playhead.append(playheadTime);
+  playhead.hidden = true;
+  canvas.append(drawing, playhead, calloutLayer);
   scroller.append(canvas);
   stage.replaceChildren(scroller, tip);
   if (tools) tools.hidden = false;
@@ -115,7 +119,7 @@
   };
   const allowedZooms = viewport => ZOOMS.filter(z => z === 1 || (viewport * z / duration <= 80 && viewport * z <= 60000));
 
-  function turnAt(time) {
+  function lastStartingBy(time) {
     let lo = 0;
     let hi = turns.length - 1;
     let found = -1;
@@ -123,6 +127,10 @@
       const mid = (lo + hi) >> 1;
       if (starts[mid] <= time) { found = mid; lo = mid + 1; } else hi = mid - 1;
     }
+    return found;
+  }
+  function turnAt(time) {
+    const found = lastStartingBy(time);
     for (let i = found; i >= 0 && i >= found - 40; i -= 1) if (turns[i][2] >= time) return i;
     return -1;
   }
@@ -299,6 +307,7 @@
       if (left + button.offsetWidth > width) button.style.left = `${Math.max(0, width - button.offsetWidth)}px`;
     });
     layout = { width, perSecond, m };
+    paintPlayhead();
     if (zoomValue) zoomValue.textContent = `×${state.zoom}`;
     zoomButtons.forEach(button => {
       const index = zooms.indexOf(state.zoom);
@@ -366,6 +375,11 @@
     previous.disabled = neighbour(-1) < 0;
     next.disabled = neighbour(1) < 0;
     nav.append(previous, next);
+    if (canPlay) {
+      const listen = html('button', { type: 'button', class: 'btn sm vd-play-turn', 'data-vd-play-turn': '' });
+      listen.append(...playIcons(), html('span', {}, 'Слушать реплику'));
+      nav.append(listen);
+    }
     if (rowsOf(index).length) nav.append(html('button', { type: 'button', class: 'btn sm', 'data-vd-open': '' }, 'В расшифровке'));
     if (fixForm) nav.append(html('button', { type: 'button', class: 'btn sm ghost', 'data-vd-fix': '' }, 'Исправить говорящего'));
     head.append(who, nav);
@@ -384,17 +398,22 @@
       scroller.scrollLeft = Math.max(0, position - view / 3);
     }
   }
-  function select(index, { focusCallout = false } = {}) {
+  // A click, an arrow or a time stamp selects a replica and moves the listening position there (`at`: an exact time);
+  // `follow` is the player moving the selection along with the sound, without seeking.
+  function select(index, { focusCallout = false, at, follow = false } = {}) {
     if (index < 0 || index >= turns.length) return;
+    const focused = scroller.contains(document.activeElement);
     state.current = index;
     render();
-    reveal(turns[index][1]);
+    if (!follow) reveal(at === undefined ? turns[index][1] : at);
     showDetail(index);
     markTranscript(index);
     if (focusCallout) {
       const button = calloutLayer.querySelector(`[data-turn="${index}"]`);
       if (button) button.focus({ preventScroll: true });
-    }
+    } else if (focused && !scroller.contains(document.activeElement)) scroller.focus({ preventScroll: true });
+    if (!follow) cue(at === undefined ? turns[index][1] : at, at !== undefined);
+    else syncControls();
   }
 
   function zoomBy(direction, anchorX) {
@@ -428,6 +447,303 @@
     markTranscript(state.current);
   }
 
+  // ---- listening: the kept recording (audio_archive.py) from the selected place ---------------------------------
+  const playButton = root.querySelector('[data-vd-play]');
+  const playLabel = root.querySelector('[data-vd-play-label]');
+  const rateButton = root.querySelector('[data-vd-rate]');
+  const playError = root.querySelector('[data-vd-play-error]');
+  const audioSource = data.audio && typeof data.audio.src === 'string' ? data.audio.src : '';
+  const canPlay = Boolean(audioSource && playButton);
+  const RATES = [1, 1.25, 1.5, 2];
+  const RATE_KEY = 'sysai.voiceDiagram.rate';
+  const player = { audio: null, position: 0, armed: false, playing: false, loading: false, stopAt: null, quote: null,
+    turn: -1, pendingSeek: null, retried: false, frame: 0, scrolledAt: 0, rate: 1 };
+  const segmentBySeq = new Map(segments.map(item => [item[0], item]));
+  const clampTime = time => Math.max(0, Math.min(duration, Number(time) || 0));
+  const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function playIcons() {
+    if (!playButton) return [];
+    return ['.vd-ico-play', '.vd-ico-pause'].map(selector => {
+      const icon = playButton.querySelector(selector);
+      return icon ? icon.cloneNode(true) : document.createTextNode('');
+    });
+  }
+  function paintPlayhead() {
+    const shown = canPlay && player.armed && layout;
+    playhead.hidden = !shown;
+    root.classList.toggle('has-playhead', Boolean(shown));
+    if (!shown) return;
+    const x = player.position * layout.perSecond;
+    playhead.style.height = `${layout.m.axis}px`;
+    playhead.style.transform = `translateX(${x.toFixed(1)}px)`;
+    playhead.classList.toggle('is-right', layout.width - x < 60);
+    playheadTime.textContent = clock(player.position);
+  }
+  function syncControls() {
+    if (!canPlay) return;
+    const playing = player.playing;
+    playButton.classList.toggle('is-playing', playing);
+    playButton.classList.toggle('is-loading', playing && player.loading);
+    playButton.setAttribute('aria-label', playing ? 'Пауза' : 'Слушать');
+    if (playLabel) playLabel.textContent = playing ? 'Пауза' : 'Слушать';
+    root.classList.toggle('is-playing', playing);
+    document.querySelectorAll('[data-vd-play-seq]').forEach(button => {
+      const on = playing && player.quote === Number(button.dataset.vdPlaySeq);
+      button.classList.toggle('is-playing', on);
+      button.setAttribute('aria-label', `${on ? 'Пауза' : 'Прослушать фрагмент'} ${button.dataset.label || ''}`.trim());
+    });
+    const listen = detail && detail.querySelector('[data-vd-play-turn]');
+    if (listen) {
+      const on = playing && player.turn >= 0 && player.turn === state.current;
+      listen.classList.toggle('is-playing', on);
+      const text = listen.querySelector('span:last-child');
+      if (text) text.textContent = on ? 'Пауза' : 'Слушать реплику';
+    }
+  }
+  function showError(text) {
+    if (!playError) return;
+    playError.textContent = text;
+    playError.hidden = !text;
+  }
+  function fresh() {  // the page's address answers with a new short-lived link to the storage
+    return `${audioSource}${audioSource.includes('?') ? '&' : '?'}t=${Date.now()}`;
+  }
+  function seekAudio(time) {
+    const audio = player.audio;
+    if (!audio) return;
+    if (audio.readyState >= 1) {
+      try { audio.currentTime = time; player.pendingSeek = null; return; } catch (error) { /* not seekable yet */ }
+    }
+    player.pendingSeek = time;
+  }
+  // The listening position: where «Слушать» starts, or where the sound jumps while it plays.
+  function cue(time, exact = false) {
+    if (!canPlay) return;
+    player.position = clampTime(time);
+    player.stopAt = null;
+    player.quote = null;
+    player.turn = -1;
+    if (exact) player.armed = true;
+    if (player.playing) seekAudio(player.position);
+    paintPlayhead();
+    syncControls();
+  }
+  function ensureAudio() {
+    if (player.audio) return player.audio;
+    const audio = new Audio();
+    audio.preload = 'auto';
+    audio.defaultPlaybackRate = player.rate;
+    audio.playbackRate = player.rate;
+    audio.addEventListener('loadedmetadata', () => {
+      audio.playbackRate = player.rate;
+      if (player.pendingSeek !== null) seekAudio(player.pendingSeek);
+    });
+    audio.addEventListener('waiting', () => { player.loading = true; syncControls(); });
+    audio.addEventListener('playing', () => {
+      player.loading = false;
+      player.retried = false;
+      showError('');
+      syncControls();
+    });
+    audio.addEventListener('pause', () => {
+      if (!player.playing) return;
+      player.playing = false;
+      player.loading = false;
+      syncControls();
+    });
+    audio.addEventListener('ended', () => {
+      player.playing = false;
+      player.loading = false;
+      player.position = duration;
+      paintPlayhead();
+      syncControls();
+    });
+    audio.addEventListener('timeupdate', () => {  // the animation frames stop in a background tab, this does not
+      if (player.playing && document.hidden) advance(audio.currentTime);
+    });
+    audio.addEventListener('error', recover);
+    audio.src = audioSource;
+    player.audio = audio;
+    return audio;
+  }
+  // A link to the storage lives a few hours: after a long pause, or a network failure, ask the page for a new one once.
+  function recover() {
+    const audio = player.audio;
+    if (!audio || !audio.error) return;
+    const resume = player.playing;
+    if (!player.retried) {
+      player.retried = true;
+      player.pendingSeek = player.position;
+      audio.src = fresh();
+      audio.load();
+      if (resume) start();
+      return;
+    }
+    player.playing = false;
+    player.loading = false;
+    syncControls();
+    showError(audio.error.code === 4
+      ? 'Запись не открылась: хранилище недоступно или файл удалён. Обновите страницу; если не поможет — Настройки → «Проверить хранилище».'
+      : 'Запись не загрузилась: проверьте соединение и нажмите «Слушать» ещё раз.');
+  }
+  function start() {
+    const audio = player.audio;
+    player.playing = true;
+    player.loading = audio.readyState < 3;
+    syncControls();
+    const begun = audio.play();
+    if (begun && typeof begun.catch === 'function') {
+      begun.catch(error => {
+        if (error && error.name === 'AbortError') return;  // paused or reloaded before it started
+        if (audio.error) return;                            // the error handler explains it
+        player.playing = false;
+        player.loading = false;
+        syncControls();
+        if (!error || error.name !== 'NotAllowedError') showError('Не удалось начать воспроизведение, попробуйте ещё раз.');
+      });
+    }
+    loop();
+  }
+  function play({ from, until = null, quote = null, turn = -1 } = {}) {
+    if (!canPlay) return;
+    const audio = ensureAudio();
+    if (audio.error) {  // a previous failure: try again with a new link
+      player.retried = true;
+      audio.src = fresh();
+      audio.load();
+    }
+    showError('');
+    if (from !== undefined) player.position = clampTime(from);
+    if (player.position >= duration - 0.25) player.position = 0;
+    player.stopAt = until;
+    player.quote = quote;
+    player.turn = turn;
+    player.armed = true;
+    if (audio.readyState < 1 || Math.abs(audio.currentTime - player.position) > 0.05) seekAudio(player.position);
+    audio.playbackRate = player.rate;
+    paintPlayhead();
+    start();
+  }
+  function pause() {
+    player.playing = false;
+    player.loading = false;
+    if (player.audio) player.audio.pause();
+    syncControls();
+  }
+  const toggle = () => (player.playing ? pause() : play());
+
+  // While a speaker is selected only their replicas sound: a gap or someone else's replica is skipped.
+  function focusedTurnAt(time) {
+    const found = lastStartingBy(time + 0.25);
+    for (let i = found; i >= 0 && i >= found - 60; i -= 1) if (turns[i][0] === state.focus && turns[i][2] >= time) return i;
+    return -1;
+  }
+  function nextFocusedTurn(time) {
+    for (let i = Math.max(0, lastStartingBy(time)); i < turns.length; i += 1) {
+      if (turns[i][0] === state.focus && turns[i][1] > time) return i;
+    }
+    return -1;
+  }
+  // Checks the sound's position: stops at the end of a replica or fragment, skips to the selected speaker. Returns the
+  // position, or null when playback stopped.
+  function advance(time) {
+    if (player.stopAt !== null && time >= player.stopAt) {
+      const end = player.stopAt;
+      pause();
+      player.position = clampTime(end);
+      paintPlayhead();
+      return null;
+    }
+    if (state.focus >= 0 && player.stopAt === null && focusedTurnAt(time) < 0) {
+      const next = nextFocusedTurn(time);
+      if (next < 0) {
+        pause();
+        return null;
+      }
+      seekAudio(turns[next][1]);
+      return turns[next][1];
+    }
+    return time;
+  }
+  function keepInView(time) {
+    if (!layout || performance.now() - player.scrolledAt < 4000) return;  // the user is looking around: do not pull
+    const x = time * layout.perSecond;
+    const view = scroller.clientWidth;
+    if (x < scroller.scrollLeft + 8 || x > scroller.scrollLeft + view - 24) scroller.scrollLeft = Math.max(0, x - view * 0.2);
+  }
+  function loop() {
+    if (player.frame) return;
+    const frame = () => {
+      player.frame = 0;
+      const audio = player.audio;
+      if (!audio || !player.playing) return;
+      const time = advance(player.pendingSeek !== null ? player.pendingSeek : audio.currentTime);
+      if (time === null) return;
+      player.position = clampTime(time);
+      if (player.stopAt === null) {
+        const index = state.focus >= 0 ? focusedTurnAt(player.position) : turnAt(player.position);
+        if (index >= 0 && index !== state.current) select(index, { follow: true });
+      }
+      paintPlayhead();
+      keepInView(player.position);
+      player.frame = requestAnimationFrame(frame);
+    };
+    player.frame = requestAnimationFrame(frame);
+  }
+
+  if (canPlay) {
+    try {
+      const saved = Number(localStorage.getItem(RATE_KEY));
+      if (RATES.includes(saved)) player.rate = saved;
+    } catch (error) { /* private mode */ }
+    const rateText = rate => `${String(rate).replace('.', ',')}×`;
+    const syncRate = () => {
+      if (!rateButton) return;
+      rateButton.textContent = rateText(player.rate);
+      rateButton.setAttribute('aria-label', `Скорость воспроизведения ${rateText(player.rate)}`);
+      rateButton.classList.toggle('is-changed', player.rate !== 1);
+    };
+    syncRate();
+    if (rateButton) {
+      rateButton.addEventListener('click', () => {
+        player.rate = RATES[(RATES.indexOf(player.rate) + 1) % RATES.length];
+        try { localStorage.setItem(RATE_KEY, String(player.rate)); } catch (error) { /* private mode */ }
+        if (player.audio) {
+          player.audio.defaultPlaybackRate = player.rate;
+          player.audio.playbackRate = player.rate;
+        }
+        syncRate();
+      });
+    }
+    playButton.addEventListener('click', toggle);
+    document.querySelectorAll('[data-vd-play-seq]').forEach(button => {
+      button.dataset.label = (button.getAttribute('aria-label') || '').replace(/^Прослушать фрагмент\s*/, '');
+      button.hidden = false;
+    });
+    // «Кто это?»: a fragment sounds from its start to its end, the page stays where it is.
+    document.addEventListener('click', event => {
+      const button = event.target.closest('[data-vd-play-seq]');
+      if (!button) return;
+      event.preventDefault();
+      const seq = Number(button.dataset.vdPlaySeq);
+      if (player.playing && player.quote === seq) { pause(); return; }
+      const segment = segmentBySeq.get(seq);
+      const from = segment ? segment[2] : Number(button.dataset.from);
+      const to = segment ? segment[3] : Number(button.dataset.to);
+      const index = turnOfSegment.get(seq);
+      if (index !== undefined) {
+        if (state.focus >= 0 && turns[index][0] !== state.focus) setFocus(state.focus);
+        select(index, { at: from });
+      }
+      play({ from, until: to > from ? to : null, quote: seq });
+    });
+    const looked = () => { player.scrolledAt = performance.now(); };
+    scroller.addEventListener('wheel', looked, { passive: true });
+    scroller.addEventListener('touchstart', looked, { passive: true });
+    scroller.addEventListener('pointerdown', event => { if (event.target === scroller) looked(); });
+  }
+
   // ---- events ---------------------------------------------------------------------------------------------------
   calloutLayer.addEventListener('click', event => {
     const button = event.target.closest('[data-turn]');
@@ -435,8 +751,8 @@
   });
   drawing.addEventListener('click', event => {
     if (!event.target.classList.contains('vd-hit') || !layout) return;
-    const time = (event.clientX - drawing.getBoundingClientRect().left) / layout.perSecond;
-    select(nearestTurn(time));
+    const time = clampTime((event.clientX - drawing.getBoundingClientRect().left) / layout.perSecond);
+    select(nearestTurn(time), { at: time });
   });
   drawing.addEventListener('pointermove', event => {
     if (!event.target.classList.contains('vd-hit') || !layout) { hideTip(); return; }
@@ -469,6 +785,7 @@
 
   scroller.addEventListener('keydown', event => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === ' ' && canPlay) { event.preventDefault(); toggle(); return; }
     let target = -2;
     if (event.key === 'ArrowRight') target = neighbour(1);
     else if (event.key === 'ArrowLeft') target = neighbour(-1);
@@ -495,6 +812,12 @@
 
   if (detail) {
     detail.addEventListener('click', event => {
+      if (event.target.closest('[data-vd-play-turn]') && state.current >= 0) {
+        if (player.playing && player.turn === state.current) { pause(); return; }
+        const turn = turns[state.current];
+        play({ from: turn[1], until: turn[2], turn: state.current });
+        return;
+      }
       const step = event.target.closest('[data-vd-step]');
       if (step) {
         const target = neighbour(Number(step.dataset.vdStep));
@@ -506,7 +829,7 @@
         if (details) details.open = true;
         markTranscript(state.current);
         const row = marked[0];
-        if (row) row.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        if (row) row.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
         return;
       }
       if (event.target.closest('[data-vd-fix]') && fixForm && state.current >= 0) {
@@ -524,14 +847,16 @@
   document.addEventListener('click', event => {
     const link = event.target.closest('[data-vd-seq]');
     if (!link) return;
-    const index = turnOfSegment.get(Number(link.dataset.vdSeq));
+    const seq = Number(link.dataset.vdSeq);
+    const index = turnOfSegment.get(seq);
     if (index === undefined) return;
     event.preventDefault();
     if (state.focus >= 0 && turns[index][0] !== state.focus) setFocus(state.focus);
-    select(index);
+    const segment = segmentBySeq.get(seq);
+    select(index, segment ? { at: segment[2] } : {});
     const box = root.getBoundingClientRect();
     if (box.top < 0 || box.top > window.innerHeight * 0.6) {
-      root.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      root.scrollIntoView({ block: 'start', behavior: reducedMotion() ? 'auto' : 'smooth' });
     }
   });
 
