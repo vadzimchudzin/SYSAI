@@ -876,3 +876,5 @@ body.org-map-page { height:100dvh; min-height:100dvh; overflow:hidden; }
   .org-map-dialog-actions { flex-direction:column-reverse; align-items:stretch; }
   .org-map-dialog-actions .btn { width:100%; }
 }
+.model-field { margin-top: 12px; } .model-field .model-filter { padding: 7px 10px; font-size: 13px; }
+.model-hint { margin: 0; overflow-wrap: anywhere; } .model-hint.warn { color: var(--amber); }

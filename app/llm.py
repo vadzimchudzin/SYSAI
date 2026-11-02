@@ -147,6 +147,12 @@ def embed(texts: list, model: str, timeout: float = 60) -> list:
     return vectors
 
 
+# STT models that answer only with plain ``json``: OpenRouter rejects ``verbose_json`` for them with HTTP 400
+# (OpenRouter speech-to-text guide; OpenAI accepts only json/text for its gpt-4o transcribe models).
+PLAIN_JSON_STT_MODELS = frozenset({"openai/gpt-4o-transcribe", "openai/gpt-4o-mini-transcribe",
+                                   "microsoft/mai-transcribe-1.5"})
+
+
 def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", language: str = "ru",
                     timeout: float = 60, prompt: str = "") -> dict:
     """Call OpenRouter's dedicated speech-to-text endpoint and preserve provider timestamps when available."""
@@ -171,6 +177,8 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
         {**base, "response_format": "verbose_json"},
         {**base, "response_format": "json"},
     ]
+    if str(model or "").split(":")[0] in PLAIN_JSON_STT_MODELS:
+        variants = variants[-1:]  # verbose_json is always rejected: skip two failing requests per chunk
     last_error = "неизвестная ошибка"
     for index, body in enumerate(variants):
         retryable_error = None

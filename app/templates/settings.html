@@ -79,38 +79,28 @@
   </section>
   <section class="card setup-step" id="model-settings">
     <h2>Модели ИИ</h2>
-    <p class="small muted">Модели выбираются отдельно: распознавание аудио, анализ и протокол, ИИ-сотрудник. Каталог загружается из OpenRouter; выбранные значения сохраняются в настройках.</p>
+    <p class="small muted">Все модели работают через OpenRouter. Список и цены загружаются из его каталога; выбранные значения меняются только после сохранения настроек.</p>
     <div class="row between">
       <span id="model-catalog-status" class="small muted" role="status">Каталог ещё не загружен</span>
       <button type="button" class="btn sm" id="model-catalog-refresh">Обновить каталог</button>
     </div>
-    <label class="f">Распознавание речи (STT)
-      <select name="transcribe_model" id="transcribe-model" data-current="{{ s.transcribe_model }}">
-        <option value="{{ s.transcribe_model }}">{{ s.transcribe_model }} — текущая</option>
+    {% macro model_field(field, element_id, title, search_hint) %}
+    <div class="f model-field">
+      <span id="{{ element_id }}-label">{{ title }}</span>
+      {% if search_hint %}<input type="search" class="model-filter" data-target="{{ element_id }}" placeholder="{{ search_hint }}" autocomplete="off" aria-label="Поиск: {{ title }}">{% endif %}
+      <select name="{{ field }}" id="{{ element_id }}" aria-labelledby="{{ element_id }}-label" data-current="{{ s[field] }}">
+        <option value="{{ s[field] }}">{{ s[field] }} — текущая</option>
       </select>
-    </label>
-    <p class="small muted">Это модели с выходной модальностью transcription. После смены сравните качество на одинаковых русскоязычных записях.</p>
-    <label class="f">Разделение говорящих и временная привязка
-      <select name="diarization_model" id="diarization-model" data-current="{{ s.diarization_model }}">
-        <option value="{{ s.diarization_model }}">{{ s.diarization_model }} — текущая</option>
-      </select>
-    </label>
-    <p class="small muted">Используется, если выбранная STT-модель не вернула метки говорящих. Текст распознавания остаётся за STT-моделью; эта модель только распределяет сегменты по голосам.</p>
-    <label class="f">Анализ расшифровки и отчёт
-      <select name="report_model" id="report-model" data-current="{{ s.report_model }}">
-        <option value="{{ s.report_model }}">{{ s.report_model }} — текущая</option>
-      </select>
-    </label>
-    <label class="f">ИИ-сотрудник
-      <select name="agent_model" id="agent-model" data-current="{{ s.agent_model }}">
-        <option value="{{ s.agent_model }}">{{ s.agent_model }} — текущая</option>
-      </select>
-    </label>
-    <label class="f">Модель переписки (бесплатная)
-      <select name="conversation_model" id="conversation-model" data-current="{{ s.conversation_model }}">
-        <option value="{{ s.conversation_model }}">{{ s.conversation_model }} — текущая</option>
-      </select>
-    </label>
+      <p class="small muted model-hint" id="{{ element_id }}-hint" aria-live="polite"></p>
+    </div>
+    {% endmacro %}
+    {{ model_field('transcribe_model', 'transcribe-model', 'Распознавание речи (STT)', 'Поиск: scribe, whisper, gemini, voxtral…') }}
+    <p class="small muted">Отдельные STT-модели распознают текст, а говорящих расставляет модель из следующего поля. Gemini слышит и текст, и голоса за один проход. Цена указана за час аудио или за 1 млн токенов. Перед сменой сравните качество на одних и тех же русскоязычных записях.</p>
+    {{ model_field('diarization_model', 'diarization-model', 'Разделение говорящих и временная привязка', 'Поиск модели со звуком…') }}
+    <p class="small muted">Используется, если выбранная STT-модель не вернула метки говорящих. Текст остаётся за STT-моделью; эта модель только распределяет реплики по голосам.</p>
+    {{ model_field('report_model', 'report-model', 'Анализ расшифровки и отчёт', 'Поиск: gemini, claude, gpt…') }}
+    {{ model_field('agent_model', 'agent-model', 'ИИ-сотрудник', 'Поиск: gemini, claude, gpt…') }}
+    {{ model_field('conversation_model', 'conversation-model', 'Модель переписки (бесплатная)', '') }}
     <p class="small muted">После сохранения новые запросы используют выбранные модели. Уже запущенная обработка совещания сохраняет прежние параметры.</p>
     <script src="{{ asset('model-settings.js') }}" defer></script>
   </section>

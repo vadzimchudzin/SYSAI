@@ -5,6 +5,7 @@ An audio-capable chat model only assigns speakers if the STT provider does not r
 Mock transcription remains an explicit demo helper; real uploads never fall back to demo data.
 """
 import base64
+import difflib
 import json
 import hashlib
 import logging
@@ -18,15 +19,32 @@ from . import audio, checkpoints, config, llm, settings_store, speaker_id, speec
 
 log = logging.getLogger("sysai.transcribe")
 LEGACY_CHAT_MODEL = "google/gemini-2.5-flash"
+# Dedicated speech-to-text ids («google/gemini-3.5-transcribe», «…-stt», «…-asr»): served only by /audio/transcriptions.
+STT_ONLY_MODEL = re.compile(r"transcribe|(?:^|[-_.])(?:stt|asr)(?:[-_.]|$)")
+
+
+def stt_only_model(model) -> bool:
+    """True for dedicated speech-to-text models, even when their id shares a chat family prefix."""
+    slug = str(model or "").strip().lower().split("/")[-1].split(":")[0]
+    return bool(STT_ONLY_MODEL.search(slug))
 
 
 def chat_model(model) -> bool:
-    """Audio-capable chat models (Gemini) hear words and voices in one pass and return speakers themselves."""
-    return str(model or "").startswith("google/gemini")
+    """Audio-capable chat models (Gemini) hear words and voices in one pass and return speakers themselves.
+
+    «google/gemini-3.5-transcribe» is an STT model: the chat endpoint does not serve it.
+    """
+    name = str(model or "").strip().lower().lstrip("~")  # «~google/gemini-flash-latest» is an alias of a chat model
+    return name.startswith("google/gemini") and not stt_only_model(name)
+
+
 DEMO = pathlib.Path(__file__).resolve().parent.parent / "samples" / "demo_transcript.json"
 SHORT_AUDIO_SECONDS = 10  # Includes codec padding around 1–5 second recordings.
 OVERLAP_SECONDS = 4
 MIN_SPLIT_SECONDS = 20
+STITCH_WINDOW_WORDS = 60  # words examined on each side of a chunk boundary
+STITCH_EDGE_WORDS = 24    # the shared run must lie near the end of the old text and the start of the new one
+STITCH_MIN_RUN = 3        # shortest run of identical words that proves the overlap (2 words may be a real echo)
 
 PROMPT = """Ты — стенографист. Расшифруй ТОЛЬКО приложенный фрагмент длительностью {duration:.3f} секунд, дословно.
 Правила точности:
@@ -207,9 +225,102 @@ def _transcribe_stt_chunk(path, settings, length, context):
     return {"segments": segments, "truncated": False}
 
 
+def _words(index, text):
+    """[(segment index, start char, end char, normalised word)] of one segment."""
+    return [(index, m.start(), m.end(), m.group(0).casefold().replace("ё", "е")) for m in re.finditer(r"\w+", str(text))]
+
+
+def _occurrences(words, run):
+    n = len(run)
+    return sum(1 for i in range(len(words) - n + 1) if words[i:i + n] == run)
+
+
+def _near_boundary(segments, tail, old_at, new, head, new_at, boundary):
+    """Could these words fall into the overlap? Word time is bounded from the segment start: at most 1.2 s per word
+    plus 3 s of pauses for the old text, at least 0.15 s per word for the new one."""
+    old_index, new_index = tail[old_at][0], head[new_at][0]
+    old_k = len(_words(old_index, segments[old_index]["text"][:tail[old_at][1]]))  # words before it in its segment
+    new_k = sum(1 for word in head[:new_at] if word[0] == new_index)
+    latest_old = segments[old_index]["start"] + 1.2 * old_k + 3
+    earliest_new = new[new_index]["start"] + 0.15 * new_k
+    return latest_old >= boundary - 1 and earliest_new <= boundary + OVERLAP_SECONDS + 1
+
+
+def _stitch_overlap(segments, new, boundary):
+    """Keep the speech both chunks heard in their shared overlap only once.
+
+    Adjacent chunks overlap by OVERLAP_SECONDS, so the end of the old text and the start of the new one repeat the
+    same words, usually as partial utterances that never match as whole segments. A unique run of identical words near
+    the boundary anchors the cut: words up to the end of the run come from the old chunk, words after it from the new
+    chunk (each chunk is least reliable at its own edge). Without such a run nothing is cut: a repeated phrase is
+    better than lost speech. Returns {new speaker label: old speaker label} proven by the shared words."""
+    if not segments or not new:
+        return {}
+    tail = []
+    for index in sorted(range(len(segments)), key=lambda i: segments[i]["start"], reverse=True):
+        tail[:0] = _words(index, segments[index]["text"])
+        if len(tail) >= STITCH_WINDOW_WORDS:
+            break
+    tail = tail[-STITCH_WINDOW_WORDS:]
+    head = []
+    for index in sorted(range(len(new)), key=lambda i: new[i]["start"]):
+        head.extend(_words(index, new[index]["text"]))
+        if len(head) >= STITCH_WINDOW_WORDS:
+            break
+    head = head[:STITCH_WINDOW_WORDS]
+    old_words, new_words = [w[3] for w in tail], [w[3] for w in head]
+    best = None
+    for a, b, size in difflib.SequenceMatcher(None, old_words, new_words, autojunk=False).get_matching_blocks():
+        run = old_words[a:a + size]
+        if size < STITCH_MIN_RUN or a + size < len(old_words) - STITCH_EDGE_WORDS or b > STITCH_EDGE_WORDS:
+            continue
+        if not any(len(word) >= 4 for word in run):  # «да да», «и в» prove nothing
+            continue
+        if not _near_boundary(segments, tail, a + size - 1, new, head, b, boundary):
+            continue  # the same words said again later, not the same moment heard twice
+        if _occurrences(old_words, run) != 1 or _occurrences(new_words, run) != 1:
+            continue  # an ambiguous run could cut real speech
+        if best is None or size > best[2]:
+            best = (a, b, size)
+    if best is None:
+        return {}
+    a, b, size = best
+    pairs = {}
+    for k in range(size):
+        old_segment, new_segment = segments[tail[a + k][0]], new[head[b + k][0]]
+        if "voiceprint" not in (old_segment.get("speaker_source"), new_segment.get("speaker_source")):
+            pairs.setdefault(new_segment["speaker"], set()).add(old_segment["speaker"])
+    anchor_start = segments[tail[a + size - 1][0]]["start"]
+
+    cut_old = {}  # segment index -> start char of its first dropped word (the new chunk repeats these words)
+    for index, start_char, _, _ in tail[a + size:]:
+        cut_old.setdefault(index, start_char)
+    for index in sorted(cut_old, reverse=True):
+        kept = segments[index]["text"][:cut_old[index]].rstrip(" ,;:-–—")
+        if _words(index, kept):
+            segments[index] = dict(segments[index], text=kept)
+        else:
+            del segments[index]
+
+    dropped = {}  # segment index -> (end char of its last dropped word, number of dropped words)
+    for index, _, end_char, _ in head[:b + size]:
+        dropped[index] = (end_char, dropped.get(index, (0, 0))[1] + 1)
+    for index in sorted(dropped, reverse=True):
+        end_char, count = dropped[index]
+        rest = new[index]["text"][end_char:].lstrip(" ,;:.!?…-–—")
+        if _words(index, rest):
+            start = max(new[index]["start"] + 0.4 * count, anchor_start)  # about 0.4 s per dropped word
+            new[index] = dict(new[index], text=rest, start=round(start, 1))
+        else:
+            del new[index]
+    return {speaker: next(iter(known)) for speaker, known in pairs.items() if len(known) == 1}
+
+
 def _merge(segments, new, boundary):
     def normalise(text):
         return re.sub(r"\W+", " ", str(text).casefold()).strip()
+
+    stitched = _stitch_overlap(segments, new, boundary)
 
     previous = [old for old in segments if boundary - 2 <= old["start"] <= boundary + OVERLAP_SECONDS]
     # Some audio models restart speaker numbering at each chunk. Use an exact repeated utterance in
@@ -234,6 +345,16 @@ def _merge(segments, new, boundary):
         if len(reverse) == 1:
             targets.setdefault(current["speaker"], set()).add(old["speaker"])
     speaker_map = {speaker: next(iter(known)) for speaker, known in targets.items() if len(known) == 1}
+    speaker_map = {**speaker_map, **stitched}  # shared overlap words are the stronger proof
+    # A label of this chunk that was not proven must not silently join the voice another label was mapped to.
+    in_use = {item["speaker"] for item in segments} | {item["speaker"] for item in new} | set(speaker_map.values())
+    for label in sorted({item["speaker"] for item in new if item.get("speaker_source") != "voiceprint"}):
+        if label not in speaker_map and label in set(speaker_map.values()):
+            number = 1
+            while f"Спикер {number}" in in_use:
+                number += 1
+            speaker_map[label] = f"Спикер {number}"
+            in_use.add(speaker_map[label])
 
     for current in new:
         if current.get("speaker_source") != "voiceprint":
