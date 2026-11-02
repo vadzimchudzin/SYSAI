@@ -1,0 +1,94 @@
+{% from "_icons.html" import icon %}
+{% macro plural(n, one, few, many) %}{{ one if n % 10 == 1 and n % 100 != 11 else (few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many) }}{% endmacro %}
+{% set d = diagram %}
+{% set people = d.speakers|length %}
+<link rel="stylesheet" href="{{ asset('voice-diagram.css') }}">
+<section class="card voice-diagram" id="voice-diagram" aria-labelledby="voice-diagram-title">
+  <div class="vd-head">
+    <div>
+      <h2 id="voice-diagram-title">{{ icon('wave') }}Кто и когда говорил</h2>
+      <p class="small muted vd-meta">{{ people }} {{ plural(people, 'говорящий', 'говорящих', 'говорящих') }}
+        · {% if d.voice_matched %}голос совпал у {{ d.voice_matched }} из {{ people }}{% else %}голоса не сверялись с образцами{% endif %}
+        {% if d.unknown %}· не распознано: {{ d.unknown|length }}{% endif %}
+        · речь {{ mmss(d.speech_seconds) }} из {{ mmss(d.duration) }}</p>
+    </div>
+    <div class="vd-tools" data-vd-tools hidden>
+      <div class="vd-zoom" role="group" aria-label="Масштаб">
+        <button type="button" class="btn sm" data-vd-zoom="-1" aria-label="Уменьшить масштаб">−</button>
+        <span class="vd-zoom-value" data-vd-zoom-value aria-live="polite">×1</span>
+        <button type="button" class="btn sm" data-vd-zoom="1" aria-label="Увеличить масштаб">+</button>
+      </div>
+      <button type="button" class="btn sm" disabled title="Прослушивание с любого места появится после подключения хранилища записей">{{ icon('play') }}Слушать</button>
+    </div>
+  </div>
+  {% if speaker_msg %}<div class="vd-msg" role="status">{{ speaker_msg }}</div>{% endif %}
+  <ul class="vd-legend" aria-label="Говорящие">
+    {% for sp in d.speakers %}
+    <li><button type="button" class="vd-chip" data-vd-speaker="{{ loop.index0 }}" aria-pressed="false" style="--c: {{ sp.color }}"
+        title="{{ mmss(sp.seconds) }} речи · {{ sp.turns }} {{ plural(sp.turns, 'реплика', 'реплики', 'реплик') }}. Нажмите, чтобы выделить только этого говорящего.">
+      <i class="vd-dot" aria-hidden="true"></i><span class="vd-chip-name">{{ sp.n }} · {{ sp.name }}</span>
+      <span class="vd-chip-share">{{ sp.share }}%</span>
+      <span class="pill {{ sp.status_tone }}" title="{{ sp.status_hint }}">{{ sp.status_label }}</span>
+    </button></li>
+    {% endfor %}
+  </ul>
+  <div class="vd-stage" data-vd-stage>
+    <div class="vd-static" role="img" aria-label="Участки речи по говорящим">
+      {% for t in d.turns %}<i style="left:{{ (t[1] / d.duration * 100)|round(3) }}%;width:{{ ((t[2] - t[1]) / d.duration * 100)|round(3) }}%;--c:{{ d.speakers[t[0]].color }}"></i>{% endfor %}
+    </div>
+    <div class="vd-static-axis small muted"><span>00:00</span><span>{{ mmss(d.duration / 2) }}</span><span>{{ mmss(d.duration) }}</span></div>
+  </div>
+  <div class="vd-detail" data-vd-detail aria-live="polite" hidden></div>
+  <p class="small muted vd-hint">
+    {%- if d.peaks %}Высота — громкость записи{% if d.synthetic %} (в демо волна условная: у демо нет записи){% endif %}, цвет — говорящий по расшифровке.
+    {%- else %}Волна громкости строится для новых записей при обработке. Аудио этого совещания уже удалено, поэтому показаны участки речи по расшифровке.{% endif %}
+    Выноски — начало реплик; при увеличении масштаба их становится больше. Штриховка — говорят одновременно.
+    Нажмите на выноску или участок, чтобы прочитать реплику; ← и → — соседние реплики.</p>
+  {% if speakers_editable %}
+  <details class="more vd-fix" {{ 'open' if speaker_msg }}>
+    <summary>Исправить говорящего</summary>
+    <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-form" data-vd-assign>
+      <label class="f">Кто в расшифровке
+        <select name="speaker" required>{% for sp in d.speakers %}<option value="{{ sp.name }}">{{ sp.n }} · {{ sp.name }} — {{ sp.status_label }}</option>{% endfor %}</select></label>
+      <label class="f">Это
+        <select name="employee_id" required data-vd-choice>
+          <option value="">Выберите сотрудника…</option>
+          {% for e in employees %}<option value="{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}
+          <option value="guest">Гость — не сотрудник</option>
+        </select></label>
+      <label class="f" data-vd-guest>Имя гостя <input name="guest_name" maxlength="80" placeholder="Необязательно"></label>
+      <button class="btn primary">Применить ко всем репликам</button>
+    </form>
+    <p class="small muted">Имя заменится во всех репликах этого говорящего в расшифровке и на диаграмме. Протокол и задачи не меняются сами{% if m.status in ('awaiting_approval','rejected','error') %} — чтобы учесть исправление, нажмите «Пересобрать»{% endif %}.</p>
+    {% if d.has_manual %}<form method="post" action="/meetings/{{ m.id }}/speakers/reset" onsubmit="return confirm('Вернуть автоматическую разметку говорящих? Все ручные исправления этого совещания будут отменены.')">
+      <button class="btn sm ghost">Вернуть автоматическую разметку</button></form>{% endif %}
+  </details>
+  {% endif %}
+  <script type="application/json" id="voice-diagram-data">{{ diagram_client|tojson }}</script>
+</section>
+{% if d.unknown and speakers_editable %}
+<section class="card vd-ask" id="voice-speakers" aria-labelledby="voice-speakers-title">
+  <div class="row between"><h2 id="voice-speakers-title">Вопрос: кто это?</h2>
+    <span class="pill amber">{{ d.unknown|length }} {{ plural(d.unknown|length, 'говорящий не распознан', 'говорящих не распознаны', 'говорящих не распознаны') }}</span></div>
+  <p class="small muted">Голос не совпал ни с одним образцом, а в разговоре нет представления или обращения по имени. Прочитайте фрагменты и укажите, кто это: имя заменится во всех его репликах. Прослушать фрагменты можно будет после подключения хранилища записей.</p>
+  {% for sp in d.unknown %}
+  <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-ask-row" data-vd-assign>
+    <input type="hidden" name="speaker" value="{{ sp.name }}">
+    <div class="vd-ask-who"><i class="vd-dot" style="--c: {{ sp.color }}" aria-hidden="true"></i><b>{{ sp.name }}</b>
+      <span class="small muted">{{ mmss(sp.seconds) }} речи · {{ sp.turns }} {{ plural(sp.turns, 'реплика', 'реплики', 'реплик') }} · {{ sp.share }}%</span></div>
+    {% if sp.samples %}<ul class="vd-quotes">{% for q in sp.samples %}
+      <li><a class="t" href="#voice-diagram" data-vd-seq="{{ q.seq }}" title="Показать на диаграмме">{{ mmss(q.start) }}</a> «{{ q.text }}»</li>{% endfor %}</ul>{% endif %}
+    <div class="vd-ask-controls">
+      <select name="employee_id" required data-vd-choice aria-label="Кто это: {{ sp.name }}">
+        <option value="">Выберите сотрудника…</option>
+        {% for e in employees %}<option value="{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}
+        <option value="guest">Гость — не сотрудник</option>
+      </select>
+      <input name="guest_name" maxlength="80" placeholder="Имя гостя (необязательно)" aria-label="Имя гостя" data-vd-guest>
+      <button class="btn primary">Применить ко всем репликам</button>
+    </div>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
+<script src="{{ asset('voice-diagram.js') }}" defer></script>

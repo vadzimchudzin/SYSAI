@@ -290,6 +290,7 @@ class Meeting(Base):
     duration_sec = Column(Float, default=0)
     meeting_date = Column(Date, nullable=True)
     transcript = Column(JSON, nullable=True)  # [{speaker, start, end, text}]
+    waveform = Column(JSON, nullable=True)  # loudness outline for the voice diagram, see waveform.py
     report = Column(JSON, nullable=True)
     options = Column(JSON, nullable=True)  # per-meeting overrides of settings (approval, deadlines, recipients…)
     created_at = Column(DateTime(timezone=True), default=now)
@@ -775,6 +776,7 @@ def init_db():
     log.info("Database ready: %s%s", engine.dialect.name, f" @ {engine.url.host}" if engine.url.host else "")
     Base.metadata.create_all(engine)
     _add_column_if_missing("meetings", "options", "options JSON")
+    _add_column_if_missing("meetings", "waveform", "waveform JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")

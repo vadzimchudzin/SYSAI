@@ -25,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import (accounts, agent, bitrix, cases, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
-               settings_store, speaker_id, telegram, userbot, notion)
+               settings_store, speaker_id, telegram, userbot, notion, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
@@ -480,13 +480,19 @@ async def demo(request: Request):
 
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
-def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False):
+def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False, speakers: str = "",
+                 changed: str = ""):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
         employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
         artifacts = [{"id": a.id, "title": a.title, "filename": a.filename, "svg": a.svg or ""} for a in
                      s.query(Artifact).filter_by(meeting_id=mid).order_by(Artifact.id.desc()).all()]
+    diagram = voice_diagram.build(m.transcript, m.duration_sec, m.waveform, employees) if m.transcript else None
+    sections = group_transcript([dict(sg, seq=i) for i, sg in enumerate(m.transcript or []) if isinstance(sg, dict)],
+                                (m.report or {}).get("topics") or [])
+    count = int(changed) if changed.isascii() and changed.isdigit() and len(changed) < 7 else 0
+    speaker_msg = SPEAKER_MESSAGES.get(speakers, "").format(n=count)
     with SessionLocal() as s:
         loaded = pipeline.load(s, mid)
         plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
@@ -500,7 +506,61 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
                 plan=plan, quiet_at=userbot.local_time(until) if until is not None else "",
                 case_by_task=cases.for_meeting(mid),
                 voice_clips=voice_clips, voice_debug_mode=voice_debug, voice_readiness=voice_ready,
-                voice_msg=voice_msg, voice_admin=voice_admin)
+                voice_msg=voice_msg, voice_admin=voice_admin, diagram=diagram, transcript_sections=sections,
+                diagram_client=voice_diagram.client_payload(diagram) if diagram else None, speaker_msg=speaker_msg,
+                speakers_editable=bool(m.transcript) and m.status not in ("queued", "transcribing"))
+
+
+SPEAKER_MESSAGES = {
+    "assigned": "Готово: говорящий исправлен во всех его репликах ({n}). Протокол и задачи не пересобираются сами.",
+    "reset": "Автоматическая разметка говорящих восстановлена ({n} реплик).",
+}
+
+
+def _speaker_meeting(session, mid):
+    meeting = session.get(Meeting, mid)
+    if meeting is None:
+        raise HTTPException(404, "Совещание не найдено.")
+    if not meeting.transcript or meeting.status in ("queued", "transcribing"):
+        raise HTTPException(409, "Расшифровка ещё не готова.")
+    return meeting
+
+
+@app.post("/meetings/{mid}/speakers")
+async def meeting_speaker_assign(request: Request, mid: int):
+    """«Кто это?»: every replica of one diarization label goes to a person from the directory or to a guest."""
+    guard(request)
+    form = await request.form()
+    label = str(form.get("speaker") or "").strip()
+    choice = str(form.get("employee_id") or "").strip()
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        if label not in {voice_diagram.label_of(seg) for seg in meeting.transcript if isinstance(seg, dict)}:
+            raise HTTPException(400, "Такого говорящего нет в расшифровке.")
+        if choice == "guest":
+            name, employee_id, guest = voice_diagram.guest_name(meeting.transcript, form.get("guest_name"), label), None, True
+        else:
+            employee = s.get(Employee, int(choice)) if choice.isascii() and choice.isdigit() and len(choice) < 10 else None
+            if employee is None or not employee.active:
+                raise HTTPException(400, "Выберите сотрудника из справочника или «Гость».")
+            name, employee_id, guest = employee.name, employee.id, False
+        meeting.transcript, count = voice_diagram.assign(meeting.transcript, label, name, employee_id, guest,
+                                                         by=current_user(request)["username"])
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?speakers=assigned&changed={count}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/reset")
+def meeting_speaker_reset(request: Request, mid: int):
+    """Undo every manual speaker correction of the meeting: the automatic labels come back."""
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        restored, count = voice_diagram.reset(meeting.transcript)
+        if count:
+            meeting.transcript = restored
+            s.commit()
+    return RedirectResponse(f"/meetings/{mid}?speakers=reset&changed={count}#voice-diagram", 303)
 
 
 @app.post("/cases/{case_id}/{action}")
