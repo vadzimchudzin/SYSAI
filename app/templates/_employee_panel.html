@@ -1,0 +1,94 @@
+{% from "_employee_form.html" import employee_form, voice_label with context %}
+{% from "_icons.html" import icon %}
+{% set e = panel_employee %}
+{% if e or add %}
+<div class="emp-card" id="{{ 'employee-card' if e else 'employee-create' }}" data-employee-id="{{ e.id if e else 0 }}" data-active-tab="{{ panel_tab }}">
+  <header class="emp-panel-head">
+    {% if e %}
+    <span class="emp-ava lg" style="--ava-h: {{ (e.id * 47) % 360 }}" aria-hidden="true">{{ initials[e.id] }}</span>
+    <div class="emp-panel-title"><h2>{{ e.name }}</h2><p class="small muted">{{ e.position or 'Должность не указана' }}{% if not e.active %} · неактивен{% endif %}</p></div>
+    {% else %}
+    <div class="emp-panel-title"><h2>Новый сотрудник</h2><p class="small muted">Заполните, что известно сейчас. Остальное можно дополнить позже.</p></div>
+    {% endif %}
+    <a class="emp-panel-close" href="/employees" data-emp-open title="Закрыть" aria-label="Закрыть карточку">×</a>
+  </header>
+  {% if saved_name and not e %}<div class="emp-saved-note" role="status">✓ Сохранено: {{ saved_name }}. Заполните следующую карточку.</div>{% endif %}
+  <div class="emp-tabs" role="tablist" aria-label="Разделы карточки">
+    <button type="button" role="tab" class="emp-tab" data-tab="profile" id="tab-profile" aria-controls="pane-profile">Профиль</button>
+    {% if departments %}<button type="button" role="tab" class="emp-tab" data-tab="departments" id="tab-departments" aria-controls="pane-departments">Отделы{% if e and e.department_memberships %} <span class="emp-tab-count">{{ e.department_memberships|length }}</span>{% endif %}</button>{% endif %}
+    <button type="button" role="tab" class="emp-tab" data-tab="contacts" id="tab-contacts" aria-controls="pane-contacts" title="Telegram, права доступа, Bitrix24">Контакты</button>
+    {% if e %}{% set v = voice_info[e.id] %}<button type="button" role="tab" class="emp-tab" data-tab="voice" id="tab-voice" aria-controls="voice">Голос <span class="emp-tab-count" data-state="{{ v.state }}">{{ voice_label(v, true) }}</span></button>{% endif %}
+  </div>
+  {{ employee_form(e) }}
+  {% if e %}{% set v = voice_info[e.id] %}{% set samples = visible_voice_samples.get(e.id, []) %}
+  <section class="emp-pane voice-profile" data-pane="voice" id="voice" role="tabpanel" aria-labelledby="tab-voice">
+    {% if voice_msg %}<div class="card note emp-voice-msg" role="status">{{ voice_msg }}</div>{% endif %}
+    <div class="emp-voice-card" data-state="{{ v.state }}">
+      <div class="emp-voice-card-head"><b>Голосовой профиль</b><span class="pill {{ {'ready': 'green', 'partial': 'amber', 'check': 'amber'}.get(v.state, 'gray') }}">{{ voice_label(v) }}</span></div>
+      <div class="emp-meter lg" role="img" aria-label="Собрано {{ v.pct }}%"><i style="width: {{ v.pct }}%"></i></div>
+      <p class="small muted">{{ v.count }} из {{ v.need }} независимых записей · {{ v.seconds }} с речи · образцов: {{ v.samples }}.
+        {% if v.state == 'check' %}Записей достаточно, но образцы расходятся между собой или похожи на голос коллеги — прослушайте и удалите лишние.{% endif %}
+        Это счётчик сбора образцов, а не проверенная точность распознавания.</p>
+    </div>
+    {% if samples %}
+    <h4>Подтверждённые образцы</h4>
+    <ul class="emp-samples">
+      {% for sample in samples %}
+      <li class="emp-sample">
+        <div class="emp-sample-meta"><b>{{ '%.0f'|format(sample.sample_duration or 0) }} с</b>
+          · {% if sample.source_meeting_id %}<a href="/meetings/{{ sample.source_meeting_id }}">совещание #{{ sample.source_meeting_id }}</a>{% elif sample.source_kind == 'manual' %}загружен вручную{% else %}совещание удалено{% endif %}
+          {% if sample.created_at %} · {{ sample.created_at.strftime('%d.%m.%Y') }}{% endif %}
+          · <span class="emp-sample-status" data-status="{{ sample.embedding_status }}">{{ voice_status_ru.get(sample.embedding_status, sample.embedding_status) }}</span></div>
+        <audio controls preload="none" src="/employees/{{ e.id }}/voice-samples/{{ sample.id }}/audio"></audio>
+        <div class="actions">
+          {% if sample.embedding_status != 'ready' %}<form method="post" action="/employees/{{ e.id }}/voice-samples/{{ sample.id }}/retry"><button class="btn sm">Повторить извлечение признаков</button></form>{% endif %}
+          <form method="post" action="/employees/{{ e.id }}/voice-samples/{{ sample.id }}/delete" onsubmit="return confirm('Удалить этот образец голоса?')"><button class="btn sm ghost danger">Удалить образец</button></form>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="small muted">Аудио зашифровано в БД. Срок хранения — 180 дней либо до отзыва или удаления совещания. Точность идентификации не калибрована.</p>
+    <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Отозвать все образцы и голосовые признаки сотрудника?')"><button class="btn sm danger">Отозвать все образцы и признаки</button></form>
+    {% else %}
+    <p class="small muted">Образцов пока нет. Их добавляют со страницы совещания кнопкой «Выбрать образец голоса вручную»: прослушайте фрагмент и подтвердите, кто говорит. Для готового профиля нужны записи минимум с {{ v.need }} разных совещаний.</p>
+    {% endif %}
+    {% if e.voiceprint or voice_identity_enabled %}
+    <details class="emp-legacy-voice"{% if e.voiceprint %} open{% endif %}>
+      <summary>Голосовой шаблон pyannoteAI</summary>
+      {% if e.voiceprint %}
+        <p class="small"><span class="pill green">Голосовой шаблон активен</span> · {{ e.voiceprint.sample_duration }} сек. · зарегистрирован {{ e.voiceprint.created_at.strftime('%d.%m.%Y') if e.voiceprint.created_at else '' }}</p>
+        <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Удалить голосовой шаблон?')"><button class="btn sm danger">Удалить шаблон</button></form>
+      {% else %}<p class="small muted">Шаблон ещё не зарегистрирован. Для регистрации нужен отдельный образец речи сотрудника.</p>{% endif %}
+      {% if voice_identity_enabled %}
+      <form method="post" action="/employees/{{ e.id }}/voice-sample" enctype="multipart/form-data" class="voice-profile-form">
+        <label class="f">Чистый образец голоса (5–30 секунд)
+          <input type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
+        </label>
+        <p class="small muted">Лучше 10–20 секунд обычной речи только этого человека — без музыки, других голосов и сильного шума. Загрузка нового образца заменит прежний.</p>
+        <label class="check"><input type="checkbox" name="consent" value="yes" required> Подтверждаю, что отдельное согласие сотрудника получено и зафиксировано. Образец и аудиофрагменты совещаний будут обрабатываться внешним сервисом pyannoteAI.</label>
+        <button class="btn primary">Создать / заменить шаблон</button>
+      </form>
+      {% endif %}
+    </details>
+    {% endif %}
+  </section>
+  {% endif %}
+  <footer class="emp-panel-foot">
+    {% if e %}
+    <button class="btn primary" type="submit" form="employee-form" name="next" value="">Сохранить</button>
+    <a class="btn ghost" href="/employees" data-emp-open>Закрыть</a>
+    <form method="post" action="/employees/{{ e.id }}/delete" class="emp-delete" onsubmit='return confirm({{ ("Удалить сотрудника «" ~ e.name ~ "»? Его голосовые образцы тоже удалятся.")|tojson }})'><button class="btn sm ghost danger" type="submit" title="Удалить сотрудника">Удалить</button></form>
+    {% else %}
+    <button class="btn primary" type="submit" form="employee-form" name="next" value="">Создать карточку</button>
+    <button class="btn" type="submit" form="employee-form" name="next" value="add" title="Карточка сохранится, и сразу откроется пустая форма для следующего человека">Сохранить и добавить ещё</button>
+    {% endif %}
+  </footer>
+</div>
+{% else %}
+<div class="emp-panel-empty">
+  <div class="empty-state-icon" aria-hidden="true">{{ icon('users') }}</div>
+  <h2>Выберите сотрудника</h2>
+  <p class="muted small">Карточка откроется здесь, а список останется на месте. Изменения сохраняются без перезагрузки страницы.</p>
+  <a class="btn primary" href="/employees?add=1#employee-create" data-emp-open>＋ Добавить сотрудника</a>
+</div>
+{% endif %}

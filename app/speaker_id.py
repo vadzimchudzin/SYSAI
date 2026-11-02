@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import math
+import operator
 import pathlib
 import subprocess
 import tempfile
@@ -940,22 +941,33 @@ def identification_readiness(samples_by_employee):
     details = []
     valid_by_employee = {eid: [r for r in rows if sample_has_usable_embedding(r)]
                          for eid, rows in samples_by_employee.items()}
+    # Every embedding is decrypted and measured once: the directory recomputes this on each card open
+    # and save. similarity() gives exactly _cosine_similarity() (same sums in the same order).
+    def prepared(row):
+        vector = _normalise_embedding(json.loads(decrypt_voiceprint(row.encrypted_embedding)))
+        return vector, math.sqrt(sum(value ** 2 for value in vector))
+
+    def similarity(first, second):
+        (left, left_norm), (right, right_norm) = first, second
+        if left_norm < 1e-8 or right_norm < 1e-8:
+            return -1.0
+        return sum(map(operator.mul, left, right)) / (left_norm * right_norm)
+
+    vectors_by_employee = {eid: [prepared(r) for r in rows] for eid, rows in valid_by_employee.items()}
     for eid, rows in valid_by_employee.items():
         count = independent_sample_count(rows)
         models = {r.model_version for r in rows}
-        vectors = [_normalise_embedding(json.loads(decrypt_voiceprint(r.encrypted_embedding))) for r in rows]
+        vectors = vectors_by_employee[eid]
         consistent = len(models) == 1 and all(
-            _cosine_similarity(a, b) >= 0.75 for i, a in enumerate(vectors) for b in vectors[i+1:])
+            similarity(a, b) >= 0.75 for i, a in enumerate(vectors) for b in vectors[i+1:])
         separated = True
         for other_id, other_rows in valid_by_employee.items():
-            if other_id == eid:
+            if other_id == eid or not separated:
                 continue
-            for other in other_rows:
-                if other.model_version not in models:
-                    continue
-                other_vector = _normalise_embedding(json.loads(decrypt_voiceprint(other.encrypted_embedding)))
-                if any(_cosine_similarity(v, other_vector) > 0.60 for v in vectors):
+            for other, other_vector in zip(other_rows, vectors_by_employee[other_id]):
+                if other.model_version in models and any(similarity(v, other_vector) > 0.60 for v in vectors):
                     separated = False
+                    break
         enough = count >= READY_INDEPENDENT_SAMPLES and consistent and separated
         details.append({"employee_id": eid, "independent_samples": count, "ready": enough})
     enough = bool(details) and all(p["ready"] for p in details)
