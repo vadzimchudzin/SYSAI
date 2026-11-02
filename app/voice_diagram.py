@@ -221,6 +221,21 @@ _AUTO_KEYS = ("speaker", "speaker_source", "speaker_employee_id", "speaker_simil
 _MANUAL_KEYS = ("speaker_guest", "speaker_assigned_by", "speaker_auto")
 
 
+def relabel(segment: dict, name: str, employee_id=None, guest=False, by: str = "") -> dict:
+    """A copy of one replica that now belongs to `name`; its first automatic labelling stays in `speaker_auto`."""
+    updated = dict(segment)
+    if "speaker_auto" not in updated:
+        updated["speaker_auto"] = {key: segment[key] for key in _AUTO_KEYS if key in segment}
+    for key in ("speaker_similarity", "speaker_confidence", "speaker_employee_id", "speaker_guest"):
+        updated.pop(key, None)
+    updated.update(speaker=name, speaker_source="manual", speaker_assigned_by=str(by or "")[:120])
+    if employee_id is not None:
+        updated["speaker_employee_id"] = int(employee_id)
+    if guest:
+        updated["speaker_guest"] = True
+    return updated
+
+
 def assign(transcript, label: str, name: str, employee_id=None, guest=False, by: str = "") -> tuple[list, int]:
     """(new transcript, changed replicas): every replica of `label` now belongs to `name`.
 
@@ -230,17 +245,7 @@ def assign(transcript, label: str, name: str, employee_id=None, guest=False, by:
         if not isinstance(segment, dict) or label_of(segment) != label:
             result.append(segment)
             continue
-        updated = dict(segment)
-        if "speaker_auto" not in updated:
-            updated["speaker_auto"] = {key: segment[key] for key in _AUTO_KEYS if key in segment}
-        for key in ("speaker_similarity", "speaker_confidence", "speaker_employee_id", "speaker_guest"):
-            updated.pop(key, None)
-        updated.update(speaker=name, speaker_source="manual", speaker_assigned_by=str(by or "")[:120])
-        if employee_id is not None:
-            updated["speaker_employee_id"] = int(employee_id)
-        if guest:
-            updated["speaker_guest"] = True
-        result.append(updated)
+        result.append(relabel(segment, name, employee_id, guest, by))
         changed += 1
     return result, changed
 

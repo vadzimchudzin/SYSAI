@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint,
                         create_engine, text)
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, deferred, relationship, sessionmaker
 
 from . import config
 
@@ -303,6 +303,12 @@ class Meeting(Base):
     duration_sec = Column(Float, default=0)
     meeting_date = Column(Date, nullable=True)
     transcript = Column(JSON, nullable=True)  # [{speaker, start, end, text}]
+    # Manual corrections (transcript_edit.py): the automatic transcript as it was before the first one, the undo
+    # history, and the corrected copy frozen as a reference («эталон») for measuring the labelling (diarization_eval.py).
+    # Deferred: the lists of meetings never need them.
+    transcript_auto = deferred(Column(JSON, nullable=True))
+    transcript_edits = deferred(Column(JSON, nullable=True))
+    diarization_reference = deferred(Column(JSON, nullable=True))
     waveform = Column(JSON, nullable=True)  # loudness outline for the voice diagram, see waveform.py
     recording_status = Column(String(12), default="")  # "" | pending | stored | failed | deleted | expired, see audio_archive.py
     recording = Column(JSON, nullable=True)  # the kept copy: storage key, size, duration, until when it is kept, last error
@@ -794,6 +800,9 @@ def init_db():
     _add_column_if_missing("meetings", "waveform", "waveform JSON")
     _add_column_if_missing("meetings", "recording_status", "recording_status VARCHAR(12) DEFAULT ''")
     _add_column_if_missing("meetings", "recording", "recording JSON")
+    _add_column_if_missing("meetings", "transcript_auto", "transcript_auto JSON")
+    _add_column_if_missing("meetings", "transcript_edits", "transcript_edits JSON")
+    _add_column_if_missing("meetings", "diarization_reference", "diarization_reference JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")

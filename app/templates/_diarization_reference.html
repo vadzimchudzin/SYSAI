@@ -1,0 +1,25 @@
+{# The reference («эталон») of one meeting: the corrected transcript the automatic speaker labelling is measured by. #}
+<details class="more vd-ref" id="diarization-reference"{{ ' open' if ref_msg }}>
+  <summary>Эталон для замера точности{% if reference %} · говорящий верный <b>{{ pct(reference.metrics.accuracy) }}</b> времени{% else %} · не сохранён{% endif %}</summary>
+  {% if ref_msg %}<div class="vd-msg" role="status">{{ ref_msg }}</div>{% endif %}
+  {% if reference %}
+  {% set r = reference.metrics %}
+  {% if reference.stale %}<p class="warn small">Расшифровка изменилась после сохранения эталона. Если правки верные, обновите эталон.</p>{% endif %}
+  <table class="ref-metrics small">
+    <tr><th>Говорящий верный</th><td><b>{{ pct(r.accuracy) }}</b> времени речи ({{ mmss(r.speech_seconds) }})</td></tr>
+    <tr><th>Лишние голоса</th><td>{{ r.extra }}{% for x in r.split %}<br><span class="muted">{{ x.person }} разбит на: {{ label_list(x.labels) }}</span>{% endfor %}</td></tr>
+    <tr><th>Склейки</th><td>{{ r.merges|length }}{% for x in r.merges %}<br><span class="muted">«{{ x.label }}» — это {{ label_list(x.people) }}</span>{% endfor %}</td></tr>
+    <tr><th>Имена</th><td>{% if r.names.precision is not none %}верны {{ pct(r.names.precision) }} подписанного времени{% else %}разметка никого не назвала{% endif %}{% if r.names.recall is not none %} · сотрудники названы {{ pct(r.names.recall) }} своего времени{% endif %}</td></tr>
+    <tr><th>Короткие реплики</th><td>{% if r.short.total %}{{ r.short.right }} из {{ r.short.total }} ({{ pct(r.short.accuracy) }}){% else %}нет{% endif %}</td></tr>
+    <tr><th>Людей / голосов</th><td>{{ r.ref_speakers }} в эталоне · {{ r.hyp_speakers }} в автоматической разметке</td></tr>
+  </table>
+  <p class="small muted">Сохранён {% if reference.at %}{{ local_time(reference.at) }}{% endif %}{% if reference.by %} · {{ reference.by }}{% endif %} · {{ reference.replicas }} реплик. <a href="/diarization">Все эталоны и средняя точность →</a></p>
+  <div class="row">
+    <form method="post" action="/meetings/{{ m.id }}/reference"><button class="btn sm">Обновить эталон по текущей расшифровке</button></form>
+    <form method="post" action="/meetings/{{ m.id }}/reference/delete" onsubmit="return confirm('Удалить эталон этого совещания? Расшифровка и правки останутся.')"><button class="btn sm ghost danger">Удалить эталон</button></form>
+  </div>
+  {% else %}
+  <p class="small muted">Когда расшифровка исправлена до правильной — у каждой реплики верный говорящий, склеенные реплики разделены, — сохраните её как эталон. По эталонам считается точность автоматической разметки голосов и сравниваются способы разметки.</p>
+  <form method="post" action="/meetings/{{ m.id }}/reference"><button class="btn sm">Сохранить как эталон</button></form>
+  {% endif %}
+</details>

@@ -24,8 +24,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, audio_archive, bitrix, cases, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress,
-               progress_board, render, report_archive, settings_store, speaker_id, storage, telegram, userbot, notion, voice_diagram)
+from . import (accounts, agent, audio_archive, bitrix, cases, diarization_eval, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress,
+               progress_board, render, report_archive, settings_store, speaker_id, storage, telegram, transcript_edit, userbot, notion,
+               voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
@@ -493,7 +494,7 @@ async def demo(request: Request):
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
 def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False, speakers: str = "",
-                 changed: str = "", recording: str = ""):
+                 changed: str = "", recording: str = "", seg: str = "", ref: str = ""):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
@@ -515,6 +516,9 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
         if voice_admin:
             voice_clips, voice_debug, voice_ready = _meeting_voice_enrollment_context(s, loaded, manual=voice_enroll)
         kept = audio_archive.view(loaded)
+        edits = transcript_edit.history(loaded)
+        reference_admin = current_user(request)["role"] == "superuser"
+        reference = diarization_eval.summary(loaded) if reference_admin else None
     if not may_listen:  # recorded in someone else's browser: the same rule as for the voice clips
         kept = {"state": "none", "text": "Запись этого совещания доступна только тому, кто его записал."}
     client = voice_diagram.client_payload(diagram) if diagram else None
@@ -528,7 +532,10 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
                 voice_msg=voice_msg, voice_admin=voice_admin, diagram=diagram, transcript_sections=sections,
                 diagram_client=client, speaker_msg=speaker_msg, recording_msg=RECORDING_MESSAGES.get(recording, ""),
                 recording=kept, recording_admin=voice_admin,
-                speakers_editable=bool(m.transcript) and m.status not in ("queued", "transcribing"))
+                speakers_editable=bool(m.transcript) and m.status not in ("queued", "transcribing"),
+                edits=edits, seg_msg=SEGMENT_MESSAGES.get(seg, ""), local_time=userbot.local_time,
+                reference=reference, reference_admin=reference_admin, ref_msg=REFERENCE_MESSAGES.get(ref, ""),
+                pct=diarization_eval.pct, label_list=diarization_eval.label_list)
 
 
 RECORDING_MESSAGES = {"deleted": "Запись удалена из хранилища. Расшифровка, протокол и диаграмма остались."}
@@ -592,8 +599,11 @@ async def meeting_speaker_assign(request: Request, mid: int):
             if employee is None or not employee.active:
                 raise HTTPException(400, "Выберите сотрудника из справочника или «Гость».")
             name, employee_id, guest = employee.name, employee.id, False
-        meeting.transcript, count = voice_diagram.assign(meeting.transcript, label, name, employee_id, guest,
-                                                         by=current_user(request)["username"])
+        by = current_user(request)["username"]
+        before = meeting.transcript
+        after, count = voice_diagram.assign(before, label, name, employee_id, guest, by=by)
+        if count:
+            transcript_edit.record(meeting, after, transcript_edit.assigned(before, after, label, name, by))
         s.commit()
     return RedirectResponse(f"/meetings/{mid}?speakers=assigned&changed={count}#voice-diagram", 303)
 
@@ -604,11 +614,171 @@ def meeting_speaker_reset(request: Request, mid: int):
     guard(request)
     with SessionLocal() as s:
         meeting = _speaker_meeting(s, mid)
-        restored, count = voice_diagram.reset(meeting.transcript)
-        if count:
-            meeting.transcript = restored
-            s.commit()
+        count = transcript_edit.reset(meeting)
+        s.commit()
     return RedirectResponse(f"/meetings/{mid}?speakers=reset&changed={count}#voice-diagram", 303)
+
+
+SEGMENT_MESSAGES = {
+    "speaker": "Готово: говорящий изменён только у этой реплики.",
+    "split": "Готово: реплика разделена на две.",
+    "merge": "Готово: реплики объединены.",
+    "undo": "Последняя правка отменена.",
+}
+
+
+def _segment_seq(seq: str) -> int:
+    if not (seq.isascii() and seq.isdigit() and len(seq) < 7):
+        raise HTTPException(404, "Такой реплики нет в расшифровке.")
+    return int(seq)
+
+
+def _segment_choice(session, transcript, form, field="who"):
+    """The speaker chosen in a correction form: (name, employee id, guest?) or None for «как было»."""
+    choice = str(form.get(field) or "").strip()
+    employee = None
+    if choice.startswith("employee:"):
+        raw = choice[len("employee:"):]
+        employee = session.get(Employee, int(raw)) if raw.isascii() and raw.isdigit() and len(raw) < 10 else None
+        if employee is None or not employee.active:
+            raise transcript_edit.EditError("Выберите сотрудника из справочника.")
+    return transcript_edit.resolve(transcript, choice, form.get("guest_name"), employee)
+
+
+def _segment_redirect(mid: int, op: str, seq: int):
+    return RedirectResponse(f"/meetings/{mid}?seg={op}#seg-{max(0, seq)}", 303)
+
+
+def _segment_error(exc: transcript_edit.EditError):
+    return HTTPException(409 if isinstance(exc, transcript_edit.Stale) else 400, str(exc))
+
+
+@app.get("/meetings/{mid}/segments/{seq}", response_class=HTMLResponse)
+def segment_editor(request: Request, mid: int, seq: str, fragment: bool = False):
+    """One replica: another speaker only for it, a split in two, a merge with a neighbour. Opens under the replica on
+    the meeting page (fragment) or as a page of its own without JavaScript."""
+    guard(request)
+    index = _segment_seq(seq)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        transcript = meeting.transcript
+        if not 0 <= index < len(transcript) or not isinstance(transcript[index], dict):
+            raise HTTPException(404, "Такой реплики нет в расшифровке.")
+        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
+        neighbour = lambda i: transcript[i] if 0 <= i < len(transcript) and isinstance(transcript[i], dict) else None
+        segment = transcript[index]
+        ctx = dict(m=meeting, seq=index, sg=segment, sig=transcript_edit.signature(segment),
+                   labels=transcript_edit.labels(transcript), new_label=transcript_edit.new_label(transcript),
+                   current=voice_diagram.label_of(segment), words=transcript_edit.words(segment.get("text")),
+                   prev=neighbour(index - 1), next=neighbour(index + 1),
+                   prev_sig=transcript_edit.signature(neighbour(index - 1)) if neighbour(index - 1) else "",
+                   next_sig=transcript_edit.signature(neighbour(index + 1)) if neighbour(index + 1) else "",
+                   employees=employees)
+        if fragment:
+            return tpl.TemplateResponse(request, "_segment_editor.html", ctx)
+        return page(request, "segment_edit.html", **ctx)
+
+
+async def _segment_change(request: Request, mid: int, seq: str, change):
+    guard(request)
+    index = _segment_seq(seq)
+    form = await request.form()
+    by = current_user(request)["username"]
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        try:
+            transcript, entry = change(s, meeting.transcript, index, form, by)
+        except transcript_edit.EditError as exc:
+            raise _segment_error(exc)
+        transcript_edit.record(meeting, transcript, entry)
+        s.commit()
+    return _segment_redirect(mid, entry["op"], entry["seq"])
+
+
+@app.post("/meetings/{mid}/segments/{seq}/speaker")
+async def segment_speaker(request: Request, mid: int, seq: str):
+    def change(s, transcript, index, form, by):
+        return transcript_edit.set_speaker(transcript, index, form.get("sig"), _segment_choice(s, transcript, form), by)
+    return await _segment_change(request, mid, seq, change)
+
+
+@app.post("/meetings/{mid}/segments/{seq}/split")
+async def segment_split(request: Request, mid: int, seq: str):
+    def change(s, transcript, index, form, by):
+        who = _segment_choice(s, transcript, form) if str(form.get("who") or transcript_edit.SAME) != transcript_edit.SAME else None
+        return transcript_edit.split(transcript, index, form.get("sig"), form.get("at"), who, by)
+    return await _segment_change(request, mid, seq, change)
+
+
+@app.post("/meetings/{mid}/segments/{seq}/merge")
+async def segment_merge(request: Request, mid: int, seq: str):
+    def change(s, transcript, index, form, by):
+        return transcript_edit.merge(transcript, index, form.get("sig"), str(form.get("with") or ""),
+                                     form.get("neighbour_sig"), by)
+    return await _segment_change(request, mid, seq, change)
+
+
+@app.post("/meetings/{mid}/transcript/undo")
+def transcript_undo(request: Request, mid: int):
+    """«Отменить последнюю правку» of the transcript, one at a time, newest first."""
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        try:
+            entry = transcript_edit.undo(meeting)
+        except transcript_edit.EditError as exc:
+            raise _segment_error(exc)
+        s.commit()
+    return _segment_redirect(mid, "undo", int(entry.get("seq") or 0))
+
+
+REFERENCE_MESSAGES = {
+    "saved": "Эталон сохранён: точность автоматической разметки посчитана по нему.",
+    "deleted": "Эталон удалён. Расшифровка и правки остались.",
+}
+
+
+@app.post("/meetings/{mid}/reference")
+def meeting_reference_save(request: Request, mid: int):
+    """«Сохранить как эталон»: the corrected transcript becomes the answer key the automatic labelling is measured by."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        try:
+            diarization_eval.save(meeting, by=current_user(request)["username"])
+        except transcript_edit.EditError as exc:
+            raise HTTPException(400, str(exc))
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?ref=saved#diarization-reference", 303)
+
+
+@app.post("/meetings/{mid}/reference/delete")
+def meeting_reference_delete(request: Request, mid: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        meeting = s.get(Meeting, mid)
+        if meeting is None:
+            raise HTTPException(404, "Совещание не найдено.")
+        diarization_eval.remove(meeting)
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?ref=deleted#diarization-reference", 303)
+
+
+@app.get("/diarization", response_class=HTMLResponse)
+def diarization_overview(request: Request):
+    """«Точность разметки голосов»: every reference, its metrics and the totals."""
+    guard_admin(request)
+    rows = []
+    with SessionLocal() as s:
+        meetings = s.query(Meeting).filter(Meeting.diarization_reference.isnot(None)).order_by(Meeting.id.desc()).all()
+        for meeting in meetings:
+            info = diarization_eval.summary(meeting)
+            if info is not None:
+                rows.append({"id": meeting.id, "title": meeting.title or f"Совещание {meeting.id}",
+                             "date": meeting.meeting_date, "duration": meeting.duration_sec, **info})
+    total = diarization_eval.combine([row["metrics"] for row in rows])
+    return page(request, "diarization.html", rows=rows, total=total, pct=diarization_eval.pct,
+                label_list=diarization_eval.label_list, local_time=userbot.local_time)
 
 
 @app.post("/cases/{case_id}/{action}")
