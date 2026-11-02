@@ -23,7 +23,7 @@ def test_transcribe_audio_retries_without_unsupported_timestamp_granularity(monk
         return responses.pop(0)
     monkeypatch.setattr(llm.httpx, "post", fake_post)
 
-    result = llm.transcribe_audio(b"fake audio", "openai/gpt-4o-transcribe", "mp3", "ru")
+    result = llm.transcribe_audio(b"fake audio", "openai/whisper-large-v3", "mp3", "ru")
 
     assert result["text"] == "Проверка связи."
     assert len(calls) == 2
@@ -31,4 +31,20 @@ def test_transcribe_audio_retries_without_unsupported_timestamp_granularity(monk
     assert "timestamp_granularities" not in calls[1][1]
     assert "diarize" not in calls[0][1] and "diarize" not in calls[1][1]
     assert calls[1][1]["language"] == "ru"
-    assert costs == [("openai/gpt-4o-transcribe", {"cost": 0.01})]
+    assert costs == [("openai/whisper-large-v3", {"cost": 0.01})]
+
+def test_plain_json_models_are_not_asked_for_verbose_json(monkeypatch):
+    calls = []
+    monkeypatch.setattr(config, "openrouter_key", lambda: "test-key")
+    monkeypatch.setattr(config, "OPENROUTER_BASE_URL", "https://openrouter.example/api/v1")
+    monkeypatch.setattr(llm, "check_budget", lambda: None)
+    monkeypatch.setattr(llm, "record_cost", lambda model, usage: None)
+
+    def fake_post(url, json, headers, timeout):
+        calls.append(json)
+        return SimpleNamespace(status_code=200, text="", json=lambda: {"text": "Проверка связи."})
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+
+    assert llm.transcribe_audio(b"fake audio", "openai/gpt-4o-transcribe", "mp3", "ru")["text"] == "Проверка связи."
+    assert len(calls) == 1 and calls[0]["response_format"] == "json"
+    assert "timestamp_granularities" not in calls[0]

@@ -1192,6 +1192,30 @@ def _chat_ids(form, name: str) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def _catalog_items(url: str, headers: dict) -> list[dict]:
+    response = httpx.get(url, headers=headers, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    items = payload.get("data", []) if isinstance(payload, dict) else []
+    return [item for item in items if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]]
+
+
+def _catalog_price(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _stt_usd_per_hour(pricing: dict) -> float | None:
+    """Duration-priced STT bills per second of audio. Token-priced models and odd units get no hourly rate."""
+    prompt, completion = _catalog_price(pricing.get("prompt")), _catalog_price(pricing.get("completion"))
+    if prompt is None or not 0 < prompt < 0.01 or completion:  # $36+ per hour is not a per-second price
+        return None
+    return round(prompt * 3600, 2)
+
+
 @app.get("/settings/models")
 def settings_models(request: Request):
     guard_admin(request)
@@ -1199,56 +1223,73 @@ def settings_models(request: Request):
     key = config.openrouter_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    # Two independent requests: one failing catalog must not empty every model list.
+    warnings, items, stt_items = [], [], []
     try:
-        response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models", headers=headers, timeout=20)
-        response.raise_for_status()
-        payload = response.json()
-        stt_response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models?output_modalities=transcription",
-                                 headers=headers, timeout=20)
-        stt_response.raise_for_status()
-        stt_payload = stt_response.json()
+        items = _catalog_items(f"{config.OPENROUTER_BASE_URL}/models", headers)
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("Could not load OpenRouter model catalog: %s", exc)
-        raise HTTPException(502, "Не удалось загрузить каталог OpenRouter. Проверьте подключение и повторите.") from None
-    items = payload.get("data", []) if isinstance(payload, dict) else []
-    models = []
+        warnings.append("общий каталог моделей не загрузился")
+    try:
+        stt_items = _catalog_items(f"{config.OPENROUTER_BASE_URL}/models?output_modalities=transcription", headers)
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Could not load OpenRouter STT catalog: %s", exc)
+        warnings.append("каталог моделей распознавания речи не загрузился")
+    if not items and not stt_items:
+        raise HTTPException(502, "Не удалось загрузить каталог OpenRouter. Проверьте подключение и повторите.")
+    models, stt_from_main = [], []
     for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            continue
+        model_id = item["id"][:200]
         architecture = item.get("architecture") or {}
         inputs = architecture.get("input_modalities") or item.get("input_modalities") or []
         outputs = architecture.get("output_modalities") or item.get("output_modalities") or []
         pricing = item.get("pricing") or {}
+        prompt, completion = _catalog_price(pricing.get("prompt")), _catalog_price(pricing.get("completion"))
+        if "transcription" in outputs:
+            stt_from_main.append(item)  # the main catalog may list STT models too
         models.append({
-            "id": item["id"][:200],
-            "name": str(item.get("name") or item["id"])[:200],
+            "id": model_id,
+            "name": str(item.get("name") or model_id)[:200],
+            "provider": model_id.lstrip("~").split("/", 1)[0],
             "audio_input": "audio" in inputs,
             "text_input": not inputs or "text" in inputs,
             "text_output": not outputs or "text" in outputs,
             "context_length": item.get("context_length"),
             "prompt_price": pricing.get("prompt"),
             "completion_price": pricing.get("completion"),
+            "free": model_id == "openrouter/free" or model_id.endswith(":free") or (prompt == 0 and completion == 0),
+            # :batch variants answer through the asynchronous batch queue, too slow for meetings and chats
+            "batch": model_id.endswith(":batch"),
         })
-    models.sort(key=lambda model: (model["id"].casefold()))
-    stt_items = stt_payload.get("data", []) if isinstance(stt_payload, dict) else []
-    transcription_models = []
-    for item in stt_items:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+    models.sort(key=lambda model: model["id"].casefold())
+    transcription_models, seen = [], set()
+    for item in stt_items + stt_from_main:
+        model_id = item["id"][:200]
+        if model_id in seen:
             continue
+        seen.add(model_id)
         pricing = item.get("pricing") or {}
-        transcription_models.append({"id": item["id"][:200],
-                                     "name": str(item.get("name") or item["id"])[:200],
-                                     "prompt_price": pricing.get("prompt"),
-                                     "completion_price": pricing.get("completion")})
+        transcription_models.append({
+            "id": model_id, "name": str(item.get("name") or model_id)[:200], "kind": "stt",
+            "provider": model_id.lstrip("~").split("/", 1)[0],
+            "prompt_price": pricing.get("prompt"), "completion_price": pricing.get("completion"),
+            "usd_per_hour": _stt_usd_per_hour(pricing),
+            "description": " ".join(str(item.get("description") or "").split())[:300],
+        })
     # Gemini hears words and voices in one pass (best on the speech benchmark, see scripts/speech_benchmark.py).
-    known = {m["id"] for m in transcription_models}
     for model in models:
-        if model["audio_input"] and transcribe.chat_model(model["id"]) and model["id"] not in known:
-            transcription_models.append({"id": model["id"], "name": model["name"] + " — слова и голоса одним проходом",
-                                         "prompt_price": model["prompt_price"], "completion_price": model["completion_price"]})
-    transcription_models.sort(key=lambda model: model["id"].casefold())
+        if (model["audio_input"] and model["text_output"] and not model["batch"]
+                and transcribe.chat_model(model["id"]) and model["id"] not in seen):
+            seen.add(model["id"])
+            transcription_models.append({
+                "id": model["id"], "name": model["name"], "kind": "chat", "provider": model["provider"],
+                "prompt_price": model["prompt_price"], "completion_price": model["completion_price"],
+                "usd_per_hour": None, "description": "",
+            })
+    transcription_models.sort(key=lambda model: (model["kind"] != "stt", model["name"].casefold(), model["id"]))
     return {"models": models, "count": len(models), "transcription_models": transcription_models,
-            "transcription_count": len(transcription_models)}
+            "transcription_count": len(transcription_models),
+            "stt_count": sum(model["kind"] == "stt" for model in transcription_models), "warnings": warnings}
 
 
 @app.post("/settings")
@@ -1276,7 +1317,7 @@ async def settings_save(request: Request):
             value = str(f[k]).strip()
             updates[k] = value if k == "glossary" else value or settings_store.DEFAULTS[k]
     for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model"):
-        if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"[A-Za-z0-9._:/-]+", updates[k])):
+        if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"~?[A-Za-z0-9._:/-]+", updates[k])):
             raise HTTPException(400, "Некорректный идентификатор модели")
     if "conversation_tone" in updates:
         updates["conversation_tone"] = updates["conversation_tone"][:1000]
