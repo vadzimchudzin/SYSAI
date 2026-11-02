@@ -24,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, bitrix, cases, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
-               settings_store, speaker_id, telegram, userbot, notion, voice_diagram)
+from . import (accounts, agent, audio_archive, bitrix, cases, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress,
+               progress_board, render, report_archive, settings_store, speaker_id, storage, telegram, userbot, notion, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
@@ -481,7 +481,7 @@ async def demo(request: Request):
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
 def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False, speakers: str = "",
-                 changed: str = ""):
+                 changed: str = "", recording: str = ""):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
@@ -497,18 +497,54 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
         loaded = pipeline.load(s, mid)
         plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
                 if userbot.ai_mode() and loaded.status in ("awaiting_approval", "rejected") else None)
-        voice_admin = current_user(request)["role"] == "superuser" and user_may_access_meeting_audio(request, loaded)
+        may_listen = user_may_access_meeting_audio(request, loaded)
+        voice_admin = current_user(request)["role"] == "superuser" and may_listen
         voice_clips, voice_debug, voice_ready = ([], False, {})
         if voice_admin:
             voice_clips, voice_debug, voice_ready = _meeting_voice_enrollment_context(s, loaded, manual=voice_enroll)
+        kept = audio_archive.view(loaded)
+    if not may_listen:  # recorded in someone else's browser: the same rule as for the voice clips
+        kept = {"state": "none", "text": "Запись этого совещания доступна только тому, кто его записал."}
+    client = voice_diagram.client_payload(diagram) if diagram else None
+    if client is not None and kept.get("playable"):
+        client["audio"] = {"src": kept["src"]}
     until = userbot.quiet_until()
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
                 plan=plan, quiet_at=userbot.local_time(until) if until is not None else "",
                 case_by_task=cases.for_meeting(mid),
                 voice_clips=voice_clips, voice_debug_mode=voice_debug, voice_readiness=voice_ready,
                 voice_msg=voice_msg, voice_admin=voice_admin, diagram=diagram, transcript_sections=sections,
-                diagram_client=voice_diagram.client_payload(diagram) if diagram else None, speaker_msg=speaker_msg,
+                diagram_client=client, speaker_msg=speaker_msg, recording_msg=RECORDING_MESSAGES.get(recording, ""),
+                recording=kept, recording_admin=voice_admin,
                 speakers_editable=bool(m.transcript) and m.status not in ("queued", "transcribing"))
+
+
+RECORDING_MESSAGES = {"deleted": "Запись удалена из хранилища. Расшифровка, протокол и диаграмма остались."}
+
+
+@app.get("/meetings/{mid}/recording")
+def meeting_recording(request: Request, mid: int, download: bool = False):
+    """The player's source: a short-lived presigned link to the private copy, never the keys or a public address."""
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _voice_meeting(s, request, mid)
+        try:
+            url = audio_archive.link(meeting, download=download)
+        except storage.StorageError as exc:
+            raise HTTPException(503, f"Хранилище записей недоступно: {exc}")
+    if not url:
+        raise HTTPException(404, "Записи этого совещания нет.")
+    return RedirectResponse(url, 302, headers={"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"})
+
+
+@app.post("/meetings/{mid}/recording/delete")
+def meeting_recording_delete(request: Request, mid: int):
+    """«Удалить запись»: the meeting, its transcript and report stay."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        _voice_meeting(s, request, mid)
+    audio_archive.remove(mid)
+    return RedirectResponse(f"/meetings/{mid}?recording=deleted#voice-diagram", 303)
 
 
 SPEAKER_MESSAGES = {
@@ -1174,6 +1210,7 @@ def meeting_delete(request: Request, mid: int):
                 if sample.sample_blob_path:
                     s.add(VoiceSampleCleanup(employee_id=sample.employee_id, storage_path=sample.sample_blob_path))
                 s.delete(sample)
+            audio_archive.forget(s, m, "meeting")
             s.delete(m)
             s.commit()
     return RedirectResponse("/meetings", 303)
@@ -1237,7 +1274,8 @@ def settings_view(request: Request, msg: str = ""):
     return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
                 digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU,
                 account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
-                notion=notion.connection_status())
+                notion=notion.connection_status(), storage=storage.describe(), storage_usage=audio_archive.usage(),
+                retention_days=config.RECORDING_RETENTION_DAYS)
 
 
 def voice_default_persona() -> str:
@@ -1549,6 +1587,20 @@ def test_telegram(request: Request):
         except Exception as e:  # noqa: BLE001
             bad.append(f"{c}: {e}")
     return RedirectResponse(f"/settings?msg=Бот @{me.get('username')}: отправлено {ok} из {len(chats)}. " + "; ".join(bad)[:300], 303)
+
+
+@app.post("/settings/test-storage")
+def test_storage(request: Request):
+    """«Проверить хранилище»: writes, reads through a presigned link and deletes a small file."""
+    guard_admin(request)
+    try:
+        text = storage.check()
+    except storage.StorageError as e:
+        text = str(e)
+    except Exception as e:  # noqa: BLE001
+        log.warning("storage check failed", exc_info=True)
+        text = f"ошибка {type(e).__name__}"
+    return RedirectResponse("/settings?msg=" + quote("Хранилище записей: " + text[:300]) + "#recording-storage", 303)
 
 
 @app.post("/settings/test-bitrix")

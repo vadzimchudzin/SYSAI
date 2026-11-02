@@ -2,6 +2,7 @@
 {% macro plural(n, one, few, many) %}{{ one if n % 10 == 1 and n % 100 != 11 else (few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many) }}{% endmacro %}
 {% set d = diagram %}
 {% set people = d.speakers|length %}
+{% set rec = recording or {} %}
 <link rel="stylesheet" href="{{ asset('voice-diagram.css') }}">
 <section class="card voice-diagram" id="voice-diagram" aria-labelledby="voice-diagram-title">
   <div class="vd-head">
@@ -18,10 +19,18 @@
         <span class="vd-zoom-value" data-vd-zoom-value aria-live="polite">×1</span>
         <button type="button" class="btn sm" data-vd-zoom="1" aria-label="Увеличить масштаб">+</button>
       </div>
-      <button type="button" class="btn sm" disabled title="Прослушивание с любого места появится после подключения хранилища записей">{{ icon('play') }}Слушать</button>
+      {% if rec.playable %}
+      <button type="button" class="btn sm vd-play" data-vd-play aria-label="Слушать" title="Слушать с выбранного места (пробел)">
+        <span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span><span data-vd-play-label>Слушать</span></button>
+      <button type="button" class="btn sm vd-rate" data-vd-rate title="Скорость воспроизведения" aria-label="Скорость воспроизведения 1×">1×</button>
+      {% else %}
+      <button type="button" class="btn sm" disabled title="{{ rec.text or 'Записи нет' }}">{{ icon('play') }}Слушать</button>
+      {% endif %}
     </div>
   </div>
   {% if speaker_msg %}<div class="vd-msg" role="status">{{ speaker_msg }}</div>{% endif %}
+  {% if recording_msg %}<div class="vd-msg" role="status">{{ recording_msg }}</div>{% endif %}
+  <div class="vd-msg is-error" data-vd-play-error role="alert" hidden></div>
   <ul class="vd-legend" aria-label="Говорящие">
     {% for sp in d.speakers %}
     <li><button type="button" class="vd-chip" data-vd-speaker="{{ loop.index0 }}" aria-pressed="false" style="--c: {{ sp.color }}"
@@ -43,7 +52,21 @@
     {%- if d.peaks %}Высота — громкость записи{% if d.synthetic %} (в демо волна условная: у демо нет записи){% endif %}, цвет — говорящий по расшифровке.
     {%- else %}Волна громкости строится для новых записей при обработке. Аудио этого совещания уже удалено, поэтому показаны участки речи по расшифровке.{% endif %}
     Выноски — начало реплик; при увеличении масштаба их становится больше. Штриховка — говорят одновременно.
-    Нажмите на выноску или участок, чтобы прочитать реплику; ← и → — соседние реплики.</p>
+    {% if rec.playable %}Нажмите на выноску или волну, чтобы прочитать реплику и слушать с этого места; ← и → — соседние реплики, пробел — пауза.
+    Если выделен говорящий, звучат только его реплики.
+    {%- else %}Нажмите на выноску или участок, чтобы прочитать реплику; ← и → — соседние реплики.{% endif %}</p>
+  {% if rec.text %}
+  <div class="vd-rec small muted" data-vd-rec="{{ rec.state }}">
+    <span>{{ rec.text }}</span>
+    {% if rec.playable %}
+    <a class="vd-rec-link" href="{{ rec.download }}">{{ icon('download') }}Скачать MP3 · {{ rec.size }}</a>
+    {% if recording_admin %}<form method="post" action="/meetings/{{ m.id }}/recording/delete" class="vd-rec-delete"
+        onsubmit="return confirm('Удалить запись этого совещания из хранилища? Расшифровка, протокол и диаграмма останутся, а слушать и скачивать запись будет нельзя.')">
+      <button class="btn sm ghost danger">Удалить запись</button></form>{% endif %}
+    <noscript><audio class="vd-rec-audio" controls preload="none" src="{{ rec.src }}"></audio></noscript>
+    {% endif %}
+  </div>
+  {% endif %}
   {% if speakers_editable %}
   <details class="more vd-fix" {{ 'open' if speaker_msg }}>
     <summary>Исправить говорящего</summary>
@@ -70,14 +93,15 @@
 <section class="card vd-ask" id="voice-speakers" aria-labelledby="voice-speakers-title">
   <div class="row between"><h2 id="voice-speakers-title">Вопрос: кто это?</h2>
     <span class="pill amber">{{ d.unknown|length }} {{ plural(d.unknown|length, 'говорящий не распознан', 'говорящих не распознаны', 'говорящих не распознаны') }}</span></div>
-  <p class="small muted">Голос не совпал ни с одним образцом, а в разговоре нет представления или обращения по имени. Прочитайте фрагменты и укажите, кто это: имя заменится во всех его репликах. Прослушать фрагменты можно будет после подключения хранилища записей.</p>
+  <p class="small muted">Голос не совпал ни с одним образцом, а в разговоре нет представления или обращения по имени. {% if rec.playable %}Прослушайте фрагменты кнопкой ▶ или прочитайте их{% else %}Прочитайте фрагменты{% endif %} и укажите, кто это: имя заменится во всех его репликах.</p>
   {% for sp in d.unknown %}
   <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-ask-row" data-vd-assign>
     <input type="hidden" name="speaker" value="{{ sp.name }}">
     <div class="vd-ask-who"><i class="vd-dot" style="--c: {{ sp.color }}" aria-hidden="true"></i><b>{{ sp.name }}</b>
       <span class="small muted">{{ mmss(sp.seconds) }} речи · {{ sp.turns }} {{ plural(sp.turns, 'реплика', 'реплики', 'реплик') }} · {{ sp.share }}%</span></div>
     {% if sp.samples %}<ul class="vd-quotes">{% for q in sp.samples %}
-      <li><a class="t" href="#voice-diagram" data-vd-seq="{{ q.seq }}" title="Показать на диаграмме">{{ mmss(q.start) }}</a> «{{ q.text }}»</li>{% endfor %}</ul>{% endif %}
+      <li>{% if rec.playable %}<button type="button" class="vd-play-quote" data-vd-play-seq="{{ q.seq }}" data-from="{{ q.start }}" data-to="{{ q.end }}"
+          aria-label="Прослушать фрагмент {{ mmss(q.start) }}" title="Прослушать фрагмент" hidden><span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span></button>{% endif %}<a class="t" href="#voice-diagram" data-vd-seq="{{ q.seq }}" title="Показать на диаграмме">{{ mmss(q.start) }}</a> «{{ q.text }}»</li>{% endfor %}</ul>{% endif %}
     <div class="vd-ask-controls">
       <select name="employee_id" required data-vd-choice aria-label="Кто это: {{ sp.name }}">
         <option value="">Выберите сотрудника…</option>

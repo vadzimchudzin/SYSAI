@@ -55,6 +55,24 @@
     {{ credential('pyannoteai_api_key', 'Ключ pyannoteAI', 'Ключ из кабинета pyannote.ai') }}
     {{ switch('voice_debug_mode', 'Отладочный режим', 'Включено: предлагать кандидаты после встречи, пока известным голосам не хватает независимых образцов. Неизвестные голоса не скрываются. Выключено: никаких автоматических запросов, ручной выбор остаётся. Количество и сходство не являются вероятностью или обещанием точности.') }}
   </section>
+  <section class="card setup-step" id="recording-storage">
+    <h2>Хранилище записей</h2>
+    <p class="small muted">Записи совещаний хранятся в приватном S3-совместимом хранилище (Cloudflare R2, Yandex Object Storage, Selectel…): на диаграмме «Кто и когда говорил» их можно слушать с любого места и скачать. В хранилище уходит сжатая копия для речи — MP3, моно, 32 кбит/с, около 14 МБ на час. Копия удаляется через {{ retention_days }} дней, а вместе с совещанием или по кнопке «Удалить запись» — сразу.</p>
+    {% if storage.configured %}
+    <p class="small">{% if storage.problem %}<span class="pill red">Ошибка настройки</span> {{ storage.problem }}
+      {%- else %}<span class="pill green">Подключено</span> бакет <b>{{ storage.bucket }}</b> · {{ storage.host }}{% endif %}</p>
+    <p class="small muted">Хранится записей: {{ storage_usage.count }} · {{ ('%.1f' % storage_usage.megabytes).replace('.', ',') }} МБ
+      {%- if storage_usage.pending %} · сохраняются сейчас: {{ storage_usage.pending }}{% endif %}
+      {%- if storage_usage.failed %} · не сохранились: {{ storage_usage.failed }} (причина — на странице совещания){% endif %}.
+      Записи совещаний, обработанных до подключения, не сохранялись.</p>
+    <button type="submit" class="btn sm" formaction="/settings/test-storage" formnovalidate>Проверить хранилище</button>
+    <p class="small muted">Проверка записывает маленький файл, читает его по временной ссылке, как плеер, и удаляет.</p>
+    {% else %}
+    <p class="small">{% if storage.missing %}<span class="pill amber">Не хватает настроек</span> не заданы: {{ storage.missing|join(', ') }}.
+      {%- else %}Пока не подключено: запись удаляется после обработки, слушать совещания нельзя.{% endif %}</p>
+    <p class="small muted">Чтобы подключить, задайте на сервере (Render → Environment) четыре переменные: <code>S3_ENDPOINT</code> — адрес хранилища, <code>S3_BUCKET</code> — приватный бакет, <code>S3_ACCESS_KEY_ID</code> и <code>S3_SECRET_ACCESS_KEY</code> — ключ с доступом только к этому бакету. Ключи хранятся только на сервере и здесь не показываются.</p>
+    {% endif %}
+  </section>
   <section class="card setup-step" id="digest">
     <h2>Сводка по делам</h2>
     <p class="small muted">Короткий отчёт проверяющим в Telegram: что ассистент закрыл, что ждёт решения, что в работе и кого ждём, что висит без движения. Директор и наблюдатели её не получают.</p>

@@ -65,6 +65,24 @@ NOTION_CLIENT_SECRET = os.getenv("NOTION_CLIENT_SECRET", "").strip()
 NOTION_REDIRECT_URI = os.getenv("NOTION_REDIRECT_URI", "").strip().rstrip("/")
 
 MIC_INBOX_DIR = pathlib.Path(os.getenv("MIC_INBOX_DIR", DATA_DIR / "inbox"))
+
+# Private S3-compatible storage for meeting recordings (Cloudflare R2, Yandex Object Storage, Selectel…), see storage.py.
+# Without all four values recordings are not kept: the original is deleted after processing, as before.
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "").strip()
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+S3_REGION = os.getenv("S3_REGION", "").strip() or "auto"  # R2 signs with "auto"; Yandex: ru-central1
+
+
+def _positive_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
+RECORDING_RETENTION_DAYS = _positive_int("RECORDING_RETENTION_DAYS", 180)
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Minsk")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 WORKERS = int(os.getenv("WORKERS", "2"))

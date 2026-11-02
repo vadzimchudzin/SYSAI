@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func
 
-from . import (analyze, assistant, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive, settings_store, telegram,
-               transcribe, userbot, voice, waveform)
+from . import (analyze, assistant, audio_archive, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive,
+               settings_store, telegram, transcribe, userbot, voice, waveform)
 from .db import (ConversationMessage, DeadlineRequest, Delivery, Employee, Meeting, SessionLocal, Task, TelegramChat,
                  now)
 
@@ -173,6 +173,7 @@ def _process(meeting_id: int):
             # Crash after _save_report committed: tasks and their IDs are already durable.
             _set(meeting_id, status="analyzing", error="")
             _ensure_waveform(meeting_id, audio_path, source, saved or [], total)
+            _keep_recording(meeting_id, audio_path, source)
             _finish_processing(meeting_id, audio_path, settings)
             return
         if source != "demo" and not config.llm_enabled():
@@ -197,6 +198,7 @@ def _process(meeting_id: int):
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
              progress="Составление отчёта и задач")
         outline_job = _start_waveform(meeting_id, audio_path, source, segments, total)
+        _keep_recording(meeting_id, audio_path, source)
         with SessionLocal() as s:
             employees = s.query(Employee).filter(Employee.active.is_(True)).all()
             for employee in employees:
@@ -255,6 +257,15 @@ def _start_waveform(meeting_id, audio_path, source, segments, total):
                            name=f"waveform-{meeting_id}", daemon=True)
     job.start()
     return job
+
+
+def _keep_recording(meeting_id, audio_path, source):
+    """Hand the original to the recordings storage (audio_archive.py) before it is deleted. It links the file at once and
+    compresses and uploads it in the background; like the outline, it never stops the meeting."""
+    try:
+        audio_archive.start(meeting_id, audio_path, source)
+    except Exception:  # noqa: BLE001
+        log.warning("recording of meeting %s was not handed to the storage", meeting_id, exc_info=True)
 
 
 def _name_speakers(segments: list) -> list:
@@ -902,7 +913,8 @@ def start_background():
         time.sleep(config.STARTUP_DELAY)  # let the web server answer the platform's checks first
         while True:
             for fn in (speaker_id.purge_due_voice_samples, mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
-                       assistant.run_pending, cases.run_due, doctext.run_pending, memory.refresh_vectors, meeting_alerts.run_due, reminders.run_due, userbot.watchdog, ticnote_ingest.scan, digest.run_due):
+                       assistant.run_pending, cases.run_due, doctext.run_pending, memory.refresh_vectors, meeting_alerts.run_due, reminders.run_due, userbot.watchdog, ticnote_ingest.scan, digest.run_due,
+                       audio_archive.run_due):
                 try:
                     fn()
                 except Exception:
