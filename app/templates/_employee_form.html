@@ -66,6 +66,24 @@
           <small class="muted">Повышенные права требуют привязанного Telegram.</small>
         </label>
       {% endif %}
+      {% if not e or (rights.get(e.id) or 'employee') != 'director' %}
+      <label class="f">Может поручать через ассистента
+        <select name="order_scope">
+          {% for sc in order_scopes %}<option value="{{ sc }}" {% if e and (e.order_scope or '') == sc %}selected{% endif %}>{{ scope_ru[sc] }}{% if scope_hint.get(sc) %} — {{ scope_hint[sc] }}{% endif %}</option>{% endfor %}
+        </select>
+        <small class="muted">По уровню доступа: полный доступ — всем, остальные — только себе. Поручения и напоминания другим людям.</small>
+      </label>
+      <div class="f employee-skills">Навыки ассистента для этого человека
+        <input type="hidden" name="skills_form" value="1">
+        {% set off = chat_skills|rejectattr('name', 'in', (e.skills_allowed if e and e.skills_allowed is not none else chat_skills|map(attribute='name')|list))|list %}
+        <details class="more"><summary>{{ 'все, что позволяет уровень доступа' if not off else ('выключено: ' ~ off|map(attribute='title')|join(', ')) }}</summary>
+          <div class="chips">
+            {% for sk in chat_skills %}<label class="chip" title="{{ sk.hint }}"><input type="checkbox" name="skill_allowed" value="{{ sk.name }}" {% if sk not in off %}checked{% endif %}>{{ sk.title }}</label>{% endfor %}
+          </div>
+        </details>
+        <small class="muted">Снимите галочку — ассистент не будет этого делать для этого человека. Уровень доступа всё равно ограничивает.</small>
+      </div>
+      {% endif %}
       <label class="f">ID в Bitrix24<input name="bitrix_user_id" maxlength="40" value="{{ (e.bitrix_user_id or '') if e else '' }}" placeholder="Если подключена интеграция" autocomplete="off"></label>
     </div>
   </section>

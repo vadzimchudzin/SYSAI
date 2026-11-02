@@ -55,7 +55,8 @@ def skill_cases():
 def test_every_action_is_a_skill_with_a_form_and_a_rule():
     assert set(agent_skills.SKILLS) == {
         "set_deadline", "task_status", "note", "ask_reviewer", "relay_answer", "approve_meeting", "reject_meeting",
-        "assign_task", "deliver_files", "team_report", "remind", "cancel_reminder", "approve_case", "cancel_case"}
+        "assign_task", "deliver_files", "team_report", "remind", "cancel_reminder", "approve_case", "cancel_case",
+        "order", "confirm_order"}
     for name, skill in agent_skills.SKILLS.items():
         assert skill.title and skill.hint and skill.when and skill.who in agent_skills.WHO_RU
         assert f'"type":"{name}"' in skill.template.replace(" ", "")
@@ -73,7 +74,7 @@ def test_function_definitions_follow_the_rights():
     nobody = agent_skills.Person()
     assert names(nobody) == ANYONE | {"update_memory"}
     worker = agent_skills.Person(employee=types.SimpleNamespace(id=3))
-    assert names(worker) == ANYONE | {"set_deadline", "ask_reviewer", "update_memory"}
+    assert names(worker) == ANYONE | {"set_deadline", "ask_reviewer", "update_memory", "order", "confirm_order"}
     boss = agent_skills.Person(employee=types.SimpleNamespace(id=1), reviewer=True, full=True)
     assert names(boss) == set(agent_skills.SKILLS) | {"update_memory"}
     for tool in agent_skills.tools(boss):

@@ -14,8 +14,9 @@ import datetime as dt
 import json
 import logging
 
-from . import bitrix, cases, deadlines, meeting_alerts, reminders, settings_store, userbot
-from .db import ConversationEscalation, ConversationMessage, Employee, Meeting, Note, SessionLocal, Task, now
+from . import bitrix, cases, deadlines, meeting_alerts, orders, reminders, settings_store, userbot
+from .db import (ConversationEscalation, ConversationMessage, Employee, EmployeeDepartment, Meeting, Note, SessionLocal,
+                 Task, now)
 
 log = logging.getLogger("sysai.agent")
 
@@ -25,7 +26,15 @@ MODE_HINT = {"auto": "выполняет сразу", "approve": "сначала
                                                    "на странице «Прогресс»)",
              "suggest": "только предлагает руководителю, сам не делает"}
 WHO_RU = {"anyone": "любой собеседник", "employee": "сотрудник из справочника", "full": "полный доступ",
-          "reviewer": "проверяющий", "assign": "проверяющий с полным доступом"}
+          "reviewer": "проверяющий", "assign": "проверяющий с полным доступом",
+          "order": "кому можно поручать — в карточке сотрудника"}
+# To whom a person may give orders in the chat (the employee card; "" = by the access level).
+ORDER_SCOPES = ("all", "department", "self")
+SCOPE_RU = {"": "по уровню доступа", "all": "всем", "department": "своему отделу", "self": "только себе"}
+SCOPE_HINT = {"all": "любому сотруднику", "department": "людям своих подразделений",
+              "self": "только себе: свои задачи и напоминания"}
+ORDER_KINDS = ("task", "ask", "request")
+PAIRED = {"confirm_order": "order"}  # turned on and off together with the skill it belongs to
 TRANSPORTS = ("json", "tools")
 TRANSPORT_RU = {"json": "ответ в JSON", "tools": "вызов функций"}
 WALL = r"нет доступа|недостаточно прав|нет прав|запрещено|не уполномочен"
@@ -42,6 +51,9 @@ class Person:
     reviewer: bool = False
     full: bool = False
     director: bool = False
+    scope: str = ""                   # to whom they may give orders: "" by the level | all | department | self
+    team: frozenset = frozenset()     # the department scope: ids of the people of their departments
+    skills: frozenset | None = None   # None: every skill the level allows; otherwise only these (the card)
 
     @property
     def leader(self) -> bool:
@@ -51,6 +63,41 @@ class Person:
     @property
     def employee_id(self):
         return getattr(self.employee, "id", None) if self.employee is not None else None
+
+    @property
+    def order_scope(self) -> str:
+        """all | department | self. By default from the level: full access orders anyone, the others only themselves."""
+        if self.director:
+            return "all"
+        if self.scope in ORDER_SCOPES:
+            return self.scope
+        return "all" if self.full else "self"
+
+
+def department_team(s, employee) -> set:
+    """The active people of the departments this employee belongs to (the employee included)."""
+    ids = [m.department_id for m in employee.department_memberships if m.department is not None and m.department.active]
+    team = {employee.id}
+    if ids:
+        team |= {row[0] for row in s.query(EmployeeDepartment.employee_id)
+                 .join(Employee, Employee.id == EmployeeDepartment.employee_id)
+                 .filter(EmployeeDepartment.department_id.in_(ids), Employee.active.is_(True)).all()}
+    legacy = (employee.department or "").strip().lower()
+    if legacy:  # the old free-text department of the card
+        team |= {e.id for e in s.query(Employee).filter_by(active=True).all()
+                 if (e.department or "").strip().lower() == legacy}
+    return team
+
+
+def person_of(s, employee, reviewer: bool = False, full: bool = False, director: bool = False) -> Person:
+    """The person with the rights of their employee card: whom they may give orders to and which skills are on."""
+    scope = str(getattr(employee, "order_scope", "") or "") if employee is not None else ""
+    scope = scope if scope in ORDER_SCOPES else ""
+    allowed = getattr(employee, "skills_allowed", None) if employee is not None else None
+    skills = frozenset(x for x in allowed if x in SKILLS) if isinstance(allowed, list) else None
+    team = frozenset(department_team(s, employee)) if employee is not None and scope == "department" else frozenset()
+    return Person(employee=employee, reviewer=bool(reviewer), full=bool(full), director=bool(director), scope=scope,
+                  team=team, skills=skills)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -184,6 +231,33 @@ SKILLS = {s.name: s for s in (
           "руководитель прямо отменил дело из cases_awaiting_decision или из разговора (если неясно какое, спроси)",
           '{"type":"cancel_case","case_id":ID}',
           {"case_id": _int("ID дела")}, ("case_id",), who="reviewer"),
+    Skill("order", "Поручение из чата", "Поручить коллеге задачу, узнать у него или запросить документ — после «да»",
+          "человек поручает новую работу, которой нет в данных: задачу сотруднику с исполнителем и сроком (kind=task), "
+          "узнать что-то у сотрудника (kind=ask) или запросить у него документ и, если нужно, передать его другому "
+          "(kind=request, forward_to). Задачи из unassigned_tasks и team[].open_tasks назначают через assign_task, не "
+          'order. to — ID сотрудника из team или "me" (поручение себе). Поручать можно только в пределах order_scope. '
+          "Если неясно кому, что или (для задачи) к какому сроку — задай один уточняющий вопрос без действия. Если ясно — "
+          "order, а в reply коротко перескажи и спроси подтверждение: «Понял: <кому> — <что> до <срока>. Делаю?». Код "
+          "запомнит поручение и начнёт только после «да» (confirm_order)",
+          '{"type":"order","kind":"task|ask|request","to":ID сотрудника или "me","title":"что сделать или узнать, '
+          'коротко","details":"подробности, если назвали","deadline":"ГГГГ-ММ-ДД" или null,"forward_to":ID или null}',
+          {"kind": _str("task — задача сотруднику, ask — узнать у сотрудника, request — запросить у него документ",
+                        ORDER_KINDS),
+           "to": _str('ID сотрудника из team (число) или "me" — поручение себе'),
+           "title": _str("что сделать или узнать, коротко"),
+           "details": _str("подробности, если назвали"),
+           "deadline": _str("срок ГГГГ-ММ-ДД по now.local; для задачи обязателен, для ask и request — если назвали"),
+           "forward_to": _int("только для request: ID сотрудника из team, кому передать полученный документ")},
+          ("kind", "to", "title"), who="order"),
+    Skill("confirm_order", "Начать поручение", "Человек ответил «да» на пересказ поручения — дело начинается",
+          "человек ответил на твой пересказ поручения из order_to_confirm: «да», «делай», «ок», «верно» — ok=true (код "
+          "начнёт дело: напишет исполнителю, проследит по сроку и доложит этому человеку); «нет», «отмена», «не надо» — "
+          "ok=false. Если человек поправил поручение (другой срок, исполнитель, суть), это не confirm_order: дай новый "
+          "order с исправлением и снова спроси «Делаю?»",
+          '{"type":"confirm_order","order_id":ID,"ok":true|false}',
+          {"order_id": _int("ID поручения из order_to_confirm"),
+           "ok": {"type": "boolean", "description": "true — начать, false — отменить"}},
+          ("order_id", "ok"), who="order", modes=True),
 )}
 
 MEMORY_TOOL = {"type": "function", "function": {
@@ -202,7 +276,16 @@ RECALL_TOOL = {"type": "function", "function": {
 
 
 # ----------------------------------------------------------------------------- who and how
+def allowed_skill(name: str, person: Person) -> bool:
+    """The employee card may turn skills off for the person (None: everything the level allows)."""
+    return person.skills is None or person.director or PAIRED.get(name, name) in person.skills
+
+
 def available(skill: Skill, person: Person) -> bool:
+    if not allowed_skill(skill.name, person):
+        return False
+    if skill.who == "order":
+        return person.employee is not None or person.order_scope != "self"
     if skill.who == "employee":
         return person.employee is not None
     if skill.who == "full":
@@ -261,7 +344,7 @@ def tools(person: Person) -> list:
     return out
 
 
-_INT_FIELDS = ("task_id", "employee_id", "question_id", "meeting_id", "reminder_id", "case_id")
+_INT_FIELDS = ("task_id", "employee_id", "question_id", "meeting_id", "reminder_id", "case_id", "order_id")
 
 
 def _as_int(value):
@@ -290,6 +373,18 @@ def normalize(action: dict) -> dict:
     elif kind == "team_report":
         scope = out.get("scope")
         out["scope"] = "all" if scope in (None, "") or str(scope).strip().lower() == "all" else _as_int(scope)
+    elif kind == "order":
+        to = out.get("to")
+        out["to"] = "me" if str(to or "").strip().lower() in ("me", "себе", "self") else _as_int(to)
+        out["kind"] = str(out.get("kind") or "task").strip().lower()
+        if "forward_to" in out:
+            out["forward_to"] = None if out["forward_to"] in (None, "", 0, "null") else _as_int(out["forward_to"])
+        if out.get("deadline") in ("", "null"):
+            out["deadline"] = None
+    elif kind == "confirm_order":
+        ok = out.get("ok")
+        if isinstance(ok, str):
+            out["ok"] = {"true": True, "false": False, "да": True, "нет": False}.get(ok.strip().lower(), ok)
     elif kind == "remind":
         people = out.pop("people", None)
         if out.get("to") == "people":
@@ -299,6 +394,13 @@ def normalize(action: dict) -> dict:
         if out.get("at") == "":
             out["at"] = None
     return out
+
+
+def personal(action: dict, person: Person) -> dict:
+    """An order to the person's own employee ID is an order to themselves ("me")."""
+    if action.get("type") == "order" and person.employee_id is not None and action.get("to") == person.employee_id:
+        return {**action, "to": "me"}
+    return action
 
 
 def from_calls(calls: list) -> tuple:
@@ -340,6 +442,8 @@ def check(action: dict, ctx: dict, person: Person, approvers=None) -> str:
     kind = action.get("type")
     if action.get("_error"):
         return f"{kind}: {action['_error']}"
+    if kind in SKILLS and not allowed_skill(kind, person):
+        return f"{kind}: этот навык для этого человека выключен в его карточке"
     if kind == "set_deadline":
         if employee is None:
             return "set_deadline доступно только сотруднику"
@@ -417,9 +521,11 @@ def check(action: dict, ctx: dict, person: Person, approvers=None) -> str:
             return "remind: meeting это true или false"
         to = action.get("to")
         if to != "me":
-            if not full:
+            if person.order_scope == "self":
                 return 'remind: сотрудник может попросить напомнить только себе (to: "me")'
             team = {p["id"]: p for p in ctx.get("team", [])}
+            if person.order_scope == "department" and not _in_team(to, person.team):
+                return "remind: этот человек напоминает только людям своего отдела (to — список ID из team)"
             if to == "all":
                 if not any(p.get("reachable") for p in team.values()):
                     return "remind: ни у кого из сотрудников нет Telegram-контакта в справочнике"
@@ -478,17 +584,97 @@ def check(action: dict, ctx: dict, person: Person, approvers=None) -> str:
             return "team_report доступно только проверяющему и людям с полным доступом"
         scope = action.get("scope")
         return "" if scope == "all" or scope in {p["id"] for p in ctx.get("team", [])} else "team_report: scope all или ID сотрудника"
+    if kind == "order":
+        return _check_order(action, ctx, person)
+    if kind == "confirm_order":
+        waiting = ctx.get("order_to_confirm")
+        if not isinstance(waiting, dict) or action.get("order_id") != waiting.get("id"):
+            return "confirm_order: поручение не найдено среди ждущих подтверждения (order_to_confirm)"
+        if action.get("ok") not in (True, False):
+            return "confirm_order: ok это true или false"
+        return ""
     return f"неизвестное действие {kind!r}"
+
+
+def _is_id(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _in_team(to, team) -> bool:
+    """A list of employee IDs, all of them people of the team."""
+    return isinstance(to, list) and bool(to) and all(_is_id(x) for x in to) and set(to) <= set(team)
+
+
+def _check_order(action: dict, ctx: dict, person: Person) -> str:
+    kind, to, scope = action.get("kind"), action.get("to"), person.order_scope
+    if kind not in ORDER_KINDS:
+        return "order: kind это task, ask или request"
+    if not str(action.get("title") or "").strip():
+        return "order: нужен title (что сделать или узнать)"
+    team = {p["id"]: p for p in ctx.get("team", []) if isinstance(p, dict)}
+    if to == "me":
+        if person.employee is None:
+            return 'order: "me" только для сотрудника из справочника'
+        if kind != "task":
+            return "order: себе можно поставить только задачу (kind=task)"
+    else:
+        if scope == "self":
+            return 'order: этот человек может поручать только себе (to: "me")'
+        if not _is_id(to) or to not in team:
+            return 'order: to должен быть ID сотрудника из team или "me"'
+        if scope == "department" and to not in person.team:
+            return f"order: {team[to]['name']} не из отдела этого человека, поручать ему он не может"
+        if not team[to].get("reachable"):
+            return f"order: у {team[to]['name']} нет Telegram-контакта в справочнике, написать нельзя"
+    deadline = action.get("deadline")
+    if deadline in (None, ""):
+        if kind == "task":
+            return "order: для задачи нужен срок (deadline); если его не назвали, спроси"
+    else:
+        try:
+            date = dt.date.fromisoformat(str(deadline))
+        except ValueError:
+            return "order: deadline в формате ГГГГ-ММ-ДД"
+        if date < deadlines.today():
+            return "order: срок уже прошёл"
+    forward = action.get("forward_to")
+    if forward is not None:
+        if kind != "request":
+            return "order: forward_to только для kind=request"
+        if not _is_id(forward) or forward not in team:
+            return "order: forward_to должен быть ID сотрудника из team"
+        if forward == to:
+            return "order: документ не пересылают тому, у кого его просят"
+        if scope == "department" and forward not in person.team:
+            return f"order: {team[forward]['name']} не из отдела этого человека"
+        if not team[forward].get("reachable"):
+            return f"order: у {team[forward]['name']} нет Telegram-контакта в справочнике"
+    return ""
 
 
 def denied(action: dict, person: Person) -> bool:
     """The action needs more than this person is allowed (as opposed to a mistake in the action itself)."""
     kind = action.get("type")
     employee = person.employee
+    if kind in SKILLS and not allowed_skill(kind, person):
+        return True
     if kind in ("team_report", "assign_task", "deliver_files"):
         return not person.full
     if kind == "remind":
-        return action.get("to") != "me" and not person.full
+        to = action.get("to")
+        if to == "me":
+            return False
+        if person.order_scope == "department":
+            return not _in_team(to, person.team)
+        return person.order_scope == "self"
+    if kind == "order":
+        to = action.get("to")
+        if to == "me" or (to is not None and to == person.employee_id):
+            return False
+        if person.order_scope == "department":
+            return to not in person.team or (action.get("forward_to") is not None
+                                             and action.get("forward_to") not in person.team)
+        return person.order_scope == "self"
     if kind in ("relay_answer", "approve_meeting", "reject_meeting", "approve_case", "cancel_case"):
         return not person.reviewer
     if kind == "note":
@@ -545,6 +731,7 @@ def execute(action: dict, chat: str, employee_id, author: str, sender: dict | No
             _remember(s, f"Задача «{task.title}»: {label}" + (f". {note}" if note else ""), employee_id=task.assignee_id,
                       task_id=task.id, kind="done" if action["status"] == "done" else "status", author=author)
             s.commit()
+            cases.task_reported(task.id, action["status"], note, author)  # an order from the chat hears of it
         elif kind == "note":
             target = action.get("employee_id") if action.get("employee_id") is not None else employee_id
             _remember(s, action["text"], employee_id=target, task_id=action.get("task_id"),
@@ -659,6 +846,15 @@ def execute(action: dict, chat: str, employee_id, author: str, sender: dict | No
                     userbot.send_message(ref, message)
         elif kind == "team_report":
             pass  # the PDF follows the reply (agent._process), or the approval case sends it (cases._run_skill)
+        elif kind == "order":  # kept until the person says «да» (the retelling is the reply)
+            s.commit()
+            orders.remember(chat, author, employee_id, action)
+        elif kind == "confirm_order":
+            s.commit()
+            try:
+                orders.decide(action["order_id"], chat, bool(action.get("ok")), author)
+            except orders.OrderError as exc:
+                raise SkillError(f"confirm_order: {exc}") from exc
         else:
             raise SkillError(f"неизвестный навык {kind!r}")
 
@@ -699,6 +895,12 @@ def describe(action: dict) -> str:
         if kind == "team_report":
             scope = action.get("scope")
             return "прислать PDF-отчёт по команде" if scope == "all" else f"прислать PDF-отчёт по {name(scope)}"
+        if kind == "order":
+            return orders.describe(action.get("kind"), "себе" if action.get("to") == "me" else name(action.get("to")),
+                                   action.get("title"), action.get("deadline"),
+                                   name(action.get("forward_to")) if action.get("forward_to") else "")
+        if kind == "confirm_order":
+            return orders.describe_order(s, action.get("order_id"), bool(action.get("ok", True)))
     return title
 
 
