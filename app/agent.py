@@ -23,13 +23,13 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import access, agent_skills, cases, deadlines, memory as company_memory, llm, reminders, settings_store, transcribe, userbot, voice
+from . import (access, agent_skills, cases, deadlines, dialog_memory, memory as company_memory, llm, reminders,
+               settings_store, transcribe, userbot, voice)
 from .db import (ConversationEscalation, ConversationMessage, Document, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
 log = logging.getLogger("sysai.agent")
 
-HISTORY = 40            # messages of one conversation the model sees
 MAX_ATTEMPTS = 3
 RECENT_FILES_HOURS = 48
 RETRY_AFTER = 20        # seconds before a waiting message is picked up again
@@ -430,11 +430,10 @@ def _notes_view(s, employee_id=None, limit=15) -> list:
 def _context(s, row, result: dict, employee, reviewer: bool, full: bool, director: bool = False,
              director_mode: bool = False) -> dict:
     chat = row.chat_id
-    history = (s.query(ConversationMessage).filter(
-        ConversationMessage.chat_id == chat, ConversationMessage.role.in_(("user", "assistant")),
-        ConversationMessage.status.in_(("agent_pending", "agent_done")), ConversationMessage.id < row.id)
-        .order_by(ConversationMessage.id.desc()).limit(HISTORY).all())
-    history.reverse()
+    # The whole conversation (dialog_memory.py): the fresh part word for word, a retelling of the older part, and the
+    # old messages this one seems to speak about.
+    talk = dialog_memory.window(s, chat, row.id)
+    history = talk["fresh"]
     last = _aware(history[-1].created_at) if history and history[-1].created_at else None
     minutes = int((now() - last).total_seconds() // 60) if last else None
     memory = s.get(PersonMemory, chat)
@@ -444,9 +443,18 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                      ("reviewer", reviewer), ("director", director)) if on],
            "director_mode": director_mode,
            "conversation": {"already_talking": minutes is not None and minutes < TALKING_HOURS * 60,
-                            "minutes_since_last_message": minutes, "messages_so_far": len(history)},
-           "memory": (memory.summary if memory else "") or None,
-           "history": [{"from": "человек" if h.role == "user" else "ты", "text": h.text[:900]} for h in history]}
+                            "minutes_since_last_message": minutes, "messages_so_far": talk["total"]},
+           "memory": (memory.summary if memory else "") or None}
+    older = talk["total"] - len(history)
+    if older > 0:
+        ctx["conversation"]["older_not_shown"] = older
+        if talk["summary"]:
+            ctx["dialog_memory"] = talk["summary"]
+        earlier = dialog_memory.related(s, chat, getattr(row, "text", "") or "", history[0].id if history else row.id)
+        if earlier:
+            ctx["from_earlier"] = earlier
+    ctx["history"] = [{"from": "человек" if h.role == "user" else "ты", "text": dialog_memory.clip(h.text)}
+                      for h in history]
     if employee is not None:
         tasks = (s.query(Task).filter(Task.assignee_id == employee.id, Task.status.in_(OPEN_STATUSES + ("done",)))
                  .order_by(Task.id.desc()).limit(30).all())
@@ -537,6 +545,12 @@ ASSIGN_RULES = (
     "должности. Если подходят несколько сотрудников либо данных мало, задай директору один конкретный уточняющий вопрос "
     "и не создавай назначение наугад. Не выдумывай компетенции и загрузку. ")
 GENERAL_RULES = (
+    "Память разговора: history — последние сообщения целиком; dialog_memory — краткий пересказ более ранней части "
+    "разговора; from_earlier — старые сообщения, которые код нашёл по словам этого сообщения; recalled — что нашлось, "
+    "когда ты сам попросил вспомнить. На «как договаривались», «тот акт», «как в прошлый раз» отвечай по ним и "
+    "называй, когда это было. Если нужного там нет, а conversation.older_not_shown больше нуля, попроси вспомнить "
+    "(поиск по всей истории чата); если не нашлось и там, честно скажи, что не помнишь, и попроси напомнить. Не "
+    "выдумывай того, чего не было в разговоре. "
     "Дела ведёт код: если this_message_for_case задан, человек ответил или прислал документ по делу — коротко "
     "поблагодари и скажи, что передашь (кому — в forward_to); сам ничего не пересылай и не обещай сверх этого. Если "
     "в нём ambiguous_cases, спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с "
@@ -556,9 +570,12 @@ GENERAL_RULES = (
     "руководителю на одобрение. ")
 MEMORY_JSON = ("Поле memory: если узнал что-то важное о человеке или его работе, верни обновлённую краткую память (до 1200 "
                "символов, сохрани важное из прошлой памяти), иначе не добавляй поле.")
+RECALL_JSON = ('{"type":"recall","query":"что искать"}: вспомнить — найти в полной истории этого чата старые сообщения, '
+               "когда нужного нет в history, dialog_memory и from_earlier; reply тогда оставь пустым: найденное придёт "
+               "в recalled, и тебя попросят ответить ещё раз; ")
 # The skills (agent_skills.py) in the JSON answer: what the model may ask for and when.
 ACTIONS_HELP = (FORMAT_JSON + ASSIGN_RULES + "Действия (ID бери только из данных; код проверяет права и ID): "
-                + agent_skills.json_help() + GENERAL_RULES + MEMORY_JSON)
+                + agent_skills.json_help() + RECALL_JSON + GENERAL_RULES + MEMORY_JSON)
 # The same skills as function calls (OpenRouter tools); the reply is the text of the answer.
 TOOLS_HELP = (
     ASSIGN_RULES +
@@ -568,7 +585,8 @@ TOOLS_HELP = (
     "вызываешь функцию, которая это делает; если не хватает данных — спроси. Функций, которых нет в списке, у этого "
     "человека нет: такие просьбы мягко отклоняй, как сказано выше. "
     + GENERAL_RULES +
-    "Если узнал что-то важное о человеке или его работе, вызови update_memory с обновлённой краткой памятью.")
+    "Вспомнить — функция recall_conversation. Если узнал что-то важное о человеке или его работе, вызови update_memory "
+    "с обновлённой краткой памятью.")
 _NO_TOOLS = set()  # models whose providers refused function calls in this process: they answer in JSON
 
 
@@ -633,41 +651,137 @@ def _decision(data) -> dict:
 
 
 TOOL_ACCEPTED = json.dumps({"ok": True, "note": "принято: код проверит права и выполнит после ответа"}, ensure_ascii=False)
+RECALL_NAME = agent_skills.RECALL_TOOL["function"]["name"]
+RECALL_DONE = json.dumps({"ok": False, "note": "уже искал в истории чата: ответь по найденному"}, ensure_ascii=False)
+RECALLED_NOTE = ("\nТы попросил вспомнить: найденное в полной истории чата — в recalled (пустой found — ничего не "
+                 "нашлось). Теперь ответь человеку целиком с учётом найденного; recall больше не проси.")
+
+
+def _take_recall(decision: dict):
+    """Takes the requests to remember out of the actions: what to look for, or None when there are none."""
+    asked = [a for a in decision["actions"] if a.get("type") == "recall"]
+    decision["actions"] = [a for a in decision["actions"] if a.get("type") != "recall"]
+    return " ".join(str(a.get("query") or "").strip() for a in asked).strip()[:300] if asked else None
+
+
+def _recall(ctx: dict, query: str, recall) -> dict:
+    """Looks through the whole chat once per message; what was found stays in ctx (a second try sees it too)."""
+    found = []
+    if recall is not None and query:
+        try:
+            found = recall(query) or []
+        except Exception as exc:  # noqa: BLE001  nothing found is an answer too
+            log.warning("recall %r failed: %s", query, exc)
+    ctx["recalled"] = {"query": query, "found": found}
+    return ctx["recalled"]
+
+
+def _ask_json(system: str, ctx: dict, text: str, feedback: str, model: str) -> dict:
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": _user_message(ctx, text, feedback)}]
+    return _decision(llm.parse_json(llm.chat(model, messages, json_mode=True, temperature=0.6, max_tokens=1800,
+                                             timeout=90)))
+
+
+def _decide_json(system: str, ctx: dict, text: str, feedback: str, model: str, recall) -> dict:
+    decision = _ask_json(system, ctx, text, feedback, model)
+    query = _take_recall(decision)
+    if query is None or "recalled" in ctx:
+        return decision
+    _recall(ctx, query, recall)
+    again = _ask_json(system, ctx, text, feedback + RECALLED_NOTE, model)
+    _take_recall(again)
+    again["memory"] = again["memory"] or decision["memory"]
+    again["recalled"] = query
+    return again
+
+
+def _as_call(call: dict) -> dict:
+    return {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}
+
+
+def _query_of(calls: list) -> str:
+    words = []
+    for call in calls:
+        raw = call.get("arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
+        except json.JSONDecodeError:
+            args = {}
+        words.append(str(args.get("query") or "").strip() if isinstance(args, dict) else "")
+    return " ".join(w for w in words if w)[:300]
+
+
+def _unique(actions: list) -> list:
+    seen, out = set(), []
+    for action in actions:
+        mark = json.dumps(action, ensure_ascii=False, sort_keys=True, default=str)
+        if mark not in seen:
+            seen.add(mark)
+            out.append(action)
+    return out
+
+
+def _decide_tools(system: str, ctx: dict, text: str, feedback: str, model: str, person, recall) -> dict:
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": _user_message(ctx, text, feedback)}]
+    tools = agent_skills.tools(person or agent_skills.Person())
+    if "recalled" not in ctx:
+        tools = tools + [agent_skills.RECALL_TOOL]
+    actions, memory, reply, recalled = [], "", "", None
+    for _ in range(2):  # the answer, or a look through the chat and then the answer
+        out = llm.chat(model, messages, tools=tools, tool_choice="auto", temperature=0.6, max_tokens=1800, timeout=90)
+        if isinstance(out, str):  # the model answered in JSON anyway
+            decision = _decision(llm.parse_json(out))
+            _take_recall(decision)
+            decision["actions"] = _unique(actions + decision["actions"])
+            decision["memory"] = decision["memory"] or memory[:1200]
+            if recalled is not None:
+                decision["recalled"] = recalled
+            return decision
+        calls = out.get("tool_calls") or []
+        asked = [c for c in calls if c["name"] == RECALL_NAME]
+        found_actions, found_memory = agent_skills.from_calls([c for c in calls if c["name"] != RECALL_NAME])
+        actions += found_actions
+        memory = found_memory or memory
+        reply = str(out.get("content") or "").strip()
+        if not asked or recalled is not None or "recalled" in ctx:
+            break
+        recalled = _query_of(asked)
+        found = _recall(ctx, recalled, recall)
+        messages.append({"role": "assistant", "content": out.get("content") or "", "tool_calls": [_as_call(c) for c in calls]})
+        messages += [{"role": "tool", "tool_call_id": c["id"],
+                      "content": (json.dumps(found, ensure_ascii=False) if c["name"] == RECALL_NAME else TOOL_ACCEPTED)}
+                     for c in calls]
+        tools = [t for t in tools if t["function"]["name"] != RECALL_NAME]
+        calls, reply = [], ""  # the answer comes once the model has read what was found
+    if calls and not reply:  # only the calls came: the model writes the reply once it sees them accepted
+        messages.append({"role": "assistant", "content": "", "tool_calls": [_as_call(c) for c in calls]})
+        messages += [{"role": "tool", "tool_call_id": c["id"],
+                      "content": TOOL_ACCEPTED if c["name"] != RECALL_NAME else RECALL_DONE} for c in calls]
+        again = llm.chat(model, messages, tools=tools, tool_choice="none", temperature=0.6, max_tokens=1200, timeout=90)
+        if isinstance(again, str):
+            try:
+                parsed = llm.parse_json(again)
+                again = parsed.get("reply", again) if isinstance(parsed, dict) else again
+            except llm.LLMError:
+                pass
+            reply = str(again or "").strip()
+        else:
+            reply = str(again.get("content") or "").strip()
+    decision = {"reply": reply[:MAX_REPLY], "actions": _unique(actions), "memory": memory[:1200]}
+    if recalled is not None:
+        decision["recalled"] = recalled
+    return decision
 
 
 def _decide(system: str, ctx: dict, text: str, feedback: str = "", *, model: str | None = None,
-            transport: str = "json", person=None) -> dict:
-    """One answer of the model: {"reply", "actions", "memory"} (actions are not checked here)."""
+            transport: str = "json", person=None, recall=None) -> dict:
+    """One answer of the model: {"reply", "actions", "memory"} (actions are not checked here). `recall(query)` looks
+    through the whole history of the chat when the model asks to remember (once per message)."""
     model = model or voice.model()
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": _user_message(ctx, text, feedback)}]
     try:
         if transport != "tools":
-            raw = llm.chat(model, messages, json_mode=True, temperature=0.6, max_tokens=1800, timeout=90)
-            return _decision(llm.parse_json(raw))
-        tools = agent_skills.tools(person or agent_skills.Person())
-        out = llm.chat(model, messages, tools=tools, tool_choice="auto", temperature=0.6, max_tokens=1800, timeout=90)
-        if isinstance(out, str):  # the model answered in JSON anyway
-            return _decision(llm.parse_json(out))
-        calls = out.get("tool_calls") or []
-        actions, memory = agent_skills.from_calls(calls)
-        reply = str(out.get("content") or "").strip()
-        if calls and not reply:  # only the calls came: the model writes the reply once it sees them accepted
-            messages.append({"role": "assistant", "content": "", "tool_calls": [
-                {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
-                for c in calls]})
-            messages += [{"role": "tool", "tool_call_id": c["id"], "content": TOOL_ACCEPTED} for c in calls]
-            again = llm.chat(model, messages, tools=tools, tool_choice="none", temperature=0.6, max_tokens=1200,
-                             timeout=90)
-            if isinstance(again, str):
-                try:
-                    parsed = llm.parse_json(again)
-                    again = parsed.get("reply", again) if isinstance(parsed, dict) else again
-                except llm.LLMError:
-                    pass
-                reply = str(again or "").strip()
-            else:
-                reply = str(again.get("content") or "").strip()
-        return {"reply": reply[:MAX_REPLY], "actions": actions, "memory": memory[:1200]}
+            return _decide_json(system, ctx, text, feedback, model, recall)
+        return _decide_tools(system, ctx, text, feedback, model, person, recall)
     except llm.ToolsUnsupported:
         raise
     except llm.LLMError as exc:
@@ -790,10 +904,11 @@ def _store(row_id: int, result: dict) -> None:
 
 
 def decide(ctx: dict, text: str, person, *, model: str | None = None, transport: str | None = None,
-           approvers=None, label: str = "") -> dict:
+           approvers=None, label: str = "", recall=None) -> dict:
     """The model's answer to one message, checked: every action against the data and the person's rights, promises
     against the actions, the style once. A wrong answer is explained to the model once; still wrong: AgentError.
-    The real conversation and the checking dialogs (agent_checks.py) both answer through here."""
+    The real conversation and the checking dialogs (agent_checks.py) both answer through here. `recall(query)` finds
+    old messages of the chat when the model asks to remember (dialog_memory.recall; nothing found when not given)."""
     model = model or voice.model()
     transport = transport or agent_skills.transport()
     if transport == "tools" and model in _NO_TOOLS:
@@ -802,12 +917,14 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
     feedback = ""
     for attempt in (1, 2):
         try:
-            decision = _decide(_system(transport), ctx, text, feedback, model=model, transport=transport, person=person)
+            decision = _decide(_system(transport), ctx, text, feedback, model=model, transport=transport, person=person,
+                               recall=recall)
         except llm.ToolsUnsupported as exc:
             log.info("%s answers in JSON: %s", model, exc)
             _NO_TOOLS.add(model)
             transport = "json"
-            decision = _decide(_system(transport), ctx, text, feedback, model=model, transport=transport, person=person)
+            decision = _decide(_system(transport), ctx, text, feedback, model=model, transport=transport, person=person,
+                               recall=recall)
         errors = [e for e in (agent_skills.check(a, ctx, person, approvers) for a in decision["actions"]) if e]
         if (employee is not None and not reviewer and not full
                 and organizational_change_request(text)
@@ -868,7 +985,8 @@ def _process(row_id: int) -> None:
     if decision is None:  # 2. decide (checked actions; a bad answer is explained to the model once)
         ctx.update(agent_skills.approval_hint(person))
         model = voice.model()
-        decision = decide(ctx, text, person, model=model, label=f"message {row_id}")
+        decision = decide(ctx, text, person, model=model, label=f"message {row_id}",
+                          recall=lambda query: dialog_memory.recall(chat, query, row_id))
         result["decision"], result["model"], result["transport"] = decision, model, decision.get("transport")
         _store(row_id, result)
     if not result.get("actions_done"):  # 3. act (each action once, even when a later one fails and all is retried)
@@ -903,3 +1021,4 @@ def _process(row_id: int) -> None:
         row = s.get(ConversationMessage, row_id)
         row.status, row.error, row.result = "agent_done", "", dict(result)
         s.commit()
+    dialog_memory.schedule(chat)  # the older part of the conversation is retold in the background

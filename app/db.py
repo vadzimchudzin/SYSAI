@@ -562,6 +562,18 @@ class PersonMemory(Base):
     updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class DialogMemory(Base):
+    """A short retelling of the older part of one conversation (dialog_memory.py); the fresh part goes to the model word
+    for word. `upto_id` is the last conversation message the retelling covers."""
+    __tablename__ = "dialog_memory"
+    chat_id = Column(String(40), primary_key=True)
+    summary = Column(Text, default="")
+    upto_id = Column(Integer, default=0)
+    messages = Column(Integer, default=0)
+    error = Column(Text, default="")
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+
+
 class Artifact(Base):
     """A document the AI employee produced itself (chart, report): kept for the panel and sent to the reviewer."""
     __tablename__ = "artifacts"

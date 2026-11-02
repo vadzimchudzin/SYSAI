@@ -1,6 +1,6 @@
 """Checking dialogs: how well a model works as the AI employee, before it answers real people.
 
-About fifty situations with the expected behaviour (an order, a question back, a question about the company, a person
+About sixty situations with the expected behaviour (an order, a question back, a question about the company, a person
 who does not answer, a document, a request beyond the person's rights…) go to the chosen models in both ways of asking
 for actions: a JSON answer and function calls. Nothing is carried out and nobody gets a message — the decision passes
 the same checks as in a real conversation (agent.decide) and is compared with what was expected. OpenRouter reports
@@ -20,7 +20,7 @@ import threading
 import time
 import types
 
-from . import agent, agent_skills, config, deadlines, llm, reminders, settings_store
+from . import agent, agent_skills, config, deadlines, dialog_memory, llm, reminders, settings_store
 from .db import AgentCheckCase, AgentCheckResult, AgentCheckRun, ConversationMessage, Employee, SessionLocal, now
 
 log = logging.getLogger("sysai.checks")
@@ -235,13 +235,26 @@ class Scenario:
     voice: bool = False
     voice_problem: str | None = None
     extra: dict = dataclasses.field(default_factory=dict)  # ctx keys of this situation (replace the company's)
+    archive: tuple = ()          # older messages, not shown: (days ago, "человек" | "ты", text); the model may recall them
+    older: int = 0               # how many older messages there are (when not the archive)
 
     def build(self) -> tuple:
         ctx, person = build_ctx(self.role, history=self.history, talking=self.talking, voice=self.voice,
                                 voice_problem=self.voice_problem)
+        older = self.older or len(self.archive)
+        if older:
+            ctx["conversation"]["older_not_shown"] = older
+            ctx["conversation"]["messages_so_far"] += older
         for key, value in self.extra.items():
             ctx[key] = value(ctx) if callable(value) else value
         return ctx, person, self.text
+
+    def recall(self, query: str) -> list:
+        """What the model finds when it asks to remember: the same search as in a real chat, over the archive."""
+        rows = [types.SimpleNamespace(id=i + 1, role="user" if who == "человек" else "assistant", text=text,
+                                      created_at=now() - dt.timedelta(days=days))
+                for i, (days, who, text) in enumerate(self.archive)]
+        return dialog_memory.search(query, rows)
 
     def evaluate(self, decision: dict, ctx: dict) -> list:
         """Why the decision is not what was expected ([] = passed)."""
@@ -327,6 +340,32 @@ def scenarios() -> list:
                       [("позавчера 11:00", "Попросил у Анны акт сверки"), ("вчера 10:00", "Напомнил Анне"),
                        ("сегодня 10:00", "Напомнил ещё раз; сообщил руководителю, что ответа нет")],
                       "ты поручил это ассистенту")
+    roof_talk = (
+        ("человек", "По кровле на складе на Заводской. Площадь около 640 м², уклон небольшой, старое покрытие — "
+                    "рубероид в два слоя, местами вздулся. Предлагаю снимать до основания, потому что под ним мокрая "
+                    "стяжка, иначе через год всё вернётся. Утеплитель — минвата 150 мм в два слоя, сверху "
+                    "мембрана ПВХ 1,5 мм, примыкания к парапетам усиливаем. Водосточные воронки старые, чугунные, "
+                    "три из шести забиты — их меняем на новые с обогревом. Леса не нужны, работаем с автовышки, её "
+                    "даёт Виктор. Бригада Дмитрия свободна со следующей недели, им нужно пять рабочих дней при "
+                    "сухой погоде. По материалам я уже запросил цены у двух поставщиков, жду ответ до среды; если "
+                    "мембрана подорожает, предложу более дешёвый вариант, но с меньшей гарантией. Отдельно посчитаю "
+                    "вывоз мусора — около двух машин. Ещё нужно согласовать с арендатором склада, чтобы в эти дни "
+                    "убрали стеллажи у северной стены, там будет основной подъём материалов. Смету со всеми "
+                    f"позициями сдам к {_ru(d10)}."),
+        ("ты", "Понял, спасибо за подробный план. Записал, жду цены от поставщиков."),
+        ("человек", "И ещё: мембрану брать белую или серую?"),
+        ("ты", "Если склад летом греется, белая лучше: меньше нагрев. Но это реши с Дмитрием по наличию."))
+    monolith_archive = (
+        (52, "человек", "Пришли отчёт по команде за неделю."),
+        (52, "ты", "Отправил отчёт по команде."),
+        (45, "человек", "С «Монолитом» договорились: скидка 7% при оплате до 25-го числа."),
+        (45, "ты", "Записал: у «Монолита» скидка 7% при оплате до 25-го."),
+        (41, "человек", "Напомни Анне про счёт за бетон."),
+        (41, "ты", "Хорошо, напомню Анне завтра в 10:00."),
+        (33, "человек", "Как там Борис со сметой на кровлю?"),
+        (33, "ты", "Смета в работе, Борис обещал к пятнице."),
+        (21, "человек", "Арматуру на Ленина 12 довезли?"),
+        (21, "ты", "Да, Виктор отписался: доставили вчера."))
     S = Scenario
     return [
         # --- orders from the director
@@ -499,6 +538,29 @@ def scenarios() -> list:
           reply_has=(r"повтор|напиш|не удалось|не получилось|не расслыш|не разобрал",)),
         S("who-are-you", "Разговор", "Прямой вопрос «ты кто?» — честно", "accountant", "Привет! А ты кто?", allowed=(),
           reply_has=(r"ассистент|ИИ|помощник|бот",)),
+        # --- the whole conversation: the fresh part word for word, the retelling of the older part, old messages
+        S("ctx-long-message", "Контекст", "Срок из длинного сообщения в начале разговора", "employee",
+          "Напомни, к какому числу я обещал смету на кровлю?", allowed=("note", "set_deadline"),
+          reply_has=(rf"(?<!\d){d10.day}(?!\d)",), history=roof_talk),
+        S("ctx-summary", "Контекст", "«Как договаривались» — по пересказу давнего разговора", "employee",
+          "Как договаривались по кровле: какой там бюджет и что с водостоком?", allowed=("note",),
+          reply_has=(r"12", r"отдельн"), history=talk, older=30,
+          extra={"dialog_memory": f"{_ru(_day(-20))}: договорились, что Борис готовит смету на кровлю; бюджет — до "
+                                  f"12 тысяч рублей, материал — металлочерепица. {_ru(_day(-12))}: Борис спрашивал про "
+                                  "водосток — решили считать его отдельной сметой."}),
+        S("ctx-earlier", "Контекст", "«Тот акт» — по старым сообщениям, найденным кодом", "employee",
+          "А где сейчас оригинал того акта?", allowed=("note", "ask_reviewer"), reply_has=(r"Ольг",),
+          history=talk, older=60,
+          extra={"from_earlier": [{"when": _day(-25).isoformat(), "messages": [
+              {"from": "человек", "text": "Акт скрытых работ по Ленина 12 подписали, №47. Оригинал куда девать?"},
+              {"from": "ты", "text": "Оригинал акта №47 отдай Ольге Кузнецовой, она подошьёт его в папку объекта."}]}]}),
+        S("ctx-recall", "Контекст", "Давняя договорённость — вспомнить по всей истории чата", "director",
+          "Какую скидку нам обещал «Монолит» и до какого числа нужно оплатить?", allowed=("note", "remind"),
+          reply_has=(r"7\s*%|7 процент|сем(ь|и) процент", r"25"), history=talk, archive=monolith_archive),
+        S("ctx-unknown", "Контекст", "Такого в разговоре не было — не выдумывать", "employee",
+          "Как мы в прошлый раз договорились по оплате такси до объекта?", allowed=("note", "ask_reviewer"),
+          reply_has=(r"не помню|не наш(ё|е)л|не вижу|не нахожу|нет (такой|этого|договор)|не было|напомни|уточн",),
+          reply_not=(r"\d+\s*(руб|byn|тыс|%)",), history=talk, older=12),
     ]
 
 
@@ -633,13 +695,17 @@ def running_id():
 
 
 def _cases() -> list:
-    """(key, group, build, evaluate) for every built-in scenario and every active case of the director."""
-    out = [(sc.id, sc.group, sc.build, sc.evaluate) for sc in scenarios()]
+    """(key, group, build, evaluate, recall) for every built-in scenario and every active case of the director (its
+    model may look through the real chat as it was before that message)."""
+    out = [(sc.id, sc.group, sc.build, sc.evaluate, sc.recall) for sc in scenarios()]
     with SessionLocal() as s:
         for case in s.query(AgentCheckCase).filter_by(active=True).order_by(AgentCheckCase.id).all():
             s.expunge(case)
+            source = s.get(ConversationMessage, case.source_message_id) if case.source_message_id else None
+            recall = ((lambda query, chat=source.chat_id, before=source.id: dialog_memory.recall(chat, query, before))
+                      if source is not None else None)
             out.append((f"case:{case.id}", "Свои случаи", (lambda c=case: _case_scenario(c)),
-                        (lambda decision, ctx, c=case: judge(c, decision) + generic(decision, ctx))))
+                        (lambda decision, ctx, c=case: judge(c, decision) + generic(decision, ctx)), recall))
     return out
 
 
@@ -684,7 +750,7 @@ def stop() -> bool:
 
 
 def _one(run_id: int, model: str, transport: str, item, halt) -> None:
-    key, group, build, evaluate = item
+    key, group, build, evaluate, recall = item
     if halt.is_set():
         return
     ctx, person, text = build()
@@ -693,7 +759,7 @@ def _one(run_id: int, model: str, transport: str, item, halt) -> None:
     with llm.meter() as box:
         try:
             decision = agent.decide(ctx, text, person, model=model, transport=transport, approvers=APPROVERS,
-                                    label=f"check {key}")
+                                    label=f"check {key}", recall=recall)
         except Exception as exc:  # noqa: BLE001  a model that fails is a result too
             error = str(exc)
     seconds = time.monotonic() - started
