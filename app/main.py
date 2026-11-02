@@ -2,6 +2,7 @@
 import datetime as dt
 import hmac
 import logging
+import math
 import mimetypes
 import os
 import pathlib
@@ -28,7 +29,7 @@ from . import (accounts, agent, bitrix, cases, doctext, memory, transcribe, conf
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, EmployeeVoiceprint, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceprint, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -479,7 +480,7 @@ async def demo(request: Request):
 
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
-def meeting_view(request: Request, mid: int):
+def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
@@ -490,10 +491,16 @@ def meeting_view(request: Request, mid: int):
         loaded = pipeline.load(s, mid)
         plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
                 if userbot.ai_mode() and loaded.status in ("awaiting_approval", "rejected") else None)
+        voice_admin = current_user(request)["role"] == "superuser" and user_may_access_meeting_audio(request, loaded)
+        voice_clips, voice_debug, voice_ready = ([], False, {})
+        if voice_admin:
+            voice_clips, voice_debug, voice_ready = _meeting_voice_enrollment_context(s, loaded, manual=voice_enroll)
     until = userbot.quiet_until()
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
                 plan=plan, quiet_at=userbot.local_time(until) if until is not None else "",
-                case_by_task=cases.for_meeting(mid))
+                case_by_task=cases.for_meeting(mid),
+                voice_clips=voice_clips, voice_debug_mode=voice_debug, voice_readiness=voice_ready,
+                voice_msg=voice_msg, voice_admin=voice_admin)
 
 
 @app.post("/cases/{case_id}/{action}")
@@ -1094,12 +1101,19 @@ def meeting_delete(request: Request, mid: int):
         s.query(Meeting).filter_by(id=mid).update({Meeting.progress: Meeting.progress}, synchronize_session=False)
         m = s.get(Meeting, mid)
         if m:
+            if not user_may_access_meeting_audio(request, m):
+                raise HTTPException(404, "Совещание не найдено.")
             if m.status in ("queued", "transcribing", "analyzing", "sending", "delivery_queued", "delivery_retry"):
                 raise HTTPException(409, "Дождитесь завершения обработки")
             if s.query(Delivery).filter(Delivery.meeting_id == mid, Delivery.status.in_(("pending", "sending"))).first():
                 raise HTTPException(409, "Нельзя удалить совещание с незавершённой доставкой")
             if m.audio_path:
                 pathlib.Path(m.audio_path).unlink(missing_ok=True)
+            from .db import VoiceSampleCleanup
+            for sample in s.query(EmployeeVoiceSample).filter_by(source_meeting_id=mid).all():
+                if sample.sample_blob_path:
+                    s.add(VoiceSampleCleanup(employee_id=sample.employee_id, storage_path=sample.sample_blob_path))
+                s.delete(sample)
             s.delete(m)
             s.commit()
     return RedirectResponse("/meetings", 303)
@@ -1178,6 +1192,30 @@ def _chat_ids(form, name: str) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def _catalog_items(url: str, headers: dict) -> list[dict]:
+    response = httpx.get(url, headers=headers, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    items = payload.get("data", []) if isinstance(payload, dict) else []
+    return [item for item in items if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]]
+
+
+def _catalog_price(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _stt_usd_per_hour(pricing: dict) -> float | None:
+    """Duration-priced STT bills per second of audio. Token-priced models and odd units get no hourly rate."""
+    prompt, completion = _catalog_price(pricing.get("prompt")), _catalog_price(pricing.get("completion"))
+    if prompt is None or not 0 < prompt < 0.01 or completion:  # $36+ per hour is not a per-second price
+        return None
+    return round(prompt * 3600, 2)
+
+
 @app.get("/settings/models")
 def settings_models(request: Request):
     guard_admin(request)
@@ -1185,56 +1223,73 @@ def settings_models(request: Request):
     key = config.openrouter_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    # Two independent requests: one failing catalog must not empty every model list.
+    warnings, items, stt_items = [], [], []
     try:
-        response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models", headers=headers, timeout=20)
-        response.raise_for_status()
-        payload = response.json()
-        stt_response = httpx.get(f"{config.OPENROUTER_BASE_URL}/models?output_modalities=transcription",
-                                 headers=headers, timeout=20)
-        stt_response.raise_for_status()
-        stt_payload = stt_response.json()
+        items = _catalog_items(f"{config.OPENROUTER_BASE_URL}/models", headers)
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("Could not load OpenRouter model catalog: %s", exc)
-        raise HTTPException(502, "Не удалось загрузить каталог OpenRouter. Проверьте подключение и повторите.") from None
-    items = payload.get("data", []) if isinstance(payload, dict) else []
-    models = []
+        warnings.append("общий каталог моделей не загрузился")
+    try:
+        stt_items = _catalog_items(f"{config.OPENROUTER_BASE_URL}/models?output_modalities=transcription", headers)
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Could not load OpenRouter STT catalog: %s", exc)
+        warnings.append("каталог моделей распознавания речи не загрузился")
+    if not items and not stt_items:
+        raise HTTPException(502, "Не удалось загрузить каталог OpenRouter. Проверьте подключение и повторите.")
+    models, stt_from_main = [], []
     for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            continue
+        model_id = item["id"][:200]
         architecture = item.get("architecture") or {}
         inputs = architecture.get("input_modalities") or item.get("input_modalities") or []
         outputs = architecture.get("output_modalities") or item.get("output_modalities") or []
         pricing = item.get("pricing") or {}
+        prompt, completion = _catalog_price(pricing.get("prompt")), _catalog_price(pricing.get("completion"))
+        if "transcription" in outputs:
+            stt_from_main.append(item)  # the main catalog may list STT models too
         models.append({
-            "id": item["id"][:200],
-            "name": str(item.get("name") or item["id"])[:200],
+            "id": model_id,
+            "name": str(item.get("name") or model_id)[:200],
+            "provider": model_id.lstrip("~").split("/", 1)[0],
             "audio_input": "audio" in inputs,
             "text_input": not inputs or "text" in inputs,
             "text_output": not outputs or "text" in outputs,
             "context_length": item.get("context_length"),
             "prompt_price": pricing.get("prompt"),
             "completion_price": pricing.get("completion"),
+            "free": model_id == "openrouter/free" or model_id.endswith(":free") or (prompt == 0 and completion == 0),
+            # :batch variants answer through the asynchronous batch queue, too slow for meetings and chats
+            "batch": model_id.endswith(":batch"),
         })
-    models.sort(key=lambda model: (model["id"].casefold()))
-    stt_items = stt_payload.get("data", []) if isinstance(stt_payload, dict) else []
-    transcription_models = []
-    for item in stt_items:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+    models.sort(key=lambda model: model["id"].casefold())
+    transcription_models, seen = [], set()
+    for item in stt_items + stt_from_main:
+        model_id = item["id"][:200]
+        if model_id in seen:
             continue
+        seen.add(model_id)
         pricing = item.get("pricing") or {}
-        transcription_models.append({"id": item["id"][:200],
-                                     "name": str(item.get("name") or item["id"])[:200],
-                                     "prompt_price": pricing.get("prompt"),
-                                     "completion_price": pricing.get("completion")})
+        transcription_models.append({
+            "id": model_id, "name": str(item.get("name") or model_id)[:200], "kind": "stt",
+            "provider": model_id.lstrip("~").split("/", 1)[0],
+            "prompt_price": pricing.get("prompt"), "completion_price": pricing.get("completion"),
+            "usd_per_hour": _stt_usd_per_hour(pricing),
+            "description": " ".join(str(item.get("description") or "").split())[:300],
+        })
     # Gemini hears words and voices in one pass (best on the speech benchmark, see scripts/speech_benchmark.py).
-    known = {m["id"] for m in transcription_models}
     for model in models:
-        if model["audio_input"] and transcribe.chat_model(model["id"]) and model["id"] not in known:
-            transcription_models.append({"id": model["id"], "name": model["name"] + " — слова и голоса одним проходом",
-                                         "prompt_price": model["prompt_price"], "completion_price": model["completion_price"]})
-    transcription_models.sort(key=lambda model: model["id"].casefold())
+        if (model["audio_input"] and model["text_output"] and not model["batch"]
+                and transcribe.chat_model(model["id"]) and model["id"] not in seen):
+            seen.add(model["id"])
+            transcription_models.append({
+                "id": model["id"], "name": model["name"], "kind": "chat", "provider": model["provider"],
+                "prompt_price": model["prompt_price"], "completion_price": model["completion_price"],
+                "usd_per_hour": None, "description": "",
+            })
+    transcription_models.sort(key=lambda model: (model["kind"] != "stt", model["name"].casefold(), model["id"]))
     return {"models": models, "count": len(models), "transcription_models": transcription_models,
-            "transcription_count": len(transcription_models)}
+            "transcription_count": len(transcription_models),
+            "stt_count": sum(model["kind"] == "stt" for model in transcription_models), "warnings": warnings}
 
 
 @app.post("/settings")
@@ -1247,7 +1302,7 @@ async def settings_save(request: Request):
     updates = {}
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
-              "bitrix_enabled", "ai_employee", "ticnote_enabled"):
+              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -1262,7 +1317,7 @@ async def settings_save(request: Request):
             value = str(f[k]).strip()
             updates[k] = value if k == "glossary" else value or settings_store.DEFAULTS[k]
     for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model"):
-        if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"[A-Za-z0-9._:/-]+", updates[k])):
+        if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"~?[A-Za-z0-9._:/-]+", updates[k])):
             raise HTTPException(400, "Некорректный идентификатор модели")
     if "conversation_tone" in updates:
         updates["conversation_tone"] = updates["conversation_tone"][:1000]
@@ -1582,10 +1637,15 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
+        visible_voice_samples = {}
         for employee in emps:
+            visible_voice_samples[employee.id] = [sample for sample in employee.voice_samples
+                if (not sample.access_owner or sample.access_owner in {
+                    f"user:{current_user(request)['id']}", request.session.get("recording_owner")})]
             for membership in employee.department_memberships:
                 _ = membership.department.name if membership.department else ""
             _ = employee.voiceprint.created_at if employee.voiceprint else None
+            _ = list(employee.voice_samples)
         for department in departments:
             _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
@@ -1596,7 +1656,9 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     return page(request, "employees.html", employees=emps, chats=chats, linked=linked, rights=rights,
                 rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
                 strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
-                voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()))
+                voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()),
+                voice_service_enabled=config.voice_service_enabled(), visible_voice_samples=visible_voice_samples,
+                voice_readiness=speaker_id.identification_readiness({e.id: list(e.voice_samples) for e in emps if e.active}))
 
 
 @app.post("/employees")
@@ -1652,14 +1714,234 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
             s.rollback()
             raise HTTPException(400, "Сначала укажите Telegram сотрудника: права привязываются к его аккаунту")
         s.commit()
+        saved_employee_id = e.id
     if level and level != access.level_of(e):
         access.set_level(e, level)  # after the card is saved: the settings are written in their own transaction
     agent.invalidate_roster()
-    return RedirectResponse("/employees", 303)
+    target = (
+        f"/employees?edit={saved_employee_id}#employee-{saved_employee_id}"
+        if id else f"/employees#employee-{saved_employee_id}"
+    )
+    return RedirectResponse(target, 303)
 
 
 def _voice_redirect(employee_id: int, message: str):
     return RedirectResponse(f"/employees?edit={employee_id}&voice_msg={quote(message, safe='')}", 303)
+
+
+def _meeting_redirect(mid: int, message: str):
+    return RedirectResponse(f"/meetings/{mid}?voice_msg={quote(message, safe='')}", 303)
+
+
+def _voice_write_guard(request):
+    guard_admin(request)
+    from urllib.parse import urlsplit
+    origin = request.headers.get("origin")
+    if request.headers.get("sec-fetch-site") == "cross-site" or (origin and urlsplit(origin).netloc != request.url.netloc):
+        raise HTTPException(403, "Запрос должен исходить из этой панели.")
+
+
+def _meeting_audio_owner(session, meeting):
+    # Match both the explicit link and reused audio paths. No superuser bypass:
+    # /recordings/{rid}/audio enforces ownership even for other superusers.
+    rows = session.query(Recording).filter(
+        (Recording.meeting_id == meeting.id) | (Recording.path == (meeting.audio_path or ""))
+    ).all()
+    return [r for r in rows if r.meeting_id == meeting.id or (meeting.audio_path and r.path == meeting.audio_path)]
+
+
+def user_may_access_meeting_audio(request, meeting):
+    guard(request)
+    with SessionLocal() as session:
+        rows = _meeting_audio_owner(session, meeting)
+    return all(r.owner == recording_owner(request, r.id) for r in rows)
+
+
+def _voice_meeting(session, request, mid):
+    meeting = session.get(Meeting, mid)
+    if meeting is None or not user_may_access_meeting_audio(request, meeting):
+        raise HTTPException(404, "Совещание не найдено.")
+    return meeting
+
+
+def _candidate(meeting, start, end, speaker=None):
+    start, end = speaker_id._finite(start), speaker_id._finite(end)
+    if start is None or end is None or start < 0 or not 5 <= end - start <= 30:
+        raise HTTPException(400, "Некорректный интервал фрагмента.")
+    for clip in speaker_id.propose_clear_speaker_clips(meeting.transcript or []):
+        if abs(clip["start"] - start) < 0.0005 and abs(clip["end"] - end) < 0.0005:
+            if speaker is None or clip["speaker"] == speaker:
+                return clip
+    raise HTTPException(400, "Фрагмент не входит в доступные кандидаты или содержит наложение реплик.")
+
+
+def _meeting_voice_enrollment_context(session, meeting, manual=False):
+    debug = settings_store.get("voice_debug_mode") is True
+    active = session.query(Employee).filter(Employee.active.is_(True)).all()
+    by_employee = {e.id: list(e.voice_samples) for e in active}
+    readiness = speaker_id.identification_readiness(by_employee)
+    if not (debug or manual) or meeting.status in ("queued", "transcribing", "analyzing"):
+        return [], debug, readiness
+    if not meeting.audio_path or not pathlib.Path(meeting.audio_path).is_file():
+        return [], debug, readiness
+    # Stop collecting for sufficiently sampled known people, never hide an unknown
+    # just because another subset of employees has enough samples.
+    per_person = {p["employee_id"]: p["ready"] for p in readiness.get("people", [])}
+    pending = []
+    for clip in speaker_id.propose_clear_speaker_clips(meeting.transcript or []):
+        if speaker_id.overlapping_confirmed_sample(session, meeting.id, clip["start"], clip["end"]):
+            continue
+        known_id = clip.get("speaker_employee_id")
+        if not manual and known_id is not None and per_person.get(known_id):
+            continue
+        pending.append(clip)
+    return pending[:8], debug, readiness
+
+
+@app.get("/meetings/{mid}/speaker-clip")
+def meeting_speaker_clip(request: Request, mid: int, start: float, end: float):
+    guard(request)
+    with SessionLocal() as session:
+        meeting = _voice_meeting(session, request, mid)
+        clip = _candidate(meeting, start, end)
+        source = meeting.audio_path
+        if not source or not pathlib.Path(source).is_file():
+            raise HTTPException(404, "Аудиозапись недоступна.")
+    with tempfile.TemporaryDirectory(prefix="sysai_clip_") as tmp:
+        target = pathlib.Path(tmp) / "clip.wav"
+        if speaker_id.extract_interval(source, target, clip["start"], clip["end"]) is None:
+            raise HTTPException(400, "Не удалось вырезать полный фрагмент.")
+        if not speaker_id.clip_has_speech(target):
+            raise HTTPException(400, "Фрагмент слишком тихий, перегружен или содержит слишком много пауз.")
+        raw = target.read_bytes()
+    return Response(raw, media_type="audio/wav", headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/meetings/{mid}/speaker-clips/confirm")
+def meeting_confirm_speaker_clip(request: Request, mid: int, speaker: str = Form(...),
+                                 start: float = Form(...), end: float = Form(...),
+                                 employee_id: int = Form(...), consent: str = Form(""),
+                                 listened: str = Form("")):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        meeting = _voice_meeting(session, request, mid)
+        clip = _candidate(meeting, start, end, speaker)
+        if consent not in ("yes", "1", "on", "true") or listened != "yes":
+            return _meeting_redirect(mid, "Нужно прослушать фрагмент, подтвердить один голос и отдельное согласие сотрудника.")
+        source = pathlib.Path(meeting.audio_path or "")
+        if not meeting.audio_path or not source.is_file():
+            return _meeting_redirect(mid, "Аудиозапись недоступна.")
+        # Lock employee before provider work so a simultaneous revoke wins serially.
+        employee = session.query(Employee).filter_by(id=employee_id, active=True).with_for_update().one_or_none()
+        if employee is None:
+            return _meeting_redirect(mid, "Активный сотрудник не найден.")
+        owners = _meeting_audio_owner(session, meeting)
+        access_owner = owners[0].owner if owners else ""
+        import hashlib
+        source_hash = hashlib.sha256()
+        before = source.stat()
+        with source.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                source_hash.update(block)
+        with tempfile.TemporaryDirectory(prefix="sysai_confirm_clip_") as tmp:
+            target = pathlib.Path(tmp) / "clip.wav"
+            extracted = speaker_id.extract_interval(source, target, clip["start"], clip["end"])
+            after = source.stat()
+            if extracted is None or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                return _meeting_redirect(mid, "Запись изменилась или фрагмент неполный; прослушайте заново.")
+            actual_start, duration = extracted
+            try:
+                row = speaker_id.store_confirmed_meeting_sample(
+                    session, employee_id=employee_id, meeting_id=mid,
+                    start=actual_start, end=actual_start + duration, wav_path=target,
+                    confirmed_by=str(current_user(request)["id"]), access_owner=access_owner,
+                    source_audio_sha256=source_hash.hexdigest(),
+                )
+                session.commit()
+                status = row.embedding_status
+            except speaker_id.SpeakerIdentityError as exc:
+                session.rollback()
+                return _meeting_redirect(mid, str(exc)[:300])
+        message = {"ready": "Зашифрованный образец и голосовые признаки сохранены. Точность ещё не проверена.",
+                   "pending": "Аудио сохранено в БД. Сервис признаков не настроен: образец пока не участвует в идентификации.",
+                   "failed": "Аудио сохранено в БД, извлечение признаков не удалось. Можно повторить в карточке сотрудника."}
+        return _meeting_redirect(mid, message[status])
+
+
+def _voice_sample(session, request, eid, sid):
+    guard_admin(request)
+    row = session.query(EmployeeVoiceSample).filter_by(employee_id=eid, id=sid).with_for_update().one_or_none()
+    if row is None or not speaker_id._not_expired(row):
+        raise HTTPException(404, "Образец не найден или срок хранения истёк.")
+    if row.access_owner and row.access_owner not in {f"user:{current_user(request)['id']}", request.session.get("recording_owner")}:
+        raise HTTPException(404, "Образец не найден.")
+    if row.source_meeting_id is not None:
+        _voice_meeting(session, request, row.source_meeting_id)
+    return row
+
+
+@app.get("/employees/{eid}/voice-samples/{sid}/audio")
+def employee_voice_sample_audio(request: Request, eid: int, sid: int):
+    guard_admin(request)
+    with SessionLocal() as session:
+        row = _voice_sample(session, request, eid, sid)
+        try:
+            raw = speaker_id.decrypt_sample_audio(row)
+        except speaker_id.SpeakerIdentityError:
+            raise HTTPException(409, "Образец не удалось расшифровать. Проверьте постоянный SECRET_KEY.")
+    return Response(raw, media_type="audio/wav", headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/employees/{eid}/voice-samples/{sid}/retry")
+def employee_voice_sample_retry(request: Request, eid: int, sid: int):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        row = _voice_sample(session, request, eid, sid)
+        try:
+            ready = speaker_id.embed_pending_sample(session, row)
+        except speaker_id.SpeakerIdentityError as exc:
+            return _voice_redirect(eid, str(exc))
+        session.commit()
+    return _voice_redirect(eid, "Признаки получены." if ready else "Признаки пока недоступны; аудио сохранено в БД.")
+
+
+@app.post("/employees/{eid}/voice-samples/{sid}/delete")
+def employee_voice_sample_delete_one(request: Request, eid: int, sid: int):
+    _voice_write_guard(request)
+    from .db import VoiceSampleCleanup
+    with SessionLocal() as session:
+        row = _voice_sample(session, request, eid, sid)
+        if row.sample_blob_path:
+            session.add(VoiceSampleCleanup(employee_id=eid, storage_path=row.sample_blob_path))
+        session.delete(row)
+        session.commit()
+    return _voice_redirect(eid, "Образец и голосовые признаки удалены из БД.")
+
+
+@app.post("/employees/{eid}/voice-sample/delete")
+def employee_voice_sample_delete(request: Request, eid: int):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        employee = session.query(Employee).filter_by(id=eid).with_for_update().one_or_none()
+        if employee is None:
+            return _voice_redirect(eid, "Сотрудник не найден.")
+        removed = speaker_id.revoke_employee_voice_data(session, eid)
+        session.commit()
+    # New samples have no external copy. Legacy cleanup is durable and can be retried.
+    with SessionLocal() as session:
+        speaker_id.retry_sample_cleanup(session)
+        session.commit()
+    return _voice_redirect(eid, f"Образцы и признаки отозваны ({removed}). Старые внешние копии при ошибке остаются в очереди очистки.")
+
+
+@app.post("/employees/voice-samples/cleanup")
+def employee_voice_samples_cleanup(request: Request):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        speaker_id.purge_expired_samples(session)
+        speaker_id.retry_sample_cleanup(session)
+        session.commit()
+    return RedirectResponse("/employees", 303)
 
 
 @app.post("/employees/{eid}/voice-sample")
@@ -1726,60 +2008,397 @@ def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(
             pass
 
 
-@app.post("/employees/{eid}/voice-sample/delete")
-def employee_voice_sample_delete(request: Request, eid: int):
-    guard_admin(request)
-    with SessionLocal() as session:
-        employee = session.get(Employee, eid)
-        if employee is None:
-            return _voice_redirect(eid, "Сотрудник не найден.")
-        profile = session.query(EmployeeVoiceprint).filter_by(employee_id=eid).one_or_none()
-        if profile is not None:
-            session.delete(profile)
-            session.commit()
-        employee_name = employee.name
-    return _voice_redirect(eid, f"Локальный голосовой шаблон «{employee_name}» удалён.")
-
-
 @app.get("/departments", response_class=HTMLResponse)
-def departments_view(request: Request, edit: int = 0, msg: str = ""):
+def departments_view(request: Request, edit: int = 0, msg: str = "",
+                     view: str = "map", open_add: int = 0):
     guard_admin(request)
+    view = "list" if view == "list" else "map"
     with SessionLocal() as s:
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
-        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
-        for department in departments:
-            for membership in department.memberships:
-                if membership.employee is not None:
-                    _ = membership.employee.name, membership.employee.position, membership.employee.active
-            _ = len(department.memberships)
-        for employee in employees:
-            for membership in employee.department_memberships:
-                if membership.department is not None:
-                    _ = membership.department.name
-        department_heads = {
-            department.id: next(
+        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name, Employee.id).all()
+        from . import access
+        access_levels = {employee.id: access.level_of(employee) for employee in employees}
+
+        department_positions = {}
+        department_heads = {}
+        for index, department in enumerate(departments):
+            department_positions[department.id] = (
+                max(0, min(20000, round(float(department.map_x)))) if department.map_x is not None
+                else 480 + (index // 5) * 760,
+                max(0, min(20000, round(float(department.map_y)))) if department.map_y is not None
+                else 120 + (index % 5) * 315,
+            )
+            department_heads[department.id] = next(
                 (membership for membership in department.memberships
                  if membership.is_primary and membership.employee is not None and membership.employee.active),
                 None,
             )
-            for department in departments
-        }
-        member_ids_by_department = {
-            department.id: {membership.employee_id for membership in department.memberships}
-            for department in departments
-        }
-        available_employees_by_department = {
-            department.id: [employee for employee in employees
-                            if employee.id not in member_ids_by_department[department.id]]
-            for department in departments
-        }
-    return page(request, "departments.html", departments=departments, edit=edit, msg=msg,
-                available_employees_by_department=available_employees_by_department, department_heads=department_heads)
+
+        visible_department_ids = {d.id for d in departments}
+        employee_memberships = {}
+        for employee in employees:
+            employee_memberships[employee.id] = [
+                membership for membership in employee.department_memberships
+                if membership.department_id in visible_department_ids
+                and membership.department is not None
+            ]
+
+        available_employees_by_department = {}
+        for department in departments:
+            assigned = {m.employee_id for m in department.memberships}
+            available_employees_by_department[department.id] = [
+                employee for employee in employees if employee.id not in assigned
+            ]
+
+        graph_relations = s.query(OrgRelation).all()
+        map_departments = []
+        furthest_right, furthest_bottom = 1400, 1100
+        for department in departments:
+            x, y = department_positions[department.id]
+            members = [
+                m for m in department.memberships
+                if m.employee is not None and m.employee.active
+            ]
+            map_departments.append({
+                "id": department.id, "name": department.name,
+                "description": department.description or "",
+                "active": bool(department.active),
+                "members": members,
+                "head_name": department_heads[department.id].employee.name
+                    if department_heads[department.id] else "",
+                "map_x": x, "map_y": y,
+            })
+            furthest_right = max(furthest_right, x + 340)
+            furthest_bottom = max(furthest_bottom, y + 190)
+
+        # A person is rendered exactly once, regardless of how many departments
+        # they belong to or lead. Legacy membership coordinates are used only as
+        # a one-time fallback until the employee is next moved on the canvas.
+        map_employees = []
+        map_edges = []
+        slots_by_department = {}
+        for index, employee in enumerate(employees):
+            memberships = employee_memberships.get(employee.id, [])
+            first_membership = next(
+                (m for m in memberships if m.map_x is not None and m.map_y is not None),
+                None,
+            )
+            anchor = next((m for m in memberships if m.is_primary), memberships[0] if memberships else None)
+            if employee.map_x is not None and employee.map_y is not None:
+                employee_x, employee_y = float(employee.map_x), float(employee.map_y)
+            elif first_membership is not None:
+                employee_x, employee_y = float(first_membership.map_x), float(first_membership.map_y)
+            elif anchor is not None:
+                dept_x, dept_y = department_positions[anchor.department_id]
+                slot = slots_by_department.get(anchor.department_id, 0)
+                slots_by_department[anchor.department_id] = slot + 1
+                employee_x = dept_x + 390 + (slot // 7) * 330
+                employee_y = dept_y + 12 + (slot % 7) * 108
+            else:
+                employee_x = 420 + (index // 8) * 330
+                employee_y = 980 + (index % 8) * 110
+
+            employee_x = max(0, min(20000, round(employee_x)))
+            employee_y = max(0, min(20000, round(employee_y)))
+            position = employee.position or ""
+            manager_departments = [
+                m.department.name for m in memberships
+                if m.is_primary and m.department is not None
+            ]
+            department_names = [
+                m.department.name for m in memberships if m.department is not None
+            ]
+            department_roles = [
+                f"{m.department.name}: {m.role}" if m.role else m.department.name
+                for m in memberships if m.department is not None
+            ]
+            map_employees.append({
+                "id": employee.id, "name": employee.name, "position": position,
+                "access_level": access_levels.get(employee.id, "employee"),
+                "is_director": " ".join((employee.name or "").split()).casefold()
+                    == "корнюшко сергей михайлович",
+                "map_x": employee_x, "map_y": employee_y,
+                "department_summary": ", ".join(department_names),
+                "role_summary": " · ".join(department_roles),
+                "manager_summary": ", ".join(manager_departments),
+                "department_ids": [m.department_id for m in memberships],
+            })
+            furthest_right = max(furthest_right, employee_x + 330)
+            furthest_bottom = max(furthest_bottom, employee_y + 150)
+
+            for membership in memberships:
+                if membership.is_primary:
+                    map_edges.append({
+                        "source": f"employee:{employee.id}",
+                        "target": f"department:{membership.department_id}",
+                        "kind": "manager", "label": membership.role or "Руководитель",
+                    })
+                else:
+                    map_edges.append({
+                        "source": f"department:{membership.department_id}",
+                        "target": f"employee:{employee.id}",
+                        "kind": "membership", "label": membership.role or "Сотрудник",
+                    })
+
+        valid_employee_ids = {e.id for e in employees}
+        valid_department_ids = {d.id for d in departments}
+        employee_parent_ids = set()
+        company_linked_employee_ids = set()
+        for relation in graph_relations:
+            if relation.source_type not in {"company", "employee", "department"}:
+                continue
+            if relation.target_type not in {"employee", "department"}:
+                continue
+            if relation.source_type == "employee" and relation.source_id not in valid_employee_ids:
+                continue
+            if relation.source_type == "department" and relation.source_id not in valid_department_ids:
+                continue
+            if relation.target_type == "employee" and relation.target_id not in valid_employee_ids:
+                continue
+            if relation.target_type == "department" and relation.target_id not in valid_department_ids:
+                continue
+            source_key = f"{relation.source_type}:{relation.source_id}"
+            target_key = f"{relation.target_type}:{relation.target_id}"
+            kind = "block" if relation.target_type == "department" else "reporting"
+            map_edges.append({
+                "source": source_key, "target": target_key,
+                "kind": kind, "label": relation.label or relation.relation_type,
+                "relation_id": relation.id,
+            })
+            if relation.target_type == "employee":
+                employee_parent_ids.add(relation.target_id)
+                if relation.source_type == "company":
+                    company_linked_employee_ids.add(relation.target_id)
+
+        # The designated director is the initial root link until the graph is
+        # explicitly configured in the constructor. This does not grant access.
+        director = next(
+            (e for e in employees
+             if " ".join((e.name or "").split()).casefold() == "корнюшко сергей михайлович"),
+            None,
+        )
+        if director is not None and director.id not in company_linked_employee_ids:
+            map_edges.append({
+                "source": "company:1", "target": f"employee:{director.id}",
+                "kind": "director", "label": "Директор",
+            })
+            employee_parent_ids.add(director.id)
+
+        # Staff without a department or explicit reporting line remain visible
+        # as direct company reports; no active employee is dropped from the map.
+        for employee in employees:
+            if not employee_memberships.get(employee.id) and employee.id not in employee_parent_ids:
+                map_edges.append({
+                    "source": "company:1", "target": f"employee:{employee.id}",
+                    "kind": "company-member", "label": "Прямое подчинение",
+                })
+
+        map_root_x = max(0, min(20000, round(float(settings_store.get("org_map_root_x") or 85))))
+        map_root_y = max(0, min(20000, round(float(settings_store.get("org_map_root_y") or 735))))
+        map_board_width = max(3200, furthest_right + 520, map_root_x + 750)
+        map_board_height = max(2200, furthest_bottom + 420, map_root_y + 600)
+
+    return page(
+        request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
+        open_add=open_add, map_departments=map_departments, map_employees=map_employees,
+        map_unassigned=[e for e in map_employees if not e["department_ids"]],
+        map_edges=map_edges, map_board_width=map_board_width, map_board_height=map_board_height,
+        map_root_x=map_root_x, map_root_y=map_root_y, map_member_count=len(map_employees),
+        available_employees_by_department=available_employees_by_department,
+        department_heads=department_heads,
+    )
+
+
+@app.post("/departments/map/position")
+async def department_map_position(request: Request):
+    """Save the free position of one graph node without changing its relationships."""
+    guard_admin(request)
+    try:
+        data = await request.json()
+        node_type = str(data.get("node_type") or "")
+        map_x, map_y = float(data.get("map_x")), float(data.get("map_y"))
+        if not (0 <= map_x <= 20000 and 0 <= map_y <= 20000):
+            raise ValueError("coordinates out of bounds")
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "Некорректные координаты карточки")
+
+    if node_type == "company":
+        settings_store.set_many({"org_map_root_x": map_x, "org_map_root_y": map_y})
+        return JSONResponse({"ok": True})
+    with SessionLocal() as s:
+        if node_type == "department":
+            try:
+                node_id = int(data.get("department_id") or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "Некорректное подразделение")
+            node = s.get(Department, node_id)
+        elif node_type == "employee":
+            try:
+                node_id = int(data.get("employee_id") or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "Некорректный сотрудник")
+            node = s.get(Employee, node_id)
+            if node is not None and not node.active:
+                raise HTTPException(404, "Активный сотрудник не найден")
+        else:
+            raise HTTPException(400, "Неизвестный тип карточки")
+        if node is None:
+            raise HTTPException(404, "Карточка не найдена")
+        node.map_x, node.map_y = map_x, map_y
+        s.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/departments/map/assign")
+async def department_map_assign(request: Request):
+    """Add/update an employee's membership in a department without removing other memberships."""
+    guard_admin(request)
+    try:
+        data = await request.json()
+        employee_id = int(data.get("employee_id") or 0)
+        department_id = int(data.get("department_id") or 0)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "Некорректный сотрудник или подразделение")
+    role = str(data.get("role") or "").strip()[:200]
+    responsibilities = str(data.get("responsibilities") or "").strip()[:4000]
+    is_primary = bool(data.get("is_primary"))
+    try:
+        map_x = float(data.get("map_x")) if data.get("map_x") is not None else None
+        map_y = float(data.get("map_y")) if data.get("map_y") is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректные координаты карточки")
+    with SessionLocal() as s:
+        employee = s.get(Employee, employee_id)
+        department = s.get(Department, department_id)
+        if employee is None or not employee.active:
+            raise HTTPException(404, "Активный сотрудник не найден")
+        if department is None or not department.active:
+            raise HTTPException(400, "Подразделение не найдено или неактивно")
+        membership = s.query(EmployeeDepartment).filter_by(
+            employee_id=employee_id, department_id=department_id
+        ).one_or_none()
+        if membership is None:
+            membership = EmployeeDepartment(employee_id=employee_id, department_id=department_id)
+            s.add(membership)
+            s.flush()
+        if is_primary:
+            s.query(EmployeeDepartment).filter(
+                EmployeeDepartment.department_id == department_id,
+                EmployeeDepartment.id != membership.id,
+            ).update({EmployeeDepartment.is_primary: False}, synchronize_session=False)
+        membership.role = role
+        membership.responsibilities = responsibilities
+        membership.is_primary = is_primary
+        if map_x is not None and map_y is not None:
+            employee.map_x, employee.map_y = map_x, map_y
+        s.commit()
+    agent.invalidate_roster()
+    return JSONResponse({"ok": True})
+
+
+def _org_cycle_exists(session, source_type: str, source_id: int, target_type: str, target_id: int) -> bool:
+    """True when adding source -> target would close a directed cycle among people and departments."""
+    children = {}
+    for edge in session.query(OrgRelation).all():
+        children.setdefault((edge.source_type, edge.source_id), set()).add((edge.target_type, edge.target_id))
+    pending, visited = [(target_type, target_id)], set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == (source_type, source_id):
+            return True
+        pending.extend(children.get(current, ()))
+    return False
+
+
+@app.post("/departments/map/relation")
+async def department_map_relation(request: Request):
+    """Create or update a directed line between people, departments, or the company root."""
+    guard_admin(request)
+    try:
+        data = await request.json()
+        source_type = str(data.get("source_type") or "")
+        source_id = int(data.get("source_id") or 0)
+        target_type = str(data.get("target_type") or "employee")
+        target_id = int(data.get("target_id") or 0)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "Некорректные параметры связи")
+    label = str(data.get("label") or "").strip()[:200]
+    relation_type = str(data.get("relation_type") or "reports_to").strip()[:40] or "reports_to"
+    allowed = {"company", "employee", "department"}
+    if source_type not in allowed or target_type not in {"employee", "department"}:
+        raise HTTPException(400, "Можно связать компанию, отдел или сотрудника")
+    if source_type == "company" and source_id != 1:
+        raise HTTPException(400, "Некорректный узел компании")
+    if source_type != "company" and source_id <= 0:
+        raise HTTPException(400, "Некорректный исходный блок")
+    if target_id <= 0:
+        raise HTTPException(400, "Некорректный целевой блок")
+    if source_type == target_type and source_id == target_id:
+        raise HTTPException(400, "Нельзя связать блок с самим собой")
+
+    with SessionLocal() as s:
+        if source_type == "employee":
+            parent = s.get(Employee, source_id)
+            if parent is None or not parent.active:
+                raise HTTPException(404, "Исходный сотрудник не найден")
+        if source_type == "department":
+            parent_dept = s.get(Department, source_id)
+            if parent_dept is None:
+                raise HTTPException(404, "Исходное подразделение не найдено")
+        if target_type == "employee":
+            target = s.get(Employee, target_id)
+            if target is None or not target.active:
+                raise HTTPException(404, "Целевой сотрудник не найден")
+        else:
+            target_dept = s.get(Department, target_id)
+            if target_dept is None:
+                raise HTTPException(404, "Целевое подразделение не найдено")
+        if _org_cycle_exists(s, source_type, source_id, target_type, target_id):
+            raise HTTPException(409, "Эта связь создаст замкнутый цикл")
+        relation = s.query(OrgRelation).filter_by(
+            source_type=source_type, source_id=source_id,
+            target_type=target_type, target_id=target_id, relation_type=relation_type,
+        ).one_or_none()
+        if relation is None:
+            relation = OrgRelation(
+                source_type=source_type, source_id=source_id,
+                target_type=target_type, target_id=target_id,
+                relation_type=relation_type,
+            )
+            s.add(relation)
+        if label:
+            relation.label = label
+        elif target_type == "department" and source_type == "department":
+            relation.label = "Связь отделов"
+        elif target_type == "department" and source_type == "company":
+            relation.label = "Подразделение"
+        elif source_type == "company":
+            relation.label = "Директор"
+        else:
+            relation.label = "Подчинение"
+        s.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/departments/map/relation/{relation_id}/delete")
+def department_map_relation_delete(request: Request, relation_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        relation = s.get(OrgRelation, relation_id)
+        if relation is None:
+            raise HTTPException(404, "Связь не найдена")
+        s.delete(relation)
+        s.commit()
+    return JSONResponse({"ok": True})
 
 
 @app.post("/departments")
 def department_save(request: Request, id: int = Form(0), name: str = Form(...),
-                    description: str = Form(""), active: str = Form(""), regulations: str = Form(None)):
+                    description: str = Form(""), active: str = Form(""), regulations: str = Form(None),
+                    return_view: str = Form("list")):
     guard_admin(request)
     clean_name = name.strip()[:100]
     if not clean_name:
@@ -1800,11 +2419,17 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         department.active = bool(active) if id else True
         s.add(department)
         s.commit()
-    return RedirectResponse("/departments", 303)
+    safe_view = "map" if return_view == "map" else "list"
+    if id:
+        target = f"/departments?view={safe_view}#department-{department.id}"
+    else:
+        target = f"/departments?view={safe_view}&create=1#department-create-form"
+    return RedirectResponse(target, 303)
 
 
 @app.post("/departments/{department_id}/head")
-def department_set_head(request: Request, department_id: int, employee_id: int = Form(0)):
+def department_set_head(request: Request, department_id: int, employee_id: int = Form(0),
+                        view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -1826,13 +2451,14 @@ def department_set_head(request: Request, department_id: int, employee_id: int =
         f"Назначен начальник подразделения «{department_name}»: {chosen_name}."
         if chosen_name else f"Назначение начальника подразделения «{department_name}» снято."
     )
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}&msg=" + quote(message) + f"#department-{department_id}", 303)
 
 
 @app.post("/departments/{department_id}/members")
 def department_add_member(request: Request, department_id: int,
                           employee_id: int = Form(0), role: str = Form(""),
-                          responsibilities: str = Form("")):
+                          responsibilities: str = Form(""), view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -1853,14 +2479,23 @@ def department_add_member(request: Request, department_id: int,
         membership.responsibilities = responsibilities.strip()[:4000]
         s.commit()
         message = f"{employee.name} добавлен в подразделение «{department.name}». Он сохранён в общем справочнике сотрудников."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(
+        f"/departments?view={safe_view}&open_add={department_id}&msg=" + quote(message)
+        + f"#department-{department_id}-add", 303,
+    )
 
 
 @app.post("/departments/{department_id}/members/create")
-def department_create_member(request: Request, department_id: int, name: str = Form(...),
-                             aliases: str = Form(""), position: str = Form(""),
-                             telegram_contact: str = Form(""), role: str = Form(""),
-                             responsibilities: str = Form("")):
+async def department_create_member(
+    request: Request, department_id: int, name: str = Form(...),
+    aliases: str = Form(""), position: str = Form(""), competencies: str = Form(""),
+    employee_responsibilities: str = Form(""), context: str = Form(""),
+    telegram_contact: str = Form(""), bitrix_user_id: str = Form(""),
+    role: str = Form(""), responsibilities: str = Form(""),
+    view: str = Form("list"), access_level: str = Form("employee"),
+    is_primary: str = Form(""),
+):
     guard_admin(request)
     clean_name = name.strip()[:200]
     if not clean_name:
@@ -1871,41 +2506,60 @@ def department_create_member(request: Request, department_id: int, name: str = F
             contact = userbot.normalize_ref(contact)
         except userbot.RefError as exc:
             raise HTTPException(400, str(exc))
+    from . import access
+    selected_level = access_level.strip() or "employee"
+    if selected_level not in access.LEVELS:
+        raise HTTPException(400, "Неизвестный уровень доступа")
+    if selected_level != "employee" and not contact:
+        raise HTTPException(400, "Для повышенных прав сначала укажите Telegram сотрудника")
+    primary = is_primary.strip().lower() in {"1", "true", "on", "yes"}
     with SessionLocal() as s:
         department = s.get(Department, department_id)
-        if department is None:
-            raise HTTPException(404, "Подразделение не найдено")
-        if not department.active:
-            raise HTTPException(400, "Сначала активируйте подразделение")
+        if department is None or not department.active:
+            raise HTTPException(400, "Подразделение не найдено или неактивно")
         duplicate = next((item for item in s.query(Employee).all()
                           if (item.name or "").strip().casefold() == clean_name.casefold()), None)
         if duplicate is not None:
-            membership = s.query(EmployeeDepartment).filter_by(
-                employee_id=duplicate.id, department_id=department.id
-            ).first()
-            if membership is None:
-                raise HTTPException(
-                    409,
-                    f"Сотрудник «{duplicate.name}» уже есть в общем справочнике. Добавьте существующую запись."
-                )
-            raise HTTPException(409, f"«{duplicate.name}» уже состоит в этом подразделении.")
+            raise HTTPException(
+                409,
+                f"Сотрудник «{duplicate.name}» уже есть в общем справочнике. Перетащите его карточку в подразделение или добавьте через «Существующий сотрудник»."
+            )
         employee = Employee(
             name=clean_name, aliases=aliases.strip()[:500], position=position.strip()[:200],
-            channel="telegram", telegram_chat_id=contact, active=True,
+            competencies=competencies.strip()[:4000],
+            responsibilities=employee_responsibilities.strip()[:4000],
+            context=context.strip()[:4000], channel="telegram",
+            telegram_chat_id=contact, bitrix_user_id=bitrix_user_id.strip()[:40], active=True,
         )
         s.add(employee)
         s.flush()
-        s.add(EmployeeDepartment(
+        membership = EmployeeDepartment(
             employee_id=employee.id, department_id=department.id,
             role=role.strip()[:200], responsibilities=responsibilities.strip()[:4000],
-        ))
+            is_primary=primary,
+        )
+        s.add(membership)
+        if primary:
+            s.query(EmployeeDepartment).filter(
+                EmployeeDepartment.department_id == department.id,
+                EmployeeDepartment.employee_id != employee.id,
+            ).update({EmployeeDepartment.is_primary: False}, synchronize_session=False)
+        employee_id = employee.id
+        department_name = department.name
         s.commit()
-        message = f"Создан сотрудник «{employee.name}» и добавлен в «{department.name}». Он отображается и в общем справочнике."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    if selected_level != "employee":
+        access.set_level(employee, selected_level)
+    agent.invalidate_roster()
+    message = f"Создан сотрудник «{clean_name}» и добавлен в «{department_name}». Все данные профиля сохранены."
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(
+        f"/departments?view={safe_view}&msg=" + quote(message) + f"#employee-{employee_id}", 303,
+    )
 
 
 @app.post("/departments/{department_id}/members/{employee_id}/remove")
-def department_remove_member(request: Request, department_id: int, employee_id: int):
+def department_remove_member(request: Request, department_id: int, employee_id: int,
+                             view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
@@ -1919,18 +2573,20 @@ def department_remove_member(request: Request, department_id: int, employee_id: 
         department_name = department.name if department is not None else "подразделение"
         employee_name = employee.name if employee is not None else "Сотрудник"
     message = f"{employee_name} исключён из «{department_name}». Запись в общем справочнике сотрудников сохранена."
-    return RedirectResponse("/departments?msg=" + quote(message), 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}&msg=" + quote(message) + f"#department-{department_id}", 303)
 
 
 @app.post("/departments/{department_id}/delete")
-def department_delete(request: Request, department_id: int):
+def department_delete(request: Request, department_id: int, view: str = Form("list")):
     guard_admin(request)
     with SessionLocal() as s:
         department = s.get(Department, department_id)
         if department:
             s.delete(department)
             s.commit()
-    return RedirectResponse("/departments", 303)
+    safe_view = "map" if view == "map" else "list"
+    return RedirectResponse(f"/departments?view={safe_view}#departments-list", 303)
 
 
 # ----------------------------------------------------------------------------- meeting reminders
@@ -1984,7 +2640,13 @@ def employee_delete(request: Request, eid: int):
         s.query(Task).filter_by(target_employee_id=eid).update({Task.target_employee_id: None}, synchronize_session=False)
         e = s.get(Employee, eid)
         if e:
+            speaker_id.revoke_employee_voice_data(s, eid)
+            s.flush()
+            s.expire(e, ["voice_samples", "voiceprint"])
             s.delete(e)
+        s.commit()
+    with SessionLocal() as s:
+        speaker_id.retry_sample_cleanup(s)
         s.commit()
     return RedirectResponse("/employees", 303)
 

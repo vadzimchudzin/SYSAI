@@ -6,7 +6,7 @@ import socket
 import time
 from urllib.parse import urlparse
 
-from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint,
+from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint,
                         create_engine, text)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -154,8 +154,12 @@ class Employee(Base):
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
     bitrix_user_id = Column(String(40), default="")
     active = Column(Boolean, default=True)
+    org_order = Column(Integer, nullable=False, default=0)
+    map_x = Column(Float, nullable=True)
+    map_y = Column(Float, nullable=True)
     department_memberships = relationship("EmployeeDepartment", back_populates="employee",
-                                          cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
+                                          cascade="all, delete-orphan",
+                                          order_by="(EmployeeDepartment.sort_order, EmployeeDepartment.id)")
     voiceprint = relationship("EmployeeVoiceprint", back_populates="employee", uselist=False,
                               cascade="all, delete-orphan", single_parent=True)
     voice_samples = relationship("EmployeeVoiceSample", back_populates="employee",
@@ -172,9 +176,12 @@ class Department(Base):
     description = Column(Text, default="")
     regulations = Column(Text, default="")  # how the department works: rules, procedures, who signs what
     active = Column(Boolean, default=True)
+    map_x = Column(Float, nullable=True)
+    map_y = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now)
     memberships = relationship("EmployeeDepartment", back_populates="department",
-                               cascade="all, delete-orphan", order_by="EmployeeDepartment.id")
+                               cascade="all, delete-orphan",
+                               order_by="(EmployeeDepartment.sort_order, EmployeeDepartment.id)")
 
 
 class EmployeeDepartment(Base):
@@ -185,9 +192,34 @@ class EmployeeDepartment(Base):
     role = Column(String(200), default="")
     responsibilities = Column(Text, default="")
     is_primary = Column(Boolean, default=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    map_x = Column(Float, nullable=True)
+    map_y = Column(Float, nullable=True)
     employee = relationship("Employee", back_populates="department_memberships")
     department = relationship("Department", back_populates="memberships")
     __table_args__ = (UniqueConstraint("employee_id", "department_id", name="uq_employee_department"),)
+
+
+class OrgRelation(Base):
+    """An editable directed edge in the company organisation graph.
+
+    Existing EmployeeDepartment rows remain the source of department membership and
+    per-department leadership. This table stores cross-person reporting lines and
+    explicit company-level links without duplicating employee or department records.
+    """
+    __tablename__ = "org_relations"
+    id = Column(Integer, primary_key=True)
+    source_type = Column(String(20), nullable=False, default="employee")  # company | employee | department
+    source_id = Column(Integer, nullable=False, default=1)
+    target_type = Column(String(20), nullable=False, default="employee")  # employee | department
+    target_id = Column(Integer, nullable=False, index=True)
+    relation_type = Column(String(40), nullable=False, default="reports_to")
+    label = Column(String(200), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
+    __table_args__ = (
+        UniqueConstraint("source_type", "source_id", "target_type", "target_id", "relation_type",
+                         name="uq_org_relation_edge"),
+    )
 
 
 class EmployeeVoiceprint(Base):
@@ -206,13 +238,17 @@ class EmployeeVoiceprint(Base):
 
 
 class EmployeeVoiceSample(Base):
-    """One consented reference recording and its encrypted local speaker embedding."""
+    """One consented reference recording. Audio lives encrypted in the DB; embeddings are optional."""
     __tablename__ = "employee_voice_samples"
     id = Column(Integer, primary_key=True)
     employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
     sample_blob_path = Column(String(600), nullable=False, default="")
-    encrypted_embedding = Column(LargeBinary, nullable=False)
-    embedding_dimensions = Column(Integer, nullable=False, default=192)
+    encrypted_audio = Column(LargeBinary, nullable=True)
+    audio_mime = Column(String(80), nullable=False, default="audio/wav")
+    audio_bytes = Column(Integer, nullable=False, default=0)
+    encrypted_embedding = Column(LargeBinary, nullable=False, default=bytes)
+    embedding_status = Column(String(24), nullable=False, default="pending")  # pending | ready | failed
+    embedding_dimensions = Column(Integer, nullable=False, default=0)
     model_version = Column(String(120), nullable=False, default="")
     sample_duration = Column(Float, nullable=False, default=0.0)
     waveform_data = Column(JSON, nullable=False, default=list)
@@ -220,10 +256,25 @@ class EmployeeVoiceSample(Base):
     source_meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True, index=True)
     source_start = Column(Float, nullable=True)
     source_end = Column(Float, nullable=True)
+    content_sha256 = Column(String(64), nullable=False, default="", index=True)
+    source_audio_sha256 = Column(String(64), nullable=False, default="")
+    quality_metrics = Column(JSON, nullable=False, default=dict)
+    confirmed_by = Column(String(120), nullable=False, default="")
+    access_owner = Column(String(128), nullable=False, default="")
+    expires_at = Column(DateTime(timezone=True), nullable=True)
     consent_at = Column(DateTime(timezone=True), nullable=False, default=now)
     consent_version = Column(String(40), nullable=False, default="voiceprint-consent-v2")
     created_at = Column(DateTime(timezone=True), nullable=False, default=now)
     employee = relationship("Employee", back_populates="voice_samples")
+
+
+class VoiceSampleCleanup(Base):
+    """Legacy external-copy cleanup outbox; no audio/embedding or identity evidence."""
+    __tablename__ = "voice_sample_cleanup"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, nullable=False)
+    storage_path = Column(String(600), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
 
 
 class Meeting(Base):
@@ -699,12 +750,14 @@ class MemoryVector(Base):
 def _add_column_if_missing(table: str, column: str, ddl: str):
     """Lightweight migration for databases created by earlier versions."""
     from sqlalchemy import inspect
+    sqlite_ddl = ddl.replace(" BYTEA", " BLOB") if engine.dialect.name == "sqlite" else ddl
     for attempt in (1, 2):
-        if column in {c["name"] for c in inspect(engine).get_columns(table)}:
+        names = {c["name"] for c in inspect(engine).get_columns(table)}
+        if column in names:
             return
         try:
             with engine.begin() as con:
-                con.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+                con.execute(text(f"ALTER TABLE {table} ADD COLUMN {sqlite_ddl}"))
             return
         except OperationalError as exc:
             # SQLite parses ALTER against the schema cached by the pooled connection. A connection that missed a
@@ -737,6 +790,14 @@ def init_db():
     _add_column_if_missing("employees", "context", "context TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_at", "consent_at TIMESTAMP")
     _add_column_if_missing("employees", "communication_style", "communication_style TEXT DEFAULT ''")
+    _add_column_if_missing("employees", "org_order", "org_order INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("employee_departments", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("employees", "map_x", "map_x FLOAT")
+    _add_column_if_missing("employees", "map_y", "map_y FLOAT")
+    _add_column_if_missing("departments", "map_x", "map_x FLOAT")
+    _add_column_if_missing("departments", "map_y", "map_y FLOAT")
+    _add_column_if_missing("employee_departments", "map_x", "map_x FLOAT")
+    _add_column_if_missing("employee_departments", "map_y", "map_y FLOAT")
     _add_column_if_missing("departments", "regulations", "regulations TEXT DEFAULT ''")
     _add_column_if_missing("notes", "department_id", "department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL")
     _add_column_if_missing("notes", "confidence", "confidence VARCHAR(10) DEFAULT 'medium'")
@@ -748,6 +809,39 @@ def init_db():
     _add_column_if_missing("documents", "text_status", "text_status VARCHAR(12) DEFAULT 'pending'")
     _add_column_if_missing("documents", "summary", "summary TEXT DEFAULT ''")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "source_kind", "source_kind VARCHAR(32) NOT NULL DEFAULT 'manual'")
+    _add_column_if_missing("employee_voice_samples", "source_meeting_id", "source_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL")
+    _add_column_if_missing("employee_voice_samples", "source_start", "source_start FLOAT")
+    _add_column_if_missing("employee_voice_samples", "source_end", "source_end FLOAT")
+    _add_column_if_missing("employee_voice_samples", "encrypted_audio", "encrypted_audio BYTEA")
+    _add_column_if_missing("employee_voice_samples", "audio_mime", "audio_mime VARCHAR(80) NOT NULL DEFAULT 'audio/wav'")
+    _add_column_if_missing("employee_voice_samples", "audio_bytes", "audio_bytes INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("employee_voice_samples", "embedding_status", "embedding_status VARCHAR(24) NOT NULL DEFAULT 'pending'")
+    _add_column_if_missing("employee_voice_samples", "content_sha256", "content_sha256 VARCHAR(64) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "source_audio_sha256", "source_audio_sha256 VARCHAR(64) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "quality_metrics", "quality_metrics JSON NOT NULL DEFAULT '{}'")
+    _add_column_if_missing("employee_voice_samples", "confirmed_by", "confirmed_by VARCHAR(120) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "access_owner", "access_owner VARCHAR(128) NOT NULL DEFAULT ''")
+    _add_column_if_missing("employee_voice_samples", "expires_at", "expires_at TIMESTAMP")
+    _ensure_voice_sample_constraints()
+
+
+def _ensure_voice_sample_constraints():
+    """Add indexes even for an existing table. Unknown legacy rows remain ineligible."""
+    with engine.begin() as con:
+        con.execute(text("CREATE INDEX IF NOT EXISTS ix_employee_voice_samples_source_meeting_id "
+                         "ON employee_voice_samples (source_meeting_id)"))
+        con.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_sample_content_sha256 "
+                         "ON employee_voice_samples (content_sha256) WHERE content_sha256 <> ''"))
+        # SQLite FK enforcement was historically disabled in this app. Restrict the fix
+        # to biometric rows; do not rebuild unrelated legacy tables or change their data.
+        if engine.dialect.name == "sqlite":
+            con.execute(text("CREATE TRIGGER IF NOT EXISTS voice_samples_delete_meeting "
+                             "AFTER DELETE ON meetings BEGIN DELETE FROM employee_voice_samples "
+                             "WHERE source_meeting_id = OLD.id; END"))
+            con.execute(text("CREATE TRIGGER IF NOT EXISTS voice_samples_delete_employee "
+                             "AFTER DELETE ON employees BEGIN DELETE FROM employee_voice_samples "
+                             "WHERE employee_id = OLD.id; END"))
 
 
 def dumps(v) -> str:

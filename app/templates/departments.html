@@ -1,33 +1,73 @@
 {% extends "base.html" %}{% block title %}Подразделения — SYSAI{% endblock %}
+{% macro initials(name) %}{% set parts = (name or '').replace('-', ' ').split() %}{% if not parts %}С{% elif parts|length == 1 %}{{ parts[0][:2]|upper }}{% else %}{{ (parts[0][:1] ~ parts[1][:1])|upper }}{% endif %}{% endmacro %}
 {% macro form(d) %}
 <form method="post" action="/departments" class="department-form">
   <input type="hidden" name="id" value="{{ d.id if d else 0 }}">
+  <input type="hidden" name="return_view" value="{{ view }}">
   <label class="f">Название подразделения<input name="name" required maxlength="100" value="{{ d.name if d else '' }}" placeholder="Например, Технический отдел"></label>
   <label class="f">Зона ответственности<textarea name="description" rows="2" maxlength="1000" placeholder="Основные задачи подразделения">{{ d.description if d else '' }}</textarea></label>
   <label class="f">Регламенты: порядок работы, кто что согласует и подписывает<textarea name="regulations" rows="3" maxlength="10000" placeholder="Например: счета согласует руководитель отдела, оплату — директор">{{ d.regulations if d else '' }}</textarea></label>
   {% if d %}<label class="check"><input type="checkbox" name="active" {% if d.active %}checked{% endif %}> Подразделение активно</label>{% endif %}
-  <div class="actions"><button class="btn primary">{{ 'Сохранить изменения' if d else 'Создать подразделение' }}</button>{% if d %}<a class="btn ghost" href="/departments">Отмена</a>{% endif %}</div>
+  <div class="actions"><button class="btn primary">{{ 'Сохранить изменения' if d else 'Создать подразделение' }}</button>{% if d %}<a class="btn ghost" href="/departments?view={{ view }}#department-{{ d.id }}">Отмена</a>{% endif %}</div>
 </form>
 {% endmacro %}
 {% macro existing_member_form(d, available) %}
 <form method="post" action="/departments/{{ d.id }}/members" class="department-form">
+  <input type="hidden" name="view" value="{{ view }}">
   <label class="f">Сотрудник из общего списка
     <select name="employee_id" required><option value="">Выберите сотрудника</option>{% for employee in available %}<option value="{{ employee.id }}">{{ employee.name }}{% if employee.position %} — {{ employee.position }}{% endif %}</option>{% endfor %}</select>
   </label>
-  <p class="small muted">Роль и обязанности назначаются позже в карточке сотрудника.</p>
+  <div class="employee-profile-grid">
+    <label class="f">Роль в подразделении<input name="role" maxlength="200" placeholder="Например, инженер-проектировщик"></label>
+    <label class="f">Обязанности в этом подразделении<input name="responsibilities" maxlength="4000" placeholder="За что отвечает именно здесь"></label>
+  </div>
   <button class="btn primary" {% if not available %}disabled{% endif %}>Добавить в состав</button>
-  {% if not available %}<small class="muted">Нет свободных сотрудников. Создайте карточку в общем списке или проверьте состав этого отдела.</small>{% endif %}
+  {% if not available %}<small class="muted">Нет свободных сотрудников. Все активные сотрудники уже состоят в этом подразделении.</small>{% endif %}
 </form>
 {% endmacro %}
 {% macro new_member_form(d) %}
-<form method="post" action="/departments/{{ d.id }}/members/create" class="department-form">
-  <label class="f">Имя и фамилия<input name="name" required maxlength="200" placeholder="Иван Петров"></label>
-  <p class="small muted">Роль, контакты и обязанности можно заполнить после создания в общем списке сотрудников.</p>
-  <button class="btn primary">Создать карточку и добавить в состав</button>
+<form method="post" action="/departments/{{ d.id }}/members/create" class="department-form employee-create-full">
+  <input type="hidden" name="view" value="{{ view }}">
+  <div class="employee-create-section">
+    <div class="employee-create-section-head"><b>Основная информация</b><span class="small muted">Обязательное поле отмечено *</span></div>
+    <div class="employee-profile-grid">
+      <label class="f employee-profile-wide">Имя и фамилия *<input name="name" required maxlength="200" placeholder="Иван Петров"></label>
+      <label class="f">Как называют на совещаниях<input name="aliases" maxlength="500" placeholder="Ваня, Иван Сергеевич"></label>
+      <label class="f">Должность<input name="position" maxlength="200" placeholder="Должность сотрудника"></label>
+      <label class="f employee-profile-wide">Компетенции<textarea name="competencies" rows="2" maxlength="4000" placeholder="Навыки, направления, оборудование и технологии"></textarea></label>
+      <label class="f employee-profile-wide">Общие обязанности<textarea name="employee_responsibilities" rows="2" maxlength="4000" placeholder="За что сотрудник отвечает в целом"></textarea><small class="muted">Используются при подборе исполнителя по смыслу задачи.</small></label>
+      <label class="f employee-profile-wide">Дополнительный контекст<textarea name="context" rows="2" maxlength="4000" placeholder="Уточнения для различения одноимённых сотрудников и понимания их роли"></textarea></label>
+    </div>
+  </div>
+  <div class="employee-create-section">
+    <div class="employee-create-section-head"><b>Роль в подразделении «{{ d.name }}»</b></div>
+    <div class="employee-profile-grid">
+      <label class="f">Роль / должность в отделе<input name="role" maxlength="200" placeholder="Например, ведущий инженер"></label>
+      <label class="f">Обязанности в этом отделе<textarea name="responsibilities" rows="2" maxlength="4000" placeholder="Какие процессы и задачи закреплены за сотрудником"></textarea></label>
+    </div>
+  </div>
+  <div class="employee-create-section">
+    <div class="employee-create-section-head"><b>Контакты и интеграции</b></div>
+    <div class="employee-profile-grid">
+      <label class="f">Telegram<input name="telegram_contact" maxlength="200" placeholder="@username, телефон или chat_id"><small class="muted">Можно оставить пустым и привязать позднее.</small></label>
+      <label class="f">ID пользователя Bitrix24<input name="bitrix_user_id" maxlength="40" placeholder="Если известен"></label>
+      <label class="f">Права доступа
+        <select name="access_level">
+          <option value="employee" selected>Сотрудник</option>
+          <option value="full">Полный доступ</option>
+          <option value="reviewer">Проверяющий</option>
+          <option value="observer">Наблюдатель</option>
+        </select>
+        <small class="muted">Повышенные права требуют привязанного Telegram. Обычно достаточно «Сотрудник».</small>
+      </label>
+    </div>
+  </div>
+  <div class="actions employee-create-actions"><button class="btn primary">Создать сотрудника и добавить в подразделение</button></div>
 </form>
 {% endmacro %}
 {% macro head_form(d, head) %}
 <form method="post" action="/departments/{{ d.id }}/head" class="department-head-form">
+  <input type="hidden" name="view" value="{{ view }}">
   <label class="f">Начальник подразделения<select name="employee_id" {% if not d.memberships %}disabled{% endif %}>
     <option value="0">Не назначен</option>
     {% for membership in d.memberships %}{% if membership.employee and membership.employee.active %}<option value="{{ membership.employee_id }}" {% if head and head.employee_id == membership.employee_id %}selected{% endif %}>{{ membership.employee.name }}{% if membership.role %} — {{ membership.role }}{% endif %}</option>{% endif %}{% endfor %}
@@ -35,16 +75,266 @@
   <button class="btn" {% if not d.memberships %}disabled{% endif %}>Сохранить</button>
 </form>
 {% endmacro %}
+{% macro map_person_node(member) %}
+<a class="org-map-node org-map-person-node{% if member.access_level == 'reviewer' %} is-reviewer{% endif %}{% if member.is_director %} is-director{% endif %}"
+   data-map-node data-node-kind="employee" data-node-key="employee:{{ member.id }}"
+   data-employee-id="{{ member.id }}"{% if member.manager_summary %} data-head="1"{% endif %}{% if not member.department_ids %} data-unassigned="1"{% endif %} draggable="false"
+   style="left:{{ member.map_x }}px;top:{{ member.map_y }}px"
+   href="/employees?edit={{ member.id }}" title="{{ member.name }}{% if member.role_summary %} · {{ member.role_summary }}{% endif %}">
+  <span class="org-map-person-avatar" aria-hidden="true">{{ initials(member.name) }}</span>
+  <span class="org-map-person-copy">
+    <strong>{{ member.name }}</strong>
+    <small>{{ member.position or 'Должность не указана' }}</small>
+    {% if member.manager_summary %}<small class="org-map-manager-summary">Руководит: {{ member.manager_summary }}</small>{% elif member.department_summary %}<small class="org-map-role">{{ member.department_summary }}</small>{% else %}<small class="org-map-role is-free">Без подразделения</small>{% endif %}
+    {% if member.access_level == 'reviewer' %}<small class="org-map-reviewer-label">ПРОВЕРЯЮЩИЙ</small>{% endif %}
+  </span>
+  {% if member.is_director %}<span class="director-crown" title="Директор" aria-label="Директор"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.2 8.2 7.6 12 12 4.8l4.4 7.2 4.4-3.8-1.9 10.3H5.1Z"/><path d="M5.4 20.6h13.2"/></svg></span>{% elif member.manager_summary %}<span class="org-head-badge" title="Руководитель подразделения" aria-label="Руководитель">★</span>{% endif %}
+</a>
+{% endmacro %}
 {% block body %}
+{% if view != 'map' %}
 <div class="page-h departments-page-head">
-  <div><h1>Подразделения</h1><p>У каждого отдела свой состав, начальник и обязанности сотрудников.</p></div>
-  <div class="actions"><a class="btn" href="/employees">Общий список сотрудников</a><a class="btn primary" href="#create-department">＋ Создать подразделение</a></div>
+  <div><h1>Подразделения</h1><p>Организационная структура, состав отделов, роли и ответственность.</p></div>
+  <div class="department-toolbar">
+    <div class="org-view-toggle" role="group" aria-label="Представление структуры">
+      <a class="{{ 'active' if view == 'list' else '' }}" href="/departments?view=list#departments-list"><span aria-hidden="true">☷</span> Список</a>
+      <a class="{{ 'active' if view == 'map' else '' }}" href="/departments?view=map#org-map"><span aria-hidden="true">⌘</span> Mind map</a>
+    </div>
+    <div class="actions"><a class="btn" href="/employees">Общий список сотрудников</a><a class="btn primary" href="#create-department">＋ Создать подразделение</a></div>
+  </div>
 </div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 <section class="card department-create" id="create-department">
-  <details {% if edit == 0 and not departments %}open{% endif %}><summary><span class="create-summary-icon">＋</span><span><b>Создать подразделение</b><small class="muted">Название и зона ответственности</small></span></summary><div class="department-create-form">{{ form(None) }}</div></details>
+  <details {% if (edit == 0 and not departments) or request.query_params.get("create") == "1" %}open{% endif %}>
+    <summary><span class="create-summary-icon">＋</span><span><b>Создать подразделение</b><small class="muted">Название, зона ответственности и регламенты</small></span></summary>
+    <div class="department-create-form" id="department-create-form">{{ form(None) }}</div>
+  </details>
 </section>
-<section class="departments-list">
+{% endif %}
+
+{% if view == 'map' %}
+{% set company_title = 'SysAT' %}
+{% set head_total = map_employees|selectattr('manager_summary')|list|length %}
+{% set ACCENTS = ['#d98e8a', '#8fa8d8', '#7fb7a4', '#e0a85a', '#b59ad9', '#d7b46a', '#e39bb7', '#86b6cf'] %}
+{% set accent_by_dept = {} %}
+{% for d in departments|sort(attribute='id') %}{% set _ = accent_by_dept.update({d.id: loop.index0 % ACCENTS|length}) %}{% endfor %}
+<link rel="stylesheet" href="{{ asset('org-map.css') }}">
+<section class="org-map-panel org-studio" id="org-map">
+  <header class="org-map-heading org-studio-head">
+    <div class="org-map-heading-main">
+      <div class="org-map-heading-copy">
+        <span class="org-studio-kicker"><i class="org-studio-tile" aria-hidden="true"></i>Организационная структура</span>
+        <h2>{{ company_title }} <em>— карта команды</em></h2>
+      </div>
+      <ul class="org-studio-stats" aria-label="Сводка">
+        <li><b>{{ map_departments|length }}</b><span>подразделений</span></li>
+        <li><b>{{ map_employees|length }}</b><span>сотрудников</span></li>
+        <li><b>{{ head_total }}</b><span>руководителей</span></li>
+        <li class="{{ 'is-warn' if map_unassigned else '' }}"><b>{{ map_unassigned|length }}</b><span>без отдела</span></li>
+      </ul>
+      <nav class="org-map-top-actions" aria-label="Инструменты конструктора">
+        <div class="org-view-toggle" role="group" aria-label="Представление структуры">
+          <a class="active" href="/departments?view=map#org-map">Mind map</a>
+          <a href="/departments?view=list#departments-list">Список</a>
+        </div>
+        <a class="btn sm ghost" href="/employees">Справочник</a>
+        <button class="btn sm" type="button" data-create-department>＋ Подразделение</button>
+        <button class="btn sm primary" type="button" data-create-employee-for="0" {% if not map_departments|selectattr('active')|list %}disabled title="Сначала создайте активное подразделение"{% endif %}>＋ Сотрудник</button>
+      </nav>
+    </div>
+  </header>
+  {% if not map_departments and not map_employees %}
+    <div class="org-empty">
+      <i class="org-studio-tile is-big" aria-hidden="true"></i>
+      <h3>Структура пока пуста</h3>
+      <p class="muted">Создайте первое подразделение — затем добавляйте людей прямо на карте.</p>
+      <button class="btn primary" type="button" data-create-department>＋ Создать подразделение</button>
+    </div>
+  {% else %}
+  <div class="org-map-stage" id="org-map-stage">
+    <div class="org-map-scroll" id="org-map-scroll" tabindex="0" aria-label="Карта структуры: колесо — масштаб, перетаскивание пустого места — перемещение">
+      <div class="org-map-canvas org-map-grid" id="org-map-canvas" style="width:{{ map_board_width }}px;height:{{ map_board_height }}px">
+        <svg class="org-map-lines" aria-hidden="true"></svg>
+        <div class="org-map-root" data-map-node data-node-kind="company" data-node-key="company:1" data-drop-root style="left:{{ map_root_x }}px;top:{{ map_root_y }}px">
+          <span class="org-map-root-halo" aria-hidden="true"></span>
+          <i class="org-studio-tile is-root" aria-hidden="true"></i>
+          <span class="org-map-root-kicker">Компания</span>
+          <strong>{{ company_title }}</strong>
+          <span class="org-map-root-stats"><span><b>{{ map_departments|length }}</b> отделов</span><span><b>{{ map_employees|length }}</b> человек</span></span>
+        </div>
+        {% for d in map_departments %}
+        <article class="org-map-node org-map-dept-node{{ '' if d.active else ' is-inactive' }}"
+                 data-map-node data-node-kind="department" data-node-key="department:{{ d.id }}"
+                 data-department-id="{{ d.id }}" data-accent="{{ accent_by_dept.get(d.id, 0) }}"{% if d.active %} data-drop-department="{{ d.id }}"{% endif %}
+                 style="left:{{ d.map_x }}px;top:{{ d.map_y }}px">
+          <div class="org-dept-top">
+            <span class="org-map-node-kicker">Подразделение</span>
+            <span class="org-map-node-status"><i class="{{ 'is-active' if d.active else '' }}"></i>{{ 'Активно' if d.active else 'Неактивно' }}</span>
+          </div>
+          <strong>{{ d.name }}</strong>
+          {% if d.description %}<p class="org-dept-desc">{{ d.description }}</p>{% endif %}
+          <div class="org-dept-foot">
+            <span class="org-dept-faces" aria-hidden="true">{% for m in d.members[:4] %}<i>{{ initials(m.employee.name) }}</i>{% endfor %}{% if d.members|length > 4 %}<i class="more">+{{ d.members|length - 4 }}</i>{% endif %}</span>
+            <span class="org-map-node-meta">{{ d.members|length }} {{ 'сотрудник' if d.members|length % 10 == 1 and d.members|length % 100 != 11 else ('сотрудника' if d.members|length % 10 in [2,3,4] and d.members|length % 100 not in [12,13,14] else 'сотрудников') }}</span>
+          </div>
+          <div class="org-dept-head">{% if d.head_name %}<span class="org-head-badge" aria-hidden="true">★</span><span>{{ d.head_name }}</span>{% else %}<span class="muted">Руководитель не назначен</span>{% endif %}</div>
+          <div class="org-map-node-actions">
+            <button type="button" data-inspect-department="{{ d.id }}">Состав</button>
+            {% if d.active %}<button type="button" class="is-add" data-create-employee-for="{{ d.id }}" data-department-name="{{ d.name }}">＋ Сотрудник</button>{% endif %}
+          </div>
+        </article>
+        {% endfor %}
+        {% for member in map_employees %}{{ map_person_node(member) }}{% endfor %}
+      </div>
+    </div>
+
+    <div class="org-map-search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+      <input id="org-map-search" type="search" placeholder="Найти сотрудника или отдел" autocomplete="off" aria-label="Поиск по карте">
+      <kbd>/</kbd>
+      <div class="org-map-search-results" id="org-map-search-results" hidden></div>
+    </div>
+
+    <div class="org-map-toolbar" role="toolbar" aria-label="Масштаб и раскладка">
+      <button type="button" data-zoom="out" title="Уменьшить (−)" aria-label="Уменьшить">−</button>
+      <button type="button" class="org-zoom-value" data-zoom="reset" title="Масштаб 100%" id="org-zoom-value">100%</button>
+      <button type="button" data-zoom="in" title="Увеличить (+)" aria-label="Увеличить">＋</button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" data-zoom="fit" title="Показать всю структуру (F)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>Вписать</button>
+      <button type="button" data-auto-layout title="Аккуратно разложить всю структуру"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="5.5" r="2.2"/><circle cx="19" cy="12" r="2.2"/><circle cx="19" cy="18.5" r="2.2"/><path d="M7.2 12h9.6M7 11c4-5.5 6-5.5 9.8-5.5M7 13c4 5.5 6 5.5 9.8 5.5"/></svg>Упорядочить</button>
+    </div>
+
+    <div class="org-map-legend" aria-label="Обозначения">
+      <span><i class="org-legend-line is-member"></i> Состав отдела</span>
+      <span><i class="org-legend-line is-head"></i> Руководитель</span>
+      <span><i class="org-legend-line is-report"></i> Подчинение</span>
+      <span class="org-legend-reviewer"><i></i> Проверяющий</span>
+      <span class="org-legend-director"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.2 8.2 7.6 12 12 4.8l4.4 7.2 4.4-3.8-1.9 10.3H5.1Z"/></svg> Директор</span>
+      <details class="org-map-help"><summary>Как работать</summary>
+        <p class="org-map-hint">ЛКМ по пустому месту — двигать доску · колесо — масштаб · карточку сотрудника на отдел — добавить в состав · карточку на карточку — связать блоки · клик по линии — удалить связь · клик по карточке — редактировать.</p>
+      </details>
+    </div>
+
+    <aside class="org-inspector" id="org-inspector" aria-live="polite" hidden></aside>
+  </div>
+  <script type="application/json" id="org-map-edges">{{ map_edges|tojson }}</script>
+  <script type="application/json" id="org-map-data">
+  {%- set orm_emps = {} -%}
+  {%- set memberships_by_emp = {} -%}
+  {%- for d in departments -%}{%- for m in d.memberships -%}{%- if m.employee and m.employee.active -%}
+    {%- set _ = orm_emps.update({m.employee_id: m.employee}) -%}
+    {%- if m.employee_id not in memberships_by_emp -%}{%- set _ = memberships_by_emp.update({m.employee_id: []}) -%}{%- endif -%}
+    {%- set _ = memberships_by_emp[m.employee_id].append({'department_id': d.id, 'role': m.role or '', 'responsibilities': m.responsibilities or '', 'is_primary': true if m.is_primary else false, 'legacy_xy': m.map_x is not none and m.map_y is not none}) -%}
+  {%- endif -%}{%- endfor -%}{%- endfor -%}
+  {%- for people in available_employees_by_department.values() -%}{%- for e in people -%}{%- set _ = orm_emps.update({e.id: e}) -%}{%- endfor -%}{%- endfor -%}
+  {%- set payload_emps = [] -%}
+  {%- for me in map_employees -%}{%- set e = orm_emps.get(me.id) -%}{%- set ms = memberships_by_emp.get(me.id, []) -%}
+    {%- set _ = payload_emps.append({
+      'id': me.id, 'name': me.name, 'position': me.position, 'access_level': me.access_level,
+      'editable': e is not none,
+      'aliases': (e.aliases or '') if e else '', 'competencies': (e.competencies or '') if e else '',
+      'responsibilities': (e.responsibilities or '') if e else '', 'context': (e.context or '') if e else '',
+      'telegram': (e.telegram_chat_id or '') if e else '', 'bitrix': (e.bitrix_user_id or '') if e else '',
+      'channel': (e.channel or 'telegram') if e else 'telegram', 'legacy_department': (e.department or '') if e else '',
+      'saved': (e is not none and e.map_x is not none and e.map_y is not none) or (ms|selectattr('legacy_xy')|list|length > 0),
+      'memberships': ms}) -%}
+  {%- endfor -%}
+  {%- set payload_depts = [] -%}
+  {%- for d in departments -%}{%- set _ = payload_depts.append({'id': d.id, 'name': d.name, 'description': d.description or '', 'regulations': d.regulations or '', 'active': true if d.active else false, 'accent': accent_by_dept.get(d.id, 0), 'saved': d.map_x is not none and d.map_y is not none}) -%}{%- endfor -%}
+  {%- set payload_rel = [] -%}
+  {%- for edge in map_edges if edge.relation_id -%}{%- set _ = payload_rel.append({'id': edge.relation_id, 'source': edge.source, 'target': edge.target, 'label': edge.label}) -%}{%- endfor -%}
+  {{- {'departments': payload_depts, 'employees': payload_emps, 'relations': payload_rel, 'accents': ACCENTS}|tojson -}}
+  </script>
+  {% endif %}
+  <div class="org-toast" id="org-toast" role="status" data-initial="{{ msg }}"></div>
+
+  <dialog class="org-map-dialog" id="org-employee-dialog">
+    <form method="dialog" class="org-map-dialog-close-form"><button class="org-map-dialog-close" aria-label="Закрыть">×</button></form>
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">НОВАЯ КАРТОЧКА</span><h2>Добавить сотрудника</h2><p class="muted small">Профиль создаётся сразу с членством в выбранном подразделении. Существующего сотрудника можно просто перетащить на отдел.</p></div>
+    <form id="org-employee-create-form" method="post" action="/departments/0/members/create" class="org-map-dialog-body">
+      <input type="hidden" name="view" value="map">
+      <label class="f org-dialog-department">Подразделение *<select id="org-employee-department" required>
+        {% for d in map_departments if d.active %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+      </select></label>
+      <div class="employee-create-section">
+        <div class="employee-create-section-head"><b>Основная информация</b></div>
+        <div class="employee-profile-grid">
+          <label class="f employee-profile-wide">Имя и фамилия *<input name="name" required maxlength="200" placeholder="Иван Петров"></label>
+          <label class="f">Псевдонимы / имя на совещании<input name="aliases" maxlength="500" placeholder="Ваня, Иван Сергеевич"></label>
+          <label class="f">Общая должность<input name="position" maxlength="200" placeholder="Заместитель директора"></label>
+          <label class="f employee-profile-wide">Компетенции<textarea name="competencies" rows="2" maxlength="4000"></textarea></label>
+          <label class="f employee-profile-wide">Общие обязанности<textarea name="employee_responsibilities" rows="2" maxlength="4000"></textarea></label>
+          <label class="f employee-profile-wide">Контекст<textarea name="context" rows="2" maxlength="4000"></textarea></label>
+        </div>
+      </div>
+      <div class="employee-create-section">
+        <div class="employee-create-section-head"><b>Роль в подразделении</b></div>
+        <div class="employee-profile-grid">
+          <label class="f">Роль / должность в отделе<input name="role" maxlength="200" placeholder="Руководитель отдела / инженер"></label>
+          <label class="f">Обязанности в этом отделе<textarea name="responsibilities" rows="2" maxlength="4000"></textarea></label>
+          <label class="check"><input type="checkbox" name="is_primary"> Назначить руководителем этого подразделения</label>
+        </div>
+      </div>
+      <div class="employee-create-section">
+        <div class="employee-create-section-head"><b>Контакты и интеграции</b></div>
+        <div class="employee-profile-grid">
+          <label class="f">Telegram<input name="telegram_contact" maxlength="200" placeholder="@username или телефон"></label>
+          <label class="f">Bitrix24 ID<input name="bitrix_user_id" maxlength="40"></label>
+          <label class="f">Права доступа<select name="access_level"><option value="employee">Сотрудник</option><option value="full">Полный доступ</option><option value="reviewer">Проверяющий</option><option value="observer">Наблюдатель</option></select></label>
+        </div>
+      </div>
+      <p class="org-map-dialog-error" role="alert"></p>
+      <div class="org-map-dialog-actions"><button type="button" class="btn" data-dialog-close>Отмена</button><button class="btn primary">Создать и назначить</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="org-map-dialog org-map-dialog-compact" id="org-assign-dialog">
+    <form method="dialog" class="org-map-dialog-close-form"><button class="org-map-dialog-close" aria-label="Закрыть">×</button></form>
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">НОВАЯ СВЯЗЬ</span><h2>Назначить в подразделение</h2><p class="muted small" id="org-assign-summary"></p></div>
+    <form id="org-assign-form" class="org-map-dialog-body">
+      <input type="hidden" name="employee_id"><input type="hidden" name="department_id">
+      <label class="f">Роль в этом подразделении<input name="role" maxlength="200" placeholder="Например, руководитель ОМТС"></label>
+      <label class="f">Обязанности в этом подразделении<textarea name="responsibilities" rows="3" maxlength="4000"></textarea></label>
+      <label class="check"><input type="checkbox" name="is_primary"> Назначить руководителем подразделения</label>
+      <p class="small muted">Другие назначения сотрудника сохраняются. Руководить можно несколькими отделами.</p>
+      <p class="org-map-dialog-error" role="alert"></p>
+      <div class="org-map-dialog-actions"><button type="button" class="btn" data-dialog-close>Отмена</button><button class="btn primary">Сохранить связь</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="org-map-dialog org-map-dialog-compact" id="org-relation-dialog">
+    <form method="dialog" class="org-map-dialog-close-form"><button class="org-map-dialog-close" aria-label="Закрыть">×</button></form>
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">СВЯЗЬ БЛОКОВ</span><h2>Соединить блоки</h2><p class="muted small" id="org-relation-summary"></p></div>
+    <form id="org-relation-form" class="org-map-dialog-body">
+      <input type="hidden" name="source_type"><input type="hidden" name="source_id"><input type="hidden" name="target_type"><input type="hidden" name="target_id">
+      <label class="f">Тип связи<select name="relation_type"><option value="reports_to">Подчиняется / входит</option><option value="linked_to">Связан с</option><option value="deputy">Заместитель</option><option value="project_lead">Курирует направление</option></select></label>
+      <label class="f">Подпись связи<input name="label" maxlength="200" placeholder="Например, подчиняется закупкам"></label>
+      <p class="small muted">Линия идёт от блока, на который бросили, к перетащенному. Клик по линии удаляет связь, карточки остаются.</p>
+      <p class="org-map-dialog-error" role="alert"></p>
+      <div class="org-map-dialog-actions"><button type="button" class="btn" data-dialog-close>Отмена</button><button class="btn primary">Сохранить связь</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="org-map-dialog org-map-dialog-compact" id="org-department-dialog">
+    <form method="dialog" class="org-map-dialog-close-form"><button class="org-map-dialog-close" aria-label="Закрыть">×</button></form>
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">НОВЫЙ УЗЕЛ</span><h2>Создать подразделение</h2><p class="muted small">Блок появится на карте рядом с остальными — сразу можно добавлять людей.</p></div>
+    <form id="org-department-create-form" method="post" action="/departments" class="org-map-dialog-body">
+      <input type="hidden" name="return_view" value="map">
+      <label class="f">Название подразделения *<input name="name" required maxlength="100" placeholder="Например, Технический отдел"></label>
+      <label class="f">Зона ответственности<textarea name="description" rows="2" maxlength="1000"></textarea></label>
+      <label class="f">Регламенты<textarea name="regulations" rows="3" maxlength="10000"></textarea></label>
+      <p class="org-map-dialog-error" role="alert"></p>
+      <div class="org-map-dialog-actions"><button type="button" class="btn" data-dialog-close>Отмена</button><button class="btn primary">Создать подразделение</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="org-map-dialog org-map-dialog-compact org-confirm" id="org-confirm-dialog">
+    <div class="org-map-dialog-head"><span class="org-map-dialog-kicker">ПОДТВЕРЖДЕНИЕ</span><h2 id="org-confirm-title">Подтвердите действие</h2><p class="muted small" id="org-confirm-text"></p></div>
+    <div class="org-map-dialog-body"><div class="org-map-dialog-actions"><button type="button" class="btn" data-confirm="no">Отмена</button><button type="button" class="btn danger" data-confirm="yes" id="org-confirm-yes">Удалить</button></div></div>
+  </dialog>
+</section>
+{% else %}
+<section class="departments-list" id="departments-list">
   <header class="departments-list-head"><div><h2>Структура компании</h2><p class="muted small">{{ departments|length }} подразделений</p></div></header>
   {% if not departments %}<div class="card empty-state"><h3>Подразделений пока нет</h3><p class="muted">Создайте отдел, добавьте сотрудников и выберите начальника.</p></div>{% endif %}
   {% for d in departments %}
@@ -55,7 +345,7 @@
         {% if d.description %}<p>{{ d.description }}</p>{% endif %}
         <div class="department-meta"><span>{{ d.memberships|length }} сотрудников</span>{% if department_heads[d.id] %}<span class="department-head-chip"><span class="manager-star">★</span> Начальник: {{ department_heads[d.id].employee.name }}</span>{% else %}<span class="muted">Начальник не назначен</span>{% endif %}</div>
       </div>
-      <div class="actions"><a class="btn sm" href="/departments?edit={{ d.id }}#department-{{ d.id }}">Изменить</a><form method="post" action="/departments/{{ d.id }}/delete" onsubmit="return confirm('Удалить подразделение? Сотрудники останутся в общем справочнике.')"><button class="btn sm danger">Удалить</button></form></div>
+      <div class="actions"><a class="btn sm" href="/departments?view=list&edit={{ d.id }}#department-{{ d.id }}">Изменить</a><form method="post" action="/departments/{{ d.id }}/delete" onsubmit="return confirm('Удалить подразделение? Сотрудники останутся в общем справочнике.')"><input type="hidden" name="view" value="{{ view }}"><button class="btn sm danger">Удалить</button></form></div>
     </header>
     {% if edit == d.id %}<div class="department-edit-panel">{{ form(d) }}</div>{% endif %}
     <section class="department-head-area">{{ head_form(d, department_heads[d.id]) }}<p class="small muted">Начальником может быть только активный участник этого подразделения. ★ отмечает его и в общем списке.</p></section>
@@ -70,21 +360,27 @@
             {% if membership.role %}<div class="small">{{ membership.role }}</div>{% endif %}
             {% if membership.responsibilities %}<div class="small muted">{{ membership.responsibilities }}</div>{% endif %}
           </div>
-          <form method="post" action="/departments/{{ d.id }}/members/{{ membership.employee_id }}/remove" onsubmit="return confirm('Убрать из этого отдела? Запись сотрудника сохранится.')"><button class="btn sm danger">Убрать</button></form>
+          <form method="post" action="/departments/{{ d.id }}/members/{{ membership.employee_id }}/remove" onsubmit="return confirm('Убрать из этого отдела? Запись сотрудника сохранится.')"><input type="hidden" name="view" value="{{ view }}"><button class="btn sm danger">Убрать</button></form>
         </div>
         {% endfor %}
       </div>
       {% else %}<div class="department-empty">В этом подразделении пока нет сотрудников.</div>{% endif %}
     </section>
     {% if d.active %}
-    <details class="department-add"><summary><span class="create-summary-icon">＋</span> Добавить сотрудника</summary>
+    <details class="department-add" id="department-{{ d.id }}-add" {% if open_add == d.id %}open{% endif %}>
+      <summary><span class="create-summary-icon">＋</span> Добавить сотрудника</summary>
       <div class="department-add-stack">
-        <section class="department-add-option"><h4>Выбрать из общего списка</h4><p class="small muted">Добавится только связь с отделом. Обязанности настраиваются позднее в карточке сотрудника.</p>{{ existing_member_form(d, available_employees_by_department[d.id]) }}</section>
-        <details class="department-add-option department-add-new"><summary><h4>Создать нового сотрудника</h4><p class="small muted">Создадим карточку по имени; контакты, должность и обязанности заполните позже.</p></summary>{{ new_member_form(d) }}</details>
+        <section class="department-add-option"><h4>Выбрать из общего списка</h4><p class="small muted">Существующая карточка добавится в отдел. Роль и обязанности можно сразу указать здесь.</p>{{ existing_member_form(d, available_employees_by_department[d.id]) }}</section>
+        <details class="department-add-option department-add-new" open>
+          <summary><h4>Создать нового сотрудника</h4><p class="small muted">Заполните профиль сразу — повторно открывать карточку не придётся.</p></summary>
+          {{ new_member_form(d) }}
+        </details>
       </div>
     </details>
     {% else %}<p class="muted small">Чтобы менять состав, сначала активируйте подразделение.</p>{% endif %}
   </article>
   {% endfor %}
 </section>
+{% endif %}
+{% if view == 'map' %}<script src="{{ asset('org-map-views.js') }}"></script><script src="{{ asset('org-map.js') }}"></script>{% endif %}
 {% endblock %}

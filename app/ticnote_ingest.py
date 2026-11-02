@@ -126,6 +126,19 @@ def import_recording(appkey: str, node: dict) -> int | None:
             return None
         dst.parent.mkdir(parents=True, exist_ok=True)
         ticnote.download_wav(ticnote.audio_url(detail), dst)
+        # The user may press Stop while the cloud download is in progress.
+        # Re-check the durable import row before creating a meeting or queueing
+        # paid transcription work, so a late download cannot restart processing.
+        with SessionLocal() as s:
+            latest = s.get(TicnoteImport, record_id)
+            stopped = latest is None or (
+                latest.status == "error"
+                and (latest.error or "") == "Скачивание остановлено вручную"
+            )
+        if stopped:
+            dst.unlink(missing_ok=True)
+            log.info("TicNote import %s stopped by user during download", record_id)
+            return None
         mid = pipeline.create_meeting(f"{title}.wav", str(dst), source="ticnote", title=title,
                                       meeting_date=_meeting_date(node))
     except Exception as e:  # noqa: BLE001
@@ -176,6 +189,9 @@ def status(limit: int = 6) -> dict:
     with SessionLocal() as s:
         rows = s.query(TicnoteImport).order_by(TicnoteImport.created_at.desc()).limit(limit).all()
         for row in rows:
+            # A manually stopped download remains visible with an explicit Retry action.
+            # _claim() still blocks automatic retries while attempts == MAX_ATTEMPTS;
+            # the manual retry endpoint resets attempts before the next scan.
             m = s.get(Meeting, row.meeting_id) if row.meeting_id else None
             if _stale(row):
                 state = "error"
@@ -183,7 +199,13 @@ def status(limit: int = 6) -> dict:
                 state = "downloading" if row.status == "downloading" else (m.status if m else row.status)
             if state in ("downloading", "queued", "transcribing", "analyzing"):
                 busy = True
-            can_stop = state == "downloading" or (m is not None and state in pipeline.STOPPABLE)
+            # Keep Stop available even when a download has gone stale and
+            # is displayed as an error; otherwise the stuck row cannot be cleared.
+            # A queued import without a meeting is an orphaned job: it can keep
+            # mode="busy" forever, but the usual meeting cancellation cannot handle it.
+            # Expose the stop action so it can be dismissed and never re-imported.
+            orphaned_queue = m is None and row.meeting_id is None and row.status == "queued"
+            can_stop = row.status == "downloading" or orphaned_queue or (m is not None and state in pipeline.STOPPABLE)
             can_retry = state == "error"
             recent.append({"record_id": row.record_id, "can_stop": can_stop, "can_retry": can_retry,
                            "title": row.title or "Запись TicNote", "state": state,
@@ -203,8 +225,12 @@ def stop(record_id: str) -> bool:
             return False
         if row.meeting_id:
             mid = row.meeting_id
-        elif row.status == "downloading":
+        elif row.status in ("downloading", "queued"):
+            # No meeting is linked to this import. In particular, a queued row
+            # with meeting_id=NULL is orphaned and otherwise leaves TicNote busy
+            # forever; mark it as manually dismissed and prevent automatic retry.
             row.status, row.attempts, row.error = "error", MAX_ATTEMPTS, "Скачивание остановлено вручную"
+            row.updated_at = now()
             s.commit()
             return True
         else:

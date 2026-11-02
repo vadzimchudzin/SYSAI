@@ -1,20 +1,144 @@
-{% from "_logo.html" import logo %}<!doctype html>
-<html lang="ru"><head>{% include "_head.html" %}<title>Вход — SYSAI</title></head>
-<body><div class="aura" aria-hidden="true"><i></i><i></i><i></i></div><div class="auth"><div class="auth-box">
-  <a href="/">{{ logo('md', animate=True) }}</a>
-  <h1>С возвращением</h1><p>Войдите в личный кабинет</p>
-  <form method="post" action="/login" class="auth-form">
-    <label class="f">Логин <input name="username" autocomplete="username" required autofocus value="{{ username }}"></label>
-    <label class="f">Пароль <input type="password" name="password" autocomplete="current-password" required></label>
-    {% if error == 'pending' %}<div class="warn small">Заявка ещё не подтверждена администратором.</div>
-    {% elif error == 'rejected' %}<div class="warn small">Заявка отклонена.</div>
-    {% elif error == 'disabled' %}<div class="warn small">Доступ отключён администратором.</div>
-    {% elif error == 'throttled' %}<div class="warn small">Слишком много неверных паролей. Подождите 10 минут и попробуйте снова.</div>
-    {% elif error == 'insecure' %}<div class="warn small">Вход закрыт: на сервере остались пароль или ключ по умолчанию. Задайте ADMIN_PASSWORD и SECRET_KEY в переменных окружения и перезапустите сервис.</div>
-    {% elif error %}<div class="warn small">Неверный логин или пароль</div>{% endif %}
-    <button class="btn primary wide">Войти</button>
-  </form>
-  <p class="small muted" style="margin-top:18px">Нет доступа? <a href="/register">Оставить заявку</a></p>
-  <p class="small muted"><a href="/" class="muted">← На главную</a></p>
-  <p class="small muted legal-links"><a href="/privacy" class="muted">Политика обработки персональных данных</a> · <a href="/legal" class="muted">Реквизиты</a></p>
-</div></div></body></html>
+{% from "_logo.html" import logo %}
+<!doctype html>
+<html lang="ru">
+<head>
+  {% include "_head.html" %}
+  <title>Вход — SYSAI</title>
+  <style>
+    :root{--lv-bg:#171816;--lv-text:#f1efea;--lv-muted:#aaa7a2;--lv-coral:#f08b91;--lv-blue:#78aaf4;--lv-sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;--lv-mono:ui-monospace,SFMono-Regular,Consolas,monospace}
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100%;background:var(--lv-bg);color:var(--lv-text);font-family:var(--lv-sans);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+    body{min-height:100vh;min-height:100svh}a{color:inherit;text-decoration:none}button,input{font:inherit}
+    .login-layout{min-height:100vh;min-height:100svh;display:grid;grid-template-columns:minmax(0,1.38fr) minmax(390px,.82fr);background:var(--lv-bg)}
+    .login-visual{position:relative;isolation:isolate;min-width:0;min-height:100vh;min-height:100svh;overflow:hidden;background:radial-gradient(ellipse at 51% 44%,rgba(120,170,244,.14),transparent 36%),radial-gradient(ellipse at 20% 78%,rgba(240,139,145,.12),transparent 35%),linear-gradient(145deg,#191a18 0%,#161715 48%,#171816 100%)}
+    .login-visual:after{content:"";position:absolute;inset:0;z-index:1;pointer-events:none;background:linear-gradient(180deg,rgba(16,17,14,.12),transparent 19%,transparent 54%,rgba(16,17,14,.40)),linear-gradient(90deg,rgba(16,17,14,.20),transparent 24%,transparent 79%,rgba(16,17,14,.08))}
+    .login-pixels{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0}
+    .visual-top{position:absolute;top:clamp(26px,3.6vw,50px);left:clamp(28px,4.3vw,66px);right:clamp(24px,3.3vw,52px);display:flex;align-items:center;justify-content:space-between;gap:20px;z-index:3}
+    .login-brand{display:inline-flex;align-items:center;gap:11px;font-size:21px;font-weight:780;letter-spacing:-.055em;line-height:1;color:var(--lv-text)}
+    .login-brand-word{white-space:nowrap}.login-brand-word .sys{color:#f1efea}.login-brand-word .ai{color:var(--lv-coral)}
+    .login-brand-mark{width:27px;height:27px;position:relative;display:grid;grid-template-columns:repeat(3,1fr);align-items:center;gap:3px;padding:4px;border:1px solid rgba(120,170,244,.88);border-radius:8px;background:rgba(120,170,244,.12);box-shadow:0 0 25px rgba(120,170,244,.22),inset 0 0 10px rgba(240,139,145,.17)}
+    .login-brand-mark i{display:block;width:100%;border-radius:2px;background:var(--lv-blue);box-shadow:0 0 8px rgba(120,170,244,.76)}
+    .login-brand-mark i:nth-child(1){height:7px}.login-brand-mark i:nth-child(2){height:14px;background:var(--lv-coral)}.login-brand-mark i:nth-child(3){height:10px}
+    .visual-status{display:flex;align-items:center;gap:9px;color:rgba(241,236,228,.60);font:600 10px/1.4 var(--lv-mono);letter-spacing:.16em;text-transform:uppercase;white-space:nowrap}
+    .status-dot{width:6px;height:6px;border-radius:50%;background:var(--lv-blue);box-shadow:0 0 13px rgba(120,170,244,.94);animation:login-status-pulse 2.2s ease-in-out infinite}
+    .visual-copy{position:absolute;left:clamp(28px,4.3vw,66px);right:clamp(26px,4vw,62px);bottom:clamp(70px,9.5vh,116px);z-index:3;max-width:720px}
+    .visual-kicker{display:flex;align-items:center;gap:11px;margin:0 0 23px;color:rgba(241,236,228,.78);font:650 10px/1.4 var(--lv-mono);letter-spacing:.15em;text-transform:uppercase}
+    .kicker-line{width:27px;height:1px;background:linear-gradient(90deg,var(--lv-blue),var(--lv-coral));box-shadow:0 0 9px rgba(240,139,145,.70)}
+    .visual-copy h2{margin:0;max-width:690px;font-size:clamp(43px,5.1vw,78px);font-weight:560;line-height:.99;letter-spacing:-.075em;text-wrap:balance}
+    .visual-copy h2 .accent{display:inline-block;color:transparent;background:linear-gradient(100deg,#a9cdff 0%,#d5e3fa 28%,#f08b91 70%,#ffb0b4 100%);-webkit-background-clip:text;background-clip:text}
+    .visual-copy p{max-width:410px;margin:23px 0 0;color:rgba(223,219,211,.76);font-size:14px;line-height:1.8;letter-spacing:-.01em}
+    .visual-bottom{position:absolute;bottom:26px;left:clamp(28px,4.3vw,66px);right:clamp(26px,4vw,62px);z-index:3;display:flex;align-items:center;gap:9px;color:rgba(231,224,213,.48);font:600 9px/1.5 var(--lv-mono);letter-spacing:.14em;text-transform:uppercase}
+    .visual-bottom .sep{color:var(--lv-coral);opacity:.95}.visual-bottom .right-note{margin-left:auto;color:rgba(231,224,213,.40);letter-spacing:.11em}
+    .login-side{position:relative;z-index:4;min-width:0;min-height:100vh;min-height:100svh;display:grid;grid-template-rows:auto 1fr auto;padding:30px clamp(30px,4.5vw,72px) 25px;background:linear-gradient(145deg,rgba(27,28,25,.99),rgba(23,24,21,.99));border-left:1px solid rgba(255,255,255,.065);box-shadow:-28px 0 70px rgba(0,0,0,.11)}
+    .login-topbar{display:flex;align-items:center;justify-content:flex-end;gap:24px;min-height:28px}
+    .login-language{display:inline-flex;align-items:center;gap:9px;color:#d7d1cb;font-size:12px;font-weight:620;letter-spacing:-.01em}.language-icon,.login-chevron{color:#a4a19a;font-size:15px}
+    .site-link{display:inline-flex;align-items:center;gap:7px;color:#e2ddd7;font-size:12px;font-weight:620;letter-spacing:-.012em;transition:color .2s}.site-link:hover{color:#fff}
+    .login-content{width:min(100%,390px);margin:auto;padding:42px 0 48px}
+    .login-eyebrow{margin:0 0 14px;color:#aaa6a0;font:650 9px/1.5 var(--lv-mono);letter-spacing:.17em;text-transform:uppercase}
+    .login-content h1{margin:0;color:#f1efea;font-size:clamp(36px,3.1vw,45px);font-weight:570;line-height:1.04;letter-spacing:-.065em}
+    .login-intro{max-width:340px;margin:15px 0 34px;color:#b8b4ae;font-size:13px;line-height:1.8}
+    .login-form{display:flex;flex-direction:column;gap:19px;margin:0}
+    .login-field{display:flex;flex-direction:column;gap:9px;min-width:0}.login-field-label{color:#e4dfda;font-size:12px;font-weight:620}
+    .login-field input{width:100%;height:50px;min-width:0;padding:0 15px;border:1px solid rgba(210,208,199,.18);border-radius:11px;outline:none;color:#f1efea;background:linear-gradient(180deg,rgba(255,255,255,.052),rgba(255,255,255,.023));font-size:13px;transition:border .2s,background .2s,box-shadow .2s}
+    .login-field input::placeholder{color:#aaa7a2;opacity:1}.login-field input:hover{border-color:rgba(210,208,199,.30)}.login-field input:focus{border-color:rgba(120,170,244,.94);background:rgba(255,255,255,.045);box-shadow:0 0 0 3px rgba(120,170,244,.22),0 0 28px rgba(240,139,145,.10)}
+    .login-password-wrap{position:relative;display:block}.login-password-wrap input{padding-right:48px}
+    .login-password-toggle{position:absolute;right:7px;top:50%;transform:translateY(-50%);width:36px;height:36px;display:grid;place-items:center;border:0;border-radius:9px;color:#c4ccda;background:transparent;cursor:pointer;transition:color .2s,background .2s,box-shadow .2s}
+    .login-password-toggle:hover{color:#f1efea;background:rgba(120,170,244,.17);box-shadow:inset 0 0 0 1px rgba(120,170,244,.22)}
+    .login-password-toggle svg,.login-submit svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+    .login-submit{width:100%;min-height:52px;margin-top:5px;padding:0 18px;display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid rgba(255,180,183,.98);border-radius:12px;color:#241f1e;background:linear-gradient(108deg,#f5a9aa 0%,#f08b91 52%,#e87c89 100%);font-family:var(--lv-sans);font-size:14px;font-weight:760;letter-spacing:-.018em;line-height:1.1;cursor:pointer;box-shadow:0 7px 24px rgba(240,139,145,.22),inset 0 1px rgba(255,255,255,.30);transition:transform .2s,filter .2s,box-shadow .2s,border-color .2s}
+    .login-submit span{font-size:14px;font-weight:760;letter-spacing:-.018em}.login-submit:hover{transform:translateY(-1px);filter:brightness(1.07);border-color:#ffc2c4;box-shadow:0 11px 30px rgba(240,139,145,.35),inset 0 1px rgba(255,255,255,.38)}.login-submit:active{transform:translateY(0);filter:brightness(.98)}.login-submit:focus-visible,.login-password-toggle:focus-visible{outline:2px solid #78aaf4;outline-offset:3px}
+    .login-submit svg{flex:none;transition:transform .2s}.login-submit:hover svg{transform:translateX(2px)}
+    .login-error{padding:10px 12px;border:1px solid rgba(240,112,131,.35);border-radius:10px;background:rgba(240,112,131,.09);color:#ffb7bd;font-size:12px;line-height:1.55}
+    .login-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:24px;color:#b2aea8;font-size:12px}.login-actions a{color:#f1efea;font-weight:700;letter-spacing:-.012em;transition:color .2s}.login-actions a span{margin-left:4px;color:var(--lv-coral);transition:transform .2s}.login-actions a:hover{color:#bfd4f5}
+    .login-legal{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:42px;color:#96938d;font-size:10px;line-height:1.7}.login-legal a:hover{color:#e1dcd5}
+    .login-footer{display:flex;align-items:center;gap:9px;color:#9c9992;font-size:10px}.footer-dot{width:5px;height:5px;flex:none;border-radius:50%;background:var(--lv-blue);box-shadow:0 0 10px rgba(120,170,244,.76)}.footer-year{margin-left:auto;color:#777870}
+    @keyframes login-status-pulse{0%,100%{opacity:.45;box-shadow:0 0 6px rgba(120,170,244,.5)}50%{opacity:1;box-shadow:0 0 15px rgba(120,170,244,1)}}
+    @media(min-width:1600px){.login-layout{grid-template-columns:minmax(0,1.45fr) minmax(440px,.75fr)}.login-side{padding-left:clamp(54px,4.8vw,90px);padding-right:clamp(54px,4.8vw,90px)}}
+    @media(max-width:1050px){.login-layout{grid-template-columns:minmax(0,1.08fr) minmax(370px,.92fr)}.visual-copy h2{font-size:clamp(41px,5.25vw,62px)}.visual-status{font-size:9px;letter-spacing:.1em}.login-side{padding-left:30px;padding-right:30px}}
+    @media(max-width:760px){.login-layout{display:flex;flex-direction:column;min-height:100svh}.login-visual{min-height:360px;height:42svh;max-height:490px}.visual-top{top:23px;left:23px;right:23px}.visual-status{font-size:8px;letter-spacing:.08em}.visual-copy{left:24px;right:24px;bottom:51px}.visual-kicker{margin-bottom:16px;font-size:8px;letter-spacing:.11em}.visual-copy h2{font-size:clamp(38px,8.3vw,61px)}.visual-copy p{display:none}.visual-bottom{left:24px;right:24px;bottom:18px;font-size:8px}.visual-bottom .right-note{display:none}.login-side{display:flex;flex-direction:column;flex:1;min-height:auto;padding:20px 25px 22px;border-left:0;border-top:1px solid rgba(255,255,255,.065);box-shadow:0 -20px 50px rgba(0,0,0,.11)}.login-content{width:min(100%,430px);padding:38px 0 36px}.login-content h1{font-size:36px}.login-intro{margin-bottom:27px}.login-legal{margin-top:30px}.login-footer{padding-bottom:2px}}
+    @media(max-width:400px){.login-side{padding-left:20px;padding-right:20px}.visual-top{left:20px;right:20px}.visual-copy{left:21px;right:20px}.visual-copy h2{font-size:37px}.visual-status{gap:6px;font-size:7px}.visual-bottom{left:21px;right:20px}.visual-bottom .sep:nth-of-type(2),.visual-bottom .tag:nth-of-type(3){display:none}}
+    @media(prefers-reduced-motion:reduce){.status-dot{animation:none}}
+  </style>
+</head>
+<body>
+<main class="login-layout">
+  <section class="login-visual" aria-label="SYSAI — интеллектуальная рабочая среда">
+    <canvas class="login-pixels" id="login-pixels" aria-hidden="true"></canvas>
+    <header class="visual-top">
+      <a href="/" class="login-brand" aria-label="SYSAI — на главную"><span class="login-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="login-brand-word"><span class="sys">SYS</span><span class="ai">AI</span></span></a>
+      <span class="visual-status"><i class="status-dot"></i> LIVE SIGNAL / INTELLIGENCE</span>
+    </header>
+    <div class="visual-copy">
+      <div class="visual-kicker"><span class="kicker-line"></span> ЕДИНОЕ ПРОСТРАНСТВО ДЛЯ КОМАНДЫ</div>
+      <h2>Меньше рутины.<br><span class="accent">Больше ясности.</span></h2>
+      <p>Совещания, знания и задачи — связаны в единую интеллектуальную систему.</p>
+    </div>
+    <div class="visual-bottom"><span>SYS<span style="color:#f08b91">AI</span></span><span class="sep">/</span><span>WORK, CONNECTED</span><span class="right-note">THINK · CONNECT · BUILD</span></div>
+  </section>
+  <section class="login-side" aria-label="Вход в SYSAI">
+    <header class="login-topbar"><span class="login-language"><span class="language-icon">◎</span> RU <span class="login-chevron">⌄</span></span><a href="/" class="site-link">На сайт <span>↗</span></a></header>
+    <div class="login-content">
+      <p class="login-eyebrow">ВАШЕ РАБОЧЕЕ ПРОСТРАНСТВО</p>
+      <h1>Вход</h1>
+      <p class="login-intro">Доступ к SYSAI сейчас по приглашениям. Если у вас уже есть аккаунт — войдите.</p>
+      <form method="post" action="/login" class="login-form" id="login-form">
+        <label class="login-field"><span class="login-field-label">Логин</span><input name="username" autocomplete="username" placeholder="Введите логин" required autofocus value="{{ username|default('', true) }}"></label>
+        <label class="login-field"><span class="login-field-label">Пароль</span><span class="login-password-wrap"><input id="login-password" type="password" name="password" autocomplete="current-password" placeholder="Введите пароль" required><button class="login-password-toggle" type="button" id="password-toggle" aria-label="Показать пароль" title="Показать пароль"><svg viewBox="0 0 24 24"><path d="M2.5 12s3.3-6 9.5-6 9.5 6 9.5 6-3.3 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></svg></button></span></label>
+        {% if error == 'pending' %}<div class="login-error">Заявка ещё не подтверждена администратором.</div>
+        {% elif error == 'rejected' %}<div class="login-error">Заявка отклонена.</div>
+        {% elif error == 'disabled' %}<div class="login-error">Доступ отключён администратором.</div>
+        {% elif error == 'throttled' %}<div class="login-error">Слишком много неверных паролей. Подождите 10 минут и попробуйте снова.</div>
+        {% elif error == 'insecure' %}<div class="login-error">Вход закрыт: на сервере остались пароль или ключ по умолчанию. Задайте ADMIN_PASSWORD и SECRET_KEY в переменных окружения и перезапустите сервис.</div>
+        {% elif error %}<div class="login-error">Неверный логин или пароль</div>{% endif %}
+        <button class="login-submit" type="submit"><span>Войти</span><svg viewBox="0 0 24 24"><path d="M4.5 12h14m-6-6 6 6-6 6"/></svg></button>
+      </form>
+      <div class="login-actions"><span>Нет доступа?</span><a href="/register">Оставить заявку <span>→</span></a></div>
+      <div class="login-legal"><a href="/privacy">Политика обработки персональных данных</a><span>·</span><a href="/legal">Реквизиты</a></div>
+    </div>
+    <footer class="login-footer"><span class="footer-dot"></span><span>Защищённый доступ · SYSAI</span><span class="footer-year">© SYSAI</span></footer>
+  </section>
+</main>
+<script>
+(()=>{
+  const canvas=document.getElementById('login-pixels'),visual=canvas&&canvas.closest('.login-visual');
+  if(!canvas||!visual)return;
+  const ctx=canvas.getContext('2d',{alpha:true});if(!ctx)return;
+  const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const palette={red:[248,120,138],blue:[115,167,255]};
+  let w=0,h=0,dpr=1,raf=0,last=0,cell=11.2;
+  const pointer={x:-1000,y:-1000,tx:-1000,ty:-1000,energy:0,idle:0,lastMove:0,moveSinceBoil:0,inside:false};
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),fract=v=>v-Math.floor(v);
+  function resize(){const r=visual.getBoundingClientRect();w=Math.max(1,r.width);h=Math.max(1,r.height);dpr=Math.min(window.devicePixelRatio||1,1.5);canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);cell=w<560?9.5:11.2;draw(performance.now())}
+  function draw(now){
+    pointer.x+=(pointer.tx-pointer.x)*.16;pointer.y+=(pointer.ty-pointer.y)*.16;pointer.energy+=((pointer.inside?1:0)-pointer.energy)*.055;
+    ctx.clearRect(0,0,w,h);const t=now*.001,idleTarget=(pointer.inside&&now-pointer.lastMove>320)?1:0;pointer.idle+=(idleTarget-pointer.idle)*(idleTarget?.038:.095);
+    const cols=Math.ceil(w/cell)+1,rows=Math.ceil(h/cell)+1,center=h*.47;
+    if(pointer.energy>.006&&pointer.x>-150&&pointer.x<w+150&&pointer.y>-150&&pointer.y<h+150){
+      const e=pointer.energy,idle=pointer.idle,gx=pointer.x+Math.sin(t*1.3)*idle*3.2,gy=pointer.y+Math.cos(t*1.1)*idle*2.8,radius=300+idle*28;
+      ctx.save();ctx.globalCompositeOperation='screen';const warm=ctx.createRadialGradient(gx,gy,0,gx,gy,radius);
+      warm.addColorStop(0,'rgba(240,112,131,'+((.17+.11*idle)*e)+')');warm.addColorStop(.13,'rgba(240,112,131,'+((.13+.08*idle)*e)+')');warm.addColorStop(.34,'rgba(240,112,131,'+((.075+.045*idle)*e)+')');warm.addColorStop(.60,'rgba(120,170,244,'+((.043+.023*idle)*e)+')');warm.addColorStop(.83,'rgba(120,170,244,'+((.016+.01*idle)*e)+')');warm.addColorStop(1,'rgba(120,170,244,0)');ctx.fillStyle=warm;ctx.fillRect(0,0,w,h);
+      const cool=ctx.createRadialGradient(gx-42,gy+24,0,gx-42,gy+24,radius*.74);cool.addColorStop(0,'rgba(120,170,244,'+((.06+.05*idle)*e)+')');cool.addColorStop(.30,'rgba(120,170,244,'+((.034+.023*idle)*e)+')');cool.addColorStop(1,'rgba(120,170,244,0)');ctx.fillStyle=cool;ctx.fillRect(0,0,w,h);ctx.restore();
+    }
+    const amps=new Float32Array(cols),phases=new Float32Array(cols);
+    for(let col=0;col<cols;col++){const x=col*cell+cell*.5,nx=x/w,low=Math.abs(Math.sin(nx*13.5-t*.92+Math.sin(nx*3.4)*.55)),mid=Math.abs(Math.sin(nx*29+t*1.33+Math.sin(nx*7.1-t*.22)*.72)),high=Math.abs(Math.sin(nx*57-t*1.88+Math.sin(nx*14.7+t*.31)*.44)),trans=Math.pow(Math.max(0,Math.sin(nx*8.7-t*.56+Math.sin(nx*2.1)*.3)),7),organic=.51*low+.31*mid+.18*high,env=.22+.78*organic,boost=pointer.energy*Math.max(0,1-Math.abs(x-pointer.x)/(w*.18));amps[col]=h*(.025+.365*env+.095*trans)+boost*h*.105;phases[col]=clamp(.58*mid+.28*high+.14*low+trans*.32,0,1)}
+    ctx.save();ctx.strokeStyle='rgba(120,170,244,.085)';ctx.lineWidth=1;for(const f of [.18,.47,.76]){const y=h*f;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}ctx.restore();
+    for(let row=0;row<rows;row++){const y=row*cell+cell*.5,dy=y-center,ny=y/h;for(let col=0;col<cols;col++){
+      const x=col*cell+cell*.5,nx=x/w,amp=amps[col],rel=Math.abs(dy)/Math.max(1,amp),noise=.10*Math.sin(col*.67+row*.19+t*1.45)+.05*Math.sin(col*.21-t*.92);if(rel>1+noise)continue;
+      const hash=fract(Math.sin(col*127.1+row*311.7)*43758.5453),edge=clamp(1-rel,0,1),signal=phases[col],dx=x-pointer.x,dyc=(y-pointer.y)*.76,dist=Math.hypot(dx,dyc),fall=Math.exp(-Math.pow(dist/224,2.12)),angle=Math.atan2(dyc,dx),boil=.5+.5*Math.sin(t*7-dist*.058+Math.sin(angle*4+t*1.65)*.82+Math.sin(dist*.032-t*2.25)*.58),lift=pointer.energy*fall*(.72+pointer.idle*.48*(boil-.22)),local=pointer.idle*fall*(.18+.35*boil),missing=.07+.19*(1-edge)+.06*(1-signal);if(hash<missing||(hash>.935&&edge<.5&&signal<.42))continue;
+      const pulse=(Math.sin(nx*10.5-t*1.45)+1)*.5,sh1=.5+.5*Math.sin(t*1.02-col*.071+Math.sin(row*.13+t*.24)*.55),sh2=.5+.5*Math.sin(t*.57+col*.031-row*.064),bright=clamp(.18+.82*Math.pow(sh1*.76+sh2*.24,1.2)+local*.30,.12,1),rgb=Math.sin(nx*7.6-t*.31+Math.sin(ny*3.5)*.38)>0?palette.red:palette.blue,flick=pointer.idle*fall*(.12+.22*boil),alpha=clamp((.075+edge*.70+signal*.27+lift*.64+flick)*(.18+.82*bright),.045,1),size=cell*(.47+.28*edge+Math.min(.09,lift*.09)+flick*.035),jx=pointer.idle*fall*Math.sin(t*7.2+row*.81+col*.29)*1.35,jy=pointer.idle*fall*Math.cos(t*6+col*.55-row*.47)*1.05;
+      ctx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+alpha+')';if(((edge>.62&&signal>.58)||lift>.30)&&bright>.46){ctx.shadowColor='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(.30+bright*.65)+')';ctx.shadowBlur=2.2+signal*4.5+bright*7.5+lift*5}ctx.fillRect(x-size*.5+jx,y-size*.5+jy,size,size);ctx.shadowBlur=0;
+    }}
+    for(let k=0;k<7;k++){const nx=(k*.173+t*(.035+k*.0018))%1,col=Math.min(cols-1,Math.max(0,Math.round(nx*w/cell))),x=col*cell+cell*.5,peakY=center-amps[col]*(.72+.18*Math.sin(t*2.1+k)),rgb=k%2===0?palette.blue:palette.red,shine=.24+.76*Math.pow(.5+.5*Math.sin(t*1.15-k*.9),1.55);ctx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+shine+')';ctx.shadowColor='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(shine*.75)+')';ctx.shadowBlur=2+shine*8;ctx.fillRect(x-cell*.24,peakY-cell*.24,cell*.48,cell*.48);ctx.shadowBlur=0}
+    if(pointer.energy>.015&&pointer.idle>.015){ctx.save();ctx.globalCompositeOperation='screen';for(let k=0;k<26;k++){const phase=t*(.58+(k%6)*.095)+k*2.399,orbit=20+((k*37)%116)+Math.sin(t*1.85+k*1.17)*6,bx=pointer.x+Math.cos(phase)*orbit+Math.sin(phase*.7+k)*5,lift=(t*(7+(k%5)*1.35)+k*13.7)%48,by=pointer.y+Math.sin(phase*1.07+k*.17)*orbit*.42-lift,life=.5+.5*Math.sin(t*3.9+k*1.63),rgb=k%3===0?palette.blue:palette.red,alpha=pointer.idle*pointer.energy*(.08+.20*life),size=1.25+life*1.65;ctx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+alpha+')';ctx.fillRect(bx-size*.5,by-size*.5,size,size)}ctx.restore()}
+    const activity=.5+.5*Math.sin(t*.8),glow=ctx.createRadialGradient(w*.48,center,4,w*.48,center,w*.62);glow.addColorStop(0,'rgba(120,170,244,'+(.065+.045*activity)+')');glow.addColorStop(.42,'rgba(240,139,145,.048)');glow.addColorStop(1,'rgba(13,14,12,0)');ctx.globalCompositeOperation='destination-over';ctx.fillStyle=glow;ctx.fillRect(0,0,w,h);ctx.globalCompositeOperation='source-over';
+  }
+  function animate(now){if(reduced)return;if(now-last>28){draw(now);last=now}raf=requestAnimationFrame(animate)}
+  visual.addEventListener('pointermove',e=>{const r=visual.getBoundingClientRect(),nx=e.clientX-r.left,ny=e.clientY-r.top,now=performance.now(),entering=!pointer.inside,step=(!entering&&pointer.tx>-500&&pointer.ty>-500)?Math.hypot(nx-pointer.tx,ny-pointer.ty):0;if(entering){pointer.x=nx;pointer.y=ny;pointer.lastMove=now;pointer.idle=0;pointer.moveSinceBoil=0}else if(step>1.15){if(pointer.idle>.18){pointer.moveSinceBoil+=step;if(pointer.moveSinceBoil>=120){pointer.lastMove=now;pointer.idle=.02;pointer.moveSinceBoil=0}}else{pointer.lastMove=now;pointer.moveSinceBoil=0}}pointer.tx=nx;pointer.ty=ny;pointer.inside=true;pointer.energy=Math.max(pointer.energy,.88)},{passive:true});
+  visual.addEventListener('pointerleave',()=>{pointer.tx=-1000;pointer.ty=-1000;pointer.inside=false;pointer.lastMove=performance.now();pointer.moveSinceBoil=0},{passive:true});
+  if('ResizeObserver'in window)new ResizeObserver(resize).observe(visual);else window.addEventListener('resize',resize,{passive:true});resize();if(!reduced)raf=requestAnimationFrame(animate);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelAnimationFrame(raf);else if(!reduced){last=0;raf=requestAnimationFrame(animate)}});
+  const password=document.getElementById('login-password'),toggle=document.getElementById('password-toggle');if(password&&toggle)toggle.addEventListener('click',()=>{const show=password.type==='password';password.type=show?'text':'password';toggle.title=show?'Скрыть пароль':'Показать пароль';toggle.setAttribute('aria-label',toggle.title);password.focus({preventScroll:true})});
+})();
+</script>
+</body>
+</html>
