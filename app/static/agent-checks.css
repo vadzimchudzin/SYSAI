@@ -1,0 +1,119 @@
+/* «Навыки»: встроенные навыки ИИ-сотрудника; «Проверочные диалоги»: сравнение моделей и способов вызова. */
+.skills-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.skills-top h1 { margin: 0; }
+.skill-table { width: 100%; }
+.skill-table th, .skill-table td { padding: 9px 10px 9px 0; }
+.skill-table td:first-child { min-width: 170px; }
+.skill-table td:last-child { width: 1%; }
+.skill-table select { width: auto; min-width: 190px; padding: 7px 10px; font-size: 13px; }
+.skill-table code { display: inline-block; margin-top: 4px; font-size: 11.5px; }
+.skill-way { display: grid; gap: 6px; max-width: 680px; margin: 16px 0 14px; }
+.skill-way select { max-width: 420px; }
+.skill-way p { margin: 0; }
+.skills-company { margin: 30px 0 6px; }
+
+.ck-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.ck-head h1 { margin: 0; }
+.ck-lead { max-width: 860px; margin: 0 0 18px; }
+.ck-error { margin: 12px 0 0; padding: 9px 12px; border: 1px solid rgba(224,108,90,.45); border-radius: 10px; background: rgba(224,108,90,.08); color: var(--soft); font-size: 13.5px; }
+.ck-run { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px 22px; align-items: start; }
+.ck-run textarea { min-height: 112px; resize: vertical; font: 13px/1.5 var(--mono); }
+.ck-run fieldset { margin: 0; padding: 0; border: 0; min-width: 0; display: grid; gap: 8px; }
+.ck-run legend { padding: 0; margin-bottom: 6px; font-size: 13.5px; color: var(--soft); }
+.ck-way { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line2); border-radius: 12px; background: var(--bg2); cursor: pointer; font-size: 13.5px; color: var(--soft); }
+.ck-way input { width: auto; margin: 3px 0 0; accent-color: var(--clay); }
+.ck-way small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.ck-way:has(input:checked) { border-color: rgba(217,142,138,.55); background: var(--clay-bg); color: var(--text); }
+.ck-actions { display: flex; gap: 10px 14px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+.ck-actions form { margin: 0; }
+.ck-live { display: grid; gap: 8px; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg2); }
+.ck-live .progress div { transition: none; }
+.ck-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; margin: 0 0 12px; }
+
+.ck-table th, .ck-table td { padding: 10px 12px 10px 0; vertical-align: middle; }
+.ck-table td.num, .ck-table th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ck-table td:last-child { text-align: right; padding-right: 0; white-space: nowrap; }
+.ck-table td:first-child { min-width: 210px; }
+.ck-table tr.is-current td { background: rgba(217,142,138,.06); }
+.ck-table tr.is-recommended td { background: rgba(127,183,126,.06); }
+.ck-model { display: block; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.ck-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.ck-tags .pill { font-size: 11px; padding: 2px 8px; }
+.ck-pct { display: grid; gap: 5px; min-width: 120px; }
+.ck-pct b { font-size: 16px; }
+.ck-bar { height: 5px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.ck-bar i { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+.ck-bar.mid i { background: var(--amber); } .ck-bar.low i { background: var(--red); }
+.ck-table form { margin: 0; }
+.ck-budget { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.ck-budget form { display: flex; gap: 8px; align-items: flex-end; margin: 0; }
+.ck-budget .f { min-width: 0; flex: 0 0 170px; }
+.ck-budget p { margin: 0; flex: 1 1 280px; }
+
+.ck-groups th:not(:first-child), .ck-groups td:not(:first-child) { text-align: center; white-space: nowrap; }
+.ck-groups th { white-space: normal; font-size: 11.5px; max-width: 150px; }
+.ck-cell { display: inline-block; min-width: 54px; padding: 3px 8px; border-radius: 8px; font-weight: 600; font-size: 12.5px; }
+.ck-cell.hi { background: rgba(127,183,126,.13); color: var(--green); }
+.ck-cell.mid { background: rgba(224,168,90,.14); color: var(--amber); }
+.ck-cell.low { background: rgba(224,108,90,.14); color: var(--red); }
+
+.ck-fail { border-top: 1px solid var(--line); padding: 10px 0; }
+.ck-fail:first-of-type { border-top: 0; }
+.ck-fail > summary { display: flex; justify-content: space-between; gap: 6px 14px; align-items: baseline; flex-wrap: wrap; }
+.ck-fail > summary b { font-weight: 600; }
+.ck-fail > summary::before { content: "›"; color: var(--muted); margin-right: 2px; transition: transform .15s; display: inline-block; }
+.ck-fail[open] > summary::before { transform: rotate(90deg); }
+.ck-fail > summary > span:first-child { flex: 1 1 320px; }
+.ck-miss { display: grid; gap: 6px; margin: 10px 0 0 14px; padding: 10px 12px; border-left: 2px solid var(--line2); }
+.ck-miss + .ck-miss { margin-top: 8px; }
+.ck-miss ul { margin: 0; padding-left: 18px; color: var(--soft); }
+.ck-reply { margin: 0; padding: 8px 11px; border-radius: 10px; background: var(--bg2); border: 1px solid var(--line); color: var(--soft); font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
+.ck-acts { display: flex; flex-wrap: wrap; gap: 5px; }
+.ck-acts code { font-size: 11.5px; overflow-wrap: anywhere; white-space: normal; }
+
+.ck-runs { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.ck-runs li { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.ck-runs li:last-child { border-bottom: 0; }
+.ck-runs li.on a { color: var(--text); font-weight: 600; }
+
+.ck-case, .ck-answer { padding: 14px 0; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.ck-case:first-of-type, .ck-answer:first-of-type { border-top: 0; padding-top: 4px; }
+.ck-case.off { opacity: .55; }
+.ck-said { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.ck-said q { quotes: "«" "»"; color: var(--text); overflow-wrap: anywhere; }
+.ck-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ck-row form { margin: 0; }
+.ck-mark > summary { color: var(--clay); font-size: 13px; }
+.ck-mark > summary:hover { color: var(--clay2); }
+.ck-mark form { display: grid; gap: 10px; margin-top: 10px; padding: 12px; border: 1px solid var(--line2); border-radius: 12px; background: var(--bg2); }
+.ck-mark textarea { min-height: 70px; resize: vertical; }
+.ck-mark .row .f { min-width: 170px; }
+
+.ck-scen { margin-top: 6px; }
+.ck-scen > summary { font-weight: 600; padding: 8px 0; }
+.ck-scen ol { margin: 4px 0 10px; padding-left: 22px; display: grid; gap: 6px; }
+.ck-scen li { font-size: 13px; color: var(--soft); }
+.ck-scen li q { quotes: "«" "»"; color: var(--muted); }
+
+@media (max-width: 760px) {
+  .ck-run { grid-template-columns: 1fr; }
+  .skill-table thead, .ck-table thead { display: none; }
+  .skill-table, .skill-table tbody, .skill-table tr, .skill-table td,
+  .ck-table, .ck-table tbody, .ck-table tr, .ck-table td { display: block; width: 100%; }
+  .skill-table tr, .ck-table tr { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .skill-table tr:last-child, .ck-table tr:last-child { border-bottom: 0; }
+  .skill-table td, .ck-table td { border: 0; padding: 3px 0; min-width: 0 !important; text-align: left !important; }
+  .skill-table td[data-label]::before, .ck-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 11.5px; font-weight: 600; margin-bottom: 2px; }
+  .skill-table td:last-child { width: 100%; }
+  .skill-table select { width: 100%; }
+  .ck-table td.ck-inline { display: inline-flex; width: auto; gap: 6px; align-items: baseline; margin-right: 16px; }
+  .ck-table td.ck-inline::before { display: inline !important; margin: 0 !important; }
+  .ck-table td:last-child { margin-top: 8px; }
+  .ck-table tr.is-current td, .ck-table tr.is-recommended td { background: transparent; }
+  .ck-table tr.is-current, .ck-table tr.is-recommended { margin: 6px 0; padding: 12px; border: 0; border-radius: 12px; }
+  .ck-table tr.is-current { background: rgba(217,142,138,.07); } .ck-table tr.is-recommended { background: rgba(127,183,126,.07); }
+  .ck-table td:last-child .btn { width: 100%; }
+  .ck-budget form { flex-wrap: wrap; width: 100%; }
+  .ck-budget .f { flex: 1 1 150px; }
+  .ck-miss { margin-left: 0; }
+}

@@ -576,6 +576,59 @@ class Artifact(Base):
     created_at = Column(DateTime(timezone=True), default=now)
 
 
+class AgentCheckRun(Base):
+    """A run of the checking dialogs (agent_checks.py): which models and ways of asking were compared, how it ended."""
+    __tablename__ = "agent_check_runs"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(12), nullable=False, default="running")  # running | done | stopped | failed | interrupted
+    models = Column(JSON, nullable=False, default=list)
+    transports = Column(JSON, nullable=False, default=list)
+    total = Column(Integer, nullable=False, default=0)
+    by = Column(String(120), default="")
+    note = Column(Text, default="")
+
+
+class AgentCheckResult(Base):
+    """One checking dialog answered by one model in one way: passed or why not, what it cost."""
+    __tablename__ = "agent_check_results"
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("agent_check_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    model = Column(String(120), nullable=False)
+    transport = Column(String(10), nullable=False)
+    case_key = Column(String(60), nullable=False)  # a built-in scenario id or "case:<AgentCheckCase.id>"
+    topic = Column(String(60), default="")
+    ok = Column(Boolean, nullable=False, default=False)
+    reasons = Column(JSON, nullable=False, default=list)
+    reply = Column(Text, default="")
+    actions = Column(JSON, nullable=False, default=list)
+    via = Column(String(10), default="")  # the way that answered (a model without function calls answers in JSON)
+    cost = Column(Float, nullable=False, default=0.0)
+    calls = Column(Integer, nullable=False, default=0)
+    tokens = Column(Integer, nullable=False, default=0)
+    seconds = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
+class AgentCheckCase(Base):
+    """A bad answer from a real conversation kept as a checking dialog, with how it should have been."""
+    __tablename__ = "agent_check_cases"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    title = Column(String(200), default="")
+    text = Column(Text, nullable=False, default="")
+    ctx = Column(JSON, nullable=False, default=dict)      # what the model saw (rebuilt when the answer was marked)
+    person = Column(JSON, nullable=False, default=dict)   # employee_id, employee_name, reviewer, full, director
+    expected = Column(Text, nullable=False, default="")   # «как надо было», in the director's words
+    must = Column(JSON, nullable=False, default=list)     # skills that had to be used
+    must_not = Column(JSON, nullable=False, default=list)  # skills that must not be used
+    bad_reply = Column(Text, default="")
+    source_message_id = Column(Integer, nullable=True)
+    by = Column(String(120), default="")
+    active = Column(Boolean, nullable=False, default=True)
+
+
 class LlmSpend(Base):
     """What one OpenRouter call cost (usage.cost in the answer). The daily budget is the sum for the UTC day."""
     __tablename__ = "llm_spend"

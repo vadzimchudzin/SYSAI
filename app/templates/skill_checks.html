@@ -1,0 +1,150 @@
+{% extends "base.html" %}{% block title %}Проверочные диалоги — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('agent-checks.css') }}">{% if running %}<meta http-equiv="refresh" content="15">{% endif %}{% endblock %}
+{% macro usd(value) %}{% if value is none %}—{% elif value < 0.01 %}&lt; $0,01{% elif value < 100 %}${{ ('%.2f' % value)|replace('.', ',') }}{% else %}${{ '{:,.0f}'.format(value)|replace(',', ' ') }}{% endif %}{% endmacro %}
+{% macro level(ok, total) %}{% set share = (ok / total) if total else 0 %}{{ 'hi' if share >= 0.85 else ('mid' if share >= 0.65 else 'low') }}{% endmacro %}
+{% set STATUS_RU = {'running': ('идёт', 'blue'), 'done': ('готов', 'green'), 'stopped': ('остановлен', 'amber'), 'failed': ('сбой', 'red'), 'interrupted': ('прерван', 'gray')} %}
+{% macro status_pill(status) %}{% set s = STATUS_RU.get(status, (status, 'gray')) %}<span class="pill {{ s[1] }}">{{ s[0] }}</span>{% endmacro %}
+{% block body %}
+<div class="ck-head"><h1>Проверочные диалоги</h1><a class="btn sm ghost" href="/skills">← Навыки</a></div>
+<p class="muted ck-lead">{{ scenarios|length }} ситуаций из жизни компании: поручения, отчёты, напоминания, сроки, уточнения, решения руководителя, файлы, вопросы без прав. Каждая модель отвечает на все, а код проверяет ответ: сделала ли нужное действие, не сделала ли лишнего, переспросила ли, где надо, нет ли «стены» отказа и обещаний без действия. Рядом — сколько стоит месяц работы, чтобы выбрать модель по качеству и бюджету.</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="ck-error" role="alert">{{ error }}</div>{% endif %}
+
+{% set active_cases = cases|selectattr('active')|list %}
+{% set per_pair = scenarios|length + active_cases|length %}
+{% set live = (history|selectattr('id', 'equalto', running)|first) if running else None %}
+<section class="card" id="run" style="margin-top:16px">
+  <h2>Прогон</h2>
+  <form method="post" action="/skills/checks"><input type="hidden" name="do" value="run">
+    <div class="ck-run">
+      <label class="f">Модели OpenRouter — по одной в строке, до 6
+        <textarea name="models" spellcheck="false" aria-describedby="models-hint">{{ defaults|join('\n') }}</textarea>
+        <span class="small muted" id="models-hint">Первая — модель ИИ-сотрудника сейчас. Имена — как на openrouter.ai/models.</span></label>
+      <fieldset><legend>Как модель просит действия</legend>
+        {% for t, label in transports.items() %}<label class="ck-way"><input type="checkbox" name="transport" value="{{ t }}" checked>
+          <span>{{ label[:1]|upper }}{{ label[1:] }}{% if t == transport %} <span class="pill clay">сейчас</span>{% endif %}<small>{{ 'действия — в JSON-ответе, как раньше' if t == 'json' else 'навыки — функции OpenRouter; модель без них отвечает в JSON' }}</small></span></label>{% endfor %}
+      </fieldset>
+    </div>
+    <div class="ck-actions">
+      <button class="btn primary" {{ 'disabled' if running or not key }}>Прогнать</button>
+      <span class="small muted">{{ per_pair }} {{ plural(per_pair, 'диалог', 'диалога', 'диалогов') }} на каждую пару «модель × способ»{% if active_cases %}, из них своих — {{ active_cases|length }}{% endif %}. Обычно прогон трёх моделей обоими способами стоит $1–5 и идёт 5–15 минут; расход входит в дневной лимит на ИИ.</span>
+    </div>
+  </form>
+  {% if not key %}<div class="ck-error">Нужен ключ OpenRouter: <a href="/settings">Настройки → Подключения</a>. Проверочные диалоги идут через настоящие модели.</div>{% endif %}
+  {% if live %}<div class="ck-live" role="status">
+    <div class="row between"><span>Идёт прогон №{{ live.id }}: {{ live.done }} из {{ live.total }} ответов</span>
+      <form method="post" action="/skills/checks"><input type="hidden" name="do" value="stop"><button class="btn sm">Остановить</button></form></div>
+    <div class="progress"><div style="width: {{ ((100 * live.done / live.total) if live.total else 0)|round(1) }}%"></div></div>
+    <span class="small muted">Страница обновляется каждые 15 секунд. Можно уйти — прогон продолжится.</span>
+  </div>{% endif %}
+</section>
+
+{% if data and data.pairs %}{% set r = data.run %}
+<section class="card" id="compare">
+  <h2>Сравнение</h2>
+  <div class="ck-meta small muted"><span>Прогон №{{ r.id }} · {{ r.created.strftime('%d.%m.%Y %H:%M') if r.created }}</span>{{ status_pill(r.status) }}
+    <span>{{ r.done }} из {{ r.total }} ответов</span>{% if r.by %}<span>запустил {{ r.by }}</span>{% endif %}{% if r.note %}<span>{{ r.note }}</span>{% endif %}</div>
+  <div class="table-wrap"><table class="ck-table">
+    <thead><tr><th>Модель и способ</th><th>Пройдено</th><th class="num">Время ответа</th><th class="num">За 100 сообщений</th><th class="num">≈ В месяц</th><th></th></tr></thead>
+    <tbody>{% for p in data.pairs %}
+      <tr class="{{ 'is-current' if p.current }} {{ 'is-recommended' if p.recommended and not p.current }}">
+        <td><span class="ck-model">{{ p.model }}</span><span class="small muted">{{ transports[p.transport] }}</span>
+          <div class="ck-tags">{% if p.current %}<span class="pill clay">сейчас</span>{% endif %}{% if p.best %}<span class="pill green">лучшее качество</span>{% endif %}{% if p.recommended %}<span class="pill blue">рекомендуем</span>{% endif %}{% if p.over_budget %}<span class="pill amber">выше бюджета</span>{% endif %}{% if p.fell_back %}<span class="pill gray" title="Модель не принимает функции — эти ответы получены в JSON">{{ p.fell_back }} без функций</span>{% endif %}{% if p.errors %}<span class="pill red" title="Модель не ответила или ответила не по форме">{{ p.errors }} {{ plural(p.errors, 'сбой', 'сбоя', 'сбоев') }}</span>{% endif %}</div></td>
+        <td data-label="Пройдено"><div class="ck-pct"><b>{{ p.pct }}%</b><div class="ck-bar {{ level(p.passed, p.count)|trim|replace('hi', '') }}"><i style="width: {{ p.pct }}%"></i></div><span class="small muted">{{ p.passed }} из {{ p.count }}</span></div></td>
+        <td class="num ck-inline" data-label="Время ответа">{{ ('%.1f' % p.seconds)|replace('.', ',') }} с</td>
+        <td class="num ck-inline" data-label="За 100 сообщений">{{ usd(p.per_100) }}</td>
+        <td class="num ck-inline" data-label="≈ В месяц"><b>{{ usd(p.per_month) }}</b></td>
+        <td>{% if p.current %}<span class="small muted">выбрана</span>{% else %}<form method="post" action="/skills/checks"><input type="hidden" name="do" value="pick"><input type="hidden" name="model" value="{{ p.model }}"><input type="hidden" name="transport" value="{{ p.transport }}"><input type="hidden" name="run" value="{{ r.id }}"><button class="btn sm {{ 'primary' if p.recommended }}">Выбрать</button></form>{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  <p class="small muted">Время — медиана одного ответа. Цена — по счёту OpenRouter за эти диалоги; в жизни контекст компании больше, поэтому настоящая цена может быть выше. «Рекомендуем» — самая дешёвая пара из тех, что отстают от лучшей не больше чем на 5 пунктов и укладываются в бюджет.</p>
+  <div class="ck-budget">
+    <form method="post" action="/skills/checks"><input type="hidden" name="do" value="budget">
+      <label class="f">Бюджет, $ в месяц <input name="budget" inputmode="decimal" value="{{ ('%g' % budget) if budget else '' }}" placeholder="не задан"></label>
+      <button class="btn sm">Сохранить</button></form>
+    <p class="small muted">Месяц — {{ data.month }} {{ plural(data.month, 'сообщение', 'сообщения', 'сообщений') }} ИИ-сотруднику{% if data.counted %}: столько было за последние 30 дней{% else %}: переписки пока мало, взято условно{% endif %}.</p>
+  </div>
+</section>
+
+{% if data.groups and data.pairs|length > 1 %}
+<section class="card">
+  <h2>По темам</h2>
+  <div class="table-wrap"><table class="small ck-groups">
+    <thead><tr><th>Тема</th>{% for p in data.pairs %}<th title="{{ p.label }}">{{ p.model.split('/')[-1] }}<br><span class="muted">{{ transports[p.transport] }}</span></th>{% endfor %}</tr></thead>
+    <tbody>{% for g in data.groups %}<tr><td>{{ g.group }}</td>{% for c in g.cells %}<td>{% if c[1] %}<span class="ck-cell {{ level(c[0], c[1])|trim }}">{{ c[0] }}/{{ c[1] }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if data.failing %}
+<section class="card" id="failing">
+  <h2>Где ошибаются</h2>
+  <p class="small muted">Ситуации, на которых хоть одна модель ответила не так. Сначала — где ошибаются чаще.</p>
+  {% for c in data.failing[:40] %}<details class="ck-fail">
+    <summary><span><b>{{ c.title }}</b> <span class="small muted">· {{ c.group }}</span></span><span class="pill {{ 'red' if c.fails|length == c.runs else 'amber' }}">{{ c.fails|length }} из {{ c.runs }}</span></summary>
+    {% for f in c.fails %}<div class="ck-miss"><b class="small">{{ f.label }}</b>
+      <ul class="small">{% for why in f.reasons %}<li>{{ why }}</li>{% endfor %}</ul>
+      {% if f.reply %}<p class="ck-reply">{{ f.reply }}</p>{% endif %}
+      {% if f.actions %}<div class="ck-acts">{% for a in f.actions %}<code>{{ a|action_line }}</code>{% endfor %}</div>{% endif %}
+    </div>{% endfor %}
+  </details>{% endfor %}
+</section>
+{% endif %}
+{% elif data %}
+<section class="card" id="compare"><h2>Сравнение</h2><p class="muted">В прогоне №{{ data.run.id }} пока нет ответов{% if data.run.note %}: {{ data.run.note }}{% endif %}.</p></section>
+{% endif %}
+
+{% if history %}
+<section class="card">
+  <h2>Прогоны</h2>
+  <ul class="ck-runs">{% for h in history %}<li class="{{ 'on' if data and data.run and data.run.id == h.id }}">
+    <a href="/skills/checks?run={{ h.id }}#compare">№{{ h.id }} · {{ h.created.strftime('%d.%m %H:%M') if h.created }}</a>{{ status_pill(h.status) }}
+    <span class="muted">{{ h.models|map('replace', 'openai/', '')|map('replace', 'anthropic/', '')|map('replace', 'google/', '')|join(', ') }} · {% for t in h.transports %}{{ transports.get(t, t) }}{{ ', ' if not loop.last }}{% endfor %}</span>
+    <span class="small muted">{{ h.done }} из {{ h.total }}{% if h.by %} · {{ h.by }}{% endif %}</span></li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="card" id="own">
+  <h2>Свои случаи</h2>
+  <p class="small muted">Плохие ответы из настоящей переписки, отмеченные ниже, с тем, как надо было. Модель видит то же, что видела тогда; ответ сверяет с вашим описанием модель-судья, а обязательные и запрещённые навыки проверяет код.</p>
+  {% for c in cases %}<div class="ck-case {{ '' if c.active else 'off' }}">
+    <div class="ck-said"><q>{{ c.text }}</q>{% if not c.active %}<span class="pill gray">выключен</span>{% endif %}</div>
+    <div class="small"><span class="muted">Как надо:</span> {{ c.expected }}</div>
+    {% if c.must or c.must_not %}<div class="ck-acts">{% for m in c.must %}<span class="pill green">нужно: {{ skills[m].title if m in skills else m }}</span>{% endfor %}{% for m in c.must_not %}<span class="pill red">нельзя: {{ skills[m].title if m in skills else m }}</span>{% endfor %}</div>{% endif %}
+    {% if c.bad_reply %}<p class="ck-reply"><span class="muted">Было:</span> {{ c.bad_reply }}</p>{% endif %}
+    <div class="ck-row small"><span class="muted">{{ c.at.strftime('%d.%m.%Y') if c.at }}{% if c.by %} · {{ c.by }}{% endif %}</span>
+      <form method="post" action="/skills/checks"><input type="hidden" name="do" value="toggle"><input type="hidden" name="case_id" value="{{ c.id }}"><button class="btn sm ghost">{{ 'выключить' if c.active else 'включить' }}</button></form>
+      <form method="post" action="/skills/checks" onsubmit="return confirm('Удалить случай?')"><input type="hidden" name="do" value="delete"><input type="hidden" name="case_id" value="{{ c.id }}"><button class="btn sm ghost">удалить</button></form></div>
+  </div>{% else %}<p class="muted small">Пока нет. Отметьте неудачный ответ в списке ниже — он станет проверочным диалогом.</p>{% endfor %}
+</section>
+
+<section class="card" id="answers">
+  <div class="row between"><h2 style="margin:0">Последние ответы ИИ-сотрудника</h2><a class="btn sm" href="/skills/checks/export?days=90" download>Скачать переписку (JSONL)</a></div>
+  <p class="small muted">Выгрузка — переписка за 90 дней: чаты пронумерованы, без Telegram-номеров. По ней удобно найти неудачные ответы или передать их разработчику.</p>
+  {% for a in answers %}<div class="ck-answer">
+    <div class="ck-said"><b>{{ a.name or 'Без имени' }}</b><span class="small muted">{{ a.at.strftime('%d.%m %H:%M') if a.at }}{% if a.model %} · {{ a.model }}{% endif %}{% if a.transport %} · {{ transports.get(a.transport, a.transport) }}{% endif %}</span>{% if a.marked %}<span class="pill clay">в проверочных</span>{% endif %}</div>
+    <div><q>{{ a.text }}</q></div>
+    {% if a.reply %}<p class="ck-reply">{{ a.reply }}</p>{% endif %}
+    {% if a.actions %}<div class="ck-acts">{% for x in a.actions %}<code>{{ x|action_line }}</code>{% endfor %}</div>{% endif %}
+    {% if not a.marked %}<details class="ck-mark"><summary>Плохой ответ — в проверочные</summary>
+      <form method="post" action="/skills/checks"><input type="hidden" name="do" value="mark"><input type="hidden" name="message_id" value="{{ a.id }}">
+        <label class="f">Как надо было <textarea name="expected" required maxlength="2000" placeholder="Поставить напоминание на пятницу 10:00 и коротко подтвердить, без вопросов"></textarea></label>
+        <div class="row">
+          <label class="f">Обязательно сделать <select name="must"><option value="">—</option>{% for name, k in skills.items() %}<option value="{{ name }}">{{ k.title }}</option>{% endfor %}</select></label>
+          <label class="f">Нельзя делать <select name="must_not"><option value="">—</option>{% for name, k in skills.items() %}<option value="{{ name }}">{{ k.title }}</option>{% endfor %}</select></label>
+        </div>
+        <div><button class="btn sm primary">Добавить в проверочные</button></div>
+      </form></details>{% endif %}
+  </div>{% else %}<p class="muted small">Переписки с ИИ-сотрудником пока нет.</p>{% endfor %}
+</section>
+
+<section class="card">
+  <h2>Какие ситуации проверяются</h2>
+  <p class="small muted">Тестовая компания из семи человек с задачами, совещанием и документами. Пишут сотрудник, бухгалтер, проверяющий, директор и человек с полным доступом.</p>
+  {% set groups = [] %}{% for sc in scenarios %}{% if sc.group not in groups %}{% set _ = groups.append(sc.group) %}{% endif %}{% endfor %}
+  {% for g in groups %}{% set items = scenarios|selectattr('group', 'equalto', g)|list %}<details class="ck-scen">
+    <summary>{{ g }} <span class="muted small">· {{ items|length }}</span></summary>
+    <ol>{% for sc in items %}<li><b>{{ sc.title }}</b> <span class="muted">({{ role_ru.get(sc.role, sc.role) }})</span><br><q>{{ sc.text }}</q></li>{% endfor %}</ol>
+  </details>{% endfor %}
+</section>
+{% endblock %}

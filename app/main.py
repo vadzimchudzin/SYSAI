@@ -1,6 +1,7 @@
 """SYSAI web app: upload form, meetings, draft editing/approval, settings, employees, Telegram webhook."""
 import datetime as dt
 import hmac
+import json
 import logging
 import math
 import mimetypes
@@ -19,18 +20,18 @@ from urllib.parse import quote, urlencode
 
 from sqlalchemy import func
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, audio_archive, bitrix, cases, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
-               storage, telegram, transcript_edit, userbot, notion, voice_diagram)
+               storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (AgentCheckCase, Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -106,6 +107,18 @@ def plural(count, one: str, few: str, many: str) -> str:
 
 
 tpl.env.globals.update(plural=plural)
+
+
+def action_line(action) -> str:
+    """An action the model asked for, in one line: remind(to="me", topic="акт") — for the checking dialogs."""
+    if not isinstance(action, dict):
+        return str(action)[:200]
+    rest = ", ".join(f"{k}={json.dumps(v, ensure_ascii=False, default=str)}" for k, v in action.items() if k != "type")
+    line = f"{action.get('type')}({rest})"
+    return line if len(line) <= 200 else line[:199] + "…"
+
+
+tpl.env.filters["action_line"] = action_line
 
 
 def startup():
@@ -1257,14 +1270,120 @@ def memory_person_forget(request: Request, eid: int):
     return RedirectResponse(f"/memory/people/{eid}", 303)
 
 
+def _builtin_skills() -> list:
+    modes = agent_skills.modes()
+    return [{"name": k.name, "title": k.title, "hint": k.hint, "who": agent_skills.WHO_RU[k.who], "modes": k.modes,
+             "mode": modes.get(k.name, "auto")} for k in agent_skills.SKILLS.values()]
+
+
 @app.get("/skills", response_class=HTMLResponse)
-def skills_view(request: Request, edit: int = 0):
+def skills_view(request: Request, edit: int = 0, saved: int = 0):
     guard_admin(request)
     with SessionLocal() as s:
         rows = [{"id": k.id, "title": k.title, "kind": k.kind, "when": k.when_to_use or "", "body": k.body, "active": k.active,
                  "uses": k.uses, "updated": k.updated_at, "by": k.updated_by or ""}
                 for k in s.query(Skill).order_by(Skill.active.desc(), Skill.title)]
-    return page(request, "skills.html", skills=rows, edit=edit)
+    return page(request, "skills.html", skills=rows, edit=edit, builtin=_builtin_skills(), saved=saved,
+                modes_ru=agent_skills.MODE_RU, mode_hints=agent_skills.MODE_HINT, transport=agent_skills.transport(),
+                transports=agent_skills.TRANSPORT_RU, agent_model=voice.model())
+
+
+@app.post("/skills/agent")
+async def skills_agent_save(request: Request):
+    """The modes of the built-in skills (at once / with the director's approval / only a suggestion) and the way the
+    model asks for them."""
+    guard_admin(request)
+    f = await request.form()
+    chosen = {}
+    for name, skill in agent_skills.SKILLS.items():
+        value = str(f.get(f"mode_{name}") or "auto")
+        if skill.modes and value in agent_skills.MODES and value != "auto":
+            chosen[name] = value
+    way = str(f.get("transport") or "")
+    settings_store.set_many({"agent_skill_modes": chosen,
+                             "agent_transport": way if way in agent_skills.TRANSPORTS else agent_skills.transport()})
+    return RedirectResponse("/skills?saved=1#agent-skills", 303)
+
+
+CHECK_MESSAGES = {"started": "Прогон начался: модели отвечают на проверочные диалоги. Страница обновляется сама.",
+                  "stopped": "Прогон останавливается: начатые ответы допишутся.",
+                  "picked": "Модель и способ выбраны: ИИ-сотрудник отвечает так со следующего сообщения.",
+                  "budget": "Бюджет сохранён.", "marked": "Ответ добавлен в проверочные диалоги — он войдёт в следующий прогон.",
+                  "deleted": "Случай удалён.", "toggled": "Готово."}
+
+
+@app.get("/skills/checks", response_class=HTMLResponse)
+def skill_checks_view(request: Request, run: int = 0, msg: str = "", error: str = ""):
+    """Checking dialogs: about fifty situations sent to several models; quality and the price a month side by side."""
+    guard_admin(request)
+    history = agent_checks.runs()
+    shown = run or next((r["id"] for r in history if r["done"]), 0)
+    data = agent_checks.summary(shown) if shown else {}
+    defaults = list(dict.fromkeys([voice.model(), *agent_checks.DEFAULT_MODELS]))
+    return page(request, "skill_checks.html", data=data, history=history, running=agent_checks.running_id(),
+                scenarios=agent_checks.scenarios(), cases=agent_checks.custom_cases(),
+                answers=agent_checks.recent_answers(), defaults=defaults, budget=agent_checks.budget(),
+                month=agent_checks.monthly_messages(), model=voice.model(), transport=agent_skills.transport(),
+                transports=agent_skills.TRANSPORT_RU, skills=agent_skills.SKILLS, role_ru=agent_checks.ROLE_RU,
+                msg=CHECK_MESSAGES.get(msg, ""), error=error[:300], key=bool(config.openrouter_key()))
+
+
+@app.post("/skills/checks")
+async def skill_checks_action(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    do = str(f.get("do") or "")
+    try:
+        if do == "run":
+            models = re.split(r"[\s,;]+", str(f.get("models") or ""))
+            agent_checks.start(models, f.getlist("transport"), _who(request))
+            return RedirectResponse("/skills/checks?msg=started", 303)
+        if do == "stop":
+            agent_checks.stop()
+            return RedirectResponse("/skills/checks?msg=stopped", 303)
+        if do == "pick":
+            model, way = str(f.get("model") or "").strip(), str(f.get("transport") or "")
+            if not re.fullmatch(r"[\w.\-]+/[\w.:\-]+", model) or way not in agent_skills.TRANSPORTS:
+                raise agent_checks.CheckError("Неизвестная модель или способ")
+            settings_store.set_many({"agent_model": model, "agent_transport": way})
+            return RedirectResponse(f"/skills/checks?msg=picked&run={int(f.get('run') or 0)}", 303)
+        if do == "budget":
+            raw = str(f.get("budget") or "0").strip().replace(",", ".") or "0"
+            try:
+                value = float(raw)
+            except ValueError:
+                raise agent_checks.CheckError("Бюджет — число долларов в месяц, например 20") from None
+            if not 0 <= value <= 100000:
+                raise agent_checks.CheckError("Бюджет — от 0 до 100 000 долларов в месяц")
+            settings_store.set_many({"agent_budget_month_usd": round(value, 2)})
+            return RedirectResponse("/skills/checks?msg=budget#compare", 303)
+        if do == "mark":
+            agent_checks.add_case(int(str(f.get("message_id") or "0")), str(f.get("expected") or ""),
+                                  [str(f.get("must") or "")], [str(f.get("must_not") or "")], _who(request))
+            return RedirectResponse("/skills/checks?msg=marked#own", 303)
+        if do in ("delete", "toggle"):
+            with SessionLocal() as s:
+                case = s.get(AgentCheckCase, int(str(f.get("case_id") or "0")))
+                if case is None:
+                    raise agent_checks.CheckError("Случай не найден")
+                if do == "delete":
+                    s.delete(case)
+                else:
+                    case.active = not case.active
+                s.commit()
+            return RedirectResponse(f"/skills/checks?msg={'deleted' if do == 'delete' else 'toggled'}#own", 303)
+    except (agent_checks.CheckError, ValueError) as exc:
+        return RedirectResponse("/skills/checks?error=" + quote(str(exc)[:300]), 303)
+    raise HTTPException(404, "Неизвестное действие")
+
+
+@app.get("/skills/checks/export")
+def skill_checks_export(request: Request, days: int = 90):
+    """The conversations as JSON lines: to pick the worst answers or to share them with the developer."""
+    guard_admin(request)
+    name = f"sysai-dialogs-{dt.date.today().isoformat()}.jsonl"
+    return StreamingResponse(agent_checks.export_lines(max(1, min(days, 365))), media_type="application/x-ndjson",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.post("/skills")

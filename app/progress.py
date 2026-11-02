@@ -106,6 +106,8 @@ def _step_text(s, step, names) -> str:
         return f"отправить {'архив' if a.get('from_step') is not None else 'файлы'} {who('to')}"
     if step.tool == "report":
         return "доложить руководителю"
+    if step.tool == "run_skill":
+        return a.get("summary") or "выполнить просьбу"
     return "закрыть дело"
 
 

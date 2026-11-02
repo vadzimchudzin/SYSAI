@@ -257,6 +257,8 @@ def describe_plan(s, case) -> str:
             lines.append(f"отправить {'архив' if a.get('from_step') is not None else 'файлы'} {names[a['to']]}")
         elif step.tool == "report":
             lines.append("доложить результат")
+        elif step.tool == "run_skill":
+            lines.append(a.get("summary") or "выполнить просьбу")
     return "; ".join(lines)
 
 
@@ -333,6 +335,10 @@ def _write(purpose: str, facts: dict) -> str:
         "failure": "Сообщи руководителю, что дело не удалось начать или выполнить: reason. Предложи, что можно сделать.",
         "handover": "Напиши сотруднику (person), что руководитель передаёт ему поручение (task), которое вёл ты. Коротко "
                     "перечисли, что уже сделано (done_so_far) и что получено (documents), и что осталось сделать.",
+        "skill_done": "Коротко сообщи человеку, что руководитель одобрил его просьбу и ты её выполнил: done — что "
+                      "сделано. Без лишних слов.",
+        "skill_declined": "Коротко и по-доброму сообщи человеку, что руководитель не одобрил его просьбу (asked). "
+                          "Не спорь и не объясняй, как устроено одобрение; предложи, чем можешь помочь сам.",
     }[purpose]
     system = voice.system_prompt("Ты ведёшь дело по поручению с совещания. " + instructions + ' JSON: {"text":"..."}')
     facts = {"purpose": purpose, **facts}
@@ -708,6 +714,76 @@ def _close_step(case_id: int, step_id: int) -> bool:
     return True
 
 
+# ----------------------------------------------------------------------------- a skill waiting for the director
+def start_skill(action: dict, summary: str, mode: str, *, chat: str, requested_by: str, employee_id=None,
+                sender: dict | None = None, full: bool = False) -> int:
+    """A request from the chat whose skill needs the director (Skills page: «с подтверждением» or «только предложить»):
+    a case of run_skill → close that waits for the approval, then does it and tells the person who asked."""
+    mode = mode if mode in ("approve", "suggest") else "approve"
+    with SessionLocal() as s:
+        case = Case(title=summary[:500] or "Просьба из чата", kind="skill", autonomy=mode, planner="agent",
+                    status="awaiting_approval" if mode == "approve" else "suggested")
+        case.steps.extend([
+            CaseStep(position=0, tool="run_skill",
+                     args={"skill": action.get("type"), "action": dict(action), "summary": summary[:500],
+                           "chat": str(chat), "employee_id": employee_id, "author": requested_by[:120],
+                           "sender": sender or {}, "full": bool(full), "requested_by": requested_by[:120],
+                           "requested_chat": str(chat)}),
+            CaseStep(position=1, tool="close", args={})])
+        s.add(case)
+        s.flush()
+        _event(s, case.id, "planned", f"Просьба от {requested_by or 'сотрудника'}: {summary}")
+        s.commit()
+        case_id = case.id
+    _tell_leaders(case_id, "approval", {"plan": summary, "autonomy": mode, "requested_by": requested_by})
+    return case_id
+
+
+def _tell_requester(case_id: int, purpose: str, extra: dict) -> None:
+    """The person who asked hears how their request ended; failures are logged, never raised."""
+    if not userbot.ai_mode():
+        return
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        step = next((x for x in case.steps if x.tool == "run_skill"), None) if case else None
+        if step is None or not (step.args or {}).get("requested_chat"):
+            return
+        chat = str(step.args["requested_chat"])
+        facts = {"case": {"id": case.id, "title": case.title}, "requested_by": step.args.get("requested_by"), **extra}
+    try:
+        _send_text(chat, _write(purpose, facts))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("case %s: the person who asked was not told (%s): %s", case_id, purpose, exc)
+        return
+    with SessionLocal() as s:
+        _event(s, case_id, "told_requester", purpose)
+        s.commit()
+
+
+def _run_skill(case_id: int, step_id: int) -> bool:
+    from . import agent_skills, assistant
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        a = dict(step.args or {})
+    action = dict(a.get("action") or {})
+    if action.get("type") not in agent_skills.SKILLS:
+        raise CaseError(f"неизвестный навык {action.get('type')!r}")
+    try:
+        agent_skills.execute(action, a.get("chat") or "", a.get("employee_id"), a.get("author") or "", a.get("sender") or None,
+                             full=bool(a.get("full")))
+        if action["type"] == "team_report" and a.get("chat"):
+            assistant.send_team_report(a["chat"], action.get("scope") or "all")
+    except agent_skills.SkillError as exc:
+        raise CaseError(str(exc)) from exc
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        step.status, step.finished_at, step.result = "done", now(), {"done": a.get("summary") or ""}
+        _event(s, case_id, "skill_done", f"Сделано: {a.get('summary') or action['type']}", step_id)
+        s.commit()
+    _tell_requester(case_id, "skill_done", {"done": a.get("summary") or ""})
+    return True
+
+
 # ----------------------------------------------------------------------------- delivery: «запакуй и отправь ему»
 def _safe_name(name: str, fallback: str = "файл") -> str:
     name = re.sub(r"[\\/\x00-\x1f]+", "_", str(name or "")).strip(" .") or fallback
@@ -885,7 +961,7 @@ def _local_time(moment) -> str:
     return local.strftime("%H:%M") if local.date() == today else local.strftime("%d.%m %H:%M")
 
 
-EVENT_SKIP = ("retry", "told_leader")  # internal noise, not what a person wants to hear about
+EVENT_SKIP = ("retry", "told_leader", "told_requester")  # internal noise, not what a person wants to hear about
 
 
 def _case_story(s, case, events: int = 5) -> dict:
@@ -953,7 +1029,8 @@ def recent_view(hours: int = 48, limit: int = 8) -> list:
 
 
 _RUN = {"send_message": _send_message, "wait_reply": _wait_reply, "forward_document": _forward_document,
-        "report": _report, "close": _close_step, "zip_pack": _zip_pack, "send_files": _send_files}
+        "report": _report, "close": _close_step, "zip_pack": _zip_pack, "send_files": _send_files,
+        "run_skill": _run_skill}
 
 
 def _close(s, case) -> None:
@@ -1155,6 +1232,10 @@ def cancel(case_id: int, by: str = "") -> bool:
             case.task.status = "assistant_failed"
         _event(s, case_id, "cancelled", f"Дело отменил {by or 'руководитель'}")
         s.commit()
+        declined = case.kind == "skill" and not any(x.tool == "run_skill" and x.status == "done" for x in case.steps)
+        title = case.title
+    if declined:
+        _tell_requester(case_id, "skill_declined", {"asked": title})
     return True
 
 
