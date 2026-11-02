@@ -21,6 +21,9 @@ DEFAULTS = {
     "digest_last_sent": "",          # the day / week already covered         # see everything, never asked or reported to by the assistant (access.py)      # contacts (besides the reviewers) who may ask "who does what" and get reports
     "persona": "",                   # how the AI employee talks; empty = built-in default
     "agent_model": "google/gemini-2.5-flash",
+    "agent_transport": "json",       # how the AI employee asks for actions: json (an answer with "actions") | tools
+    "agent_skill_modes": {},         # skill -> auto | approve | suggest (Skills page); nothing set = everything runs at once
+    "agent_budget_month_usd": 0.0,   # what the AI employee may cost a month (checking dialogs compare models with it)
     "userbot_api_id": "", "userbot_api_hash": "", "userbot_session": "", "userbot_phone": "",  # sealed, see userbot.py
     "userbot_pending": "", "userbot_me": {},
     # access

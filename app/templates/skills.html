@@ -1,6 +1,29 @@
 {% extends "base.html" %}{% block title %}Навыки — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('agent-checks.css') }}">{% endblock %}
 {% block body %}
-<h1>Навыки</h1>
+<div class="skills-top"><h1>Навыки</h1><a class="btn sm" href="/skills/checks">Проверочные диалоги</a></div>
+<section class="card" id="agent-skills">
+  <h2>Что умеет ИИ-сотрудник</h2>
+  <p class="small muted">Каждое действие — навык: когда его применять, кто может о нём попросить и как его выполняет код. Модель только предлагает действие; код проверяет права и данные и лишь потом выполняет. Для навыков с выбором режима можно включить одобрение: тогда просьбы сотрудников сначала уходят руководителю (ответ «да» в чате или «Одобрить» на странице <a href="/progress?scope=chat">Прогресс</a>), а просьбы самих руководителей выполняются сразу.</p>
+  {% if saved %}<div class="people-msg" role="status">Сохранено: режимы навыков и способ вызова действуют со следующего сообщения.</div>{% endif %}
+  <form method="post" action="/skills/agent">
+    <div class="table-wrap"><table class="small skill-table">
+      <thead><tr><th>Навык</th><th>Когда</th><th>Кто может</th><th>Режим</th></tr></thead>
+      <tbody>{% for k in builtin %}
+        <tr><td><b>{{ k.title }}</b><br><code class="muted">{{ k.name }}</code></td><td data-label="Когда">{{ k.hint }}</td><td data-label="Кто может">{{ k.who }}</td>
+          <td data-label="Режим">{% if k.modes %}<select name="mode_{{ k.name }}" aria-label="Режим: {{ k.title }}">{% for m, label in modes_ru.items() %}<option value="{{ m }}" {{ 'selected' if k.mode == m }} title="{{ mode_hints[m] }}">{{ label }}</option>{% endfor %}</select>
+          {%- else %}<span class="muted" title="Это само обращение к руководителю или его решение — одобрять нечего">всегда сразу</span>{% endif %}</td></tr>
+      {% endfor %}</tbody>
+    </table></div>
+    <div class="skill-way">
+      <label class="f">Как модель просит действия
+        <select name="transport">{% for t, label in transports.items() %}<option value="{{ t }}" {{ 'selected' if transport == t }}>{{ label }}{{ ' (вызов функций OpenRouter)' if t == 'tools' else ' (как раньше)' }}</option>{% endfor %}</select></label>
+      <p class="small muted">Модель ИИ-сотрудника: <b>{{ agent_model }}</b>. Какой способ и какая модель лучше — видно на странице <a href="/skills/checks">«Проверочные диалоги»</a>: там же их можно выбрать одной кнопкой.</p>
+    </div>
+    <button class="btn sm primary">Сохранить</button>
+  </form>
+</section>
+<h2 class="skills-company">Навыки компании</h2>
 <p class="muted small">Сценарии и шаблоны, по которым ИИ-сотрудник действует: как запросить документ, каким тоном писать подрядчикам, что проверить перед отправкой. Подходящий навык сам подставляется в сообщения и ответы ассистента.</p>
 {% set cur = (skills|selectattr('id', 'equalto', edit)|list|first) if edit else None %}
 <section class="card"><h2>{{ 'Изменить навык' if cur else 'Новый навык' }}</h2>
