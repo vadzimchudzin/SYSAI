@@ -13,6 +13,9 @@
     <tr><th>Короткие реплики</th><td>{% if r.short.total %}{{ r.short.right }} из {{ r.short.total }} ({{ pct(r.short.accuracy) }}){% else %}нет{% endif %}</td></tr>
     <tr><th>Людей / голосов</th><td>{{ r.ref_speakers }} в эталоне · {{ r.hyp_speakers }} в автоматической разметке</td></tr>
   </table>
+  {% if reference.runs %}<p class="small ref-runs">Способы на этой записи:{% for w in reference.runs %}
+    <span>{{ w.title }} — {% if w.error %}<span class="muted">{{ w.error }}</span>{% else %}<b>{{ pct(w.accuracy) }}</b>{% if w.threshold %} <span class="muted">при пороге {{ w.threshold|replace('.', ',') }}</span>{% endif %}{% endif %}</span>{% endfor %}
+    <a href="/diarization#compare">Сравнение →</a></p>{% endif %}
   <p class="small muted">Сохранён {% if reference.at %}{{ local_time(reference.at) }}{% endif %}{% if reference.by %} · {{ reference.by }}{% endif %} · {{ reference.replicas }} реплик. <a href="/diarization">Все эталоны и средняя точность →</a></p>
   <div class="row">
     <form method="post" action="/meetings/{{ m.id }}/reference"><button class="btn sm">Обновить эталон по текущей расшифровке</button></form>

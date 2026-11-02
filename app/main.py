@@ -24,13 +24,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, audio_archive, bitrix, cases, diarization_eval, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress,
+from . import (accounts, agent, audio_archive, bitrix, cases, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_id, storage, telegram, transcript_edit, userbot, notion,
                voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceprint, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -494,7 +494,7 @@ async def demo(request: Request):
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
 def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False, speakers: str = "",
-                 changed: str = "", recording: str = "", seg: str = "", ref: str = ""):
+                 changed: str = "", recording: str = "", seg: str = "", ref: str = "", people: str = ""):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
@@ -519,6 +519,11 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
         edits = transcript_edit.history(loaded)
         reference_admin = current_user(request)["role"] == "superuser"
         reference = diarization_eval.summary(loaded) if reference_admin else None
+        if reference is not None:
+            reference["runs"] = diarization_runs.brief(loaded.diarization_reference,
+                                                       diarize.threshold_of(settings_store.all_settings()))
+        present = participants.view(s, loaded)
+        hint = participants.match_alert(s, loaded) if (loaded.participants or {}).get("source") != "alert" else None
     if not may_listen:  # recorded in someone else's browser: the same rule as for the voice clips
         kept = {"state": "none", "text": "Запись этого совещания доступна только тому, кто его записал."}
     client = voice_diagram.client_payload(diagram) if diagram else None
@@ -535,7 +540,68 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
                 speakers_editable=bool(m.transcript) and m.status not in ("queued", "transcribing"),
                 edits=edits, seg_msg=SEGMENT_MESSAGES.get(seg, ""), local_time=userbot.local_time,
                 reference=reference, reference_admin=reference_admin, ref_msg=REFERENCE_MESSAGES.get(ref, ""),
-                pct=diarization_eval.pct, label_list=diarization_eval.label_list)
+                pct=diarization_eval.pct, label_list=diarization_eval.label_list,
+                attendance=present, participant_ids=present["ids"], alert_hint=hint.title if hint is not None else "",
+                people_msg=PARTICIPANT_MESSAGES.get(people, ""), diarization_note=_diarization_note(m))
+
+
+def _diarization_note(meeting) -> dict | None:
+    """How the voices of this meeting were labelled, when it is worth saying: another way than the parts, or a failure."""
+    note = (meeting.options or {}).get("diarization") if isinstance(meeting.options, dict) else None
+    if not isinstance(note, dict) or (note.get("method") == "chunks" and not note.get("error")):
+        return None
+    error = str(note.get("error") or "").strip()
+    if error and error[-1] not in ".!?…":
+        error += "."
+    name = str(note.get("wanted") or note.get("method")) if error else str(note.get("method"))
+    return {"title": diarize.METHODS.get(name, diarize.METHODS["chunks"]), "voices": note.get("voices"), "error": error,
+            "seconds": note.get("seconds")}
+
+
+PARTICIPANT_MESSAGES = {
+    "saved": "Участники сохранены. Имена голосам теперь подбираются только из них; протокол учтёт список после «Пересобрать».",
+    "alert": "Участники взяты из напоминания.",
+    "cleared": "Список участников сброшен: имена голосам подбираются из всех сотрудников.",
+    "noalert": "Для этой встречи не нашлось напоминания с участниками.",
+}
+
+
+@app.post("/meetings/{mid}/participants")
+async def meeting_participants(request: Request, mid: int):
+    """«Участники»: who was at the meeting. Names for its voices come only from them; the protocol lists them."""
+    guard(request)
+    form = await request.form()
+    action = str(form.get("action") or "save")
+    with SessionLocal() as s:
+        meeting = s.get(Meeting, mid)
+        if meeting is None:
+            raise HTTPException(404, "Совещание не найдено.")
+        if action == "save":
+            guests = str(form.get("guests") or "")[:4000].splitlines()
+            participants.set_people(s, meeting, form.getlist("ids"), guests, by=current_user(request)["username"])
+            code = "saved"
+        elif action == "clear":
+            meeting.participants, code = None, "cleared"
+        elif action == "alert":
+            previous, meeting.participants = meeting.participants, None
+            code = "alert" if participants.ensure(s, meeting) else "noalert"
+            if code == "noalert":
+                meeting.participants = previous
+        else:
+            raise HTTPException(400, "Неизвестное действие со списком участников.")
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?people={code}#meeting-participants", 303)
+
+
+def _named_present(meeting, who, by: str = "") -> None:
+    """A person or a named guest chosen for a voice was at the meeting: the list of participants grows."""
+    if not who:
+        return
+    name, employee_id, guest = who
+    if employee_id is not None:
+        participants.add(meeting, employee_id=employee_id, by=by)
+    elif guest and not re.fullmatch(voice_diagram.GUEST + r"( \d+)?", str(name or "")):
+        participants.add(meeting, guest=name, by=by)
 
 
 RECORDING_MESSAGES = {"deleted": "Запись удалена из хранилища. Расшифровка, протокол и диаграмма остались."}
@@ -604,6 +670,7 @@ async def meeting_speaker_assign(request: Request, mid: int):
         after, count = voice_diagram.assign(before, label, name, employee_id, guest, by=by)
         if count:
             transcript_edit.record(meeting, after, transcript_edit.assigned(before, after, label, name, by))
+            _named_present(meeting, (name, employee_id, guest), by)
         s.commit()
     return RedirectResponse(f"/meetings/{mid}?speakers=assigned&changed={count}#voice-diagram", 303)
 
@@ -673,7 +740,7 @@ def segment_editor(request: Request, mid: int, seq: str, fragment: bool = False)
                    prev=neighbour(index - 1), next=neighbour(index + 1),
                    prev_sig=transcript_edit.signature(neighbour(index - 1)) if neighbour(index - 1) else "",
                    next_sig=transcript_edit.signature(neighbour(index + 1)) if neighbour(index + 1) else "",
-                   employees=employees)
+                   employees=employees, participant_ids=participants.employee_ids(meeting))
         if fragment:
             return tpl.TemplateResponse(request, "_segment_editor.html", ctx)
         return page(request, "segment_edit.html", **ctx)
@@ -686,33 +753,39 @@ async def _segment_change(request: Request, mid: int, seq: str, change):
     by = current_user(request)["username"]
     with SessionLocal() as s:
         meeting = _speaker_meeting(s, mid)
+        chosen = []
         try:
-            transcript, entry = change(s, meeting.transcript, index, form, by)
+            transcript, entry = change(s, meeting.transcript, index, form, by, chosen)
         except transcript_edit.EditError as exc:
             raise _segment_error(exc)
         transcript_edit.record(meeting, transcript, entry)
+        for who in chosen:
+            _named_present(meeting, who, by)
         s.commit()
     return _segment_redirect(mid, entry["op"], entry["seq"])
 
 
 @app.post("/meetings/{mid}/segments/{seq}/speaker")
 async def segment_speaker(request: Request, mid: int, seq: str):
-    def change(s, transcript, index, form, by):
-        return transcript_edit.set_speaker(transcript, index, form.get("sig"), _segment_choice(s, transcript, form), by)
+    def change(s, transcript, index, form, by, chosen):
+        who = _segment_choice(s, transcript, form)
+        chosen.append(who)
+        return transcript_edit.set_speaker(transcript, index, form.get("sig"), who, by)
     return await _segment_change(request, mid, seq, change)
 
 
 @app.post("/meetings/{mid}/segments/{seq}/split")
 async def segment_split(request: Request, mid: int, seq: str):
-    def change(s, transcript, index, form, by):
+    def change(s, transcript, index, form, by, chosen):
         who = _segment_choice(s, transcript, form) if str(form.get("who") or transcript_edit.SAME) != transcript_edit.SAME else None
+        chosen.append(who)
         return transcript_edit.split(transcript, index, form.get("sig"), form.get("at"), who, by)
     return await _segment_change(request, mid, seq, change)
 
 
 @app.post("/meetings/{mid}/segments/{seq}/merge")
 async def segment_merge(request: Request, mid: int, seq: str):
-    def change(s, transcript, index, form, by):
+    def change(s, transcript, index, form, by, chosen):
         return transcript_edit.merge(transcript, index, form.get("sig"), str(form.get("with") or ""),
                                      form.get("neighbour_sig"), by)
     return await _segment_change(request, mid, seq, change)
@@ -765,7 +838,7 @@ def meeting_reference_delete(request: Request, mid: int):
 
 
 @app.get("/diarization", response_class=HTMLResponse)
-def diarization_overview(request: Request):
+def diarization_overview(request: Request, msg: str = ""):
     """«Точность разметки голосов»: every reference, its metrics and the totals."""
     guard_admin(request)
     rows = []
@@ -776,9 +849,67 @@ def diarization_overview(request: Request):
             if info is not None:
                 rows.append({"id": meeting.id, "title": meeting.title or f"Совещание {meeting.id}",
                              "date": meeting.meeting_date, "duration": meeting.duration_sec, **info})
+        references = [meeting.diarization_reference for meeting in meetings]
     total = diarization_eval.combine([row["metrics"] for row in rows])
+    settings = settings_store.all_settings()
+    method, threshold = diarize.method_of(settings), diarize.threshold_of(settings)
     return page(request, "diarization.html", rows=rows, total=total, pct=diarization_eval.pct,
-                label_list=diarization_eval.label_list, local_time=userbot.local_time)
+                label_list=diarization_eval.label_list, local_time=userbot.local_time,
+                compare=diarization_runs.overview(references, method, threshold), run=diarization_runs.status(),
+                method=method, threshold=threshold, methods=diarize.METHODS,
+                unavailable={name: diarize.unavailable(name) for name in diarize.METHODS},
+                msg=DIARIZATION_MESSAGES.get(msg, ""), when=_when)
+
+
+def _when(value) -> str:
+    try:
+        return userbot.local_time(dt.datetime.fromisoformat(str(value)))
+    except (TypeError, ValueError):
+        return ""
+
+
+DIARIZATION_MESSAGES = {
+    "started": "Сравнение запущено: способы по очереди размечают записи эталонов. Страница обновляется сама.",
+    "busy": "Сравнение уже идёт.",
+    "empty": "Нет эталонов: сначала сохраните хотя бы одну исправленную расшифровку как эталон.",
+    "applied": "Способ разметки сохранён: он сработает на следующих записях.",
+}
+
+
+@app.post("/diarization/compare")
+def diarization_compare(request: Request):
+    """«Сравнить способы»: every way runs on the recording of every reference, in the background."""
+    guard_admin(request)
+    if diarization_runs.status()["running"]:
+        code = "busy"
+    else:
+        code = "started" if diarization_runs.start() else "empty"
+    return RedirectResponse(f"/diarization?msg={code}#compare", 303)
+
+
+@app.post("/diarization/method")
+async def diarization_method(request: Request):
+    """«Применить»: the way (and, for the voice service, the threshold) the next recordings are labelled by."""
+    guard_admin(request)
+    form = await request.form()
+    name = str(form.get("method") or "")
+    if name not in diarize.METHODS:
+        raise HTTPException(400, "Выберите способ разметки из списка.")
+    updates = {"diarization_method": name}
+    if form.get("threshold"):
+        updates["diarization_voice_threshold"] = _voice_threshold(form.get("threshold"))
+    settings_store.set_many(updates)
+    return RedirectResponse("/diarization?msg=applied#compare", 303)
+
+
+def _voice_threshold(raw) -> float:
+    try:
+        value = float(str(raw).strip().replace(",", "."))
+    except ValueError:
+        raise HTTPException(400, "Порог сходства голосов укажите числом от 0,2 до 0,95.") from None
+    if not 0.2 <= value <= 0.95:
+        raise HTTPException(400, "Порог сходства голосов укажите числом от 0,2 до 0,95.")
+    return round(value, 2)
 
 
 @app.post("/cases/{case_id}/{action}")
@@ -1447,7 +1578,7 @@ def settings_view(request: Request, msg: str = ""):
     guard_admin(request)
     st = settings_store.all_settings()
     masked = {k: bool(st.get(k)) for k in settings_store.SECRET_KEYS}
-    env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "pyannoteai_api_key": bool(config.PYANNOTEAI_API_KEY),
+    env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY),
            "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN), "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL),
            "ticnote_appkey": bool(config.TICNOTE_APPKEY)}
     for k in settings_store.SECRET_KEYS + settings_store.HIDDEN_KEYS:
@@ -1458,7 +1589,9 @@ def settings_view(request: Request, msg: str = ""):
                 digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU,
                 account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
                 notion=notion.connection_status(), storage=storage.describe(), storage_usage=audio_archive.usage(),
-                retention_days=config.RECORDING_RETENTION_DAYS)
+                retention_days=config.RECORDING_RETENTION_DAYS, diarization_methods=diarize.METHODS,
+                diarization_hints=diarize.HINTS, voice_service=config.voice_service_enabled(),
+                diarization_unavailable={name: diarize.unavailable(name) for name in diarize.METHODS})
 
 
 def voice_default_persona() -> str:
@@ -1632,6 +1765,12 @@ async def settings_save(request: Request):
             updates[key] = int(value) if key == "case_max_reminders" else value
     if "sensitive_keywords" in f:
         updates["sensitive_keywords"] = str(f["sensitive_keywords"])[:1000]
+    if "diarization_method" in f:
+        if f["diarization_method"] not in diarize.METHODS:
+            raise HTTPException(400, "Выберите способ разметки голосов из списка")
+        updates["diarization_method"] = f["diarization_method"]
+    if "diarization_voice_threshold" in f:
+        updates["diarization_voice_threshold"] = _voice_threshold(f["diarization_voice_threshold"])
     # Secrets are never echoed in hidden inputs. A value alone (including a
     # legacy hidden value) is not an instruction to replace a credential.
     # Require the explicit action selected in the visible credential control.
@@ -2045,7 +2184,7 @@ def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str
         strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS,
         edit=panel_employee.id if panel_employee else 0, add=bool(add) and panel_employee is None,
         panel_employee=panel_employee, panel_tab=tab, saved_name=saved[:200], voice_msg=voice_msg,
-        voice_identity_enabled=bool(config.pyannoteai_key()), voice_service_enabled=config.voice_service_enabled(),
+        voice_service_enabled=config.voice_service_enabled(),
         visible_voice_samples=visible_voice_samples, voice_readiness=readiness, voice_info=voice_info,
         voice_status_ru=VOICE_STATUS_RU, initials={e.id: _initials(e.name) for e in emps},
         search_text={e.id: _employee_search_text(e) for e in emps},
@@ -2388,70 +2527,6 @@ def employee_voice_samples_cleanup(request: Request):
         speaker_id.retry_sample_cleanup(session)
         session.commit()
     return RedirectResponse("/employees", 303)
-
-
-@app.post("/employees/{eid}/voice-sample")
-def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(...), consent: str = Form("")):
-    guard_admin(request)
-    if consent not in ("yes", "1", "on", "true"):
-        return _voice_redirect(eid, "Нужно отдельное подтверждённое согласие сотрудника на голосовой шаблон.")
-    if not config.pyannoteai_key():
-        return _voice_redirect(eid, "Сначала добавьте ключ pyannoteAI в Настройки → Идентификация по голосу.")
-    if config.weak_secret_key():
-        return _voice_redirect(eid, "Перед сохранением голосового шаблона задайте надёжный SECRET_KEY на сервере.")
-    extension = pathlib.Path(sample.filename or "").suffix.lower()
-    if extension not in {".wav", ".mp3", ".m4a", ".webm", ".ogg", ".flac", ".aac", ".mp4"}:
-        return _voice_redirect(eid, "Поддерживаются WAV, MP3, M4A, WEBM, OGG, FLAC, AAC или MP4.")
-    with SessionLocal() as session:
-        employee = session.get(Employee, eid)
-        if employee is None or not employee.active:
-            return _voice_redirect(eid, "Активный сотрудник не найден.")
-        employee_name = employee.name
-    try:
-        with tempfile.TemporaryDirectory(prefix="sysai_voice_sample_") as tmp:
-            source_path = pathlib.Path(tmp) / ("upload" + extension)
-            normalized_path = pathlib.Path(tmp) / "voice-sample.wav"
-            total = 0
-            with source_path.open("wb") as destination:
-                while True:
-                    block = sample.file.read(1024 * 1024)
-                    if not block:
-                        break
-                    total += len(block)
-                    if total > speaker_id.MAX_SAMPLE_BYTES:
-                        raise speaker_id.SpeakerIdentityError("Файл образца превышает 16 МБ.")
-                    destination.write(block)
-            if total == 0:
-                raise speaker_id.SpeakerIdentityError("Файл образца пуст.")
-            duration = speaker_id.normalize_sample(source_path, normalized_path)
-            template = speaker_id.create_voiceprint(normalized_path, eid)
-            encrypted = speaker_id.encrypt_voiceprint(template)
-        with SessionLocal() as session:
-            employee = session.get(Employee, eid)
-            if employee is None:
-                raise speaker_id.SpeakerIdentityError("Сотрудник был удалён во время регистрации.")
-            profile = session.query(EmployeeVoiceprint).filter_by(employee_id=eid).one_or_none()
-            if profile is None:
-                profile = EmployeeVoiceprint(employee_id=eid)
-            profile.encrypted_voiceprint = encrypted
-            profile.provider = "pyannoteAI"
-            profile.sample_duration = duration
-            profile.consent_at = now()
-            profile.consent_version = speaker_id.CONSENT_VERSION
-            profile.updated_at = now()
-            session.add(profile)
-            session.commit()
-        return _voice_redirect(eid, f"Голосовой шаблон для «{employee_name}» создан. Исходный файл образца не сохранялся в SYSAI.")
-    except speaker_id.SpeakerIdentityError as exc:
-        return _voice_redirect(eid, str(exc)[:300])
-    except Exception:
-        log.exception("Could not enroll voiceprint for employee id %s", eid)
-        return _voice_redirect(eid, "Не удалось создать голосовой шаблон. Проверьте ключ pyannoteAI и логи сервера.")
-    finally:
-        try:
-            sample.file.close()
-        except Exception:
-            pass
 
 
 @app.get("/departments", response_class=HTMLResponse)

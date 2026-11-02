@@ -953,3 +953,26 @@ body.org-map-page { height:100dvh; min-height:100dvh; overflow:hidden; }
 }
 .model-field { margin-top: 12px; } .model-field .model-filter { padding: 7px 10px; font-size: 13px; }
 .model-hint { margin: 0; overflow-wrap: anywhere; } .model-hint.warn { color: var(--amber); }
+/* Участники совещания (participants.py) и сообщения рядом с ними */
+.people-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; }
+.people-head h2 { margin: 0; }
+.people-msg { margin: 12px 0 0; padding: 9px 12px; border: 1px solid rgba(127,183,126,.35); border-radius: 10px; background: rgba(127,183,126,.08); color: var(--soft); font-size: 13.5px; }
+.people-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+.people-list li { display: inline-block; padding: 5px 12px; border: 1px solid var(--line2); border-radius: 99px; background: var(--bg2); color: var(--text); font-size: 13px; }
+.people-list li.guest { border-style: dashed; }
+.people-list .muted { font-size: 12px; }
+.meeting-people > p.small { margin: 10px 0 0; }
+.people-form { display: grid; gap: 12px; margin-top: 10px; }
+.people-pick { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.people-pick legend { padding: 0; margin-bottom: 8px; }
+.people-pick .chip { position: relative; display: inline-block; }
+.people-pick .chip input { display: block; position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.people-pick .chip:has(input:focus-visible) { outline: 2px solid var(--clay); outline-offset: 2px; }
+.people-pick .chip .muted { font-size: 12px; }
+.people-form textarea { min-height: 62px; resize: vertical; }
+.method-hints { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+.method-hints .why { display: block; color: var(--amber); }
+.method-table tr.is-current td, .method-table tr.is-best td { background: rgba(217,142,138,.06); }
+.method-table td:last-child { text-align: right; white-space: nowrap; }
+.method-table td:first-child { min-width: 150px; }
+.ref-runs { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }

@@ -57,6 +57,8 @@ DEFAULTS = {
     # models (OpenRouter)
     "transcribe_model": "openai/gpt-4o-transcribe",
     "diarization_model": "google/gemini-2.5-flash",
+    "diarization_method": "chunks",      # chunks | voice | gemini — who speaks across the whole recording, see diarize.py
+    "diarization_voice_threshold": 0.5,  # voice prints at least this alike are one person (method «voice»)
     "report_model": "google/gemini-2.5-pro",
     "conversation_model": "openrouter/free",
     "dialogue_enabled": True,
@@ -74,7 +76,6 @@ DEFAULTS = {
     # integrations (keys pasted in the panel; environment variables are the fallback)
     "bitrix_enabled": False,
     "openrouter_api_key": "",
-    "pyannoteai_api_key": "",
     "telegram_bot_token": "",
     "bitrix_webhook_url": "",
     "notion_parent_id": "",
@@ -135,7 +136,7 @@ def set_many(values: dict):
         s.commit()
 
 
-SECRET_KEYS = ("openrouter_api_key", "pyannoteai_api_key", "telegram_bot_token", "bitrix_webhook_url", "ticnote_appkey")
+SECRET_KEYS = ("openrouter_api_key", "telegram_bot_token", "bitrix_webhook_url", "ticnote_appkey")
 # Never sent to the browser (sealed Telegram account data).
 HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me")
 
