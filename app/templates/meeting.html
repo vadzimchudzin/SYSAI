@@ -31,6 +31,7 @@
 </div>
 
 {% if m.report %}{% include '_progress_board.html' %}{% endif %}
+{% if diagram %}{% include '_voice_diagram.html' %}{% endif %}
 {% if r.visualizations %}
 <section class="card" id="meeting-visualizations">
   <div class="row between"><h2>Графики и показатели</h2><span class="pill blue">{{ r.visualizations|length }} граф.</span></div>
@@ -246,12 +247,12 @@
 </section>
 {% endif %}
 {% if m.transcript %}
-<details class="card" id="meeting-transcript"><summary><b>Расшифровка по подразделам</b> <span class="muted">· {{ m.transcript|length }} реплик · {{ group_transcript(m.transcript, r.topics or [])|length }} разделов</span></summary>
+<details class="card" id="meeting-transcript"><summary><b>Расшифровка по подразделам</b> <span class="muted">· {{ m.transcript|length }} реплик · {{ transcript_sections|length }} разделов</span></summary>
   <div class="transcript" style="margin-top:12px">
-  {% for section in group_transcript(m.transcript, r.topics or []) %}
+  {% for section in transcript_sections %}
     <section class="topic transcript-section">
       <h3 style="margin:0 0 8px">{% if section.time %}<span class="t">{{ section.time }}</span> · {% endif %}{{ section.title }}</h3>
-      {% for sg in section.segments %}<p><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}{% if sg.speaker_source == "voiceprint" %} <span class="pill green" title="Сопоставление с подтверждённым образцом. Оценка сходства не является вероятностью.">голос совпал</span>{% endif %}:</b> {{ sg.text }}</p>{% endfor %}
+      {% for sg in section.segments %}<p class="seg" id="seg-{{ sg.seq }}">{% if diagram %}<a class="t" href="#voice-diagram" data-vd-seq="{{ sg.seq }}" title="Показать на диаграмме">{{ mmss(sg.start) }}</a>{% else %}<span class="t">{{ mmss(sg.start) }}</span>{% endif %} <b>{{ sg.speaker }}{% if sg.speaker_source == "voiceprint" %} <span class="pill green" title="Сопоставление с подтверждённым образцом. Оценка сходства не является вероятностью.">голос совпал</span>{% elif sg.speaker_source == "manual" %} <span class="pill blue" title="Говорящего указал человек{% if sg.speaker_assigned_by %} ({{ sg.speaker_assigned_by }}){% endif %}.">вручную</span>{% endif %}:</b> {{ sg.text }}</p>{% endfor %}
     </section>
   {% endfor %}
   </div>

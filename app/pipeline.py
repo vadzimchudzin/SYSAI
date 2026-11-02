@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import func
 
 from . import (analyze, assistant, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive, settings_store, telegram,
-               transcribe, userbot, voice)
+               transcribe, userbot, voice, waveform)
 from .db import (ConversationMessage, DeadlineRequest, Delivery, Employee, Meeting, SessionLocal, Task, TelegramChat,
                  now)
 
@@ -172,6 +172,7 @@ def _process(meeting_id: int):
         if saved_report is not None:
             # Crash after _save_report committed: tasks and their IDs are already durable.
             _set(meeting_id, status="analyzing", error="")
+            _ensure_waveform(meeting_id, audio_path, source, saved or [], total)
             _finish_processing(meeting_id, audio_path, settings)
             return
         if source != "demo" and not config.llm_enabled():
@@ -195,6 +196,7 @@ def _process(meeting_id: int):
                 segments = _name_speakers(segments)
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
              progress="Составление отчёта и задач")
+        outline_job = _start_waveform(meeting_id, audio_path, source, segments, total)
         with SessionLocal() as s:
             employees = s.query(Employee).filter(Employee.active.is_(True)).all()
             for employee in employees:
@@ -204,12 +206,55 @@ def _process(meeting_id: int):
         report = analyze.mock_report(employees, mdate) if source == "demo" else analyze.analyze(
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
         _save_report(meeting_id, report, settings)
+        if outline_job is not None:
+            outline_job.join(WAVEFORM_WAIT)  # the original is deleted next (see WAVEFORM_WAIT)
         _finish_processing(meeting_id, audio_path, settings)
     except Cancelled:
         raise
     except Exception as e:  # noqa: BLE001
         log.exception("meeting %s failed", meeting_id)
         _set(meeting_id, status="error", progress="Ошибка", error=str(e)[:2000])
+
+
+# Seconds to let the outline decode finish before the original is deleted. A decoder that has the file open keeps
+# reading it after the unlink (POSIX), so this only covers a decoder that has not started yet; the report never waits long.
+WAVEFORM_WAIT = 120
+
+
+def _ensure_waveform(meeting_id, audio_path, source, segments, total):
+    """Store the loudness outline for the voice diagram once, while the original is still on disk.
+
+    The diagram is decoration: any failure here is logged and never stops the meeting."""
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if m is None or m.waveform:
+                return
+        if source == "demo":
+            outline = waveform.synthetic(segments, total)  # the demo has a transcript but no recording
+        elif audio_path and pathlib.Path(audio_path).is_file():
+            outline = waveform.compute(audio_path, duration_hint=total)
+        else:
+            return
+        if outline:
+            with SessionLocal() as s:
+                m = s.get(Meeting, meeting_id)
+                if m is not None and not m.waveform:
+                    m.waveform = outline
+                    s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("waveform for meeting %s was not saved", meeting_id, exc_info=True)
+
+
+def _start_waveform(meeting_id, audio_path, source, segments, total):
+    """Decode the outline next to the report analysis (network-bound), so it adds no waiting; None when not needed."""
+    if config.TESTING or source == "demo" or not audio_path or not pathlib.Path(audio_path).is_file():
+        _ensure_waveform(meeting_id, audio_path, source, segments, total)
+        return None
+    job = threading.Thread(target=_ensure_waveform, args=(meeting_id, audio_path, source, segments, total),
+                           name=f"waveform-{meeting_id}", daemon=True)
+    job.start()
+    return job
 
 
 def _name_speakers(segments: list) -> list:
