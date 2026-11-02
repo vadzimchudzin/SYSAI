@@ -110,6 +110,7 @@ def _fingerprint(segments, employees, settings, meeting_date):
         "analysis_version": 16, "batch_chars": MAX_BATCH_CHARS, "overlap_replies": OVERLAP_REPLIES,
         "model": settings.get("report_model"), "report_style": settings.get("report_style", "balanced"), "glossary": settings.get("glossary", ""),
         "employees": employees_json(employees), "meeting_date": meeting_date.isoformat(),
+        "attendees": settings.get("attendees", ""),
         "transcript": transcript_text(segments),
         "segments": [{"start": s.get("start"), "end": s.get("end"), "speaker": s.get("speaker"),
                       "text": s.get("text"), "speaker_employee_id": s.get("speaker_employee_id"),
@@ -530,6 +531,10 @@ def analyze(segments: list, employees, settings: dict, meeting_date: dt.date, pr
     profile = str(settings.get("company_profile") or settings_store_get("company_profile") or "").strip()
     if profile:
         system += "\nО компании (контекст для понимания обсуждения):\n" + profile[:2000]
+    if settings.get("attendees"):
+        system += ("\nПрисутствовали на совещании (список участников): " + str(settings["attendees"])[:1500] +
+                   "\nИмена говорящим (participants) давай только из этого списка; остальные сотрудники справочника "
+                   "могут быть исполнителями задач, но не говорящими.")
     if settings.get("open_tasks"):
         system += ("\nОткрытые задачи прошлых совещаний (контекст; если поручение повторяет открытую задачу, не придумывай "
                    "новую формулировку, а начни description со слов «повтор:»):\n" + str(settings["open_tasks"])[:4000])

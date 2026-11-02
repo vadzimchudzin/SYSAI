@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func
 
-from . import (analyze, assistant, audio_archive, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive,
-               settings_store, telegram, transcribe, userbot, voice, waveform)
+from . import (analyze, assistant, audio_archive, bitrix, checkpoints, config, deadlines, delivery, diarize, llm, render,
+               report_archive, settings_store, telegram, transcribe, userbot, voice, waveform)
 from .db import (ConversationMessage, DeadlineRequest, Delivery, Employee, Meeting, SessionLocal, Task, TelegramChat,
                  now)
 
@@ -179,6 +179,9 @@ def _process(meeting_id: int):
         if source != "demo" and not config.llm_enabled():
             raise llm.LLMError("Для обработки настоящей записи нужен ключ OpenRouter. Демо запускается отдельно.")
         checkpoint = checkpoints.Store(meeting_id)
+        allowed, people, attendees = _participants(meeting_id)
+        if attendees:
+            settings = dict(settings, attendees=attendees)
         if saved is not None:
             segments = saved
         else:
@@ -192,9 +195,12 @@ def _process(meeting_id: int):
                     audio_path = ticnote_ingest.restore_audio(meeting_id)
                 if not audio_path or not pathlib.Path(audio_path).is_file():
                     raise llm.LLMError("Исходное аудио не найдено; загрузите запись заново")
-                total, segments = transcribe.transcribe(audio_path, settings,
+                total, segments = transcribe.transcribe(audio_path, dict(settings, _participants=allowed),
                                                         progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
-                segments = _name_speakers(segments)
+                segments, how = diarize.relabel(audio_path, segments, total, settings, people=people,
+                                                progress=lambda p: _set(meeting_id, progress=p))
+                _note_diarization(meeting_id, how)
+                segments = _name_speakers(segments, allowed)
         # A transcript made by this run replaces any earlier one: corrections made to that one do not apply to it.
         fresh = {} if saved is not None else {"transcript_auto": None, "transcript_edits": None}
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
@@ -270,12 +276,47 @@ def _keep_recording(meeting_id, audio_path, source):
         log.warning("recording of meeting %s was not handed to the storage", meeting_id, exc_info=True)
 
 
-def _name_speakers(segments: list) -> list:
-    """«Спикер 2» becomes «Ольга Кузнецова» when the conversation proves it (see speakers.py)."""
+def _participants(meeting_id: int):
+    """(employee ids whose names voices may get or None for anybody, number of participants, «Присутствовали» line).
+
+    A meeting without a list takes the people of its regular meeting from «Напоминания» first (participants.py)."""
+    from . import participants
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if participants.ensure(s, m):
+                s.commit()
+            if not participants.is_set(m):
+                return None, 0, ""
+            return participants.employee_ids(m), participants.count(m), ", ".join(participants.present(s, m))
+    except Exception:  # noqa: BLE001  the list is a hint: without it the meeting is processed as before
+        log.exception("participants of meeting %s are unavailable", meeting_id)
+        return None, 0, ""
+
+
+def _note_diarization(meeting_id: int, how: dict) -> None:
+    """Keep how the voices were labelled (shown on the meeting page): the way, the number of voices, a failure."""
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if m is not None:
+                m.options = dict(m.options or {}, diarization=dict(how, at=now().isoformat(timespec="seconds")))
+                s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("diarization note of meeting %s was not saved", meeting_id, exc_info=True)
+
+
+def _name_speakers(segments: list, allowed=None) -> list:
+    """«Спикер 2» becomes «Ольга Кузнецова» when the conversation proves it (see speakers.py).
+
+    allowed: the employee ids of the meeting's participants; names of other people are never given to its voices."""
     from . import speakers
     try:
         with SessionLocal() as s:
-            people = s.query(Employee).filter(Employee.active.is_(True)).all()
+            query = s.query(Employee).filter(Employee.active.is_(True))
+            if allowed is not None:
+                query = query.filter(Employee.id.in_(list(allowed) or [-1]))
+            people = query.all()
             named, mapping = speakers.name_speakers(segments, people)
         return named
     except Exception:  # noqa: BLE001  naming must never lose a transcript

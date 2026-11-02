@@ -40,6 +40,14 @@ def _meeting_date(node: dict) -> dt.date | None:
     return dt.datetime.fromtimestamp(ms / 1000, ZoneInfo(config.TIMEZONE)).date()
 
 
+def _recorded(node: dict) -> dict:
+    """When the device started recording: tells which regular meeting this is (participants.py)."""
+    ms = _ms(node, "createTimestamp")
+    if not ms:
+        return {}
+    return {"recorded_at": dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).isoformat(timespec="seconds")}
+
+
 def _title(node: dict) -> str:
     name = (node.get("name") or "").strip()
     if name:
@@ -140,7 +148,7 @@ def import_recording(appkey: str, node: dict) -> int | None:
             log.info("TicNote import %s stopped by user during download", record_id)
             return None
         mid = pipeline.create_meeting(f"{title}.wav", str(dst), source="ticnote", title=title,
-                                      meeting_date=_meeting_date(node))
+                                      meeting_date=_meeting_date(node), options=_recorded(node))
     except Exception as e:  # noqa: BLE001
         log.warning("TicNote import %s failed: %s", record_id, e)
         dst.unlink(missing_ok=True)

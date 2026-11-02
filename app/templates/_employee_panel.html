@@ -52,25 +52,6 @@
     {% else %}
     <p class="small muted">Образцов пока нет. Их добавляют со страницы совещания кнопкой «Выбрать образец голоса вручную»: прослушайте фрагмент и подтвердите, кто говорит. Для готового профиля нужны записи минимум с {{ v.need }} разных совещаний.</p>
     {% endif %}
-    {% if e.voiceprint or voice_identity_enabled %}
-    <details class="emp-legacy-voice"{% if e.voiceprint %} open{% endif %}>
-      <summary>Голосовой шаблон pyannoteAI</summary>
-      {% if e.voiceprint %}
-        <p class="small"><span class="pill green">Голосовой шаблон активен</span> · {{ e.voiceprint.sample_duration }} сек. · зарегистрирован {{ e.voiceprint.created_at.strftime('%d.%m.%Y') if e.voiceprint.created_at else '' }}</p>
-        <form method="post" action="/employees/{{ e.id }}/voice-sample/delete" onsubmit="return confirm('Удалить голосовой шаблон?')"><button class="btn sm danger">Удалить шаблон</button></form>
-      {% else %}<p class="small muted">Шаблон ещё не зарегистрирован. Для регистрации нужен отдельный образец речи сотрудника.</p>{% endif %}
-      {% if voice_identity_enabled %}
-      <form method="post" action="/employees/{{ e.id }}/voice-sample" enctype="multipart/form-data" class="voice-profile-form">
-        <label class="f">Чистый образец голоса (5–30 секунд)
-          <input type="file" name="sample" accept=".wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4" required>
-        </label>
-        <p class="small muted">Лучше 10–20 секунд обычной речи только этого человека — без музыки, других голосов и сильного шума. Загрузка нового образца заменит прежний.</p>
-        <label class="check"><input type="checkbox" name="consent" value="yes" required> Подтверждаю, что отдельное согласие сотрудника получено и зафиксировано. Образец и аудиофрагменты совещаний будут обрабатываться внешним сервисом pyannoteAI.</label>
-        <button class="btn primary">Создать / заменить шаблон</button>
-      </form>
-      {% endif %}
-    </details>
-    {% endif %}
   </section>
   {% endif %}
   <footer class="emp-panel-foot">

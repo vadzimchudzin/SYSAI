@@ -235,9 +235,12 @@ def save(meeting, by: str = "") -> dict:
         raise transcript_edit.EditError("В расшифровке нет реплик со временем — эталон не из чего сделать.")
     auto = meeting.transcript_auto if meeting.transcript_auto is not None else transcript_edit.automatic(transcript)
     previous = meeting.diarization_reference if isinstance(meeting.diarization_reference, dict) else {}
+    fingerprint = transcript_edit.fingerprint(transcript)
+    # the ways compared on the old answer key were measured against it: they stay only when it did not change
+    runs = (previous.get("runs") or {}) if previous.get("fingerprint") == fingerprint else {}
     reference = {"transcript": transcript, "auto": copy.deepcopy(auto), "by": str(by or "")[:120],
                  "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                 "fingerprint": transcript_edit.fingerprint(transcript), "runs": previous.get("runs") or {}}
+                 "fingerprint": fingerprint, "runs": runs}
     meeting.diarization_reference = reference
     return reference
 

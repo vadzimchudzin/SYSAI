@@ -1,5 +1,5 @@
 {% from "_logo.html" import logo %}{% from "_icons.html" import icon %}<!doctype html>
-<html lang="ru"><head>{% include "_head.html" %}<title>{% block title %}SYSAI{% endblock %}</title></head>
+<html lang="ru"><head>{% include "_head.html" %}<title>{% block title %}SYSAI{% endblock %}</title>{% block head %}{% endblock %}</head>
 {% set path = request.url.path %}
 {% set is_org_map = path == '/departments' and request.query_params.get('view') != 'list' %}
 <body class="{{ 'org-map-page' if is_org_map else '' }}"><div class="aura soft" aria-hidden="true"><i></i><i></i><i></i></div>

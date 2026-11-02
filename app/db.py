@@ -223,12 +223,12 @@ class OrgRelation(Base):
 
 
 class EmployeeVoiceprint(Base):
-    """Encrypted provider voiceprint and consent metadata; raw enrollment audio is not stored."""
+    """Templates of the removed pyannoteAI identification. Nothing writes them any more; init_db deletes what is left."""
     __tablename__ = "employee_voiceprints"
     id = Column(Integer, primary_key=True)
     employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     encrypted_voiceprint = Column(LargeBinary, nullable=False)
-    provider = Column(String(40), nullable=False, default="pyannoteAI")
+    provider = Column(String(40), nullable=False, default="legacy")
     sample_duration = Column(Float, nullable=False, default=0.0)
     consent_at = Column(DateTime(timezone=True), nullable=False, default=now)
     consent_version = Column(String(40), nullable=False, default="voiceprint-consent-v1")
@@ -309,6 +309,7 @@ class Meeting(Base):
     transcript_auto = deferred(Column(JSON, nullable=True))
     transcript_edits = deferred(Column(JSON, nullable=True))
     diarization_reference = deferred(Column(JSON, nullable=True))
+    participants = Column(JSON, nullable=True)  # who was there, see participants.py: {"people": [...], "source": ...}
     waveform = Column(JSON, nullable=True)  # loudness outline for the voice diagram, see waveform.py
     recording_status = Column(String(12), default="")  # "" | pending | stored | failed | deleted | expired, see audio_archive.py
     recording = Column(JSON, nullable=True)  # the kept copy: storage key, size, duration, until when it is kept, last error
@@ -803,6 +804,7 @@ def init_db():
     _add_column_if_missing("meetings", "transcript_auto", "transcript_auto JSON")
     _add_column_if_missing("meetings", "transcript_edits", "transcript_edits JSON")
     _add_column_if_missing("meetings", "diarization_reference", "diarization_reference JSON")
+    _add_column_if_missing("meetings", "participants", "participants JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")
@@ -852,6 +854,16 @@ def init_db():
     _add_column_if_missing("employee_voice_samples", "access_owner", "access_owner VARCHAR(128) NOT NULL DEFAULT ''")
     _add_column_if_missing("employee_voice_samples", "expires_at", "expires_at TIMESTAMP")
     _ensure_voice_sample_constraints()
+    _forget_pyannote()
+
+
+def _forget_pyannote():
+    """pyannoteAI is removed: its voice templates and key are of no use and are not kept (they are personal data)."""
+    with engine.begin() as con:
+        gone = con.execute(text("DELETE FROM employee_voiceprints")).rowcount or 0
+        con.execute(text("DELETE FROM settings WHERE key = 'pyannoteai_api_key'"))
+    if gone:
+        log.info("Deleted %s voice templates of the removed pyannoteAI identification", gone)
 
 
 def _ensure_voice_sample_constraints():

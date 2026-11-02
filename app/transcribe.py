@@ -157,8 +157,94 @@ def _assign_speakers(path, segments, settings, context):
     return [dict(item, speaker=by_index[index]) for index, item in enumerate(segments)]
 
 
+ALIGN_MIN_SHARE = 0.75  # the audio model's segments must repeat at least this share of the STT words, in order
+
+
+def _spans(text):
+    """[(start char, end char, normalised word)] of a text, with the same words as _word_tokens."""
+    return [(m.start(), m.end(), m.group(0).casefold().replace("ё", "е"))
+            for m in re.finditer(r"[a-zа-яё0-9]+", str(text or ""), re.IGNORECASE)]
+
+
+def _clean_segments(segments, length):
+    """Speaker and start of each segment the audio model returned, made safe: starts in the part and never going back."""
+    out, last = [], 0.0
+    for item in segments:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item.get("start"))
+        except (TypeError, ValueError):
+            start = last
+        if isinstance(item.get("start"), bool) or not math.isfinite(start):
+            start = last
+        start = min(max(start, last, 0.0), length)
+        speaker = item.get("speaker") if isinstance(item.get("speaker"), str) and item.get("speaker").strip() else "Спикер 1"
+        out.append({"speaker": speaker.strip(), "start": start, "text": str(item.get("text") or "")})
+        last = start
+    return out
+
+
+def _project(text, segments, length):
+    """The audio model's speakers and times laid over the exact STT text.
+
+    The model often repeats the STT text with small changes (a number in words, a dropped «ну»), and an exact comparison
+    then threw the whole part into one replica of «Спикер 1». Here the STT words are matched to the model's words in
+    order; each STT word takes the segment of its match (an unmatched word stays with the word before it) and the text
+    is cut at the first word of every segment. None when less than ALIGN_MIN_SHARE of the words match."""
+    stt = _spans(text)
+    segments = _clean_segments(segments, length)
+    owned = [(number, word) for number, item in enumerate(segments) for word in _word_tokens(item["text"])]
+    if not stt or not owned:
+        return None
+    matcher = difflib.SequenceMatcher(None, [word for _, _, word in stt], [word for _, word in owned], autojunk=False)
+    owner, matched = [None] * len(stt), 0
+    for a, b, size in matcher.get_matching_blocks():
+        for k in range(size):
+            owner[a + k] = owned[b + k][0]
+        matched += size
+    if matched < ALIGN_MIN_SHARE * len(stt):
+        return None
+    first = next(value for value in owner if value is not None)
+    for k, value in enumerate(owner):  # unmatched words go with the word before them
+        owner[k] = first = value if value is not None else first
+    pieces, begin = [], 0
+    for k in range(1, len(stt) + 1):
+        if k == len(stt) or owner[k] != owner[k - 1]:
+            end = stt[k][0] if k < len(stt) else len(text)
+            piece = text[begin:end].strip()
+            if piece:
+                item = segments[owner[k - 1]]
+                pieces.append({"speaker": item["speaker"], "start": round(item["start"], 1), "text": piece})
+            begin = end
+    return pieces or None
+
+
+def _sentences(text, length):
+    """The STT text cut into sentences, each with a start estimated from its place in the text."""
+    parts = [part.strip() for part in re.split(r"(?<=[.!?…])\s+", str(text).strip()) if part.strip()]
+    merged = []
+    for part in parts:
+        if merged and len(_word_tokens(part)) < 3 and len(_word_tokens(merged[-1])) < 12:
+            merged[-1] += " " + part  # «Да.» alone gives the speaker model nothing to hear
+        else:
+            merged.append(part)
+    total, at, out = max(1, len(text)), 0, []
+    for part in merged:
+        found = text.find(part, at)
+        at = found if found >= 0 else at
+        out.append({"start": round(length * at / total, 1), "text": part})
+        at += len(part)
+    return out
+
+
 def _align_plain_transcript(path, text, settings, length, context):
-    """Fallback for STT providers that return text but no timestamped segments."""
+    """Fallback for STT providers that return text but no timestamped segments.
+
+    1. The audio model splits the STT text by speakers and times; its segments are laid over the exact STT words
+       (_project), so small differences in its wording do not lose the split.
+    2. When that fails, the STT text is cut into sentences and the audio model only says who speaks each one.
+    3. Only when both fail the part stays one replica, as before."""
     prompt = (
         "Сегментируй аудио по говорящим и времени, используя следующий STT-текст как единственный источник слов. "
         "Не добавляй, не удаляй и не исправляй слова; если невозможно надёжно выровнять речь, верни один сегмент с текстом целиком. "
@@ -176,8 +262,25 @@ def _align_plain_transcript(path, text, settings, length, context):
             tokens = [word for item in segments if isinstance(item, dict) for word in _word_tokens(item.get("text", ""))]
             if tokens == _word_tokens(text):
                 return {"segments": segments, "truncated": False}
+            projected = _project(text, segments, length)
+            if projected:
+                return {"segments": projected, "truncated": False}
     except llm.LLMError:
-        log.warning("Could not align STT text to segment timestamps; keeping the exact transcript as one segment")
+        log.warning("Could not align STT text to segment timestamps; asking for the speaker of each sentence")
+    sentences = _sentences(text, length)
+    if len(sentences) > 1:
+        try:
+            labelled = _assign_speakers(path, sentences, settings, context)
+        except llm.LLMError:
+            log.warning("Could not label the sentences of a part; keeping the exact transcript as one segment")
+        else:
+            joined = []
+            for item in labelled:
+                if joined and joined[-1]["speaker"] == item["speaker"]:
+                    joined[-1]["text"] += " " + item["text"]
+                else:
+                    joined.append(dict(item))
+            return {"segments": joined, "truncated": False}
     return {"segments": [{"speaker": "Спикер 1", "start": 0.0, "text": text}], "truncated": False}
 
 
@@ -396,6 +499,9 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
     except speaker_id.SpeakerIdentityError as exc:
         log.warning("Voice identity is unavailable; keeping ordinary speaker labels: %s", exc)
         voiceprints = []
+    if settings.get("_participants") is not None:  # only the people who were there can be heard (participants.py)
+        allowed = set(settings["_participants"])
+        voiceprints = [profile for profile in voiceprints if profile.get("employee_id") in allowed]
     segments: list = []
     settings = dict(settings, _stt_prompt=speech_fix.prompt_text(settings))  # names and terms to hear right
     base = {"version": 10, "stt_prompt": settings["_stt_prompt"], "cleanup": audio.cleanup_enabled(), "audio": digest.hexdigest(), "model": settings["transcribe_model"],

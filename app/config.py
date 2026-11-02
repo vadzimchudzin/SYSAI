@@ -38,7 +38,6 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-PYANNOTEAI_API_KEY = os.getenv("PYANNOTEAI_API_KEY", "")  # legacy only
 TICNOTE_APPKEY = os.getenv("TICNOTE_APPKEY", "").strip()
 VOICE_SERVICE_URL = os.getenv("SYSAI_VOICE_SERVICE_URL", "").strip().rstrip("/")
 VOICE_SERVICE_TOKEN = os.getenv("SYSAI_VOICE_SERVICE_TOKEN", "").strip()
@@ -117,11 +116,6 @@ def openrouter_key() -> str:
 
 def ticnote_appkey() -> str:
     return _panel("ticnote_appkey") or TICNOTE_APPKEY
-
-
-def pyannoteai_key() -> str:
-    """Deprecated compatibility helper; the active provider is the Vercel microservice."""
-    return _panel("pyannoteai_api_key") or PYANNOTEAI_API_KEY
 
 
 def voice_service_url() -> str:

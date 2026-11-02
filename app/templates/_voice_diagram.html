@@ -1,4 +1,4 @@
-{% from "_icons.html" import icon %}
+{% from "_icons.html" import icon %}{% from "_people_options.html" import employee_options %}
 {% macro plural(n, one, few, many) %}{{ one if n % 10 == 1 and n % 100 != 11 else (few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many) }}{% endmacro %}
 {% set d = diagram %}
 {% set people = d.speakers|length %}
@@ -12,6 +12,8 @@
         · {% if d.voice_matched %}голос совпал у {{ d.voice_matched }} из {{ people }}{% else %}голоса не сверялись с образцами{% endif %}
         {% if d.unknown %}· не распознано: {{ d.unknown|length }}{% endif %}
         · речь {{ mmss(d.speech_seconds) }} из {{ mmss(d.duration) }}</p>
+      {% if diarization_note %}<p class="small muted vd-meta">{% if diarization_note.error %}Разметка «{{ diarization_note.title }}» не сработала: {{ diarization_note.error }} Голоса размечены по кускам записи.
+        {%- else %}Голоса размечены по всей записи: {{ diarization_note.title }}{% if diarization_note.voices %} · {{ diarization_note.voices }} {{ plural(diarization_note.voices, 'голос', 'голоса', 'голосов') }}{% endif %}.{% endif %}</p>{% endif %}
     </div>
     <div class="vd-tools" data-vd-tools hidden>
       <div class="vd-zoom" role="group" aria-label="Масштаб">
@@ -76,7 +78,7 @@
       <label class="f">Это
         <select name="employee_id" required data-vd-choice>
           <option value="">Выберите сотрудника…</option>
-          {% for e in employees %}<option value="{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}
+          {{ employee_options(employees, participant_ids) }}
           <option value="guest">Гость — не сотрудник</option>
         </select></label>
       <label class="f" data-vd-guest>Имя гостя <input name="guest_name" maxlength="80" placeholder="Необязательно"></label>
@@ -105,7 +107,7 @@
     <div class="vd-ask-controls">
       <select name="employee_id" required data-vd-choice aria-label="Кто это: {{ sp.name }}">
         <option value="">Выберите сотрудника…</option>
-        {% for e in employees %}<option value="{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}
+        {{ employee_options(employees, participant_ids) }}
         <option value="guest">Гость — не сотрудник</option>
       </select>
       <input name="guest_name" maxlength="80" placeholder="Имя гостя (необязательно)" aria-label="Имя гостя" data-vd-guest>

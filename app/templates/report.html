@@ -31,6 +31,7 @@ ul { margin: 4px 0 0 0; padding-left: 16px; } li { margin: 2px 0; }
 .t { color: var(--a); font-weight:600; font-size: 8.5pt; }
 .seg { margin: 0 0 4px; font-size: 8.5pt; } .seg b { color:#334155; }
 .two { display:flex; gap:10px; } .two > div { flex:1; }
+.present { margin: 0 0 10px; font-size: 9pt; } .present b { color:#334155; }
 </style></head>
 <body>
 <div class="hero">
@@ -39,11 +40,12 @@ ul { margin: 4px 0 0 0; padding-left: 16px; } li { margin: 2px 0; }
   <div class="meta">
     <span>Дата: {{ (m.meeting_date.strftime('%d.%m.%Y') if m.meeting_date else '') }}</span>
     <span>Длительность: {{ mmss(m.duration_sec) }}</span>
-    <span>Участников: {{ (r.participants or [])|length }}</span>
+    <span>Участников: {{ present|length if present else (r.participants or [])|length }}</span>
     <span>Сформирован {{ generated }}</span>
   </div>
 </div>
 
+{% if present %}<p class="present"><b>Присутствовали:</b> {{ present|join(', ') }}</p>{% endif %}
 <div class="grid">
   <div class="kpi"><b>{{ tasks|length }}</b><span>задач</span></div>
   <div class="kpi"><b>{{ (r.decisions or [])|length }}</b><span>решений</span></div>
