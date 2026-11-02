@@ -176,8 +176,9 @@ def test_processing_labels_the_whole_record_with_the_number_of_participants(monk
     monkeypatch.setattr(pipeline.transcribe, "transcribe", lambda *a, **kw: (20.0, [dict(s) for s in parts]))
     seen = {}
 
-    def relabel(audio_path, segments, total, settings, people=0, progress=None, name=None):
-        seen.update(people=people, method=settings.get("diarization_method"), audio=audio_path)
+    def relabel(audio_path, segments, total, settings, people=0, progress=None, name=None, meeting_id=None, allowed=None):
+        seen.update(people=people, method=settings.get("diarization_method"), audio=audio_path, meeting_id=meeting_id,
+                    allowed=allowed)
         joined = [dict(s, speaker="Спикер 1" if s["speaker"] == "Спикер 3" else s["speaker"]) for s in segments]
         return joined, {"method": "voice", "wanted": "voice", "error": "", "voices": 2, "seconds": 1.2}
 
@@ -193,6 +194,7 @@ def test_processing_labels_the_whole_record_with_the_number_of_participants(monk
         s.commit()
     pipeline.process(mid)
     assert seen["people"] == 2 and seen["method"] == "voice" and seen["audio"] == str(path)
+    assert seen["meeting_id"] and seen["allowed"] is not None  # remembered voices: only the participants
     assert seen["speakers"] == ["Спикер 1", "Спикер 2", "Спикер 1"] and seen["attendees"] == "Анна Петрова, Борис Смирнов"
     with SessionLocal() as s:
         m = s.get(Meeting, mid)

@@ -782,8 +782,10 @@ def embed_pending_sample(session, row):
 
 
 def revoke_employee_voice_data(session, employee_id):
-    """Local revocation is immediate; failed legacy remote cleanup remains queued separately."""
-    from .db import EmployeeVoiceprint, EmployeeVoiceSample, VoiceSampleCleanup
+    """Local revocation is immediate; failed legacy remote cleanup remains queued separately. The voice remembered
+    between meetings (voice_memory.py) is deleted too; the consent to remember it stays as it was."""
+    from .db import EmployeeVoiceMemory, EmployeeVoiceprint, EmployeeVoiceSample, VoiceSampleCleanup
+    session.query(EmployeeVoiceMemory).filter_by(employee_id=employee_id).delete(synchronize_session=False)
     rows = session.query(EmployeeVoiceSample).filter_by(employee_id=employee_id).all()
     for row in rows:
         pathname = row.sample_blob_path or ""
@@ -797,12 +799,14 @@ def revoke_employee_voice_data(session, employee_id):
 
 
 def purge_expired_samples(session):
-    from .db import EmployeeVoiceSample, VoiceSampleCleanup, now
+    from .db import EmployeeVoiceMemory, EmployeeVoiceSample, VoiceSampleCleanup, now
     rows = session.query(EmployeeVoiceSample).filter(EmployeeVoiceSample.expires_at <= now()).all()
     for row in rows:
         if row.sample_blob_path:
             session.add(VoiceSampleCleanup(employee_id=row.employee_id, storage_path=row.sample_blob_path))
         session.delete(row)
+    # voices remembered between meetings (voice_memory.py) have the same term
+    session.query(EmployeeVoiceMemory).filter(EmployeeVoiceMemory.expires_at <= now()).delete(synchronize_session=False)
     return len(rows)
 
 

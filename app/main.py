@@ -25,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import (accounts, agent, audio_archive, bitrix, cases, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
-               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id,
+               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
                storage, telegram, transcript_edit, userbot, notion, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
@@ -94,6 +94,18 @@ def legal_info() -> dict:
 
 
 tpl.env.globals.update(legal_info=legal_info, POLICY_DATE="12.10.2026")
+
+
+def plural(count, one: str, few: str, many: str) -> str:
+    """The Russian word form for a number: plural(5, 'реплика', 'реплики', 'реплик') → 'реплик'."""
+    try:
+        number = abs(int(count or 0))
+    except (TypeError, ValueError):
+        number = 0
+    return _plural_ru(number, (one, few, many))
+
+
+tpl.env.globals.update(plural=plural)
 
 
 def startup():
@@ -494,7 +506,8 @@ async def demo(request: Request):
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
 def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False, speakers: str = "",
-                 changed: str = "", recording: str = "", seg: str = "", ref: str = "", people: str = ""):
+                 changed: str = "", recording: str = "", seg: str = "", ref: str = "", people: str = "",
+                 relabel: str = ""):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
@@ -506,7 +519,7 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
     sections = group_transcript([dict(sg, seq=i) for i, sg in enumerate(m.transcript or []) if isinstance(sg, dict)],
                                 (m.report or {}).get("topics") or [])
     count = int(changed) if changed.isascii() and changed.isdigit() and len(changed) < 7 else 0
-    speaker_msg = SPEAKER_MESSAGES.get(speakers, "").format(n=count)
+    speaker_msg = (SPEAKER_MESSAGES.get(speakers, "") or RELABEL_MESSAGES.get(relabel, "")).format(n=count)
     with SessionLocal() as s:
         loaded = pipeline.load(s, mid)
         plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
@@ -531,6 +544,7 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
     if client is not None and kept.get("playable"):
         client["audio"] = {"src": kept["src"]}
     until = userbot.quiet_until()
+    relabel_view = voice_relabel.view(m, settings_store.for_meeting(m.options)) if diagram and may_listen else None
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
                 plan=plan, quiet_at=userbot.local_time(until) if until is not None else "",
                 case_by_task=cases.for_meeting(mid),
@@ -543,7 +557,8 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
                 reference=reference, reference_admin=reference_admin, ref_msg=REFERENCE_MESSAGES.get(ref, ""),
                 pct=diarization_eval.pct, label_list=diarization_eval.label_list,
                 attendance=present, participant_ids=present["ids"], alert_hint=hint.title if hint is not None else "",
-                people_msg=PARTICIPANT_MESSAGES.get(people, ""), diarization_note=_diarization_note(m))
+                people_msg=PARTICIPANT_MESSAGES.get(people, ""), diarization_note=_diarization_note(m),
+                relabel=relabel_view)
 
 
 def _diarization_note(meeting) -> dict | None:
@@ -637,6 +652,11 @@ SPEAKER_MESSAGES = {
     "assigned": "Готово: говорящий исправлен во всех его репликах ({n}). Протокол и задачи не пересобираются сами.",
     "reset": "Автоматическая разметка говорящих восстановлена ({n} реплик).",
 }
+RELABEL_MESSAGES = {
+    "started": "Переразметка голосов запущена — обычно это несколько минут. Расшифровка не изменится, пока вы не сохраните результат.",
+    "saved": "Новая разметка голосов сохранена ({n} реплик сменили говорящего). Протокол и задачи не пересобираются сами.",
+    "reverted": "Прежняя разметка голосов возвращена ({n} реплик).",
+}
 
 
 def _speaker_meeting(session, mid):
@@ -673,7 +693,65 @@ async def meeting_speaker_assign(request: Request, mid: int):
             transcript_edit.record(meeting, after, transcript_edit.assigned(before, after, label, name, by))
             _named_present(meeting, (name, employee_id, guest), by)
         s.commit()
+    if count and employee_id is not None:
+        voice_memory.remember_soon(mid, by=by)  # a confirmed voice, for the next meetings (with consent)
     return RedirectResponse(f"/meetings/{mid}?speakers=assigned&changed={count}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/relabel")
+def meeting_speaker_relabel(request: Request, mid: int):
+    """«Переразметить голоса»: label the voices again from the kept recording; nothing changes until it is saved."""
+    guard(request)
+    with SessionLocal() as s:
+        _voice_meeting(s, request, mid)
+        _speaker_meeting(s, mid)
+    try:
+        voice_relabel.start(mid, by=current_user(request)["username"])
+    except voice_relabel.RelabelError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return RedirectResponse(f"/meetings/{mid}?relabel=started#voice-relabel", 303)
+
+
+@app.get("/meetings/{mid}/speakers/relabel/status")
+def meeting_speaker_relabel_status(request: Request, mid: int):
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _voice_meeting(s, request, mid)
+        data = voice_relabel.state(meeting)
+    return {"state": data.get("state") or "", "progress": data.get("progress") or ""}
+
+
+def _relabel_decision(request: Request, mid: int, act) -> int:
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _voice_meeting(s, request, mid)
+        try:
+            count = act(meeting)
+        except voice_relabel.RelabelError as exc:
+            raise HTTPException(409, str(exc)) from None
+        s.commit()
+    return count
+
+
+@app.post("/meetings/{mid}/speakers/relabel/save")
+def meeting_speaker_relabel_save(request: Request, mid: int):
+    guard(request)
+    by = current_user(request)["username"]
+    count = _relabel_decision(request, mid, lambda meeting: voice_relabel.save(meeting, by=by))
+    voice_memory.remember_soon(mid, by=by)
+    return RedirectResponse(f"/meetings/{mid}?relabel=saved&changed={count}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/relabel/revert")
+def meeting_speaker_relabel_revert(request: Request, mid: int):
+    count = _relabel_decision(request, mid, voice_relabel.revert)
+    return RedirectResponse(f"/meetings/{mid}?relabel=reverted&changed={count}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/relabel/close")
+def meeting_speaker_relabel_close(request: Request, mid: int):
+    _relabel_decision(request, mid, voice_relabel.close)
+    return RedirectResponse(f"/meetings/{mid}#voice-diagram", 303)
 
 
 @app.post("/meetings/{mid}/speakers/reset")
@@ -763,6 +841,8 @@ async def _segment_change(request: Request, mid: int, seq: str, change):
         for who in chosen:
             _named_present(meeting, who, by)
         s.commit()
+    if any(who and who[1] is not None for who in chosen):
+        voice_memory.remember_soon(mid, by=by)
     return _segment_redirect(mid, entry["op"], entry["seq"])
 
 
@@ -912,6 +992,17 @@ def _name_threshold(raw) -> float:
     if not 50 <= value <= 95:
         raise HTTPException(400, "Уверенность для имени укажите числом от 50 до 95 %.")
     return round(value / 100, 2)
+
+
+def _memory_threshold(raw) -> float:
+    """How alike a voice must be to the voice of a person remembered from past meetings: 0,4–0,95."""
+    try:
+        value = float(str(raw).strip().replace(",", "."))
+    except ValueError:
+        raise HTTPException(400, "Порог узнавания по прошлым встречам укажите числом от 0,4 до 0,95.") from None
+    if not 0.4 <= value <= 0.95:
+        raise HTTPException(400, "Порог узнавания по прошлым встречам укажите числом от 0,4 до 0,95.")
+    return round(value, 2)
 
 
 def _voice_threshold(raw) -> float:
@@ -1536,6 +1627,7 @@ def meeting_delete(request: Request, mid: int):
                 if sample.sample_blob_path:
                     s.add(VoiceSampleCleanup(employee_id=sample.employee_id, storage_path=sample.sample_blob_path))
                 s.delete(sample)
+            voice_memory.forget_meeting(s, mid)  # the voices remembered from this meeting go with it
             audio_archive.forget(s, m, "meeting")
             s.delete(m)
             s.commit()
@@ -1603,7 +1695,8 @@ def settings_view(request: Request, msg: str = ""):
                 notion=notion.connection_status(), storage=storage.describe(), storage_usage=audio_archive.usage(),
                 retention_days=config.RECORDING_RETENTION_DAYS, diarization_methods=diarize.METHODS,
                 diarization_hints=diarize.HINTS, voice_service=config.voice_service_enabled(),
-                diarization_unavailable={name: diarize.unavailable(name) for name in diarize.METHODS})
+                diarization_unavailable={name: diarize.unavailable(name) for name in diarize.METHODS},
+                voice_memory_days=speaker_id.VOICE_SAMPLE_RETENTION_DAYS, voice_memory_meetings=voice_memory.MIN_MEETINGS)
 
 
 def voice_default_persona() -> str:
@@ -1728,7 +1821,7 @@ async def settings_save(request: Request):
     updates = {}
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
-              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode"):
+              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode", "voice_memory"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -1785,6 +1878,8 @@ async def settings_save(request: Request):
         updates["diarization_voice_threshold"] = _voice_threshold(f["diarization_voice_threshold"])
     if "speaker_name_threshold" in f:
         updates["speaker_name_threshold"] = _name_threshold(f["speaker_name_threshold"])
+    if "voice_memory_threshold" in f:
+        updates["voice_memory_threshold"] = _memory_threshold(f["voice_memory_threshold"])
     # Secrets are never echoed in hidden inputs. A value alone (including a
     # legacy hidden value) is not an instruction to replace a credential.
     # Require the explicit action selected in the visible credential control.
@@ -2190,6 +2285,10 @@ def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str
     readiness = speaker_id.identification_readiness({e.id: list(e.voice_samples) for e in emps if e.active})
     voice_info = _employee_voice_info(emps, readiness)
     panel_employee = next((e for e in emps if e.id == edit), None) if edit else None
+    voice_memory_card = None
+    if panel_employee is not None:
+        with SessionLocal() as s:
+            voice_memory_card = voice_memory.card(s, panel_employee)
     if tab not in EMPLOYEE_TABS or (tab == "voice" and panel_employee is None):
         tab = "voice" if voice_msg and panel_employee is not None else "profile"
     return dict(
@@ -2200,6 +2299,7 @@ def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str
         panel_employee=panel_employee, panel_tab=tab, saved_name=saved[:200], voice_msg=voice_msg,
         voice_service_enabled=config.voice_service_enabled(),
         visible_voice_samples=visible_voice_samples, voice_readiness=readiness, voice_info=voice_info,
+        voice_memory=voice_memory_card,
         voice_status_ru=VOICE_STATUS_RU, initials={e.id: _initials(e.name) for e in emps},
         search_text={e.id: _employee_search_text(e) for e in emps},
         employee_summary=_employee_summary(emps, voice_info),
@@ -2531,6 +2631,42 @@ def employee_voice_sample_delete(request: Request, eid: int):
         speaker_id.retry_sample_cleanup(session)
         session.commit()
     return _voice_redirect(eid, f"Образцы и признаки отозваны ({removed}). Старые внешние копии при ошибке остаются в очереди очистки.")
+
+
+@app.post("/employees/{eid}/voice-memory")
+async def employee_voice_memory(request: Request, eid: int):
+    """The employee's consent to remember the voice between meetings: given (the latest confirmed meetings are
+    remembered at once) or withdrawn (every print is deleted)."""
+    _voice_write_guard(request)
+    form = await request.form()
+    agreed = str(form.get("consent") or "") == "yes"
+    by = _who(request)
+    with SessionLocal() as session:
+        employee = session.query(Employee).filter_by(id=eid).with_for_update().one_or_none()
+        if employee is None:
+            return _voice_redirect(eid, "Сотрудник не найден.")
+        if agreed and not employee.active:
+            return _voice_redirect(eid, "Сотрудник не активен — голос не запоминается.")
+        removed = voice_memory.set_consent(session, employee, agreed, by=by)
+        session.commit()
+    if not agreed:
+        return _voice_redirect(eid, f"Согласие отозвано, запомненный голос удалён ({removed}).")
+    if not voice_memory.enabled():
+        return _voice_redirect(eid, "Согласие отмечено. Голос начнёт запоминаться, когда в настройках включат "
+                                    "«Запоминать голоса между встречами» и подключат свой сервис голосов.")
+    voice_memory.remember_history(eid, by=by)
+    return _voice_redirect(eid, "Согласие отмечено. Голос запоминается по последним подтверждённым совещаниям "
+                                "и дальше — после каждого «Кто это?».")
+
+
+@app.post("/employees/{eid}/voice-memory/forget")
+def employee_voice_memory_forget(request: Request, eid: int):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        removed = voice_memory.forget(session, eid)
+        session.commit()
+    return _voice_redirect(eid, f"Запомненный голос удалён ({removed}). Согласие осталось: голос снова начнёт "
+                                "запоминаться с подтверждённых совещаний.")
 
 
 @app.post("/employees/voice-samples/cleanup")

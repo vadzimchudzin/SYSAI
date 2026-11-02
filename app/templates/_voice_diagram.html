@@ -89,10 +89,58 @@
     <p class="small muted">Имя заменится во всех репликах этого говорящего в расшифровке и на диаграмме. Протокол и задачи не меняются сами{% if m.status in ('awaiting_approval','rejected','error') %} — чтобы учесть исправление, нажмите «Пересобрать»{% endif %}.</p>
     {% if d.has_manual %}<form method="post" action="/meetings/{{ m.id }}/speakers/reset" onsubmit="return confirm('Вернуть автоматическую разметку говорящих? Все ручные исправления этого совещания будут отменены.')">
       <button class="btn sm ghost">Вернуть автоматическую разметку</button></form>{% endif %}
+    {% if relabel and relabel.can and relabel.state not in ('ready',) %}
+    <div class="vd-relabel-start">
+      <form method="post" action="/meetings/{{ m.id }}/speakers/relabel"><button class="btn sm">{{ icon('wave') }}Переразметить голоса</button></form>
+      <p class="small muted">Разметить голоса заново по сохранённой записи способом «{{ relabel.title }}». Меняются только говорящие: текст, протокол, задачи и ручные исправления остаются. Перед сохранением будет видно «было → стало».</p>
+    </div>
+    {% endif %}
   </details>
   {% endif %}
   <script type="application/json" id="voice-diagram-data">{{ diagram_client|tojson }}</script>
 </section>
+{% if relabel and speakers_editable and relabel.state %}{% set r = relabel %}{% set s = r.summary %}
+<section class="card vd-relabel" id="voice-relabel" aria-labelledby="voice-relabel-title"{% if r.state == 'running' %} data-vd-relabel-running="/meetings/{{ m.id }}/speakers/relabel/status"{% endif %}>
+  <div class="row between"><h2 id="voice-relabel-title">{{ icon('wave') }}Переразметка голосов</h2>
+    <span class="pill {{ {'running': 'blue', 'ready': 'amber', 'error': 'red', 'saved': 'green'}.get(r.state, 'gray') }}">{{ {'running': 'идёт', 'ready': 'проверьте', 'error': 'не удалась', 'saved': 'сохранена'}.get(r.state, r.state) }}</span></div>
+  {% if r.state == 'running' %}
+  <p class="small muted" role="status">Способ «{{ r.title }}»: <span data-vd-relabel-progress>{{ r.progress or 'начинаю' }}</span>. Обычно это несколько минут; страница обновится сама.</p>
+  {% elif r.state == 'error' %}
+  <p class="small" role="alert">Переразметка не удалась: {{ r.error }}</p>
+  <div class="vd-relabel-actions">
+    {% if r.can %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel"><button class="btn sm">Попробовать ещё раз</button></form>{% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers/relabel/close"><button class="btn sm ghost">Закрыть</button></form>
+  </div>
+  {% elif r.state == 'ready' %}
+  {% if s.changed %}
+  <p class="small">Способ «{{ s.title }}»: говорящий сменится у <b>{{ s.changed }}</b> из {{ s.replicas }} {{ plural(s.replicas, 'реплики', 'реплик', 'реплик') }} · голосов было {{ s.before }}, станет {{ s.after }}{% if s.remembered %} · узнаны по прошлым совещаниям: {{ s.remembered }}{% endif %}{% if s.named %} · имена из разговора: {{ s.named }}{% endif %}.</p>
+  <p class="small muted">{% if s.manual %}Ручные исправления ({{ s.manual }} {{ plural(s.manual, 'реплика', 'реплики', 'реплик') }}) не тронуты. {% endif %}Текст, время реплик, протокол и задачи не меняются. Пока не сохраните, расшифровка остаётся прежней.</p>
+  <div class="table-wrap"><table class="ref-table small vd-relabel-pairs">
+    <thead><tr><th>Было</th><th>Стало</th><th>Реплик</th></tr></thead>
+    <tbody>{% for p in r.pairs %}<tr><td>{{ p.before }}</td><td>{{ p.after }}</td><td>{{ p.count }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if r.changes %}<details class="more vd-relabel-changes"><summary>Реплики, у которых сменится говорящий{% if s.changed > r.changes|length %} (первые {{ r.changes|length }} из {{ s.changed }}){% endif %}</summary>
+    <ul class="vd-quotes">{% for c in r.changes %}
+      <li><a class="t" href="#voice-diagram" data-vd-seq="{{ c.seq }}" title="Показать на диаграмме">{{ mmss(c.start) }}</a> «{{ c.text }}» — {{ c.before }} → <b>{{ c.after }}</b></li>{% endfor %}</ul>
+  </details>{% endif %}
+  {% else %}
+  <p class="small">Способ «{{ s.title }}» разметил голоса так же, как сейчас — менять нечего.</p>
+  {% endif %}
+  <div class="vd-relabel-actions">
+    {% if r.stale %}<p class="small" role="alert">Расшифровку изменили после переразметки — эту разметку уже не сохранить.</p>
+    {% if r.can %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel"><button class="btn sm">Переразметить заново</button></form>{% endif %}
+    {% elif s.changed %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel/save"><button class="btn primary sm">Сохранить новую разметку</button></form>{% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers/relabel/close"><button class="btn sm ghost">{{ 'Отменить' if s.changed and not r.stale else 'Закрыть' }}</button></form>
+  </div>
+  {% elif r.state == 'saved' %}
+  <p class="small">Новая разметка сохранена{% if r.by %} ({{ r.by }}){% endif %}: способ «{{ s.title }}», говорящий сменился у {{ s.changed }} {{ plural(s.changed or 0, 'реплики', 'реплик', 'реплик') }}. Протокол и задачи не менялись{% if m.status in ('awaiting_approval','rejected','error') %} — чтобы учесть новых говорящих, нажмите «Пересобрать»{% endif %}.</p>
+  <div class="vd-relabel-actions">
+    {% if r.revertable %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel/revert" onsubmit="return confirm('Вернуть разметку голосов, которая была до переразметки?')"><button class="btn sm">Вернуть прежнюю разметку</button></form>{% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers/relabel/close"><button class="btn sm ghost">Скрыть</button></form>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
 {% if d.unknown and speakers_editable %}
 <section class="card vd-ask" id="voice-speakers" aria-labelledby="voice-speakers-title">
   <div class="row between"><h2 id="voice-speakers-title">Вопрос: кто это?</h2>

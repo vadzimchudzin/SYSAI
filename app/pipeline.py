@@ -198,7 +198,8 @@ def _process(meeting_id: int):
                 total, segments = transcribe.transcribe(audio_path, dict(settings, _participants=allowed),
                                                         progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
                 segments, how = diarize.relabel(audio_path, segments, total, settings, people=people,
-                                                progress=lambda p: _set(meeting_id, progress=p))
+                                                progress=lambda p: _set(meeting_id, progress=p),
+                                                meeting_id=meeting_id, allowed=allowed)
                 _note_diarization(meeting_id, how)
                 segments = _name_speakers(segments, allowed, meeting_id)
         # A transcript made by this run replaces any earlier one: corrections made to that one do not apply to it.
@@ -207,6 +208,9 @@ def _process(meeting_id: int):
              progress="Составление отчёта и задач", **fresh)
         outline_job = _start_waveform(meeting_id, audio_path, source, segments, total)
         _keep_recording(meeting_id, audio_path, source)
+        if saved is None and source != "demo":  # voices the conversation proves surely, for the next meetings
+            from . import voice_memory
+            voice_memory.remember_safely(meeting_id, by="обработка", path=audio_path)
         with SessionLocal() as s:
             employees = s.query(Employee).filter(Employee.active.is_(True)).all()
             for employee in employees:

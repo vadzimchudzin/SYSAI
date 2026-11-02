@@ -60,6 +60,8 @@ DEFAULTS = {
     "diarization_model": "google/gemini-2.5-flash",
     "diarization_method": "chunks",      # chunks | voice | gemini — who speaks across the whole recording, see diarize.py
     "diarization_voice_threshold": 0.5,  # voice prints at least this alike are one person (method «voice»)
+    "voice_memory": False,               # remember confirmed voices between meetings (voice_memory.py; with consent)
+    "voice_memory_threshold": 0.62,      # a voice this alike to the prints of a person from past meetings is that person
     "report_model": "google/gemini-2.5-pro",
     "conversation_model": "openrouter/free",
     "dialogue_enabled": True,
