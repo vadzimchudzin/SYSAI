@@ -209,3 +209,15 @@ a.t[data-vd-seq]:hover { color: var(--clay2); text-decoration: underline; }
 .ref-table th, .ref-table td { text-align: left; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 .ref-table th { color: var(--soft); font-weight: 600; white-space: nowrap; }
 @media (max-width: 640px) { .ref-metrics th { white-space: normal; width: 38%; } }
+
+/* «Переразметить голоса» */
+.vd-relabel-start { display: grid; gap: 4px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.vd-relabel-start form { margin: 0; }
+.vd-relabel h2 { margin: 0; display: flex; align-items: center; gap: 8px; }
+.vd-relabel > p { margin: 8px 0 4px; }
+.vd-relabel-pairs { margin-top: 6px; }
+.vd-relabel-changes { margin-top: 8px; }
+.vd-relabel-changes .vd-quotes { margin-top: 8px; }
+.vd-relabel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.vd-relabel-actions form { margin: 0; }
+.vd-relabel-actions p { flex: 1 1 100%; margin: 0; }

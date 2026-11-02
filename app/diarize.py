@@ -278,7 +278,8 @@ def voice_groups(audio_path, segments: list, total: float, progress=None, window
                     except speaker_id.SpeakerIdentityError:
                         continue
                     group = {"window": number, "label": str(label), "embedding": vector,
-                             "seconds": round(_number((info or {}).get("duration_seconds")), 2)}
+                             "seconds": round(_number((info or {}).get("duration_seconds")), 2),
+                             "model": str(payload.get("model_version") or "")}
                     if str(label).startswith("#") and str(label)[1:].isdigit():
                         group["short"] = int(str(label)[1:])
                     groups.append(group)
@@ -404,11 +405,13 @@ def _own_voice(shorts: list, prints: list, person: list, chosen: dict, threshold
 
 
 def voice_labels(segments: list, groups: list, threshold: float, people: int = 0, total: float = 0.0,
-                 window: float = VOICE_WINDOW) -> list:
+                 window: float = VOICE_WINDOW, found: dict | None = None) -> list:
     """New label of every replica from the clustered voice prints (None keeps the replica as it is).
 
     A short replica with a print of its own (voice_groups) is checked against the voices around it: «да» glued to
-    the label of the previous speaker goes to the person who really said it."""
+    the label of the previous speaker goes to the person who really said it. `found` receives the voice of every new
+    label: {"centres": {label: average print}, "seconds": {label: speech}, "model": voice service model} — to
+    recognise voices remembered at other meetings (voice_memory.py)."""
     prints = [group for group in groups if "short" not in group]
     shorts = [group for group in groups if "short" in group]
     person = cluster(prints, threshold, people)
@@ -433,7 +436,19 @@ def voice_labels(segments: list, groups: list, threshold: float, people: int = 0
     labels = [None] * len(segments)
     for index, p in chosen.items():
         labels[index] = f"p{p}"
-    return _renumber(labels, rows)
+    labels = _renumber(labels, rows)
+    if found is not None:
+        named = {}
+        for index, p in chosen.items():
+            named.setdefault(p, labels[index])
+        centres, seconds = _centres(prints, person), {}
+        for group, p in zip(prints, person):
+            if p in named:
+                seconds[named[p]] = seconds.get(named[p], 0.0) + _number(group.get("seconds"))
+        found.update(centres={named[p]: centre for p, centre in centres.items() if p in named},
+                     seconds={label: round(value, 2) for label, value in seconds.items()},
+                     model=next((group.get("model") for group in prints if group.get("model")), ""))
+    return labels
 
 
 # ------------------------------------------------------------------------------------------- the audio model
@@ -580,10 +595,12 @@ def gemini_labels(audio_path, segments: list, total: float, settings: dict, peop
 
 # ------------------------------------------------------------------------------------------------ the pipeline
 def relabel(audio_path, segments: list, total: float, settings: dict, people: int = 0, progress=None,
-            name: str | None = None) -> tuple[list, dict]:
-    """The transcript labelled by the chosen way, and what happened: {"method", "wanted", "voices", "error", "seconds"}.
+            name: str | None = None, meeting_id: int | None = None, allowed=None) -> tuple[list, dict]:
+    """The transcript labelled by the chosen way, and what happened: {"method", "wanted", "voices", "error", "seconds",
+    "remembered"}. The voice service's way also recognises the voices remembered at other meetings (voice_memory.py).
 
     Any failure keeps the labels of the parts: speaker labels must never cost the meeting its transcript."""
+    from . import voice_memory
     name = name or method_of(settings)
     info = {"method": name, "wanted": name, "error": ""}
     if name == "chunks" or not segments:
@@ -594,11 +611,17 @@ def relabel(audio_path, segments: list, total: float, settings: dict, people: in
         info.update(method="chunks", error=reason or "Нет записи для разметки голосов.")
         return segments, info
     started = time.monotonic()
+    known = {}
     try:
         details = {}
         if name == "voice":
             groups = voice_groups(audio_path, segments, total, progress)
-            labels = voice_labels(segments, groups, threshold_of(settings), people, total)
+            found = {}
+            labels = voice_labels(segments, groups, threshold_of(settings), people, total, found=found)
+            try:
+                known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
+            except Exception:  # noqa: BLE001  the remembered voices are a bonus
+                log.warning("recognising remembered voices failed", exc_info=True)
         else:
             labels = gemini_labels(audio_path, segments, total, settings, people, progress, details)
     except (DiarizationError, speaker_id.SpeakerIdentityError, llm.LLMError, OSError, ValueError) as exc:
@@ -609,8 +632,10 @@ def relabel(audio_path, segments: list, total: float, settings: dict, people: in
         log.exception("whole-record speaker labelling (%s) failed", name)
         info.update(method="chunks", error=f"Сбой разметки голосов: {type(exc).__name__}")
         return segments, info
-    result = apply(segments, labels, details)
+    result = voice_memory.rename(apply(segments, labels, details), known)
     info.update(voices=len({item["speaker"] for item in result}), seconds=round(time.monotonic() - started, 1))
+    if known:
+        info["remembered"] = len(known)
     if details.get("cuts"):
         info["cuts"] = len(details["cuts"])
     if details.get("overlap"):

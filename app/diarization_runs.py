@@ -26,7 +26,7 @@ import time
 import httpx
 
 from . import (audio_archive, config, diarization_eval, diarize, llm, participants, settings_store, speaker_id, speakers,
-               storage)
+               storage, voice_memory)
 from .db import Employee, Meeting, SessionLocal
 
 log = logging.getLogger("sysai.diarization_runs")
@@ -75,8 +75,9 @@ def _named(segments: list, allowed) -> list:
         return segments
 
 
-def _recording(meeting) -> tuple[str, bool]:
-    """(path to the recording, True when it is a temporary copy to delete afterwards)."""
+def recording(meeting) -> tuple[str, bool]:
+    """(path to the recording of a meeting, True when it is a temporary copy to delete afterwards): the file on the
+    server, a copy from the storage of recordings or the recording downloaded from TicNote again."""
     local = str(meeting.audio_path or "")
     if local and pathlib.Path(local).is_file():
         return local, False
@@ -108,17 +109,32 @@ def _recording(meeting) -> tuple[str, bool]:
     raise diarize.DiarizationError("Записи этого совещания нет ни на сервере, ни в хранилище — сравнивать не на чем.")
 
 
-def _measure(truth, base, labels, allowed, details=None) -> dict:
-    return _compact(diarization_eval.evaluate(truth, _named(diarize.apply(base, labels, details), allowed)))
+_recording = recording
 
 
-def _run_way(name, path, base, truth, total, settings, people, allowed, progress) -> dict:
+def _measure(truth, base, labels, allowed, details=None, known=None) -> dict:
+    labelled = voice_memory.rename(diarize.apply(base, labels, details), known or {})
+    return _compact(diarization_eval.evaluate(truth, _named(labelled, allowed)))
+
+
+def _remembered(base, groups, threshold, people, total, allowed, memory, meeting_id) -> tuple:
+    """(labels of one threshold, voices recognised by the prints from the other meetings — as at a new meeting)."""
+    found = {}
+    labels = diarize.voice_labels(base, groups, threshold, people, total, found=found)
+    known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed, memory=memory) if memory else {}
+    return labels, known
+
+
+def _run_way(name, path, base, truth, total, settings, people, allowed, progress, meeting_id=None) -> dict:
     started = time.monotonic()
     try:
         if name == "voice":
             groups = diarize.voice_groups(path, base, total, progress)
-            result = {"thresholds": {f"{threshold:.2f}": _measure(truth, base, diarize.voice_labels(
-                base, groups, threshold, people, total), allowed) for threshold in diarize.THRESHOLDS}}
+            memory = voice_memory.prints(allowed, exclude_meeting=meeting_id) if voice_memory.enabled() else {}
+            result = {"thresholds": {}}
+            for threshold in diarize.THRESHOLDS:
+                labels, known = _remembered(base, groups, threshold, people, total, allowed, memory, meeting_id)
+                result["thresholds"][f"{threshold:.2f}"] = _measure(truth, base, labels, allowed, known=known)
         else:
             details = {}  # the replicas the model cut where a second voice begins are measured as cut
             labels = diarize.gemini_labels(path, base, total, settings, people, progress, details)
@@ -163,7 +179,8 @@ def run_reference(meeting_id: int, methods=ORDER, progress=None) -> dict:
         else:
             try:
                 for name in ready:
-                    runs[name] = _run_way(name, path, base, truth, total, settings, people, allowed, progress)
+                    runs[name] = _run_way(name, path, base, truth, total, settings, people, allowed, progress,
+                                          meeting_id)
             finally:
                 if temporary:
                     pathlib.Path(path).unlink(missing_ok=True)

@@ -164,6 +164,11 @@ def build(transcript, duration=0, stored_waveform=None, employees=()) -> dict | 
         samples = [{"seq": seq, "start": start, "end": end, "text": _quote(segment.get("text"))}
                    for seq, start, end, _, segment in longest if str(segment.get("text") or "").strip()][:SAMPLE_QUOTES]
         label_text, tone, hint = STATUS[status]
+        remembered = next((row for row in own if row.get("speaker_memory") and row.get("speaker_source") == "voiceprint"), None)
+        if status == "voice" and remembered is not None:  # voice_memory: recognised by the prints of past meetings
+            alike = _seconds(remembered.get("speaker_similarity"))
+            hint = ("Голос узнан по прошлым совещаниям" + (f" (сходство {alike:.2f})".replace(".", ",") if alike is not None else "")
+                    + ". Оценка сходства не является вероятностью.")
         people.append({
             "key": label, "name": label, "n": number + 1, "color": PALETTE[number % len(PALETTE)],
             "seconds": round(spoken[number], 1), "share": shares[number], "status": status,

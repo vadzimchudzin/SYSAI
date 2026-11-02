@@ -164,6 +164,9 @@ class Employee(Base):
                               cascade="all, delete-orphan", single_parent=True)
     voice_samples = relationship("EmployeeVoiceSample", back_populates="employee",
                                  cascade="all, delete-orphan", order_by="EmployeeVoiceSample.created_at")
+    # «Запоминать голос между встречами» (voice_memory.py): when and by whom the employee's consent was recorded
+    voice_memory_consent_at = Column(DateTime(timezone=True), nullable=True)
+    voice_memory_consent_by = Column(String(120), default="")
 
     def alias_list(self):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
@@ -266,6 +269,24 @@ class EmployeeVoiceSample(Base):
     consent_version = Column(String(40), nullable=False, default="voiceprint-consent-v2")
     created_at = Column(DateTime(timezone=True), nullable=False, default=now)
     employee = relationship("Employee", back_populates="voice_samples")
+
+
+class EmployeeVoiceMemory(Base):
+    """The voice print of one employee from one meeting where that voice was confirmed (voice_memory.py). No audio:
+    the average print of the person's clear replicas, encrypted. Deleted with the consent, the meeting or its term."""
+    __tablename__ = "employee_voice_memory"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=True, index=True)
+    encrypted_embedding = Column(LargeBinary, nullable=False)
+    model_version = Column(String(120), nullable=False, default="")
+    seconds = Column(Float, nullable=False, default=0.0)
+    replicas = Column(Integer, nullable=False, default=0)
+    how = Column(String(16), nullable=False, default="manual")  # manual | context
+    confirmed_by = Column(String(120), nullable=False, default="")
+    consent_version = Column(String(40), nullable=False, default="voice-memory-v1")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class VoiceSampleCleanup(Base):
@@ -853,6 +874,8 @@ def init_db():
     _add_column_if_missing("employee_voice_samples", "confirmed_by", "confirmed_by VARCHAR(120) NOT NULL DEFAULT ''")
     _add_column_if_missing("employee_voice_samples", "access_owner", "access_owner VARCHAR(128) NOT NULL DEFAULT ''")
     _add_column_if_missing("employee_voice_samples", "expires_at", "expires_at TIMESTAMP")
+    _add_column_if_missing("employees", "voice_memory_consent_at", "voice_memory_consent_at TIMESTAMP")
+    _add_column_if_missing("employees", "voice_memory_consent_by", "voice_memory_consent_by VARCHAR(120) DEFAULT ''")
     _ensure_voice_sample_constraints()
     _forget_pyannote()
 

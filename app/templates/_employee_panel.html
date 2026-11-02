@@ -23,6 +23,31 @@
   {% if e %}{% set v = voice_info[e.id] %}{% set samples = visible_voice_samples.get(e.id, []) %}
   <section class="emp-pane voice-profile" data-pane="voice" id="voice" role="tabpanel" aria-labelledby="tab-voice">
     {% if voice_msg %}<div class="card note emp-voice-msg" role="status">{{ voice_msg }}</div>{% endif %}
+    {% set mem = voice_memory %}
+    {% if mem %}
+    <div class="emp-voice-card emp-memory" data-state="{{ mem.state }}" id="voice-memory">
+      <div class="emp-voice-card-head"><b>Голос между встречами</b><span class="pill {{ {'ready': 'green', 'partial': 'amber'}.get(mem.state, 'gray') }}">{{ mem.label }}</span></div>
+      {% if mem.consent %}<div class="emp-meter lg" role="img" aria-label="Голос запомнен с {{ mem.meetings }} из {{ mem.need }} встреч"><i style="width: {{ mem.pct }}%"></i></div>{% endif %}
+      <p class="small muted">Голос, подтверждённый на совещании («Кто это?», правка реплики, уверенное представление), запоминается — и на следующих встречах реплики сотрудника подписываются сами, с пометкой «голос совпал». Узнаётся после {{ mem.need }} разных встреч. Аудио не хранится: только зашифрованный отпечаток голоса на {{ mem.days }} дней.</p>
+      {% if not mem.on %}<p class="small"><span class="pill gray">Выключено в настройках</span> <a href="/settings#voice-memory">Включить «Запоминать голоса между встречами»</a></p>
+      {% elif not mem.service %}<p class="small"><span class="pill amber">Сервис голосов не подключён</span> Запоминание работает только со своим сервисом голосов — <a href="/settings#speaker-identification">Настройки → Разметка голосов</a>.</p>{% endif %}
+      {% if mem.consent %}
+      <p class="small">Согласие сотрудника отмечено {{ mem.consent.strftime('%d.%m.%Y') }}{% if mem.consent_by %} · {{ mem.consent_by }}{% endif %}.</p>
+      {% if mem.prints %}
+      <ul class="emp-memory-prints">
+        {% for item in mem.prints %}<li>{% if item.meeting_id %}<a href="/meetings/{{ item.meeting_id }}">{{ item.title or ('Совещание #' ~ item.meeting_id) }}</a>{% else %}совещание удалено{% endif %} · {{ item.seconds }} с речи · {{ item.how }}{% if item.at %} · {{ item.at.strftime('%d.%m.%Y') }}{% endif %}</li>{% endfor %}
+      </ul>
+      {% else %}<p class="small muted">Пока ничего не запомнено: голос запомнится с ближайшего совещания, где реплики сотрудника подтвердят.</p>{% endif %}
+      <div class="actions">
+        {% if mem.prints %}<form method="post" action="/employees/{{ e.id }}/voice-memory/forget" onsubmit="return confirm('Удалить запомненный голос сотрудника? Согласие останется.')"><button class="btn sm ghost danger">Забыть голос</button></form>{% endif %}
+        <form method="post" action="/employees/{{ e.id }}/voice-memory" onsubmit="return confirm('Отозвать согласие? Запомненный голос будет удалён.')"><input type="hidden" name="consent" value="no"><button class="btn sm ghost">Отозвать согласие</button></form>
+      </div>
+      {% else %}
+      <p class="small">Голос запоминается только с согласия сотрудника. Отметьте его, когда сотрудник согласился.</p>
+      <form method="post" action="/employees/{{ e.id }}/voice-memory"><input type="hidden" name="consent" value="yes"><button class="btn sm primary">Сотрудник согласен — запоминать голос</button></form>
+      {% endif %}
+    </div>
+    {% endif %}
     <div class="emp-voice-card" data-state="{{ v.state }}">
       <div class="emp-voice-card-head"><b>Голосовой профиль</b><span class="pill {{ {'ready': 'green', 'partial': 'amber', 'check': 'amber'}.get(v.state, 'gray') }}">{{ voice_label(v) }}</span></div>
       <div class="emp-meter lg" role="img" aria-label="Собрано {{ v.pct }}%"><i style="width: {{ v.pct }}%"></i></div>

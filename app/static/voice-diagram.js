@@ -917,3 +917,28 @@
     if (document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', refresh);
   }
 })();
+
+// «Переразметить голоса»: while the run goes on, the page asks how it is and reloads when it is done.
+(() => {
+  const box = document.querySelector('[data-vd-relabel-running]');
+  if (!box || !window.fetch) return;
+  const url = box.getAttribute('data-vd-relabel-running');
+  const label = box.querySelector('[data-vd-relabel-progress]');
+  const tick = () => fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((data) => {
+      if (!data) { window.setTimeout(tick, 15000); return; }
+      if (data.state !== 'running') {
+        const next = new URL(window.location.href);
+        next.searchParams.set('relabel', 'done');
+        next.hash = 'voice-relabel';
+        window.history.replaceState(null, '', next.toString());
+        window.location.reload();
+        return;
+      }
+      if (label && data.progress) label.textContent = data.progress;
+      window.setTimeout(tick, 6000);
+    })
+    .catch(() => window.setTimeout(tick, 15000));
+  window.setTimeout(tick, 5000);
+})();
