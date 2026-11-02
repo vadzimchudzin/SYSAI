@@ -1631,21 +1631,107 @@ def telegram_account_logout(request: Request):
 
 
 # ----------------------------------------------------------------------------- employees
-@app.get("/employees", response_class=HTMLResponse)
-def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str = ""):
-    guard_admin(request)
+EMPLOYEE_TABS = ("profile", "departments", "contacts", "voice")
+VOICE_STATUS_RU = {"ready": "признаки готовы", "pending": "ждёт сервиса признаков", "failed": "признаки не извлечены"}
+
+
+def _plural_ru(count: int, forms: tuple) -> str:
+    tens, ones = count % 100, count % 10
+    if 11 <= tens <= 14:
+        return forms[2]
+    return forms[0] if ones == 1 else forms[1] if 2 <= ones <= 4 else forms[2]
+
+
+def _initials(name: str) -> str:
+    parts = [part for part in re.split(r"[\s\-]+", name or "") if part]
+    return "".join(part[0] for part in parts[:2]).upper() or "?"
+
+
+def _employee_main_group(employee):
+    """A person is listed under the department they head, otherwise under the first one alphabetically."""
+    memberships = sorted((m for m in employee.department_memberships if m.department),
+                         key=lambda m: (not m.is_primary, m.department.name.lower()))
+    if memberships:
+        return f"d{memberships[0].department_id}", memberships[0].department.name
+    legacy = (employee.department or "").strip()
+    if legacy:
+        return "t:" + legacy.lower(), legacy
+    return "none", "Без подразделения"
+
+
+def _employee_groups(employees):
+    groups = {}
+    for employee in employees:
+        key, name = _employee_main_group(employee)
+        groups.setdefault(key, {"key": key, "name": name, "items": []})["items"].append(employee)
+    ordered = sorted(groups.values(), key=lambda g: (g["key"] == "none", g["name"].lower()))
+    for group in ordered:
+        group["items"].sort(key=lambda e: (not e.active, e.name.lower()))
+    return ordered
+
+
+def _employee_search_text(employee) -> str:
+    parts = [employee.name, employee.aliases, employee.position, employee.department, employee.telegram_chat_id,
+             (employee.competencies or "")[:400]]
+    for membership in employee.department_memberships:
+        parts += [membership.department.name if membership.department else "", membership.role]
+    return " ".join(part for part in parts if part).lower().replace("ё", "е")
+
+
+def _employee_voice_info(employees, readiness):
+    """List badge from the collection heuristic: independent recordings out of the required minimum.
+
+    It shows how far sample collection has got, not a calibrated recognition accuracy."""
+    people = {p["employee_id"]: p for p in readiness.get("people", [])}
+    need = int(readiness.get("min_independent_samples") or speaker_id.READY_INDEPENDENT_SAMPLES)
+    info = {}
+    for employee in employees:
+        person = people.get(employee.id) or {}
+        count = int(person.get("independent_samples") or 0)
+        if not employee.active:
+            state = "off"
+        elif person.get("ready"):
+            state = "ready"
+        elif count >= need:
+            state = "check"  # enough recordings, but they disagree or resemble a colleague
+        elif count:
+            state = "partial"
+        else:
+            state = "none"
+        info[employee.id] = {
+            "state": state, "count": count, "need": need,
+            "pct": 100 if state == "ready" else (min(100, round(100 * count / need)) if need else 0),
+            "samples": len(employee.voice_samples),
+            "seconds": round(sum(float(sample.sample_duration or 0) for sample in employee.voice_samples)),
+            "legacy": employee.voiceprint is not None,
+        }
+    return info
+
+
+def _employee_summary(employees, voice_info) -> str:
+    active = [e for e in employees if e.active]
+    parts = [f"{len(active)} {_plural_ru(len(active), ('человек', 'человека', 'человек'))}",
+             f"{sum(1 for e in active if e.telegram_chat_id)} с Telegram",
+             f"голос готов у {sum(1 for e in active if voice_info[e.id]['state'] == 'ready')}"]
+    inactive = len(employees) - len(active)
+    if inactive:
+        parts.append(f"неактивных: {inactive}")
+    return " · ".join(parts)
+
+
+def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str = "", tab: str = "",
+                       saved: str = ""):
+    owners = {f"user:{current_user(request)['id']}", request.session.get("recording_owner")}
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
         visible_voice_samples = {}
         for employee in emps:
             visible_voice_samples[employee.id] = [sample for sample in employee.voice_samples
-                if (not sample.access_owner or sample.access_owner in {
-                    f"user:{current_user(request)['id']}", request.session.get("recording_owner")})]
+                                                  if not sample.access_owner or sample.access_owner in owners]
             for membership in employee.department_memberships:
                 _ = membership.department.name if membership.department else ""
             _ = employee.voiceprint.created_at if employee.voiceprint else None
-            _ = list(employee.voice_samples)
         for department in departments:
             _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
@@ -1653,22 +1739,50 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     from . import access
     rights = {e.id: agent.rights_of(e) for e in emps}
-    return page(request, "employees.html", employees=emps, chats=chats, linked=linked, rights=rights,
-                rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
-                strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
-                voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()),
-                voice_service_enabled=config.voice_service_enabled(), visible_voice_samples=visible_voice_samples,
-                voice_readiness=speaker_id.identification_readiness({e.id: list(e.voice_samples) for e in emps if e.active}))
+    readiness = speaker_id.identification_readiness({e.id: list(e.voice_samples) for e in emps if e.active})
+    voice_info = _employee_voice_info(emps, readiness)
+    panel_employee = next((e for e in emps if e.id == edit), None) if edit else None
+    if tab not in EMPLOYEE_TABS or (tab == "voice" and panel_employee is None):
+        tab = "voice" if voice_msg and panel_employee is not None else "profile"
+    return dict(
+        employees=emps, employee_groups=_employee_groups(emps), chats=chats, linked=linked, rights=rights,
+        rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
+        strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS,
+        edit=panel_employee.id if panel_employee else 0, add=bool(add) and panel_employee is None,
+        panel_employee=panel_employee, panel_tab=tab, saved_name=saved[:200], voice_msg=voice_msg,
+        voice_identity_enabled=bool(config.pyannoteai_key()), voice_service_enabled=config.voice_service_enabled(),
+        visible_voice_samples=visible_voice_samples, voice_readiness=readiness, voice_info=voice_info,
+        voice_status_ru=VOICE_STATUS_RU, initials={e.id: _initials(e.name) for e in emps},
+        search_text={e.id: _employee_search_text(e) for e in emps},
+        employee_summary=_employee_summary(emps, voice_info),
+    )
 
 
-@app.post("/employees")
-async def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
-                  position: str = Form(""), department: str = Form(""), competencies: str = Form(""),
-                  responsibilities: str = Form(""), context: str = Form(""),
-                  channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
-                  telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
+def _render_fragment(request, name: str, **ctx) -> str:
+    return page(request, name, **ctx).body.decode("utf-8")
+
+
+@app.get("/employees", response_class=HTMLResponse)
+def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str = "", tab: str = "",
+                   saved: str = ""):
     guard_admin(request)
-    form = await request.form()
+    return page(request, "employees.html", **_employees_context(request, edit, bool(add), voice_msg, tab, saved))
+
+
+@app.get("/employees/panel", response_class=HTMLResponse)
+def employees_panel(request: Request, edit: int = 0, add: int = 0, tab: str = ""):
+    """The side card alone: the directory swaps it in without reloading the list."""
+    guard_admin(request)
+    ctx = _employees_context(request, edit, bool(add), tab=tab)
+    if edit and ctx["panel_employee"] is None:
+        raise HTTPException(404, "Сотрудник не найден")
+    return page(request, "_employee_panel.html", **ctx)
+
+
+def _employee_store(form, id, name, aliases, position, department, competencies, responsibilities, context,
+                    channel, telegram_chat_id, telegram_manual, bitrix_user_id, active) -> int:
+    if not name.strip():
+        raise HTTPException(400, "Укажите имя и фамилию сотрудника")
     try:
         selected_ids = {int(value) for value in form.getlist("department_ids")}
     except (TypeError, ValueError):
@@ -1717,7 +1831,43 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
         saved_employee_id = e.id
     if level and level != access.level_of(e):
         access.set_level(e, level)  # after the card is saved: the settings are written in their own transaction
+    return saved_employee_id
+
+
+@app.post("/employees")
+async def employee_save(request: Request, id: int = Form(0), name: str = Form(""), aliases: str = Form(""),
+                  position: str = Form(""), department: str = Form(""), competencies: str = Form(""),
+                  responsibilities: str = Form(""), context: str = Form(""),
+                  channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
+                  telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
+    guard_admin(request)
+    form = await request.form()
+    # The directory saves the card in place (fetch) and gets the refreshed list and card back;
+    # without JavaScript the same form posts normally and is redirected.
+    wants_json = request.headers.get("x-requested-with") == "fetch"
+    add_next = str(form.get("next") or "") == "add"
+    try:
+        saved_employee_id = _employee_store(form, id, name, aliases, position, department, competencies,
+                                            responsibilities, context, channel, telegram_chat_id, telegram_manual,
+                                            bitrix_user_id, active)
+    except HTTPException as exc:
+        if wants_json:
+            return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+        raise
     agent.invalidate_roster()
+    if wants_json:
+        ctx = _employees_context(request, 0 if add_next else saved_employee_id, add_next,
+                                 tab=str(form.get("tab") or ""), saved=name.strip() if add_next else "")
+        message = (f"Сохранено: {name.strip()}. Можно заполнять следующую карточку." if add_next
+                   else "Сотрудник добавлен." if not id else "Изменения сохранены.")
+        return JSONResponse({
+            "ok": True, "id": saved_employee_id, "created": not id, "next": "add" if add_next else "",
+            "message": message, "summary": ctx["employee_summary"],
+            "list_html": _render_fragment(request, "_employee_list.html", **ctx),
+            "panel_html": _render_fragment(request, "_employee_panel.html", **ctx),
+        })
+    if add_next:
+        return RedirectResponse(f"/employees?add=1&saved={quote(name.strip()[:200], safe='')}#employee-create", 303)
     target = (
         f"/employees?edit={saved_employee_id}#employee-{saved_employee_id}"
         if id else f"/employees#employee-{saved_employee_id}"
@@ -1726,7 +1876,8 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
 
 
 def _voice_redirect(employee_id: int, message: str):
-    return RedirectResponse(f"/employees?edit={employee_id}&voice_msg={quote(message, safe='')}", 303)
+    # Back to the same card with the voice tab open, not to the top of the directory.
+    return RedirectResponse(f"/employees?edit={employee_id}&tab=voice&voice_msg={quote(message, safe='')}#voice", 303)
 
 
 def _meeting_redirect(mid: int, message: str):
