@@ -1,8 +1,8 @@
 """Checking dialogs: how well a model works as the AI employee, before it answers real people.
 
-About sixty situations with the expected behaviour (an order, a question back, a question about the company, a person
-who does not answer, a document, a request beyond the person's rights…) go to the chosen models in both ways of asking
-for actions: a JSON answer and function calls. Nothing is carried out and nobody gets a message — the decision passes
+About eighty situations with the expected behaviour (an order, an order from the chat to confirm, a question back,
+a question about the company, a person who does not answer, a document, a request beyond the person's rights…) go to
+the chosen models in both ways of asking for actions: a JSON answer and function calls. Nothing is carried out and nobody gets a message — the decision passes
 the same checks as in a real conversation (agent.decide) and is compared with what was expected. OpenRouter reports
 the real price of every answer, so quality and the cost a month stand next to each other.
 
@@ -100,9 +100,13 @@ ROLES = {  # who writes: the employee in the directory (or nobody) and the right
     "reviewer": {"reviewer": True, "full": True, "sender": "Ирина"},
     "director": {"reviewer": True, "full": True, "director": True, "sender": "Вадим"},
     "reviewer_dm": {"reviewer": True, "director_mode": True, "sender": "Ирина"},  # a director is named: orders are theirs
+    "head": {"employee": 7, "sender": "Дмитрий", "scope": "department", "team": (5, 7)},  # orders his department only
+    "full_noremind": {"full": True, "sender": "Игорь", "skills_off": ("remind", "cancel_reminder")},
 }
 ROLE_RU = {"employee": "сотрудник", "accountant": "сотрудник", "full": "полный доступ", "reviewer": "проверяющий",
-           "director": "директор", "reviewer_dm": "проверяющий при директоре"}
+           "director": "директор", "reviewer_dm": "проверяющий при директоре", "head": "руководитель отдела",
+           "full_noremind": "полный доступ без напоминаний"}
+REFER_TO = [{"name": "Ирина Соколова", "role": "проверяющий"}]  # whom to go to with what is beyond the rights
 
 
 def _person_row(employee_id: int) -> dict:
@@ -134,6 +138,10 @@ def build_ctx(role: str, *, history=(), talking=None, voice=False, voice_problem
     employee = types.SimpleNamespace(id=employee_row["id"], name=employee_row["name"]) if employee_row else None
     reviewer, full, director = bool(flags.get("reviewer")), bool(flags.get("full")), bool(flags.get("director"))
     director_mode = bool(flags.get("director_mode"))
+    off = tuple(flags.get("skills_off") or ())
+    person = agent_skills.Person(employee=employee, reviewer=reviewer, full=full and not (director_mode and not director),
+                                 director=director, scope=flags.get("scope", ""), team=frozenset(flags.get("team") or ()),
+                                 skills=frozenset(n for n in agent_skills.SKILLS if n not in off) if off else None)
     talking = bool(history) if talking is None else talking
     ctx = {"today": deadlines.today().isoformat(), "now": reminders.now_view(), "sender_name": flags["sender"],
            "voice_message": bool(voice), "voice_problem": voice_problem,
@@ -177,14 +185,27 @@ def build_ctx(role: str, *, history=(), talking=None, voice=False, voice_problem
         ctx["recent_meetings"] = [_meeting(brief=True)]
         ctx["recent_cases"] = []
         ctx["recent_files"] = []
+    scope = person.order_scope
+    if not full and scope in ("all", "department"):  # the people they may give orders to (department: with their tasks)
+        ctx["team"] = [{"id": p["id"], "name": p["name"], "position": p["position"], "department": p["department"],
+                        "responsibilities": p["responsibilities"],
+                        "departments": [{"name": p["department"], "role": "", "responsibilities": ""}],
+                        "reachable": not p.get("unreachable"),
+                        **({"open_tasks": [_task_view(t, False) for t in TASKS if t[2] == p["id"]]}
+                           if scope == "department" else {})}
+                       for p in PEOPLE if scope == "all" or p["id"] in person.team]
+    ctx["order_scope"] = scope
+    if scope != "all":
+        ctx["refer_to"] = REFER_TO
+    if off:
+        ctx["skills_off"] = [agent_skills.SKILLS[n].title for n in agent_skills.SKILLS
+                             if n not in agent_skills.PAIRED and not agent_skills.allowed_skill(n, person)]
     ctx["reminders_pending"] = []
     if reviewer or director:
         ctx["cases_awaiting_decision"] = []
     if reviewer:
         ctx["meetings_awaiting_approval"] = []
         ctx["open_questions_from_employees"] = []
-    person = agent_skills.Person(employee=employee, reviewer=reviewer, full=full and not (director_mode and not director),
-                                 director=director)
     return ctx, person
 
 
@@ -366,6 +387,10 @@ def scenarios() -> list:
         (33, "ты", "Смета в работе, Борис обещал к пятнице."),
         (21, "человек", "Арматуру на Ленина 12 довезли?"),
         (21, "ты", "Да, Виктор отписался: доставили вчера."))
+    order_talk = (("человек", f"Поручи Виктору купить перфоратор до {_ru(d4)}."),
+                  ("ты", f"Понял: Виктор Иванов — купить перфоратор до {_ru(d4)}. Делаю?"))
+    order_61 = {"id": 61, "kind": "task", "to": "Виктор Иванов", "title": "Купить перфоратор", "details": None,
+                "deadline": d4.isoformat(), "forward_to": None, "asked_at": "сегодня 10:02"}
     S = Scenario
     return [
         # --- orders from the director
@@ -387,9 +412,50 @@ def scenarios() -> list:
         S("assign-retry", "Поручения", "Повторить задачу ассистента, которая не получилась", "director",
           "Повтори сводку по закупкам, в прошлый раз не получилось.",
           actions=({"type": "assign_task", "task_id": 301, "to": "assistant"},)),
-        S("assign-new", "Поручения", "Новой задачи нет в данных — не выдумывать", "director",
-          "Поручи Виктору купить перфоратор до пятницы.", allowed=("note", "remind"),
-          forbid=({"type": "assign_task"},)),
+        # --- new work given in the chat: retell, «Делаю?», start only after «да»
+        S("order-task", "Поручения из чата", "Новая задача сотруднику: пересказать и спросить «Делаю?»", "director",
+          f"Поручи Виктору купить перфоратор до {_ru(d4)}.",
+          actions=({"type": "order", "kind": "task", "to": 3, "deadline": d4.isoformat()},), question=True,
+          forbid=({"type": "assign_task"}, {"type": "confirm_order"})),
+        S("order-confirm", "Поручения из чата", "«Да» на пересказ — поручение начинается", "director", "Да, делай.",
+          history=order_talk, extra={"order_to_confirm": order_61},
+          actions=({"type": "confirm_order", "order_id": 61, "ok": True},), forbid=({"type": "order"},)),
+        S("order-cancel", "Поручения из чата", "«Нет» на пересказ — поручение отменяется", "director",
+          "Нет, не надо, отбой.", history=order_talk, extra={"order_to_confirm": order_61},
+          actions=({"type": "confirm_order", "order_id": 61, "ok": False},), forbid=({"type": "order"},)),
+        S("order-correct", "Поручения из чата", "Поправили срок — новый пересказ, а не «да»", "director",
+          f"Нет, пусть до {_ru(d3)}.", history=order_talk, extra={"order_to_confirm": order_61},
+          actions=({"type": "order", "kind": "task", "to": 3, "deadline": d3.isoformat()},), question=True,
+          allowed=("note", "confirm_order"), forbid=({"type": "confirm_order", "ok": True},)),
+        S("order-ask", "Поручения из чата", "Узнать у сотрудника", "director",
+          "Узнай у Ольги, когда привезут картридж для принтера.",
+          actions=({"type": "order", "kind": "ask", "to": 4},), question=True),
+        S("order-request", "Поручения из чата", "Запросить документ и передать другому", "director",
+          "Запроси у Анны акт сверки с «Монолитом» и передай его Борису.",
+          actions=({"type": "order", "kind": "request", "to": 1, "forward_to": 2},), question=True),
+        S("order-match", "Поручения из чата", "Исполнителя подобрать по обязанностям", "director",
+          f"Пусть кто-нибудь закажет канцелярию для офиса до {_ru(d3)}.",
+          actions=({"type": "order", "kind": "task", "to": 4, "deadline": d3.isoformat()},), or_question=True),
+        S("order-unclear", "Поручения из чата", "Непонятно, что поручить, — уточнить", "director",
+          "Поручи Виктору разобраться с этим.", question=True, forbid=({"type": "order"},)),
+        # --- whom the person may give orders to (the employee card)
+        S("rights-dept-order", "Права на поручения", "Руководитель отдела поручает своему человеку", "head",
+          f"Поручи Сергею проверить щиты на Ленина 12 до {_ru(d3)}.",
+          actions=({"type": "order", "kind": "task", "to": 5, "deadline": d3.isoformat()},), question=True),
+        S("rights-dept-out", "Права на поручения", "Человек не из его отдела — подсказать, к кому идти", "head",
+          f"Поручи Анне выставить счёт заказчику по Ленина 12 до {_ru(d3)}.", allowed=("note", "ask_reviewer"),
+          forbid=({"type": "order"},), reply_has=(r"Ирин",)),
+        S("rights-dept-remind", "Права на поручения", "Напомнить человеку своего отдела", "head",
+          "Напомни Сергею завтра в 8 утра взять допуск на объект.",
+          actions=({"type": "remind", "to": [5], "at": _at(d1, 8)},)),
+        S("rights-self-out", "Права на поручения", "Сотрудник поручает только себе — коллеге нельзя", "employee",
+          f"Поручи Анне прислать мне акт сверки до {_ru(d3)}.", allowed=("note", "ask_reviewer"),
+          forbid=({"type": "order"},), reply_has=(r"Ирин",)),
+        S("rights-self-ok", "Права на поручения", "Задача себе — можно", "employee",
+          f"Поставь мне задачу: позвонить в «Монолит» насчёт сверки до {_ru(d3)}.",
+          actions=({"type": "order", "kind": "task", "to": "me", "deadline": d3.isoformat()},), question=True),
+        S("rights-skill-off", "Права на поручения", "Навык выключен в карточке — не делать", "full_noremind",
+          "Напомни Анне завтра в 10:00 про счёт за бетон.", forbid=({"type": "remind"},)),
         # --- reports and «ну что там?»
         S("status-person", "Отчёты и дела", "Чем занят сотрудник", "director", "Что сейчас у Анны в работе?",
           allowed=("note", "team_report"), reply_has=(r"сверк|Монолит|бетон",)),

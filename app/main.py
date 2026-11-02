@@ -2419,6 +2419,8 @@ def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str
     return dict(
         employees=emps, employee_groups=_employee_groups(emps), chats=chats, linked=linked, rights=rights,
         rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
+        order_scopes=("",) + agent_skills.ORDER_SCOPES, scope_ru=agent_skills.SCOPE_RU, scope_hint=agent_skills.SCOPE_HINT,
+        chat_skills=[x for x in agent_skills.SKILLS.values() if x.name not in agent_skills.PAIRED],
         strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS,
         edit=panel_employee.id if panel_employee else 0, add=bool(add) and panel_employee is None,
         panel_employee=panel_employee, panel_tab=tab, saved_name=saved[:200], voice_msg=voice_msg,
@@ -2480,6 +2482,12 @@ def _employee_store(form, id, name, aliases, position, department, competencies,
         e.telegram_chat_id = ref
         e.bitrix_user_id = bitrix_user_id.strip()
         e.active = bool(active) if id else True
+        if form.get("skills_form"):  # whom they may give orders to and which skills are on (not for the director)
+            scope = str(form.get("order_scope") or "").strip()
+            e.order_scope = scope if scope in agent_skills.ORDER_SCOPES else ""
+            on = {str(x) for x in form.getlist("skill_allowed")}
+            names = [n for n in agent_skills.SKILLS if n not in agent_skills.PAIRED]
+            e.skills_allowed = None if all(n in on for n in names) else [n for n in names if n in on]
         s.add(e)
         s.flush()
         departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []

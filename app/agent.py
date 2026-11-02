@@ -23,7 +23,7 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import (access, agent_skills, cases, deadlines, dialog_memory, memory as company_memory, llm, reminders,
+from . import (access, agent_skills, cases, deadlines, dialog_memory, memory as company_memory, llm, orders, reminders,
                settings_store, transcribe, userbot, voice)
 from .db import (ConversationEscalation, ConversationMessage, Document, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
@@ -427,9 +427,37 @@ def _notes_view(s, employee_id=None, limit=15) -> list:
     return out
 
 
+def _departments_view(p) -> list:
+    return [{"name": m.department.name, "role": m.role or "", "responsibilities": m.responsibilities or ""}
+            for m in p.department_memberships if m.department is not None and m.department.active]
+
+
+def _refer_to(s, employee) -> list:
+    """Whom to send a person with a request beyond their rights: the heads of their departments, otherwise the reviewers
+    (the director is never named)."""
+    out, names = [], set()
+    for m in (employee.department_memberships if employee is not None else []):
+        department = m.department
+        if department is None or not department.active:
+            continue
+        head = next((x for x in department.memberships if x.is_primary and x.employee is not None and x.employee.active
+                     and x.employee_id != employee.id), None)
+        if head is not None and head.employee.name not in names and access.level_of(head.employee) != "director":
+            out.append({"name": head.employee.name, "role": f"руководитель: {department.name}"})
+            names.add(head.employee.name)
+    if not out:
+        for e in s.query(Employee).filter_by(active=True).order_by(Employee.name).all():
+            if (employee is None or e.id != employee.id) and access.level_of(e) == "reviewer":
+                out.append({"name": e.name, "role": "проверяющий"})
+            if len(out) >= 3:
+                break
+    return out
+
+
 def _context(s, row, result: dict, employee, reviewer: bool, full: bool, director: bool = False,
-             director_mode: bool = False) -> dict:
+             director_mode: bool = False, person=None) -> dict:
     chat = row.chat_id
+    person = person or agent_skills.person_of(s, employee, reviewer, full, director)
     # The whole conversation (dialog_memory.py): the fresh part word for word, a retelling of the older part, and the
     # old messages this one seems to speak about.
     talk = dialog_memory.window(s, chat, row.id)
@@ -467,7 +495,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                            if m.department is not None and m.department.active],
                            "tasks": [_task_view(t, True) for t in mine],
                            "done_recently": [t.title for t in tasks if t.status == "done"][:5]}
-        meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks))[:4]
+        meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks if t.meeting_id))[:4]
         ctx["meetings"] = [_meeting_view(m) for m in (s.get(Meeting, i) for i in meeting_ids) if m]
         ctx["waiting_for_reviewer"] = [{"id": e.id, "question": e.reason} for e in
                                        s.query(ConversationEscalation).filter_by(chat_id=chat, status="open").all()]
@@ -497,10 +525,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                         "department": getattr(p, "department", "") or None,
                         "competencies": getattr(p, "competencies", "") or None,
                         "responsibilities": getattr(p, "responsibilities", "") or None,
-                        "departments": [{"name": m.department.name, "role": m.role or "",
-                                         "responsibilities": m.responsibilities or ""}
-                                        for m in p.department_memberships
-                                        if m.department is not None and m.department.active],
+                        "departments": _departments_view(p),
                         "context": getattr(p, "context", "") or None,
                         "reachable": reminders.reachable(p),
                         "open_tasks": [_task_view(t, False) for t in by_person[p.id] if t.status in OPEN_STATUSES][:8],
@@ -519,6 +544,32 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                 "at": d.created_at.isoformat() if d.created_at else None}
                                for d in s.query(Document).filter(Document.chat_id == chat, Document.created_at >= since)
                                .order_by(Document.id.desc()).limit(30)]
+    scope = person.order_scope
+    if not full and scope in ("all", "department"):  # people they may give orders to (department: with their tasks)
+        people = [p for p in s.query(Employee).filter_by(active=True).order_by(Employee.name).all()
+                  if scope == "all" or p.id in person.team]
+        tasks = (s.query(Task).filter(Task.assignee_id.in_([p.id for p in people]), Task.executor != "assistant",
+                                      Task.status.in_(OPEN_STATUSES)).order_by(Task.id.desc()).limit(200).all()
+                 if scope == "department" and people else [])
+        ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None,
+                        "department": getattr(p, "department", "") or None,
+                        "responsibilities": getattr(p, "responsibilities", "") or None,
+                        "departments": _departments_view(p), "reachable": reminders.reachable(p),
+                        **({"open_tasks": [_task_view(t, False) for t in tasks if t.assignee_id == p.id][:8]}
+                           if scope == "department" else {})} for p in people]
+    ctx["order_scope"] = scope
+    if scope != "all":
+        hint = _refer_to(s, employee)
+        if hint:
+            ctx["refer_to"] = hint
+    if person.skills is not None:
+        off = [agent_skills.SKILLS[n].title for n in agent_skills.SKILLS
+               if n not in agent_skills.PAIRED and not agent_skills.allowed_skill(n, person)]
+        if off:
+            ctx["skills_off"] = off
+    waiting_order = orders.pending_view(s, chat)
+    if waiting_order:
+        ctx["order_to_confirm"] = waiting_order
     ctx["reminders_pending"] = reminders.pending_view(s, chat, full)
     if reviewer or director:
         ctx["cases_awaiting_decision"] = cases.decisions_view()
@@ -544,7 +595,16 @@ ASSIGN_RULES = (
     "задачи с department, competencies, responsibilities и context каждого сотрудника. Не выбирай только по имени или "
     "должности. Если подходят несколько сотрудников либо данных мало, задай директору один конкретный уточняющий вопрос "
     "и не создавай назначение наугад. Не выдумывай компетенции и загрузку. ")
-GENERAL_RULES = (
+ORDER_RULES = (
+    "Поручения из чата: новую работу коллеге (сделать к сроку, узнать у него, запросить документ) оформляй действием "
+    "order, а не обещанием. Сначала убедись, что ясно кому, что и (для задачи) к какому сроку; если не хватает одного "
+    "из этого — задай один короткий уточняющий вопрос. С order в reply перескажи поручение и спроси подтверждение "
+    "(«Понял: Виктору — купить перфоратор до 14.11. Делаю?»); пока человек не ответил «да», не пиши, что поручение "
+    "передано. order_to_confirm — твой пересказ, который ждёт ответа: «да» — confirm_order с ok=true, «нет» — ok=false, "
+    "поправка («нет, до среды», «лучше Ольге») — новый order с исправлением и снова «Делаю?». После confirm_order "
+    "коротко скажи, кому передал и что сообщишь, когда будет готово. assistant_waiting_for_you с expects=done — "
+    "поручение, которое выполняет этот человек: когда он пишет, что сделал или что мешает, отметь task_status по task_id. ")
+GENERAL_RULES = ORDER_RULES + (
     "Память разговора: history — последние сообщения целиком; dialog_memory — краткий пересказ более ранней части "
     "разговора; from_earlier — старые сообщения, которые код нашёл по словам этого сообщения; recalled — что нашлось, "
     "когда ты сам попросил вспомнить. На «как договаривались», «тот акт», «как в прошлый раз» отвечай по ним и "
@@ -609,8 +669,9 @@ def _system(transport: str = "json") -> str:
         "не утверждай, что «так решено и изменить нельзя». В message — кто просит, какая задача, что нужно, что в протоколе. "
         "Шутки про зарплату и прочее не по делу не эскалируй. Если ты уже "
         "ждёшь ответа проверяющего (waiting_for_reviewer), честно скажи об этом и что вернёшься с ответом. "
-        "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих и "
-        "людей с полным доступом. При выборе исполнителя используй responsibilities (реальные обязанности и компетенции), " +
+        "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих, "
+        "людей с полным доступом и у тех, кто может поручать другим (order_scope all или department: тогда team — "
+        "те, кому они могут поручать). При выборе исполнителя используй responsibilities (реальные обязанности и компетенции), " +
         "должность и текущие задачи. Если есть несколько людей с одинаковым именем, не выбирай только по имени: " +
         "сопоставь смысл поручения с обязанностями; если уверенного единственного совпадения нет, задай уточняющий вопрос " +
         "и не назначай задачу наугад. Простые действия, которые ты реально можешь выполнить доступными действиями, " +
@@ -621,10 +682,15 @@ def _system(transport: str = "json") -> str:
         "выполняют для директора: ему можно рассказывать всё, что есть в данных. Если director_mode=false, их выполняют "
         "также проверяющие и люди с полным доступом (roles содержит reviewer или full_access). Всем остальным, а при "
         "director_mode=true всем, кроме директора, такие просьбы ты не выполняешь и данных о других людях не раскрываешь. "
+        "Поручения (order) и напоминания другим людям, кроме того, ограничены order_scope этого человека: all — любому "
+        "из team, department — только людям из team (это его отдел), self — только себе (to=\"me\"); в этих пределах "
+        "выполняй их для любого человека, за пределами — нет. skills_off — что для этого человека выключено: такие "
+        "просьбы не выполняй. "
         "Откажи мягко, коротко и своими словами, чтобы человек не почувствовал стену: скажи, что такие просьбы ты по "
-        "запросам коллег не выполняешь и с ними лучше к руководителю, и сразу предложи то, что можешь сделать для него "
-        "самого (его задачи, статусы, напоминание ему самому). Не пиши «нет доступа», «недостаточно прав», «запрещено», "
-        "«не уполномочен», не объясняй, как устроены роли, и не называй, кто директор. "
+        "запросам коллег не выполняешь и с ними лучше к руководителю (если есть refer_to — назови, к кому именно), и "
+        "сразу предложи то, что можешь сделать для него самого (его задачи, статусы, напоминание ему самому). Не пиши "
+        "«нет доступа», «недостаточно прав», «запрещено», «не уполномочен», не объясняй, как устроены роли, и не "
+        "называй, кто директор. "
         "Если voice_message=true, текст это автоматическая расшифровка голосового сообщения: возможны ошибки в именах, "
         "числах и времени. Когда от точности зависит действие (кому писать, во сколько напомнить), назови в reply, что "
         "именно ты понял и сделал, чтобы человек мог поправить. Если voice_problem задан (too_long, failed, empty), текст "
@@ -811,10 +877,12 @@ def _denied(action: dict, employee, reviewer: bool, full: bool) -> bool:
 _W = r"(?<![а-яёa-z])({})(?![а-яёa-z])"
 PROMISES = (  # (words in the reply, actions that keep the promise, does a running case keep it)
     (_W.format("перешлю|передам|отправлю|скину|пришлю|упакую|запакую|заархивирую"),
-     {"deliver_files", "relay_answer", "assign_task", "team_report"}, True),
-    (_W.format("напомню"), {"remind"}, False),
-    (_W.format("уточню|спрошу|узнаю|запрошу"), {"ask_reviewer", "assign_task", "relay_answer"}, False),
+     {"deliver_files", "relay_answer", "assign_task", "team_report", "order", "confirm_order"}, True),
+    (_W.format("напомню"), {"remind", "order", "confirm_order"}, False),
+    (_W.format("уточню|спрошу|узнаю|запрошу"), {"ask_reviewer", "assign_task", "relay_answer", "order", "confirm_order"},
+     False),
     (_W.format("подготовлю|соберу|сделаю"), {"team_report", "assign_task", "deliver_files", "remind"}, False),
+    (_W.format("поручу|назначу|поставлю задачу"), {"order", "confirm_order", "assign_task"}, False),
 )
 _CONDITIONAL = re.compile(r"(?<![а-яё])(если|как только|когда|после того как|могу|можно|хочешь|нужно ли)(?![а-яё])")
 # Employee asks to change logistics (car/driver/date), not a joke about pay.
@@ -853,7 +921,12 @@ def unbacked_promises(reply: str, actions: list, ctx: dict) -> list:
     """Sentences where the assistant promises to do something («перешлю», «напомню») with no action that does it.
     Offers and conditions («могу переслать», «если пришлёшь — передам») are not promises."""
     kinds = {a.get("type") for a in actions or [] if isinstance(a, dict)}
-    case_running = bool(ctx.get("this_message_for_case"))
+    orders_of_person = {w.get("task_id") for w in ctx.get("assistant_waiting_for_you") or []
+                        if isinstance(w, dict) and w.get("expects") == "done"}
+    # «передам» after «сделал» on an order from the chat is kept by the case: it reports to whoever gave the order
+    case_running = bool(ctx.get("this_message_for_case")) or any(
+        a.get("type") == "task_status" and a.get("task_id") in orders_of_person and a.get("status") in ("done", "blocked")
+        for a in actions or [] if isinstance(a, dict))
     bad = []
     for sentence in _sentences(reply):
         low = sentence.lower()
@@ -877,8 +950,10 @@ def _drop_sentences(reply: str, bad: list) -> str:
 
 DECLINE_GENTLY = ("\nЭти действия тебе недоступны: такие просьбы по запросам коллег ты не выполняешь. Не выполняй их и убери "
                   "из actions. В reply мягко, коротко и по-человечески скажи, что такие просьбы ты не выполняешь и с ними "
-                  "лучше к руководителю, и предложи, чем можешь помочь этому человеку сам. Без слов «нет доступа», «нет "
-                  "прав», «запрещено».")
+                  "лучше к руководителю (если есть refer_to — назови, к кому), и предложи, чем можешь помочь этому "
+                  "человеку сам. Без слов «нет доступа», «нет прав», «запрещено».")
+ORDER_CONFIRM = ("\nВ actions есть order, но reply не спрашивает подтверждения. Перескажи поручение коротко (кому, что, "
+                 "срок) и спроси «Делаю?»: без «да» оно не начнётся.")
 
 
 # ----------------------------------------------------------------------------- applying actions (agent_skills.py)
@@ -925,6 +1000,7 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
             transport = "json"
             decision = _decide(_system(transport), ctx, text, feedback, model=model, transport=transport, person=person,
                                recall=recall)
+        decision["actions"] = [agent_skills.personal(a, person) for a in decision["actions"]]
         errors = [e for e in (agent_skills.check(a, ctx, person, approvers) for a in decision["actions"]) if e]
         if (employee is not None and not reviewer and not full
                 and organizational_change_request(text)
@@ -935,20 +1011,24 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
             )
         stiff = voice.officialese(decision["reply"]) if attempt == 1 else []
         promises = unbacked_promises(decision["reply"], decision["actions"], ctx)
-        if not errors and not stiff and not promises:
+        unconfirmed = any(a.get("type") == "order" for a in decision["actions"]) and "?" not in decision["reply"]
+        if not errors and not stiff and not promises and not unconfirmed:
             break
         if not errors:
-            if attempt == 2:  # a promise nobody will keep is not sent: those sentences are dropped
-                log.warning("%s: unbacked promise dropped: %s", label or "message", promises)
-                decision["reply"] = _drop_sentences(decision["reply"], promises)
+            if attempt == 2:
+                if promises:  # a promise nobody will keep is not sent: those sentences are dropped
+                    log.warning("%s: unbacked promise dropped: %s", label or "message", promises)
+                    decision["reply"] = _drop_sentences(decision["reply"], promises)
+                if unconfirmed:  # an order is never started without the person's «да»
+                    decision["reply"] = (decision["reply"].rstrip() + " Делаю?").strip()
                 break
-            feedback = ""
+            feedback = ORDER_CONFIRM if unconfirmed else ""
             if stiff:  # the style: one rewrite, then the reply goes as it is
                 feedback += (f"\nОтвет звучит как служебное письмо ({', '.join(stiff)}). Перепиши reply проще, как "
                              "коллега в мессенджере; actions и memory оставь.")
             if promises:
                 feedback += ("\nВ reply ты обещаешь сделать: «" + "»; «".join(promises) + "», но в actions нет действия, "
-                             "которое это делает. Либо добавь нужное действие (deliver_files, remind, ask_reviewer, "
+                             "которое это делает. Либо добавь нужное действие (deliver_files, remind, ask_reviewer, order, "
                              "assign_task, team_report), либо убери обещание и честно скажи, что нужно, чтобы это "
                              "сделать (кому, какие файлы, когда).")
             continue
@@ -979,9 +1059,10 @@ def _process(row_id: int) -> None:
         if director_mode and not director:
             full = False  # once there is a director, the view of the whole team and the orders are theirs alone
         author = result.get("name") or (employee.name if employee else "")
-        person = _person(employee, reviewer, full, director)
+        person = agent_skills.person_of(s, employee, reviewer, full, director)  # with the rights of the employee card
         decision = result.get("decision")
-        ctx = _context(s, row, result, employee, reviewer, full, director, director_mode) if decision is None else None
+        ctx = (_context(s, row, result, employee, reviewer, full, director, director_mode, person=person)
+               if decision is None else None)
     if decision is None:  # 2. decide (checked actions; a bad answer is explained to the model once)
         ctx.update(agent_skills.approval_hint(person))
         model = voice.model()

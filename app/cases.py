@@ -50,6 +50,9 @@ STATUS_RU = {"awaiting_approval": "ждёт одобрения плана", "sug
              "failed": "не удалось", "cancelled": "отменено", "paused": "на паузе",
              "handed_over": "передано человеку"}
 
+WAIT_RU = {"answer": "ответа", "document": "документа", "done": "выполнения"}
+EXPECT_RU = {"answer": "ответ", "document": "файл", "done": "выполнение"}
+
 _locks = collections.defaultdict(threading.Lock)
 
 
@@ -246,9 +249,11 @@ def describe_plan(s, case) -> str:
                 e = s.get(Employee, a[key])
                 names[a[key]] = e.name if e else f"#{a[key]}"
         if step.tool == "send_message":
-            lines.append(("спросить " if a.get("purpose") == "ask" else "попросить документ у ") + names[a["to"]])
+            lines.append({"ask": "спросить ", "order": "поручить "}.get(a.get("purpose"), "попросить документ у ")
+                         + names[a["to"]])
         elif step.tool == "wait_reply":
-            lines.append(f"дождаться {'ответа' if a.get('expects') == 'answer' else 'документа'} от {names[a['from']]}")
+            lines.append(f"дождаться, когда сделает {names[a['from']]}" if a.get("expects") == "done" else
+                         f"дождаться {WAIT_RU.get(a.get('expects'), 'ответа')} от {names[a['from']]}")
         elif step.tool == "forward_document":
             lines.append(f"передать документ {names[a['to']]}")
         elif step.tool == "zip_pack":
@@ -256,7 +261,7 @@ def describe_plan(s, case) -> str:
         elif step.tool == "send_files":
             lines.append(f"отправить {'архив' if a.get('from_step') is not None else 'файлы'} {names[a['to']]}")
         elif step.tool == "report":
-            lines.append("доложить результат")
+            lines.append(f"доложить {a['requested_by']}" if a.get("to_chat") and a.get("requested_by") else "доложить результат")
         elif step.tool == "run_skill":
             lines.append(a.get("summary") or "выполнить просьбу")
     return "; ".join(lines)
@@ -315,11 +320,16 @@ def start_for_task(task_id: int):
 def _write(purpose: str, facts: dict) -> str:
     instructions = {
         "ask": "Напиши сотруднику короткое сообщение: тебе нужно узнать у него то, что сказано в task. Задай вопрос прямо "
-               "и попроси ответить в этом чате. Не пиши так, будто задача поручена ему.",
+               "и попроси ответить в этом чате. Если есть requested_by, скажи, что спрашиваешь по его просьбе. Не пиши "
+               "так, будто задача поручена ему.",
         "request": "Напиши сотруднику короткое сообщение: попроси прислать в этот чат документ или данные из task. Если "
-                   "есть forward_to, скажи, что передашь документ им. Не пиши так, будто задача поручена ему.",
+                   "есть forward_to, скажи, что передашь документ им; если есть requested_by — что это его просьба. Не "
+                   "пиши так, будто задача поручена ему.",
+        "order": "Напиши сотруднику короткое сообщение: requested_by поручил ему задачу (task) — что сделать и к какому "
+                 "сроку (deadline, если есть). Попроси написать в этот чат, когда будет готово или если что-то мешает.",
         "remind": "Вежливо и коротко напомни сотруднику о своей просьбе (what_was_asked). reminder_number — какое это "
-                  "напоминание по счёту; не дави и не упрекай.",
+                  "напоминание по счёту; не дави и не упрекай. Если это поручение со сроком (deadline), спроси, как идёт "
+                  "и успевает ли к сроку.",
         "deliver": "Напиши короткую подпись к документу для получателя: от кого документ (from) и по какому поручению (task).",
         "report": "Коротко сообщи руководителю, чем закончилось дело: что спросил или попросил, у кого, что получил "
                   "(answers, documents), кому передал (forwarded, sent). Если ответ — передай его суть точно. Если в ответе "
@@ -339,10 +349,19 @@ def _write(purpose: str, facts: dict) -> str:
                       "сделано. Без лишних слов.",
         "skill_declined": "Коротко и по-доброму сообщи человеку, что руководитель не одобрил его просьбу (asked). "
                           "Не спорь и не объясняй, как устроено одобрение; предложи, чем можешь помочь сам.",
+        "order_report": "Коротко сообщи человеку, который дал поручение (requested_by), чем оно закончилось: кто и что "
+                        "сделал или ответил (answers — передай суть точно), что получено (documents) и кому передано "
+                        "(forwarded).",
+        "order_silent": "Сообщи человеку, который дал поручение (requested_by), что сотрудник (person) не отписался по "
+                        "нему (what_was_asked) уже hours часов, хотя ты напоминал (reminders); если есть deadline — что "
+                        "срок наступил. Предложи: напомнить ещё раз, поручить другому или связаться самому. Без упрёков.",
+        "order_blocked": "Сообщи человеку, который дал поручение (requested_by), что исполнитель (person) пишет, что ему "
+                         "мешает (note) по поручению (task). Предложи, как помочь, или спроси, как быть.",
     }[purpose]
-    system = voice.system_prompt("Ты ведёшь дело по поручению с совещания. " + instructions + ' JSON: {"text":"..."}')
+    system = voice.system_prompt("Ты ведёшь дело по поручению (с совещания или из чата). " + instructions +
+                                 ' JSON: {"text":"..."}')
     facts = {"purpose": purpose, **facts}
-    if purpose in ("ask", "request", "remind", "deliver", "handover"):
+    if purpose in ("ask", "request", "order", "remind", "deliver", "handover"):
         from . import memory
         found = memory.skills_for(f"{purpose} {json.dumps(facts.get('task') or {}, ensure_ascii=False)}")
         if found:
@@ -496,6 +515,8 @@ def _case_facts(s, case) -> dict:
     facts = {"task": {"title": case.title, "description": (task.description if task else "") or "",
                       "quote": (task.source_quote if task else "") or ""},
              "plan": describe_plan(s, case)}
+    if task is not None and task.deadline:
+        facts["deadline"] = task.deadline.isoformat()
     return facts
 
 
@@ -520,6 +541,8 @@ def _send_message(case_id: int, step_id: int) -> bool:
         if step.args.get("purpose") == "request":
             dests = [s.get(Employee, x.args["to"]) for x in case.steps if x.tool == "forward_document"]
             facts["forward_to"] = [e.name for e in dests if e is not None]
+        if step.args.get("requested_by"):  # an order from the chat: on whose behalf
+            facts["requested_by"] = step.args["requested_by"]
         ref, name = person.telegram_chat_id, person.name
     text = _write(step.args.get("purpose", "ask"), facts)
     with SessionLocal() as s:  # persisted before the side effect: a crash now never sends twice
@@ -558,21 +581,76 @@ def _wait_reply(case_id: int, step_id: int) -> bool:
         asked = next((x for x in reversed(case.steps) if x.position < step.position and x.tool == "send_message"
                       and x.args.get("to") == step.args["from"] and x.status == "done"), None)
         start = now()
-        reminder = dt.timedelta(hours=_hours("case_reminder_hours", 4))
         wait = s.query(CaseWait).filter_by(step_id=step_id).first() or CaseWait(case_id=case_id, step_id=step_id)
         wait.employee_id = person.id if person else None
         wait.chat_ref = person.telegram_chat_id if person else ""
         wait.expects = step.args.get("expects", "answer")
         wait.asked_message_id = (asked.result or {}).get("message_id") if asked else None
-        wait.started_at, wait.next_reminder_at = start, start + reminder
-        wait.escalate_at = start + dt.timedelta(hours=_hours("case_escalate_hours", 24))
+        wait.started_at = start
+        wait.next_reminder_at, wait.escalate_at = _wait_times(start, wait.expects, case.task)
         s.add(wait)
         step.status, step.started_at = "waiting", start
         case.status = "waiting"
-        _event(s, case_id, "waiting", f"Жду {'ответа' if wait.expects == 'answer' else 'документа'} от "
-                                      f"{person.name if person else '?'}", step_id)
+        _event(s, case_id, "waiting", (f"Жду, когда {person.name if person else '?'} сделает" +
+                                       (f" (срок {case.task.deadline.strftime('%d.%m')})"
+                                        if case.task is not None and case.task.deadline else "")
+                                       if wait.expects == "done" else
+                                       f"Жду {WAIT_RU.get(wait.expects, 'ответа')} от {person.name if person else '?'}"),
+               step_id)
         s.commit()
     return False
+
+
+def _wait_times(start, expects: str, task) -> tuple:
+    """(first reminder, when the silence is reported). An order is followed up by its deadline: a reminder on the
+    morning of that day, the person who gave it hears in the evening; without a deadline a day and three days."""
+    if expects != "done":
+        return (start + dt.timedelta(hours=_hours("case_reminder_hours", 4)),
+                start + dt.timedelta(hours=_hours("case_escalate_hours", 24)))
+    deadline = task.deadline if task is not None else None
+    if deadline is None:
+        return (start + dt.timedelta(hours=_hours("order_reminder_hours", 24)),
+                start + dt.timedelta(hours=_hours("order_escalate_hours", 72)))
+    from zoneinfo import ZoneInfo
+    zone = ZoneInfo(config.TIMEZONE)
+    morning = dt.datetime.combine(deadline, dt.time(10, 0), zone).astimezone(dt.timezone.utc)
+    evening = dt.datetime.combine(deadline, dt.time(18, 0), zone).astimezone(dt.timezone.utc)
+    first = morning if morning > start + dt.timedelta(hours=2) else start + dt.timedelta(hours=_hours("case_reminder_hours", 4))
+    return first, max(evening, first + dt.timedelta(hours=1))
+
+
+def _owner(case):
+    """The person who gave this order in the chat: {"chat", "name"} — they hear how it goes (not the leaders)."""
+    for step in case.steps:
+        a = step.args or {}
+        if a.get("to_chat"):
+            return {"chat": str(a["to_chat"]), "name": a.get("requested_by") or ""}
+    return None
+
+
+def _tell_owner(case_id: int, purpose: str, extra: dict, document=None) -> int:
+    """A text about the order for the person who gave it; failures are logged, never raised."""
+    if not userbot.ai_mode():
+        return 0
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        owner = _owner(case)
+        facts = {"case": {"id": case.id, "title": case.title, "kind": case.kind},
+                 "requested_by": owner["name"] if owner else "", **extra}
+    if owner is None:
+        return 0
+    try:
+        text = _write(purpose, facts)
+        _send_text(owner["chat"], text)
+        if document is not None:
+            userbot.send_document(owner["chat"], document["filename"], document["data"], "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("case %s: %s not told to the person who gave the order: %s", case_id, purpose, exc)
+        return 0
+    with SessionLocal() as s:
+        _event(s, case_id, "told_requester", f"{purpose}: {text}")
+        s.commit()
+    return 1
 
 
 def _sha(data: bytes) -> str:
@@ -698,7 +776,11 @@ def _report(case_id: int, step_id: int) -> bool:
             attach = {"filename": doc.filename, "data": bytes(doc.data)} if doc and doc.data else None
         facts = {**_case_facts(s, case), "answers": answers, "documents": documents, "forwarded": forwarded,
                  "sent": sent}
-    _tell_leaders(case_id, "report", facts, document=attach)
+        owner = _owner(case)
+    if owner is not None:  # an order from the chat: the person who gave it hears the result
+        _tell_owner(case_id, "order_report", facts, document=attach)
+    else:
+        _tell_leaders(case_id, "report", facts, document=attach)
     with SessionLocal() as s:
         step = s.get(CaseStep, step_id)
         step.status, step.finished_at, step.result = "done", now(), {"answers": len(answers), "documents": len(documents)}
@@ -970,7 +1052,7 @@ def _case_story(s, case, events: int = 5) -> dict:
     waiting_for = []
     for w in waits:
         e = s.get(Employee, w.employee_id) if w.employee_id else None
-        waiting_for.append({"person": e.name if e else w.chat_ref, "expects": "ответ" if w.expects == "answer" else "файл",
+        waiting_for.append({"person": e.name if e else w.chat_ref, "expects": EXPECT_RU.get(w.expects, "ответ"),
                             "since": _local_time(w.started_at)})
     story = [{"at": _local_time(ev.created_at), "text": ev.text[:300]}
              for ev in case.events if ev.kind not in EVENT_SKIP][-events:]
@@ -1035,7 +1117,7 @@ _RUN = {"send_message": _send_message, "wait_reply": _wait_reply, "forward_docum
 
 def _close(s, case) -> None:
     case.status, case.closed_at, case.note = "done", now(), ""
-    if case.task is not None:
+    if case.task is not None and case.task.executor == "assistant":  # a person's task keeps the status they reported
         case.task.status = "assistant_done"
         s.add(Note(task_id=case.task_id, meeting_id=case.meeting_id, kind="done", source="system", author="ассистент",
                    text=f"Ассистент довёл дело «{case.title}» до конца"[:800]))
@@ -1126,7 +1208,8 @@ def on_message(employee_id, text: str, reply_to=None, document_id=None) -> dict:
         expects = "document" if document_id else "answer"
         if not document_id and is_acknowledgement(text):
             for other in s.query(CaseWait).filter_by(employee_id=employee_id, status="open").all():
-                _event(s, other.case_id, "note", f"Ответил(а): «{text[:200]}» — жду ответа по существу", other.step_id)
+                _event(s, other.case_id, "note", f"Ответил(а): «{text[:200]}» — " +
+                       ("жду, когда сделает" if other.expects == "done" else "жду ответа по существу"), other.step_id)
             s.commit()
             return {}
         waits = (s.query(CaseWait).filter(CaseWait.employee_id == employee_id, CaseWait.status == "open",
@@ -1138,7 +1221,9 @@ def on_message(employee_id, text: str, reply_to=None, document_id=None) -> dict:
                         "kind": expects}
             if not document_id:
                 for other in s.query(CaseWait).filter_by(employee_id=employee_id, status="open").all():
-                    _event(s, other.case_id, "note", f"Написал(а), но документа пока нет: {text[:300]}", other.step_id)
+                    _event(s, other.case_id, "note", (f"Написал(а) по поручению: {text[:300]}" if other.expects == "done"
+                                                      else f"Написал(а), но документа пока нет: {text[:300]}"),
+                           other.step_id)
                 s.commit()
             return {}
         s.commit()
@@ -1161,6 +1246,13 @@ def _resolve(wait_id: int, answer=None, document_id=None, by: str = "") -> dict:
             step.result = {"document_id": doc.id, "sha256": doc.sha256, "filename": doc.filename}
             _event(s, case.id, "document_received", f"Получил «{doc.filename}» ({doc.size} байт){suffix}", step.id,
                    {"sha256": doc.sha256})
+        elif wait.expects == "done":
+            wait.answer = str(answer or "")[:4000]
+            step.result = {"answer": wait.answer, "done": True}
+            if case.task is not None and case.task.executor != "assistant" and case.task.status != "done":
+                case.task.status = "done"
+            _event(s, case.id, "done_reported", f"Сделано{suffix}" + (f": {wait.answer[:600]}" if wait.answer else ""),
+                   step.id)
         else:
             wait.answer = str(answer or "")[:4000]
             step.result = {"answer": wait.answer}
@@ -1171,7 +1263,8 @@ def _resolve(wait_id: int, answer=None, document_id=None, by: str = "") -> dict:
         forward_to = [s.get(Employee, x.args["to"]).name for x in case.steps
                       if x.tool == "forward_document" and s.get(Employee, x.args["to"])]
         s.commit()
-        link = {"case_id": case.id, "title": case.title, "kind": "document" if document_id else "answer",
+        link = {"case_id": case.id, "title": case.title,
+                "kind": "document" if document_id else ("done" if wait.expects == "done" else "answer"),
                 "forward_to": forward_to}
         case_id = case.id
     if _testing():
@@ -1228,8 +1321,8 @@ def cancel(case_id: int, by: str = "") -> bool:
             wait.status = "cancelled"
         for transfer in s.query(DocumentTransfer).filter_by(case_id=case_id, status="awaiting_approval"):
             transfer.status = "blocked"
-        if case.task is not None:
-            case.task.status = "assistant_failed"
+        if case.task is not None:  # an order a person was doing is withdrawn, not failed
+            case.task.status = "assistant_failed" if case.task.executor == "assistant" else "cancelled"
         _event(s, case_id, "cancelled", f"Дело отменил {by or 'руководитель'}")
         s.commit()
         declined = case.kind == "skill" and not any(x.tool == "run_skill" and x.status == "done" for x in case.steps)
@@ -1289,12 +1382,38 @@ def record_answer(case_id: int, text: str, by: str = "") -> bool:
         return False
     with SessionLocal() as s:
         case = s.get(Case, case_id)
-        wait = _open_wait(s, case_id, "answer") if case is not None and case.status in OPEN else None
+        wait = ((_open_wait(s, case_id, "answer") or _open_wait(s, case_id, "done"))
+                if case is not None and case.status in OPEN else None)
         if wait is None:
             return False
         wait_id = wait.id
     _resolve(wait_id, answer=text[:4000], by=by or "руководитель")
     return True
+
+
+def task_reported(task_id: int, status: str, note: str = "", by: str = "") -> None:
+    """The person doing an order from the chat said how it goes (task_status): «готово» ends the wait and the person
+    who gave the order hears the result; «мешает» is passed on to them at once; «в работе» goes into the diary."""
+    with SessionLocal() as s:
+        case = s.query(Case).filter_by(task_id=task_id).first()
+        if case is None or case.status not in OPEN:
+            return
+        wait = s.query(CaseWait).filter_by(case_id=case.id, status="open", expects="done").first()
+        if wait is None:
+            return
+        person = s.get(Employee, wait.employee_id) if wait.employee_id else None
+        case_id, wait_id, title = case.id, wait.id, case.title
+        if status == "done":
+            s.commit()
+        else:
+            _event(s, case_id, "note", ("Мешает: " if status == "blocked" else "В работе") +
+                   (f"{': ' if status != 'blocked' else ''}{note[:400]}" if note else ""), wait.step_id)
+            s.commit()
+    if status == "done":
+        _resolve(wait_id, answer=note or "сделано", by="")
+    elif status == "blocked":
+        _tell_owner(case_id, "order_blocked", {"task": {"title": title}, "person": {"name": person.name if person else ""},
+                                               "note": note or "не уточнил(а)"})
 
 
 def attach_document(case_id: int, filename: str, mime: str, data: bytes, by: str = "") -> bool:
@@ -1421,7 +1540,7 @@ def close_manually(case_id: int, by: str = "", note: str = "") -> bool:
         case.status, case.closed_at = "done", now()
         case.note = f"закрыто вручную{': ' + note.strip()[:300] if note and note.strip() else ''}"
         if case.task is not None:
-            case.task.status = "assistant_done"
+            case.task.status = "assistant_done" if case.task.executor == "assistant" else "done"
         _event(s, case_id, "closed", f"{by or 'Руководитель'} закрыл дело вручную" + (f": {note.strip()[:300]}" if note and note.strip() else ""))
         s.commit()
     return True
@@ -1466,7 +1585,13 @@ def _nudge(wait_id: int, moment) -> None:
                  "what_was_asked": ((asked.result or {}).get("text") if asked else "") or case.title,
                  "reminder_number": wait.reminders_sent + 1}
         hours = round((moment - _aware(wait.started_at)).total_seconds() / 3600, 1)
-        if wait.reminders_sent < max_reminders and person is not None:
+        due = not wait.escalated and wait.escalate_at is not None and moment >= _aware(wait.escalate_at)
+        done_wait = wait.expects == "done"
+        owner = _owner(case)
+        case_id_, wait_reminders = case.id, wait.reminders_sent
+        if done_wait and due:  # the deadline evening: the person who gave the order hears, reminders or not
+            ref, kind = None, "escalate"
+        elif wait.reminders_sent < max_reminders and person is not None:
             try:
                 _checked_contact(s, person.id, wait.chat_ref)
             except CaseError as exc:
@@ -1474,7 +1599,7 @@ def _nudge(wait_id: int, moment) -> None:
                 _attention(case.id, wait.step_id, str(exc))
                 return
             ref, kind = person.telegram_chat_id, "remind"
-        elif not wait.escalated and moment >= _aware(wait.escalate_at):
+        elif due:
             ref, kind = None, "escalate"
         else:
             wait.next_reminder_at = wait.escalate_at if not wait.escalated else None
@@ -1493,20 +1618,31 @@ def _nudge(wait_id: int, moment) -> None:
         with SessionLocal() as s:
             wait = s.get(CaseWait, wait_id)
             wait.reminders_sent += 1
-            wait.next_reminder_at = moment + dt.timedelta(hours=_hours("case_reminder_hours", 4))
-            if wait.reminders_sent >= max_reminders:
+            wait.next_reminder_at = moment + dt.timedelta(hours=_hours("order_reminder_hours", 24) if done_wait
+                                                          else _hours("case_reminder_hours", 4))
+            if done_wait and not wait.escalated and wait.escalate_at is not None:
+                wait.next_reminder_at = min(wait.next_reminder_at, _aware(wait.escalate_at))
+            elif wait.reminders_sent >= max_reminders:
                 wait.next_reminder_at = max(wait.next_reminder_at, _aware(wait.escalate_at))
             _event(s, wait.case_id, "reminder", f"Напоминание №{wait.reminders_sent}: {text}", wait.step_id)
             s.commit()
         return
-    told = _tell_leaders(case.id, "escalate", {"person": facts["person"], "hours": hours,
-                                               "reminders": max_reminders, "what_was_asked": facts["what_was_asked"]})
+    silence = {"person": facts["person"], "hours": hours, "reminders": wait_reminders,
+               "what_was_asked": facts["what_was_asked"], **({"deadline": facts["deadline"]} if facts.get("deadline") else {})}
+    if owner is not None:
+        told = _tell_owner(case_id_, "order_silent", silence)
+        whom = owner["name"] or "тому, кто поручил"
+    else:
+        told = _tell_leaders(case_id_, "escalate", silence)
+        whom = "руководителю"
     with SessionLocal() as s:
         wait = s.get(CaseWait, wait_id)
         wait.escalated, wait.next_reminder_at = True, None
-        s.get(Case, wait.case_id).note = f"Нет ответа {hours} ч, руководитель уведомлён"
-        _event(s, wait.case_id, "escalated", f"Нет ответа {hours} ч — сообщил руководителю" + ("" if told else
-                                                                                             " (не доставлено)"),
+        s.get(Case, wait.case_id).note = (f"Не отписался(лась) {hours} ч, сообщил: {whom}" if done_wait
+                                          else f"Нет ответа {hours} ч, руководитель уведомлён" if owner is None
+                                          else f"Нет ответа {hours} ч, сообщил: {whom}")
+        _event(s, wait.case_id, "escalated", f"Нет ответа {hours} ч — сообщил {whom}" + ("" if told else
+                                                                                       " (не доставлено)"),
                wait.step_id)
         s.commit()
 
@@ -1553,8 +1689,11 @@ def waiting_view(employee_id) -> list:
         out = []
         for wait in s.query(CaseWait).filter_by(employee_id=employee_id, status="open").order_by(CaseWait.id).limit(5):
             case = s.get(Case, wait.case_id)
-            out.append({"case": case.title, "expects": wait.expects,
-                        "since_hours": round((now() - _aware(wait.started_at)).total_seconds() / 3600, 1)})
+            item = {"case": case.title, "expects": wait.expects,
+                    "since_hours": round((now() - _aware(wait.started_at)).total_seconds() / 3600, 1)}
+            if wait.expects == "done" and case.task_id:  # an order: «сделал» is task_status done of this task
+                item["task_id"] = case.task_id
+            out.append(item)
         return out
 
 

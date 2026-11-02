@@ -167,6 +167,10 @@ class Employee(Base):
     # «Запоминать голос между встречами» (voice_memory.py): when and by whom the employee's consent was recorded
     voice_memory_consent_at = Column(DateTime(timezone=True), nullable=True)
     voice_memory_consent_by = Column(String(120), default="")
+    # Rights of the AI employee's chat (agent_skills.py): to whom the person may give orders ("" = by the access level,
+    # all | department | self) and which skills the assistant carries out for them (None = all the level allows).
+    order_scope = Column(String(12), default="")
+    skills_allowed = Column(JSON, nullable=True)
 
     def alias_list(self):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
@@ -562,6 +566,22 @@ class PersonMemory(Base):
     updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class ChatOrder(Base):
+    """An order given in the chat («поручи Виктору купить перфоратор до пятницы»), retold to the person and waiting for
+    their «да». Confirmed, it becomes a case (orders.py); a correction replaces it with a new one."""
+    __tablename__ = "chat_orders"
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(String(40), nullable=False, index=True)
+    requested_by = Column(String(120), default="")
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)  # who gave it
+    payload = Column(JSON, nullable=False, default=dict)  # the checked `order` action: kind, to, title, deadline...
+    status = Column(String(12), nullable=False, default="pending", index=True)  # pending | started | cancelled | replaced
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="SET NULL"), nullable=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class DialogMemory(Base):
     """A short retelling of the older part of one conversation (dialog_memory.py); the fresh part goes to the model word
     for word. `upto_id` is the last conversation message the retelling covers."""
@@ -941,6 +961,8 @@ def init_db():
     _add_column_if_missing("employee_voice_samples", "expires_at", "expires_at TIMESTAMP")
     _add_column_if_missing("employees", "voice_memory_consent_at", "voice_memory_consent_at TIMESTAMP")
     _add_column_if_missing("employees", "voice_memory_consent_by", "voice_memory_consent_by VARCHAR(120) DEFAULT ''")
+    _add_column_if_missing("employees", "order_scope", "order_scope VARCHAR(12) DEFAULT ''")
+    _add_column_if_missing("employees", "skills_allowed", "skills_allowed JSON")
     _ensure_voice_sample_constraints()
     _forget_pyannote()
 
