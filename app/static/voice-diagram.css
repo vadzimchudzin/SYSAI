@@ -146,3 +146,59 @@ a.t[data-vd-seq]:hover { color: var(--clay2); text-decoration: underline; }
   .vd-chip, .vd-callout, .transcript p.seg, .vd-play-quote { transition: none; }
   .vd-play.is-loading .vd-ico-pause { animation: none; opacity: .5; }
 }
+
+/* Corrections of one replica (transcript-edit.js) */
+.tr-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; margin-top: 10px; }
+.tr-tools p { margin: 0; }
+.tr-tools .i, .seg-edit .i { width: 15px; height: 15px; vertical-align: -2px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+.tr-history { margin-top: 8px; }
+.tr-history-list { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; }
+.seg-edit { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin-left: 2px; border-radius: 8px;
+  color: var(--muted); vertical-align: middle; opacity: 0; transition: opacity .15s, background .15s; }
+.transcript p.seg:hover .seg-edit, .transcript p.seg:focus-within .seg-edit, .seg-edit:focus-visible { opacity: 1; }
+.seg-edit:hover { background: var(--card2); color: var(--text); }
+@media (hover: none) { .seg-edit { opacity: .75; } }
+.transcript p.seg.seg-flash { background: var(--card2); box-shadow: inset 2px 0 0 var(--clay); }
+.seg-editor-wrap { margin: 4px 0 12px; }
+.seg-editor { border: 1px solid var(--line2); border-radius: 12px; background: var(--bg2); padding: 12px; display: grid; gap: 12px; color: var(--text); }
+.seg-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.seg-close { font-size: 18px; line-height: 1; padding: 4px 10px; }
+.transcript:has(.seg-editor-wrap) { max-height: min(85vh, 900px); }
+.seg-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 10px; margin: 0; }
+.seg-form .f { flex: 1 1 260px; max-width: 440px; min-width: 0; }
+.seg-form select { width: 100%; min-width: 0; }
+.seg-form input[name="guest_name"] { flex: 1 1 220px; max-width: 320px; min-width: 0; }
+.seg-form .btn { flex: none; }
+.seg-words-box { flex: 1 1 100%; border: 0; margin: 0; padding: 0; min-width: 0; }
+.seg-words { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; max-height: 220px; overflow-y: auto; }
+.seg-word { position: relative; display: inline-flex; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; font-size: 13.5px; color: var(--soft); }
+.seg-word.is-first { cursor: default; opacity: .7; }
+.seg-word input { position: absolute; opacity: 0; pointer-events: none; }
+.seg-word:has(input:focus-visible) { outline: 2px solid var(--clay); outline-offset: 1px; }
+.seg-word:has(input:checked), .seg-word:has(input:checked) ~ .seg-word { background: var(--card2); border-color: var(--clay); color: var(--text); }
+.seg-merge { display: flex; flex-wrap: wrap; gap: 8px; }
+.seg-merge form { margin: 0; }
+.seg-note { margin: 0; }
+.seg-page .seg-editor { margin-top: 12px; }
+@media (max-width: 640px) {
+  .seg-editor { padding: 10px; }
+  .seg-form .f, .seg-form input[name="guest_name"] { flex-basis: 100%; max-width: none; }
+  .seg-merge .btn, .seg-form .btn { width: 100%; }
+  .seg-merge form { flex: 1 1 100%; }
+}
+
+/* Reference («эталон») and the diarization accuracy page */
+.vd-ref { margin-top: 8px; }
+.vd-ref .row { gap: 8px; margin-top: 8px; }
+.vd-ref form { margin: 0; }
+.ref-metrics { border-collapse: collapse; margin: 10px 0 6px; width: 100%; max-width: 760px; }
+.ref-metrics th { text-align: left; font-weight: 600; color: var(--soft); padding: 6px 14px 6px 0; vertical-align: top; white-space: nowrap; width: 1%; }
+.ref-metrics td { padding: 6px 0; color: var(--text); }
+.ref-metrics tr + tr th, .ref-metrics tr + tr td { border-top: 1px solid var(--line); }
+.ref-totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.ref-totals div { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg2); }
+.ref-totals b { font-size: 24px; }
+.ref-table { width: 100%; border-collapse: collapse; }
+.ref-table th, .ref-table td { text-align: left; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.ref-table th { color: var(--soft); font-weight: 600; white-space: nowrap; }
+@media (max-width: 640px) { .ref-metrics th { white-space: normal; width: 38%; } }

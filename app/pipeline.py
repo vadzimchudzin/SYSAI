@@ -195,8 +195,10 @@ def _process(meeting_id: int):
                 total, segments = transcribe.transcribe(audio_path, settings,
                                                         progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
                 segments = _name_speakers(segments)
+        # A transcript made by this run replaces any earlier one: corrections made to that one do not apply to it.
+        fresh = {} if saved is not None else {"transcript_auto": None, "transcript_edits": None}
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
-             progress="Составление отчёта и задач")
+             progress="Составление отчёта и задач", **fresh)
         outline_job = _start_waveform(meeting_id, audio_path, source, segments, total)
         _keep_recording(meeting_id, audio_path, source)
         with SessionLocal() as s:

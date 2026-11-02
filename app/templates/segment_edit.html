@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block title %}Правка реплики — {{ m.title or 'Совещание' }}{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="{{ asset('voice-diagram.css') }}">
+<p class="small"><a href="/meetings/{{ m.id }}#seg-{{ seq }}">← {{ m.title or 'Совещание' }}</a></p>
+<h1>Правка реплики</h1>
+<section class="card transcript seg-page">
+  {% if prev %}<p class="seg muted"><span class="t">{{ mmss(prev.start) }}</span> <b>{{ prev.speaker }}:</b> {{ prev.text }}</p>{% endif %}
+  <p class="seg vd-current"><span class="t">{{ mmss(sg.start) }}</span> <b>{{ sg.speaker }}:</b> {{ sg.text }}</p>
+  {% if next %}<p class="seg muted"><span class="t">{{ mmss(next.start) }}</span> <b>{{ next.speaker }}:</b> {{ next.text }}</p>{% endif %}
+  {% include "_segment_editor.html" %}
+</section>
+{% endblock %}

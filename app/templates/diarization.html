@@ -1,0 +1,50 @@
+{% extends "base.html" %}{% block title %}Точность разметки голосов — SYSAI{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="{{ asset('voice-diagram.css') }}">
+<h1>Точность разметки голосов</h1>
+<p class="muted">Эталон — расшифровка совещания, исправленная человеком до правильной. По эталонам видно, как часто автоматическая разметка ошибается, и можно сравнивать способы разметки на одних и тех же записях.</p>
+{% if total %}
+<section class="card">
+  <h2>В среднем по {{ total.references }} {{ 'эталону' if total.references == 1 else 'эталонам' }} · {{ mmss(total.speech_seconds) }} речи</h2>
+  <div class="ref-totals">
+    <div><b>{{ pct(total.accuracy) }}</b><span class="small muted">времени говорящий верный</span></div>
+    <div><b>{{ ('%g' % total.extra_per_meeting)|replace('.', ',') }}</b><span class="small muted">лишних голосов в среднем на запись</span></div>
+    <div><b>{{ total.merges }}</b><span class="small muted">склеек всего</span></div>
+    <div><b>{{ pct(total.names.precision) }}</b><span class="small muted">подписанного времени с верным именем</span></div>
+    <div><b>{{ pct(total.short.accuracy) }}</b><span class="small muted">коротких реплик верно ({{ total.short.right }} из {{ total.short.total }})</span></div>
+  </div>
+</section>
+<section class="card">
+  <h2>Эталоны</h2>
+  <div class="table-wrap"><table class="ref-table small">
+    <thead><tr><th>Совещание</th><th>Речь</th><th>Людей / голосов</th><th>Говорящий верный</th><th>Лишние</th><th>Склейки</th><th>Имена верны</th><th>Короткие</th></tr></thead>
+    <tbody>{% for row in rows %}{% set r = row.metrics %}
+      <tr><td><a href="/meetings/{{ row.id }}#diarization-reference">{{ row.title }}</a>{% if row.date %} <span class="muted">· {{ row.date.strftime('%d.%m.%Y') }}</span>{% endif %}{% if row.stale %} <span class="pill amber" title="Расшифровка изменилась после сохранения эталона">изменена</span>{% endif %}</td>
+        <td>{{ mmss(r.speech_seconds) }}</td><td>{{ r.ref_speakers }} / {{ r.hyp_speakers }}</td><td><b>{{ pct(r.accuracy) }}</b></td>
+        <td>{{ r.extra }}</td><td>{{ r.merges|length }}</td><td>{{ pct(r.names.precision) }}</td>
+        <td>{% if r.short.total %}{{ r.short.right }}/{{ r.short.total }}{% else %}—{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+{% else %}
+<section class="card">
+  <h2>Эталонов пока нет</h2>
+  <ol class="small">
+    <li>Откройте совещание с записью TicNote и раскройте «Расшифровку по подразделам».</li>
+    <li>Исправьте говорящих: «Кто это?» меняет человека во всех его репликах, ✎ у реплики — только в ней; там же реплику можно разделить или объединить с соседней.</li>
+    <li>Когда всё верно, нажмите «Сохранить как эталон» под расшифровкой.</li>
+  </ol>
+  <p class="small muted">Хватит трёх разных записей: на 2–3 человека, на 5 и больше и длинной — больше часа.</p>
+</section>
+{% endif %}
+<section class="card">
+  <h2>Что значат цифры</h2>
+  <ul class="small">
+    <li><b>Говорящий верный</b> — доля времени речи, где автоматическая разметка указала того же человека, что и эталон (метки «Спикер N» сопоставляются с людьми один к одному так, чтобы совпало больше всего).</li>
+    <li><b>Лишние голоса</b> — один человек разбит на несколько меток «Спикер N».</li>
+    <li><b>Склейки</b> — в одной метке двое людей: второй говорит в ней не меньше 5 секунд и 15% её времени.</li>
+    <li><b>Имена верны</b> — из времени, где разметка подставила имя, доля с правильным именем.</li>
+    <li><b>Короткие реплики</b> — реплики эталона до 2 секунд или до трёх слов, у которых говорящий верный.</li>
+  </ul>
+</section>
+{% endblock %}

@@ -297,16 +297,29 @@
 </section>
 {% endif %}
 {% if m.transcript %}
-<details class="card" id="meeting-transcript"><summary><b>Расшифровка по подразделам</b> <span class="muted">· {{ m.transcript|length }} реплик · {{ transcript_sections|length }} разделов</span></summary>
+<details class="card" id="meeting-transcript"{{ ' open' if seg_msg or ref_msg }}><summary><b>Расшифровка по подразделам</b> <span class="muted">· {{ m.transcript|length }} реплик · {{ transcript_sections|length }} разделов{% if edits.count %} · правок: {{ edits.count }}{% endif %}</span></summary>
+  {% if seg_msg %}<div class="vd-msg" role="status">{{ seg_msg }}{% if m.status in ('awaiting_approval','rejected','error') %} Протокол и задачи не пересобираются сами — чтобы учесть правку, нажмите «Пересобрать».{% endif %}</div>{% endif %}
+  {% if speakers_editable %}
+  <div class="tr-tools">
+    <p class="small muted">Нажмите {{ icon('edit') }} у реплики, чтобы сменить говорящего только у неё, разделить её на две или объединить с соседней.</p>
+    {% if edits.undoable %}<form method="post" action="/meetings/{{ m.id }}/transcript/undo"><button class="btn sm" title="{{ edits.last }}">{{ icon('undo') }}Отменить последнюю правку</button></form>{% endif %}
+  </div>
+  {% if reference_admin %}{% include '_diarization_reference.html' %}{% endif %}
+  {% if edits.count %}<details class="more tr-history"><summary>История правок · {{ edits.count }}</summary>
+    <ol class="tr-history-list small">{% for e in edits.entries %}<li>{% if e.at %}<span class="muted">{{ local_time(e.at) }}</span> · {% endif %}{% if e.seq is not none %}<a href="#seg-{{ e.seq }}">{{ e.summary }}</a>{% else %}{{ e.summary }}{% endif %}{% if e.by %} <span class="muted">· {{ e.by }}</span>{% endif %}</li>{% endfor %}</ol>
+    {% if edits.count > edits.entries|length %}<p class="small muted">Показаны последние {{ edits.entries|length }}.</p>{% endif %}
+  </details>{% endif %}
+  {% endif %}
   <div class="transcript" style="margin-top:12px">
   {% for section in transcript_sections %}
     <section class="topic transcript-section">
       <h3 style="margin:0 0 8px">{% if section.time %}<span class="t">{{ section.time }}</span> · {% endif %}{{ section.title }}</h3>
-      {% for sg in section.segments %}<p class="seg" id="seg-{{ sg.seq }}">{% if diagram %}<a class="t" href="#voice-diagram" data-vd-seq="{{ sg.seq }}" title="Показать на диаграмме">{{ mmss(sg.start) }}</a>{% else %}<span class="t">{{ mmss(sg.start) }}</span>{% endif %} <b>{{ sg.speaker }}{% if sg.speaker_source == "voiceprint" %} <span class="pill green" title="Сопоставление с подтверждённым образцом. Оценка сходства не является вероятностью.">голос совпал</span>{% elif sg.speaker_source == "manual" %} <span class="pill blue" title="Говорящего указал человек{% if sg.speaker_assigned_by %} ({{ sg.speaker_assigned_by }}){% endif %}.">вручную</span>{% endif %}:</b> {{ sg.text }}</p>{% endfor %}
+      {% for sg in section.segments %}<p class="seg" id="seg-{{ sg.seq }}">{% if diagram %}<a class="t" href="#voice-diagram" data-vd-seq="{{ sg.seq }}" title="Показать на диаграмме">{{ mmss(sg.start) }}</a>{% else %}<span class="t">{{ mmss(sg.start) }}</span>{% endif %} <b>{{ sg.speaker }}{% if sg.speaker_source == "voiceprint" %} <span class="pill green" title="Сопоставление с подтверждённым образцом. Оценка сходства не является вероятностью.">голос совпал</span>{% elif sg.speaker_source == "manual" %} <span class="pill blue" title="Говорящего указал человек{% if sg.speaker_assigned_by %} ({{ sg.speaker_assigned_by }}){% endif %}.">вручную</span>{% endif %}:</b> {{ sg.text }}{% if speakers_editable %} <a class="seg-edit" href="/meetings/{{ m.id }}/segments/{{ sg.seq }}" data-seg-edit="{{ sg.seq }}" title="Изменить реплику" aria-label="Изменить реплику {{ mmss(sg.start) }}">{{ icon('edit') }}</a>{% endif %}</p>{% endfor %}
     </section>
   {% endfor %}
   </div>
   <p class="small muted">Подразделы привязаны к времени начала тем из протокола. Все реплики сохранены в исходном порядке; если темы не определены, показывается единая расшифровка.</p>
 </details>
+{% if speakers_editable %}<script src="{{ asset('transcript-edit.js') }}" defer></script>{% endif %}
 {% endif %}
 {% endblock %}
