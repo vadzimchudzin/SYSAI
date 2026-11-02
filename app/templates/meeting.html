@@ -138,8 +138,13 @@
   </details>
   {% else %}<p class="muted">Ответов сотрудников пока нет.</p>{% endfor %}
 </section>
+{% set editable = m.status in ('awaiting_approval','rejected') %}
+{% set can_play = diagram_client is not none and diagram_client.get('audio') %}
+{% set task_status = {'draft':('черновик','gray'),'sent':('отправлена','green'),'awaiting_deadline':('ждём срок','amber'),'no_recipient':('нет получателя','red'),'delivery_failed':('не доставлено','red'),'assistant_message_sending':('отправляется','blue'),'assistant_message_uncertain':('проверить доставку','amber'),'assistant_waiting':('ведёт дело','blue'),'assistant_done':('сделано','green'),'assistant_failed':('не удалось','red')} %}
+{% set deadline_source = {'stated':'назван на встрече','default':'по умолчанию','asked':'от исполнителя','manual':'вручную','none':'без срока'} %}
+{% set weekdays = ['пн','вт','ср','чт','пт','сб','вс'] %}
 <form method="post" action="/meetings/{{ m.id }}/save" id="report-editor">
-<fieldset {{ 'disabled' if m.status not in ('awaiting_approval','rejected') }} style="border:0;padding:0;margin:0;min-width:0">
+<fieldset {{ 'disabled' if not editable }} style="border:0;padding:0;margin:0;min-width:0">
 <section class="card">
   <div class="row between"><h2>Протокол</h2>{% if request.query_params.get('saved') %}<span class="pill green">Сохранено</span>{% endif %}</div>
   <div class="stack">
@@ -147,54 +152,98 @@
     <label class="f">Кратко <textarea name="summary" rows="5">{{ r.summary }}</textarea></label>
   </div>
 </section>
+</fieldset>
 
-<section class="card">
+{# One card per task: the text on the left, its parameters on the right. The section is outside the disabled fieldset, so
+   the case buttons keep working after sending; a sent report has nothing to edit and shows plain text instead of fields. #}
+<section class="card" id="meeting-tasks">
   <h2>Задачи · {{ m.tasks|length }}</h2>
   {% if m.report and m.report.get('assignment_notes') %}<div class="card warn small"><b>Проверьте исполнителей:</b><ul>{% for n in m.report.get('assignment_notes') %}<li>{{ n }}</li>{% endfor %}</ul></div>{% endif %}
-  <div class="table-wrap"><table class="edit">
-    <thead><tr><th>Задача</th><th>Исполнитель</th><th>Срок</th><th>Приоритет</th><th>Статус</th><th></th></tr></thead><tbody>
-    {% for t in m.tasks %}
-    <tr>
-      <td><input name="title_{{ t.id }}" value="{{ t.title }}"><textarea name="desc_{{ t.id }}" rows="2" placeholder="Описание">{{ t.description }}</textarea>
-        {% if t.source_quote %}<div class="muted small" style="margin-top:6px"><span class="t">{{ t.source_time }}</span> «{{ t.source_quote }}»</div>{% endif %}</td>
-      <td><select name="assignee_{{ t.id }}"><option value="">— не назначен —</option>
-        {% for e in employees %}<option value="{{ e.id }}" {{ 'selected' if t.assignee_id == e.id }}>{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}</select>
-        {% if t.routing_note %}<div class="muted small">Назначение: {{ t.routing_note }}</div>{% endif %}
-        {% if t.executor == 'assistant' and t.counterparts %}<div class="muted small">План ассистента: {% for c in t.counterparts %}{{ {'source':'взять у','recipient':'написать/передать','target':'связаться с'}.get(c.role, '') }} {{ c.name }}{{ '; ' if not loop.last }}{% endfor %}</div>{% endif %}
-        {% if t.executor == 'assistant' %}<div class="small">Берёт на себя ассистент{% if t.target_employee_id %}: напишет {{ t.target_employee.name if t.target_employee else t.target_employee_name }}{% elif t.target_employee_name %}: адресат не определён («{{ t.target_employee_name }}»){% endif %}{% if t.status == 'assistant_done' %}: сделано{% elif t.status == 'assistant_failed' %}: не удалось{% elif t.status in ('assistant_running','assistant_message_sending') %}: выполняется{% elif t.status == 'assistant_message_uncertain' %}: проверьте доставку в чате перед повтором{% endif %}</div>
-        {% elif not t.assignee_id and t.assignee_name %}<div class="warn small">Прозвучало «{{ t.assignee_name }}» — нет в справочнике</div>{% endif %}
-        {% if t.assignee and not t.assignee.telegram_chat_id %}<div class="warn small">Нет Telegram</div>{% endif %}</td>
-      <td><input type="date" name="deadline_{{ t.id }}" value="{{ t.deadline.isoformat() if t.deadline }}">
-        <div class="muted small">{{ {'stated':'назван на встрече','default':'по умолчанию','asked':'от исполнителя','manual':'вручную','none':'без срока'}.get(t.deadline_source) }}{% if t.deadline_quote %}: «{{ t.deadline_quote }}»{% endif %}</div></td>
-      <td><select name="priority_{{ t.id }}">{% for k, v in priority.items() %}<option value="{{ k }}" {{ 'selected' if t.priority == k }}>{{ v }}</option>{% endfor %}</select></td>
-      <td>{% set ts = {'draft':('черновик','gray'),'sent':('отправлена','green'),'awaiting_deadline':('ждём срок','amber'),'no_recipient':('нет получателя','red'),'delivery_failed':('не доставлено','red'),'assistant_message_sending':('отправляется','blue'),'assistant_message_uncertain':('проверить доставку','amber'),'assistant_waiting':('ведёт дело','blue'),'assistant_done':('сделано','green'),'assistant_failed':('не удалось','red')}.get(t.status, (t.status,'gray')) %}<span class="pill {{ ts[1] }}">{{ ts[0] }}</span>
-        {% set cs = case_by_task.get(t.id) if case_by_task else None %}
-        {% if cs %}<div class="case small" style="margin-top:6px">
+  <div class="tk-list">
+  {% for t in m.tasks %}
+    {% set ts = task_status.get(t.status, (t.status,'gray')) %}
+    {% set cs = case_by_task.get(t.id) if case_by_task else None %}
+    {% set at = stamp_seconds(t.source_time) %}
+    {% set retry = t.status == 'assistant_message_uncertain' and t.target_employee_id %}
+    <article class="tk p-{{ t.priority if t.priority in priority else 'medium' }}" id="task-{{ t.id }}">
+      <div class="tk-n" aria-hidden="true">{{ loop.index }}</div>
+      <div class="tk-text">
+        {% if editable %}
+        <textarea class="tk-title" name="title_{{ t.id }}" rows="1" maxlength="500" aria-label="Задача {{ loop.index }}" data-tk-title>{{ t.title }}</textarea>
+        <textarea class="tk-desc" name="desc_{{ t.id }}" rows="1" placeholder="Описание" aria-label="Описание задачи {{ loop.index }}">{{ t.description }}</textarea>
+        {% else %}
+        <div class="tk-title">{{ t.title }}</div>
+        {% if t.description %}<div class="tk-desc">{{ t.description }}</div>{% endif %}
+        {% endif %}
+        {% if t.source_quote %}<div class="tk-quote">{% if can_play and at is not none %}<button type="button" class="tk-play" data-vd-play-at="{{ at }}" data-vd-play-key="task-{{ t.id }}" data-label="{{ t.source_time }}" aria-label="Прослушать момент {{ t.source_time }}" title="Прослушать этот момент записи"><span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span></button>{% endif %}<span class="t">{{ t.source_time }}</span><span>«{{ t.source_quote }}»</span></div>{% endif %}
+      </div>
+      <div class="tk-params">
+        {% if not editable or t.status != 'draft' %}<div class="tk-status"><span class="pill {{ ts[1] }}">{{ ts[0] }}</span></div>{% endif %}
+        <div class="tk-field">
+          {% if editable %}<label class="tk-label" for="assignee-{{ t.id }}">Исполнитель</label>
+          <select id="assignee-{{ t.id }}" name="assignee_{{ t.id }}"><option value="">— не назначен —</option>
+            {% for e in employees %}<option value="{{ e.id }}" {{ 'selected' if t.assignee_id == e.id }}>{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}</select>
+          {% else %}<span class="tk-label">Исполнитель</span>
+          <div class="tk-value">{% if t.assignee %}{{ t.assignee.name }}{% elif t.executor == 'assistant' %}Ассистент{% else %}<span class="muted">не назначен</span>{% endif %}</div>
+          {% if t.assignee and t.assignee.position %}<div class="tk-note">{{ t.assignee.position }}</div>{% endif %}{% endif %}
+        </div>
+        {% if t.routing_note %}<div class="tk-note">Назначение: {{ t.routing_note }}</div>{% endif %}
+        {% if t.executor == 'assistant' and t.counterparts %}<div class="tk-note">План ассистента: {% for c in t.counterparts %}{{ {'source':'взять у','recipient':'написать/передать','target':'связаться с'}.get(c.role, '') }} {{ c.name }}{{ '; ' if not loop.last }}{% endfor %}</div>{% endif %}
+        {% if t.executor == 'assistant' %}<div class="tk-note tk-soft">Берёт на себя ассистент{% if t.target_employee_id %}: напишет {{ t.target_employee.name if t.target_employee else t.target_employee_name }}{% elif t.target_employee_name %}: адресат не определён («{{ t.target_employee_name }}»){% endif %}{% if t.status == 'assistant_done' %}: сделано{% elif t.status == 'assistant_failed' %}: не удалось{% elif t.status in ('assistant_running','assistant_message_sending') %}: выполняется{% elif t.status == 'assistant_message_uncertain' %}: проверьте доставку в чате перед повтором{% endif %}</div>
+        {% elif not t.assignee_id and t.assignee_name %}<div class="tk-note warn">Прозвучало «{{ t.assignee_name }}» — нет в справочнике</div>{% endif %}
+        {% if t.assignee and not t.assignee.telegram_chat_id %}<div class="tk-note warn">Нет Telegram</div>{% endif %}
+        <div class="tk-two">
+          <div class="tk-field">{% if editable %}<label class="tk-label" for="deadline-{{ t.id }}">Срок</label>
+            <input type="date" id="deadline-{{ t.id }}" name="deadline_{{ t.id }}" value="{{ t.deadline.isoformat() if t.deadline }}" data-tk-deadline>
+            {% else %}<span class="tk-label">Срок</span><div class="tk-value">{{ fmt(t.deadline) }}</div>{% endif %}</div>
+          <div class="tk-field">{% if editable %}<label class="tk-label" for="priority-{{ t.id }}"><i class="tk-dot" aria-hidden="true"></i>Приоритет</label>
+            <select id="priority-{{ t.id }}" name="priority_{{ t.id }}" data-tk-priority>{% for k, v in priority.items() %}<option value="{{ k }}" {{ 'selected' if t.priority == k }}>{{ v }}</option>{% endfor %}</select>
+            {% else %}<span class="tk-label">Приоритет</span><div class="tk-value"><i class="tk-dot" aria-hidden="true"></i>{{ priority.get(t.priority, t.priority) }}</div>{% endif %}</div>
+        </div>
+        {% if editable or t.deadline %}<div class="tk-note" data-tk-deadline-note>{% if editable and t.deadline %}<span data-tk-weekday>{{ weekdays[t.deadline.weekday()] }} · </span>{% endif %}<span data-tk-source>{{ deadline_source.get(t.deadline_source, '') }}{% if t.deadline_quote %}: «{{ t.deadline_quote }}»{% endif %}</span></div>{% endif %}
+        {% if editable %}<div class="tk-actions"><span class="tk-gone">Удалится при сохранении</span>
+          <label class="tk-del" title="Удалить задачу"><input type="checkbox" name="del_{{ t.id }}"><span class="tk-del-on">{{ icon('trash') }}Удалить</span><span class="tk-del-off">{{ icon('undo') }}Вернуть</span></label></div>{% endif %}
+      </div>
+      {% if cs or retry %}<div class="tk-foot">
+        {% if cs %}<div class="case small">
           <div><b>Дело</b> (<a href="/progress?scope={{ m.id }}#case-{{ cs.id }}">в «Прогрессе»</a>): <span class="pill {{ {'done':'green','failed':'red','cancelled':'gray','attention':'red','awaiting_approval':'amber','suggested':'amber','waiting':'blue','running':'blue'}.get(cs.status,'gray') }}">{{ cs.status_ru }}</span></div>
           <div class="muted">План{% if cs.planner == 'model' %} (составила модель, проверен кодом){% endif %}: {{ cs.plan }}</div>
           {% if cs.note %}<div class="warn">{{ cs.note }}</div>{% endif %}
-          {% if cs.events %}<details><summary>Ход дела</summary><ul>{% for e in cs.events %}<li>{{ e.at.strftime('%d.%m %H:%M') if e.at }} — {{ e.text }}</li>{% endfor %}</ul></details>{% endif %}
+          {% if cs.events %}<details id="case-events-{{ cs.id }}"><summary>Ход дела</summary><ul>{% for e in cs.events %}<li>{{ e.at.strftime('%d.%m %H:%M') if e.at }} — {{ e.text }}</li>{% endfor %}</ul></details>{% endif %}
           {% if cs.status in ('awaiting_approval','suggested','attention') %}<div class="row" style="gap:6px;margin-top:4px">
             {% if cs.status in ('awaiting_approval','suggested') or 'разрешения' in (cs.note or '') %}<button class="btn sm primary" formmethod="post" formaction="/cases/{{ cs.id }}/approve" formnovalidate>Одобрить</button>{% else %}<button class="btn sm" formmethod="post" formaction="/cases/{{ cs.id }}/retry" formnovalidate onclick="return confirm('Сначала проверьте чат. Повторить шаг?')">Повторить шаг</button>{% endif %}
             <button class="btn sm ghost" formmethod="post" formaction="/cases/{{ cs.id }}/cancel" formnovalidate onclick="return confirm('Отменить дело?')">Отменить</button></div>{% endif %}
         </div>{% endif %}
-        {% if t.status == 'assistant_message_uncertain' and t.target_employee_id %}
-        <form method="post" action="/meetings/{{ m.id }}/tasks/{{ t.id }}/retry-assistant-message"
-              onsubmit="return confirm('Сначала проверьте чат адресата. Если сообщение действительно не пришло, повторить отправку?')">
-          <button class="btn sm" style="margin-top:6px">Повторить после проверки</button>
-        </form>{% endif %}
-      </td>
-      <td><label class="small muted" title="Удалить задачу" style="white-space:nowrap"><input type="checkbox" name="del_{{ t.id }}"> ✕</label></td>
-    </tr>
-    {% endfor %}
-    <tr class="new">
-      <td><input name="new_title" placeholder="+ Добавить задачу"></td>
-      <td><select name="new_assignee"><option value="">— не назначен —</option>{% for e in employees %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}</select></td>
-      <td><input type="date" name="new_deadline"></td>
-      <td><select name="new_priority">{% for k, v in priority.items() %}<option value="{{ k }}" {{ 'selected' if k == 'medium' }}>{{ v }}</option>{% endfor %}</select></td>
-      <td></td><td></td></tr>
-  </tbody></table></div>
+        {% if retry %}<button class="btn sm" formmethod="post" formaction="/meetings/{{ m.id }}/tasks/{{ t.id }}/retry-assistant-message" formnovalidate
+            onclick="return confirm('Сначала проверьте чат адресата. Если сообщение действительно не пришло, повторить отправку?')">Повторить после проверки</button>{% endif %}
+      </div>{% endif %}
+    </article>
+  {% endfor %}
+  </div>
+  {% if editable %}
+  <details class="tk-new" id="task-new"{{ ' open' if not m.tasks }}>
+    <summary>{{ icon('plus') }}<span>Добавить задачу</span></summary>
+    <div class="tk tk-blank p-medium">
+      <div class="tk-n" aria-hidden="true">+</div>
+      <div class="tk-text">
+        <textarea class="tk-title" name="new_title" rows="1" maxlength="500" placeholder="Что нужно сделать" aria-label="Новая задача" data-tk-title></textarea>
+        <textarea class="tk-desc" name="new_desc" rows="1" placeholder="Описание" aria-label="Описание новой задачи"></textarea>
+      </div>
+      <div class="tk-params">
+        <div class="tk-field"><label class="tk-label" for="assignee-new">Исполнитель</label>
+          <select id="assignee-new" name="new_assignee"><option value="">— не назначен —</option>{% for e in employees %}<option value="{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}</select></div>
+        <div class="tk-two">
+          <div class="tk-field"><label class="tk-label" for="deadline-new">Срок</label><input type="date" id="deadline-new" name="new_deadline"></div>
+          <div class="tk-field"><label class="tk-label" for="priority-new"><i class="tk-dot" aria-hidden="true"></i>Приоритет</label>
+            <select id="priority-new" name="new_priority" data-tk-priority>{% for k, v in priority.items() %}<option value="{{ k }}" {{ 'selected' if k == 'medium' }}>{{ v }}</option>{% endfor %}</select></div>
+        </div>
+      </div>
+    </div>
+  </details>
+  {% elif not m.tasks %}<p class="muted">Задач нет.</p>{% endif %}
 </section>
+
+<fieldset {{ 'disabled' if not editable }} style="border:0;padding:0;margin:0;min-width:0">
 <div class="row sticky center">
   <button class="btn">Сохранить</button>
   {% if m.status in ('awaiting_approval', 'rejected') %}
@@ -205,6 +254,7 @@
 </div>
 </fieldset>
 </form>
+<script src="{{ asset('meeting-tasks.js') }}" defer></script>
 
 <div class="grid2">
   {% if r.decisions %}<section class="card"><h2>Решения</h2><ul>{% for d in r.decisions %}<li>{% if d.time %}<span class="t">{{ d.time }}</span> {% endif %}{{ d.text if d.text is defined else d }}</li>{% endfor %}</ul></section>{% endif %}

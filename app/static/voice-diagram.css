@@ -83,12 +83,12 @@
 .vd-ask { border-color: rgba(224,168,90,.4); }
 .vd-ask h2 { margin: 0; }
 .vd-ask > p { margin: 8px 0 4px; }
-.vd-ask-row { display: grid; gap: 10px; padding: 14px 0 4px; border-top: 1px solid var(--line); margin-top: 10px; }
+.vd-ask-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 0 4px; border-top: 1px solid var(--line); margin-top: 10px; }
 .vd-ask-who { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .vd-quotes { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; color: var(--soft); font-size: 13.5px; }
 .vd-quotes .t { margin-right: 4px; }
 .vd-ask-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.vd-ask-controls select { flex: 1 1 240px; width: auto; }
+.vd-ask-controls select { flex: 1 1 240px; width: auto; min-width: 0; } /* a long «Name · Position» must not widen the page */
 .vd-ask-controls input { flex: 1 1 200px; width: auto; }
 .vd-ask-controls .btn { flex: none; }
 
