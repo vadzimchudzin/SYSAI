@@ -34,7 +34,7 @@ def test_a_rewritten_text_falls_back_to_the_speaker_of_each_sentence(monkeypatch
     text = "Начинаем планёрку по объекту. Акт подписан вчера вечером. Да. Отправила его в бухгалтерию."
     answers = iter([json.dumps({"segments": [{"speaker": "Спикер 1", "start": 0, "text": "совсем другой пересказ разговора"}]}),
                     json.dumps({"speakers": [{"index": 0, "speaker": "Спикер 1"}, {"index": 1, "speaker": "Спикер 2"},
-                                             {"index": 2, "speaker": "Спикер 2"}]})])
+                                             {"index": 2, "speaker": "Спикер 1"}, {"index": 3, "speaker": "Спикер 2"}]})])
     asked = []
 
     def chat(model, messages, **kwargs):
@@ -42,10 +42,12 @@ def test_a_rewritten_text_falls_back_to_the_speaker_of_each_sentence(monkeypatch
         return next(answers)
     monkeypatch.setattr(llm, "chat", chat)
     result = transcribe._align_plain_transcript(part(tmp_path), text, {}, 20.0, "")
-    assert [s["speaker"] for s in result["segments"]] == ["Спикер 1", "Спикер 2"]
-    assert result["segments"][0]["text"] == "Начинаем планёрку по объекту."
-    assert result["segments"][1]["text"] == "Акт подписан вчера вечером. Да. Отправила его в бухгалтерию."  # «Да.» joined its sentence
+    # «Да.» is a sentence of its own: the model gives it the voice it hears, not the speaker before it
+    assert [(s["speaker"], s["text"]) for s in result["segments"]] == [
+        ("Спикер 1", "Начинаем планёрку по объекту."), ("Спикер 2", "Акт подписан вчера вечером."),
+        ("Спикер 1", "Да."), ("Спикер 2", "Отправила его в бухгалтерию.")]
     assert 0 < result["segments"][1]["start"] < 20 and len(asked) == 2
+    assert "одно слово" in asked[0] and "overlap" in asked[0] and "end" in asked[0]
 
 
 def test_only_when_everything_fails_the_part_is_one_replica(monkeypatch, tmp_path):

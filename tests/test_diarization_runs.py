@@ -49,7 +49,7 @@ def fake_ways(monkeypatch, calls):
                 {"window": 1, "label": "Спикер 3", "embedding": vec(0.75, 0, 0.66), "seconds": 29},  # ≈ 0.75 like Анна
                 {"window": 1, "label": "Спикер 2", "embedding": vec(0, 1, 0.1), "seconds": 30}]
 
-    def gemini(path, segments, total, settings, people=0, progress=None):
+    def gemini(path, segments, total, settings, people=0, progress=None, details=None):
         calls.append(("gemini", people))
         return ["Спикер 1", "Спикер 2", "Спикер 1", "Спикер 2"]
     monkeypatch.setattr(diarize, "voice_groups", groups)

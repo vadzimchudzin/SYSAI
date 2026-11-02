@@ -25,8 +25,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import (accounts, agent, audio_archive, bitrix, cases, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
-               progress_board, render, report_archive, settings_store, speaker_id, storage, telegram, transcript_edit, userbot, notion,
-               voice_diagram)
+               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id,
+               storage, telegram, transcript_edit, userbot, notion, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
@@ -502,6 +502,7 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
         artifacts = [{"id": a.id, "title": a.title, "filename": a.filename, "svg": a.svg or ""} for a in
                      s.query(Artifact).filter_by(meeting_id=mid).order_by(Artifact.id.desc()).all()]
     diagram = voice_diagram.build(m.transcript, m.duration_sec, m.waveform, employees) if m.transcript else None
+    speaker_hints.attach(diagram, m, employees)
     sections = group_transcript([dict(sg, seq=i) for i, sg in enumerate(m.transcript or []) if isinstance(sg, dict)],
                                 (m.report or {}).get("topics") or [])
     count = int(changed) if changed.isascii() and changed.isdigit() and len(changed) < 7 else 0
@@ -900,6 +901,17 @@ async def diarization_method(request: Request):
         updates["diarization_voice_threshold"] = _voice_threshold(form.get("threshold"))
     settings_store.set_many(updates)
     return RedirectResponse("/diarization?msg=applied#compare", 303)
+
+
+def _name_threshold(raw) -> float:
+    """The confidence a name from the conversation needs: a percentage 50–95 (stored as a share)."""
+    try:
+        value = float(str(raw).strip().rstrip("%").strip().replace(",", "."))
+    except ValueError:
+        raise HTTPException(400, "Уверенность для имени укажите числом от 50 до 95 %.") from None
+    if not 50 <= value <= 95:
+        raise HTTPException(400, "Уверенность для имени укажите числом от 50 до 95 %.")
+    return round(value / 100, 2)
 
 
 def _voice_threshold(raw) -> float:
@@ -1771,6 +1783,8 @@ async def settings_save(request: Request):
         updates["diarization_method"] = f["diarization_method"]
     if "diarization_voice_threshold" in f:
         updates["diarization_voice_threshold"] = _voice_threshold(f["diarization_voice_threshold"])
+    if "speaker_name_threshold" in f:
+        updates["speaker_name_threshold"] = _name_threshold(f["speaker_name_threshold"])
     # Secrets are never echoed in hidden inputs. A value alone (including a
     # legacy hidden value) is not an instruction to replace a credential.
     # Require the explicit action selected in the visible credential control.

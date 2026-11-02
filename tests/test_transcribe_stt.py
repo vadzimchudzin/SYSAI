@@ -15,9 +15,9 @@ def test_stt_segments_keep_words_and_normalize_provider_speaker_ids(tmp_path, mo
 
     result = transcribe._transcribe_stt_chunk(path, {"transcribe_model": "openai/gpt-4o-transcribe"}, 5, "")
 
-    assert result["segments"] == [
-        {"start": 0.0, "text": "Обсудим поставку.", "speaker": "Спикер 1"},
-        {"start": 1.3, "text": "Срок до пятницы.", "speaker": "Спикер 2"},
+    assert result["segments"] == [  # the provider's end is kept: a pause before the next replica stays a pause
+        {"start": 0.0, "end": 1.2, "text": "Обсудим поставку.", "speaker": "Спикер 1"},
+        {"start": 1.3, "end": 2.4, "text": "Срок до пятницы.", "speaker": "Спикер 2"},
     ]
 
 

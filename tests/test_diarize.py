@@ -81,19 +81,24 @@ def test_voice_groups_send_every_minute_with_its_speech_and_keep_named_voices(mo
         target.write_bytes(b"part")
         return target
 
-    def embed(path, segments):
-        calls.append(segments)
+    def embed(path, segments, min_seconds=None):
+        calls.append((segments, min_seconds))
         return {"speakers": {s["speaker"]: {"embedding": ANNA if s["speaker"] == "Спикер 1" else BORIS,
                                             "duration_seconds": s["end"] - s["start"]} for s in segments}}
     monkeypatch.setattr(diarize, "_cut", cut)
     monkeypatch.setattr(speaker_id, "embed_speakers", embed)
     segments = [seg("Спикер 1", 0, 25), seg("Спикер 2", 25, 50), seg("Ольга Кузнецова", 50, 58, speaker_source="voiceprint"),
-                seg("Спикер 1", 70, 100), seg("Спикер 2", 100, 100.8, "да")]
-    groups = diarize.voice_groups(record, segments, 101)  # «да» is shorter than a second: nothing to compare in minute 1
+                seg("Спикер 1", 70, 100), seg("Спикер 2", 100, 100.8, "да"), seg("Спикер 1", 110, 110.3, "а")]
+    groups = diarize.voice_groups(record, segments, 111)
     assert len(calls) == 2 and sorted(cuts)[0][0] == 0.4
-    assert all(s["speaker"] != "Ольга Кузнецова" for call in calls for s in call)
-    assert all(s["start"] >= 0 and s["end"] - s["start"] >= 1.0 for call in calls for s in call)
-    assert [(g["window"], g["label"]) for g in groups] == [(0, "Спикер 1"), (0, "Спикер 2"), (1, "Спикер 1")]
+    assert all(s["speaker"] != "Ольга Кузнецова" for call, _ in calls for s in call)
+    # a label is compared by a second of speech or more; the short «да» goes on its own, «а» is too short to hear
+    first = next(call for call in calls if call[1] is None)
+    second = next(call for call in calls if call[1] is not None)
+    assert all(s["start"] >= 0 and s["end"] - s["start"] >= 1.0 for s in first[0])
+    assert [s["speaker"] for s in second[0]] == ["Спикер 1", "#4"] and second[1] == diarize.SHORT_MIN_SECONDS
+    assert [(g["window"], g["label"], g.get("short")) for g in groups] == [
+        (0, "Спикер 1", None), (0, "Спикер 2", None), (1, "Спикер 1", None), (1, "#4", 4)]
 
 
 def test_voice_groups_give_up_when_the_service_loses_many_minutes(monkeypatch, tmp_path):
@@ -101,7 +106,7 @@ def test_voice_groups_give_up_when_the_service_loses_many_minutes(monkeypatch, t
     record.write_bytes(b"audio")
     monkeypatch.setattr(diarize, "_cut", fake_cut)
 
-    def embed(path, segments):
+    def embed(path, segments, min_seconds=None):
         raise speaker_id.SpeakerIdentityError("Не удалось связаться с сервисом голосов")
     monkeypatch.setattr(speaker_id, "embed_speakers", embed)
     with pytest.raises(diarize.DiarizationError, match="не ответил"):

@@ -32,6 +32,7 @@ DEFAULTS = {
     "audio_cleanup": True,           # speech clean-up before recognition (rumble, steady noise, levels)
     "speech_fix": True,              # after recognition: names and terms corrected by the directory and the glossary
     "speaker_naming": True,          # «Спикер 1» becomes a name when the conversation proves who it is
+    "speaker_name_threshold": 0.75,  # …surely enough (speakers.py); below it «Кто это?» asks with candidates
     "company_profile": "",           # what the company does, clients, products, rules everyone should know (memory)
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only

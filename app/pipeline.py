@@ -200,7 +200,7 @@ def _process(meeting_id: int):
                 segments, how = diarize.relabel(audio_path, segments, total, settings, people=people,
                                                 progress=lambda p: _set(meeting_id, progress=p))
                 _note_diarization(meeting_id, how)
-                segments = _name_speakers(segments, allowed)
+                segments = _name_speakers(segments, allowed, meeting_id)
         # A transcript made by this run replaces any earlier one: corrections made to that one do not apply to it.
         fresh = {} if saved is not None else {"transcript_auto": None, "transcript_edits": None}
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
@@ -306,18 +306,24 @@ def _note_diarization(meeting_id: int, how: dict) -> None:
         log.warning("diarization note of meeting %s was not saved", meeting_id, exc_info=True)
 
 
-def _name_speakers(segments: list, allowed=None) -> list:
-    """«Спикер 2» becomes «Ольга Кузнецова» when the conversation proves it (see speakers.py).
+def _name_speakers(segments: list, allowed=None, meeting_id: int | None = None) -> list:
+    """«Спикер 2» becomes «Ольга Кузнецова» when the conversation proves it surely enough (see speakers.py); the
+    candidates of the voices left unnamed are kept for «Кто это?» on the meeting page (speaker_hints.py).
 
     allowed: the employee ids of the meeting's participants; names of other people are never given to its voices."""
-    from . import speakers
+    from . import speaker_hints, speakers
     try:
         with SessionLocal() as s:
             query = s.query(Employee).filter(Employee.active.is_(True))
             if allowed is not None:
                 query = query.filter(Employee.id.in_(list(allowed) or [-1]))
             people = query.all()
-            named, mapping = speakers.name_speakers(segments, people)
+            found = {}
+            named, mapping = speakers.name_speakers(segments, people, found=found)
+            m = s.get(Meeting, meeting_id) if meeting_id is not None else None
+            if m is not None and (found.get("named") or found.get("ask") or (m.options or {}).get("speaker_hints")):
+                speaker_hints.save(m, found)
+                s.commit()
         return named
     except Exception:  # noqa: BLE001  naming must never lose a transcript
         log.exception("speaker naming failed")

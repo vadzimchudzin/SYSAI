@@ -69,6 +69,7 @@ def profiles_fingerprint(profiles: list[dict]) -> str:
 # -----------------------------------------------------------------------------
 # ECAPA voice prints through our own voice service (speaker-service/ on Vercel).
 VOICE_SERVICE_MAX_BYTES = 4 * 1024 * 1024
+VOICE_SERVICE_MAX_SEGMENTS = 150  # speech intervals in one /v1/identify request
 
 
 def _normalise_embedding(values) -> list[float]:
@@ -256,11 +257,12 @@ def _local_segments_with_end(segments: list[dict], offset: float, duration: floa
     return [item for item in prepared if item["speaker"]]
 
 
-def embed_speakers(path: str | pathlib.Path, segments: list[dict]) -> dict:
+def embed_speakers(path: str | pathlib.Path, segments: list[dict], min_seconds: float | None = None) -> dict:
     """One voice print per label of this audio part: {"model_version": ..., "speakers": {label: {"embedding", ...}}}.
 
     segments are [{"speaker", "start", "end"}] in seconds of this part; the service joins up to 30 s of each label and
-    skips labels with less than a second of speech."""
+    skips labels with less than a second of speech (min_seconds asks for shorter ones, down to 0.3 s: a short reply;
+    a service that does not know the field keeps its one second)."""
     audio_path = pathlib.Path(path)
     raw = audio_path.read_bytes()
     if not raw or len(raw) > VOICE_SERVICE_MAX_BYTES:
@@ -269,7 +271,8 @@ def embed_speakers(path: str | pathlib.Path, segments: list[dict]) -> dict:
         response = httpx.post(
             _voice_service_request_url("/v1/identify"),
             headers=_voice_service_headers(),
-            data={"segments_json": json.dumps({"segments": segments}, ensure_ascii=False)},
+            data={"segments_json": json.dumps({"segments": segments}, ensure_ascii=False),
+                  **({"min_seconds": f"{min(1.0, max(0.3, float(min_seconds))):.2f}"} if min_seconds else {})},
             files={"audio": (audio_path.name, raw, "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav")},
             timeout=110,
         )

@@ -42,6 +42,7 @@ MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 PROFILE_MIN_SECONDS = 5.0
 PROFILE_MAX_SECONDS = 30.0
 SEGMENT_MIN_SECONDS = 1.0
+SHORT_MIN_SECONDS = 0.3  # the shortest clip /v1/identify embeds when asked (min_seconds): a short reply like «да»
 SEGMENT_MAX_SECONDS = 300.0
 MAX_SEGMENTS = 150
 MAX_SPEAKERS = 30
@@ -262,7 +263,8 @@ def _encode_wav(samples: np.ndarray) -> bytes:
     return buffer.getvalue()
 
 
-def _slice_speech(samples: np.ndarray, segments: list[dict[str, Any]]) -> dict[str, np.ndarray]:
+def _slice_speech(samples: np.ndarray, segments: list[dict[str, Any]],
+                  minimum: float = SEGMENT_MIN_SECONDS) -> dict[str, np.ndarray]:
     grouped: dict[str, list[np.ndarray]] = {}
     for segment in segments:
         if not isinstance(segment, dict):
@@ -278,7 +280,7 @@ def _slice_speech(samples: np.ndarray, segments: list[dict[str, Any]]) -> dict[s
             continue
         start_index = max(0, min(samples.size, int(start * SAMPLE_RATE)))
         end_index = max(start_index, min(samples.size, int(end * SAMPLE_RATE)))
-        if end_index - start_index < int(SEGMENT_MIN_SECONDS * SAMPLE_RATE):
+        if end_index - start_index < int(minimum * SAMPLE_RATE):
             continue
         grouped.setdefault(speaker, []).append(samples[start_index:end_index])
     clips: dict[str, np.ndarray] = {}
@@ -394,9 +396,12 @@ class IdentifyRequestMeta(BaseModel):
 async def identify(
     audio: UploadFile = File(...),
     segments_json: str = Form(...),
+    min_seconds: float = Form(SEGMENT_MIN_SECONDS),
     x_sysai_voice_token: str | None = Header(default=None, alias="X-SYSAI-Voice-Token"),
 ) -> dict[str, Any]:
-    """Embed grouped speaker turns from a diarized chunk in one request."""
+    """Embed grouped speaker turns from a diarized chunk in one request.
+
+    min_seconds (0.3–1.0, default 1.0) lets a caller compare short replies too; such prints are less certain."""
     _check_token(x_sysai_voice_token)
     raw = await audio.read(MAX_UPLOAD_BYTES + 1)
     if not raw or len(raw) > MAX_UPLOAD_BYTES:
@@ -412,13 +417,15 @@ async def identify(
     duration = _duration(samples)
     if duration < 1 or duration > SEGMENT_MAX_SECONDS:
         raise HTTPException(status_code=422, detail="Chunk duration must be between 1 and 300 seconds")
-    clips = _slice_speech(samples, segments)
+    minimum = float(min_seconds) if np.isfinite(min_seconds) else SEGMENT_MIN_SECONDS
+    minimum = min(SEGMENT_MIN_SECONDS, max(SHORT_MIN_SECONDS, minimum))
+    clips = _slice_speech(samples, segments, minimum)
     if len(clips) > MAX_SPEAKERS:
         raise HTTPException(status_code=422, detail="Too many distinct speakers in one chunk")
     results = {}
     for speaker, clip in clips.items():
         clip_duration = _duration(clip)
-        if clip_duration < SEGMENT_MIN_SECONDS:
+        if clip_duration < minimum:
             continue
         try:
             item = {

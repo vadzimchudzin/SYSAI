@@ -91,6 +91,13 @@
 .vd-ask-controls select { flex: 1 1 240px; width: auto; min-width: 0; } /* a long «Name · Position» must not widen the page */
 .vd-ask-controls input { flex: 1 1 200px; width: auto; }
 .vd-ask-controls .btn { flex: none; }
+/* «Кто это?» candidates (speaker_hints.py): one click names the voice, the reasons can be heard */
+.vd-cands { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--card2); }
+.vd-cands > p { margin: 0; }
+.vd-cand { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.vd-cand-pick { display: contents; }
+.vd-cand-why { flex: 1 1 100%; display: grid; gap: 4px; margin: 0; padding: 0 0 0 4px; list-style: none; color: var(--soft); }
+.vd-cand-why .t { margin-right: 4px; }
 
 /* listening (audio_archive.py): the player button, the speed, the playhead over the diagram */
 .vd-ico-play, .vd-ico-pause { display: inline-flex; }
