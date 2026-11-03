@@ -27,7 +27,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel, gdrive,
-               storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
+               server_watch, storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
@@ -132,6 +132,7 @@ def startup():
     config.MIC_INBOX_DIR.mkdir(parents=True, exist_ok=True)
     if config.TESTING:
         return
+    server_watch.start()
     pipeline.start_background()
     notion.start_worker()
     if userbot.ai_mode():
@@ -155,6 +156,7 @@ def shutdown():
     new instance can take it at once instead of waiting for the lease to run out."""
     if config.TESTING:
         return
+    server_watch.stop()  # first: a clean stop is told apart from a killed process even if the rest takes too long
     notion.stop_worker()
     try:
         userbot.stop()
@@ -2224,6 +2226,28 @@ def integrations_drive_forget(request: Request):
     guard_admin(request)
     gdrive.forget()
     return _integrations_back("drive", msg="forgot")
+
+
+# ----------------------------------------------------------------------------- «Сервер» (server_watch.py, №29)
+@app.get("/server", response_class=HTMLResponse)
+def server_view(request: Request, msg: str = "", error: str = ""):
+    """Downtime, crashes, memory, disk, database and nightly dumps: is the place good enough, did the move help."""
+    guard_admin(request)
+    return page(request, "server.html", w=server_watch.summary(), msg=msg[:300], error=error[:300])
+
+
+@app.post("/server/backup")
+async def server_backup(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    if f.get("action") == "copy":
+        done = server_watch.copy_backups(force=True)
+        state = settings_store.get("backup_state") or {}
+        if state.get("error"):
+            return RedirectResponse("/server?error=" + quote(state["error"][:300]) + "#backups", 303)
+        return RedirectResponse("/server?msg=" + quote((done or "Дампов нет.")[:300]) + "#backups", 303)
+    settings_store.set_many({"backup_copy": bool(f.get("backup_copy"))})
+    return RedirectResponse("/server?msg=" + quote("Сохранено.") + "#backups", 303)
 
 
 DOC_TEMPLATE_MESSAGES = {"saved": "Шаблон сохранён: ИИ-сотрудник видит его со следующего сообщения.",

@@ -1143,6 +1143,25 @@ class DriveFile(Base):
     updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class ServerRun(Base):
+    """One start of the service process (server_watch.py, №29): its start, its last sign of life (a heartbeat every
+    minute), its clean stop and its memory peak. A gap between one run's last sign of life and the next run's start is
+    downtime; a run that ended without a clean stop was killed (most often for memory)."""
+    __tablename__ = "server_runs"
+    id = Column(Integer, primary_key=True)
+    instance = Column(String(12), nullable=False, unique=True)
+    platform = Column(String(10), default="")             # render | docker | server
+    commit = Column(String(12), default="")
+    started_at = Column(DateTime(timezone=True), nullable=False, default=now, index=True)
+    beat_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    stopped_at = Column(DateTime(timezone=True), nullable=True)
+    limit_mb = Column(Integer, nullable=True)             # the memory the process may use (container limit or RAM)
+    peak_mb = Column(Integer, nullable=True)              # the peak of the process itself
+    child_mb = Column(Integer, nullable=True)             # the peak of its biggest child process (ffmpeg)
+    oom_kills = Column(Integer, nullable=False, default=0)  # processes the kernel killed for memory in the container
+    busy = Column(String(200), default="")                # what it was doing at the last heartbeat
+
+
 class MemoryVector(Base):
     """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
     __tablename__ = "memory_vectors"

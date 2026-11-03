@@ -3,6 +3,7 @@ services:
   - type: web
     name: sysai
     runtime: docker
+    # free засыпает через 15 минут без запросов; starter (7 $/мес) не засыпает. Что выбрать: deploy/HOSTING.md
     plan: free
     healthCheckPath: /health
     envVars:

@@ -82,6 +82,10 @@ def _positive_int(name: str, default: int) -> int:
 
 
 RECORDING_RETENTION_DAYS = _positive_int("RECORDING_RETENTION_DAYS", 180)
+# The nightly dumps of the own server (deploy/compose.yaml mounts ./backups here read-only): server_watch.py copies
+# the newest one to the recordings storage. Empty: no dumps here (Render, a plain run).
+BACKUP_DIR = pathlib.Path(os.getenv("BACKUP_DIR")) if os.getenv("BACKUP_DIR") else None
+BACKUP_KEEP_DAYS = _positive_int("BACKUP_KEEP_DAYS", 14)
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Minsk")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 WORKERS = int(os.getenv("WORKERS", "2"))

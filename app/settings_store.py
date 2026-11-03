@@ -79,6 +79,9 @@ DEFAULTS = {
     "gdrive_upload": True,           # the documents of SYSAI go to «Документы» by month (not the confidential ones)
     "gdrive_templates": True,        # «Шаблоны» ↔ «Документы по шаблону», both ways
     "gdrive_state": {},              # the folders, the last sync, errors; upload_blocked when Google gives no space
+    # «Сервер» (server_watch.py, №29)
+    "backup_copy": True,             # copy the newest nightly dump of the own server to the recordings storage
+    "backup_state": {},              # the dumps copied there [{"name", "size", "at"}], the last error, when checked
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
     "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents
