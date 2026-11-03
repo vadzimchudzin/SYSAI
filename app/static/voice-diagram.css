@@ -124,8 +124,9 @@
 .vd-rec-link { display: inline-flex; align-items: center; gap: 6px; color: var(--soft); }
 .vd-rec-link:hover { color: var(--text); }
 .vd-rec-link svg.i { width: 14px; height: 14px; }
-.vd-rec-delete { margin: 0; }
-.vd-rec-delete .btn { padding: 4px 9px; font-size: 12.5px; }
+.vd-rec-delete, .vd-rec-restore { margin: 0; }
+.vd-rec-delete .btn, .vd-rec-restore .btn { padding: 4px 9px; font-size: 12.5px; }
+.vd-rec-restore .btn svg.i { width: 14px; height: 14px; }
 .vd-rec-audio { flex: 1 1 100%; width: 100%; max-width: 520px; }
 .vd-play-quote { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin: 0 6px 0 0; padding: 0;
   border: 1px solid var(--line2); border-radius: 50%; background: var(--bg2); color: var(--soft); cursor: pointer; vertical-align: -7px; transition: .15s; }

@@ -640,7 +640,12 @@ def _named_present(meeting, who, by: str = "") -> None:
         participants.add(meeting, guest=name, by=by)
 
 
-RECORDING_MESSAGES = {"deleted": "Запись удалена из хранилища. Расшифровка, протокол и диаграмма остались."}
+RECORDING_MESSAGES = {
+    "deleted": "Запись удалена из хранилища. Расшифровка, протокол и диаграмма остались.",
+    "restoring": "Скачиваем запись из TicNote заново — через несколько минут её можно будет слушать. Обновите страницу чуть позже.",
+    "unavailable": "Запись сейчас не взять из TicNote: нет ключа TicNote, совещание старше срока хранения записей "
+                   "или запись уже скачивается.",
+}
 
 
 @app.get("/meetings/{mid}/recording")
@@ -666,6 +671,16 @@ def meeting_recording_delete(request: Request, mid: int):
         _voice_meeting(s, request, mid)
     audio_archive.remove(mid)
     return RedirectResponse(f"/meetings/{mid}?recording=deleted#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/recording/restore")
+def meeting_recording_restore(request: Request, mid: int):
+    """«Скачать из TicNote заново»: a TicNote meeting whose recording was not kept takes it from the TicNote cloud again."""
+    guard(request)
+    with SessionLocal() as s:
+        _voice_meeting(s, request, mid)
+    state = "restoring" if audio_archive.restore(mid) else "unavailable"
+    return RedirectResponse(f"/meetings/{mid}?recording={state}#voice-diagram", 303)
 
 
 SPEAKER_MESSAGES = {

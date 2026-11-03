@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from app import audio_archive, config, db, pipeline, settings_store, storage
-from app.db import Meeting, Recording, SessionLocal, StorageCleanup, now
+from app.db import Meeting, Recording, SessionLocal, StorageCleanup, TicnoteImport, now
 
 ENDPOINT = "https://acc123.r2.cloudflarestorage.com"
 BUCKET = "sysai-recordings"
@@ -420,6 +420,20 @@ def test_a_restart_before_the_upload_is_reported_after_a_grace_period(s3):
     audio_archive.run_due()
     m = meeting(lost)
     assert m.recording_status == "failed" and "сервер перезапустился" in m.recording["error"] and s3.calls == []
+    assert audio_archive.view(m)["text"] == "Запись не сохранилась: сервер перезапустился раньше, чем она загрузилась в хранилище."
+    assert "restorable" not in audio_archive.view(m)  # an upload from the browser: its original is gone with the disk
+
+
+def test_the_recording_is_kept_while_the_transcription_runs(s3, processing, monkeypatch):
+    mid, path = processing
+    seen = []
+
+    def transcribing(*_args, **_kwargs):
+        seen.append(meeting(mid).recording_status)  # synchronous under tests: already in the storage
+        return 20.0, [seg("Спикер 1", 0.5, 7.5)]
+    monkeypatch.setattr(pipeline.transcribe, "transcribe", transcribing)
+    pipeline.process(mid)
+    assert seen == ["stored"] and meeting(mid).recording_status == "stored" and s3.methods().count("PUT") == 1
 
 
 def test_a_resumed_processing_keeps_the_recording_again(s3, tmp_path):
@@ -567,10 +581,14 @@ def test_the_page_explains_every_state_of_the_recording(monkeypatch):
     assert text(source="notion") == "Совещание импортировано текстом, записи нет."
     assert text(source="web", status="done").startswith("Чтобы слушать записи, подключите хранилище")
     connect(monkeypatch)
-    assert text(source="web", status="transcribing") == "Запись сохранится в хранилище после расшифровки."
+    assert text(source="web", status="transcribing") == "Запись сохранится в хранилище во время обработки."
     assert text(source="web", status="done") == "Запись этого совещания не сохранялась: оно обработано до подключения хранилища."
     assert text(recording_status="pending", recording={"attempts": 0}) == "Запись сохраняется в хранилище, обычно это занимает пару минут."
     assert text(recording_status="failed", recording={"error": "нет места"}) == "Запись не сохранилась: нет места."
+    # earlier versions stored the reason with the same words in front: the page said them twice
+    old = "запись не сохранилась: сервер перезапустился, не успев загрузить её в хранилище"
+    assert text(recording_status="failed", recording={"error": old}) == (
+        "Запись не сохранилась: сервер перезапустился, не успев загрузить её в хранилище.")
     assert text(recording_status="expired", recording={}) == "Запись удалена: прошло 180 дней хранения."
     until = dt.datetime(2027, 5, 1, 21, 30, tzinfo=dt.timezone.utc)  # already 2 May in Minsk
     view = audio_archive.view(Meeting(id=3, recording_status="stored", recording={"size": 14_400_000, "expires_at": iso(until)}))
@@ -686,3 +704,128 @@ def test_settings_explain_how_to_connect_the_storage(client, monkeypatch):
     assert "Не хватает настроек" in page and "не заданы: S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY" in page
     location = urllib.parse.unquote(client.post("/settings/test-storage", follow_redirects=False).headers["location"])
     assert "хранилище не подключено: задайте S3_ENDPOINT, S3_BUCKET" in location
+
+
+# ------------------------------------------------------------------------------ a TicNote recording taken again
+@pytest.fixture
+def cloud(monkeypatch, tmp_path):
+    """TicNote's cloud: every recording is still there as a WAV."""
+    from app import ticnote
+    settings_store.set_many({"ticnote_appkey": "tnovs_sk_x"})
+    wav = make_wav(tmp_path / "cloud.wav", seconds=4)
+    state = {"asked": [], "fail": None}
+
+    def detail(appkey, record_id):
+        state["asked"].append(record_id)
+        return {"formatUrl": f"https://cdn.ticnote.example/{record_id}.wav"}
+
+    def download(url, dest, timeout=180):
+        if state["fail"]:
+            raise ticnote.TicNoteError(state["fail"])
+        shutil.copyfile(wav, dest)
+        return pathlib.Path(dest).stat().st_size
+    monkeypatch.setattr(ticnote, "file_detail", detail)
+    monkeypatch.setattr(ticnote, "download_wav", download)
+    return state
+
+
+def from_ticnote(record_id="rec-1", **fields):
+    fields = {"title": "Планёрка", "transcript": TRANSCRIPT, "duration_sec": 90, "source": "ticnote",
+              "report": {"title": "Планёрка", "summary": "", "tasks": []}, **fields}
+    mid = add_meeting(**fields)
+    with SessionLocal() as s:
+        s.add(TicnoteImport(record_id=record_id, title="Планёрка", status="queued", attempts=1, meeting_id=mid))
+        s.commit()
+    return mid
+
+
+def failed_at(mid, moment):
+    with SessionLocal() as s:
+        row = s.get(Meeting, mid)
+        row.recording = {**row.recording, "failed_at": iso(moment)}
+        s.commit()
+
+
+def test_a_ticnote_recording_lost_in_a_restart_is_downloaded_again(s3, cloud):
+    since = now() - audio_archive.STALE - dt.timedelta(seconds=5)
+    mid = from_ticnote(recording_status="pending", recording={"attempts": 0, "since": iso(since),
+                                                             "local": str(audio_archive.archive_dir() / "m1-gone.mp3")})
+    audio_archive.run_due()
+    m = meeting(mid)
+    assert cloud["asked"] == ["rec-1"] and m.recording_status == "stored" and leftovers(mid) == []
+    assert m.recording["key"] in s3.objects and abs(m.recording["duration"] - 4.0) < 0.3
+    assert audio_archive.view(m)["playable"] and s3.methods() == ["PUT"]
+
+
+def test_old_lost_ticnote_recordings_come_back_one_at_a_time(s3, cloud):
+    old = "запись не сохранилась: сервер перезапустился, не успев загрузить её в хранилище"
+    first = from_ticnote("rec-1", recording_status="failed", recording={"error": old, "failed_at": iso(now())})
+    second = from_ticnote("rec-2", recording_status="failed", recording={"error": old, "failed_at": iso(now())})
+    view = audio_archive.view(meeting(first))
+    assert view["restorable"] and view["text"] == ("Запись не сохранилась: сервер перезапустился, не успев загрузить её в "
+                                                   "хранилище. Скачаем её из TicNote заново автоматически.")
+    audio_archive.run_due()
+    assert cloud["asked"] == ["rec-2"] and meeting(second).recording_status == "stored"  # the newest first
+    assert meeting(first).recording_status == "failed"
+    audio_archive.run_due()
+    assert cloud["asked"] == ["rec-2", "rec-1"] and meeting(first).recording_status == "stored"
+
+
+def test_taking_it_again_is_retried_with_growing_pauses_and_then_left_to_the_button(s3, cloud):
+    mid = from_ticnote(recording_status="failed", recording={"error": audio_archive.LOST, "failed_at": iso(now())})
+    cloud["fail"] = "Не удалось скачать WAV: timed out"
+    audio_archive.run_due()
+    m = meeting(mid)
+    assert m.recording_status == "failed" and m.recording["restores"] == 1 and leftovers(mid) == []
+    assert m.recording["error"] == "не удалось скачать её из TicNote заново (Не удалось скачать WAV: timed out)"
+    audio_archive.run_due()
+    assert len(cloud["asked"]) == 1  # the next attempt waits
+    for pause in audio_archive.RESTORE_PAUSE[1:]:
+        failed_at(mid, now() - dt.timedelta(seconds=pause + 1))
+        audio_archive.run_due()
+    m = meeting(mid)
+    assert len(cloud["asked"]) == audio_archive.MAX_RESTORES and m.recording["restores"] == audio_archive.MAX_RESTORES
+    failed_at(mid, now() - dt.timedelta(days=2))
+    audio_archive.run_due()
+    assert len(cloud["asked"]) == audio_archive.MAX_RESTORES  # given up: no more by itself
+    view = audio_archive.view(meeting(mid))
+    assert view["restorable"] and "автоматически" not in view["text"] and s3.calls == []
+    cloud["fail"] = None
+    assert audio_archive.restore(mid) and meeting(mid).recording_status == "stored"  # the button still works
+
+
+def test_only_ticnote_meetings_within_the_retention_period_are_taken_again(s3, cloud, monkeypatch):
+    web = add_meeting(title="Загрузка", recording_status="failed", recording={"error": audio_archive.LOST, "failed_at": iso(now())})
+    ancient = from_ticnote("rec-9", recording_status="failed", created_at=now() - dt.timedelta(days=200),
+                           recording={"error": audio_archive.LOST, "failed_at": iso(now())})
+    busy = from_ticnote("rec-8", status="analyzing")
+    audio_archive.run_due()
+    assert cloud["asked"] == [] and not audio_archive.restore(web) and not audio_archive.restore(ancient)
+    assert not audio_archive.restore(busy) and "restorable" not in audio_archive.view(meeting(ancient))
+    fresh = from_ticnote("rec-7", recording_status="failed", recording={"error": audio_archive.LOST})
+    settings_store.set_many({"ticnote_appkey": ""})
+    monkeypatch.setattr(config, "TICNOTE_APPKEY", "")
+    audio_archive.run_due()
+    assert cloud["asked"] == [] and "restorable" not in audio_archive.view(meeting(fresh))
+
+
+def test_the_page_offers_to_take_a_ticnote_recording_again(client, s3, cloud):
+    mid = from_ticnote(recording_status="failed", recording={"error": "не удалось сжать запись для хранения", "restores": 3})
+    html = client.get(f"/meetings/{mid}").text
+    assert f'action="/meetings/{mid}/recording/restore"' in html and "Скачать из TicNote заново" in html
+    assert "Запись не сохранилась: не удалось сжать запись для хранения." in html
+    response = client.post(f"/meetings/{mid}/recording/restore", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == f"/meetings/{mid}?recording=restoring#voice-diagram"
+    assert meeting(mid).recording_status == "stored" and cloud["asked"] == ["rec-1"]
+    html = client.get(f"/meetings/{mid}?recording=restoring").text
+    assert "Скачиваем запись из TicNote заново" in html and "data-vd-play " in html and "/recording/restore" not in html
+    response = client.post(f"/meetings/{mid}/recording/restore", follow_redirects=False)  # nothing to take any more
+    assert response.headers["location"] == f"/meetings/{mid}?recording=unavailable#voice-diagram"
+    web = kept(recording_status="", recording=None)
+    assert "/recording/restore" not in client.get(f"/meetings/{web}").text
+
+
+def test_a_ticnote_recording_being_downloaded_says_so():
+    view = audio_archive.view(Meeting(id=4, source="ticnote", recording_status="pending",
+                                      recording={"attempts": 0, "from": "ticnote"}))
+    assert view == {"state": "pending", "text": "Скачиваем запись из TicNote заново и сохраняем в хранилище, это займёт несколько минут."}

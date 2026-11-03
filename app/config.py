@@ -82,6 +82,9 @@ def _positive_int(name: str, default: int) -> int:
 
 
 RECORDING_RETENTION_DAYS = _positive_int("RECORDING_RETENTION_DAYS", 180)
+# A free Render instance sleeps after 15 minutes without requests and loses its disk: while a meeting is processed or a
+# recording uploaded, the service asks its own /health every 10 minutes (keep_awake.py). On by default on Render.
+KEEP_AWAKE = _bool("KEEP_AWAKE", bool(os.getenv("RENDER")))
 # The nightly dumps of the own server (deploy/compose.yaml mounts ./backups here read-only): server_watch.py copies
 # the newest one to the recordings storage. Empty: no dumps here (Render, a plain run).
 BACKUP_DIR = pathlib.Path(os.getenv("BACKUP_DIR")) if os.getenv("BACKUP_DIR") else None
