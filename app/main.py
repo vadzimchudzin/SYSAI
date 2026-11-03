@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_templates, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
                storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
@@ -1486,13 +1486,19 @@ def document_view(request: Request, doc_id: int, q: str = ""):
                "status": d.text_status or "pending", "summary": d.summary or "", "text": (d.text or "")[:20000],
                "truncated": len(d.text or "") > 20000,
                "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None}
+        intake = doc_intake.card(d)
+        cards = [{"id": e.id, "name": e.name} for e in s.query(entities.Entity).join(
+            entities.EntityLink, entities.EntityLink.entity_id == entities.Entity.id).filter(
+            entities.EntityLink.source_type == "document", entities.EntityLink.source_id == d.id)]
     answer = None
     if q.strip():
         try:
             answer = memory.answer_about_document(doc_id, q.strip()[:500])
         except llm.LLMError as exc:
             answer = {"answer": f"Модель недоступна: {exc}", "pieces": []}
-    return page(request, "document.html", doc=doc, transfers=transfers, q=q, answer=answer)
+    return page(request, "document.html", doc=doc, transfers=transfers, q=q, answer=answer, intake=intake, cards=cards,
+                intake_on=doc_intake.enabled(), msg=INTAKE_MESSAGES.get(request.query_params.get("msg", ""), ""),
+                error=str(request.query_params.get("error", ""))[:300])
 
 
 @app.post("/documents/{doc_id}/reread")
@@ -1506,6 +1512,204 @@ def document_reread(request: Request, doc_id: int):
         s.commit()
     doctext.process(doc_id) if config.TESTING else pipeline.POOL.submit(doctext.process, doc_id)
     return RedirectResponse(f"/documents/{doc_id}/view", 303)
+
+
+INTAKE_MESSAGES = {"analyzing": "Разбираю заново — обновите страницу через полминуты.", "analyzed": "Разобран заново.",
+                   "routed": "Готово: передан по правилам.", "rule": "Правило сохранено.", "rule_done": "Готово.",
+                   "intake": "Готово.", "checked": "Отмечено — счёт проверенных виден на странице «Документы» в разделе «Разбор входящих»."}
+
+
+@app.post("/documents/{doc_id}/analyze")
+def document_analyze(request: Request, doc_id: int):
+    """«Разобрать заново»: the requisites, the sums and the deadlines again (what was already sent stays as it was)."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        if s.get(Document, doc_id) is None:
+            raise HTTPException(404, "Документ не найден")
+    if config.TESTING:
+        doc_intake.analyze(doc_id, force=True)
+        return RedirectResponse(f"/documents/{doc_id}/view?msg=analyzed", 303)
+    pipeline.POOL.submit(doc_intake.analyze, doc_id, True)
+    return RedirectResponse(f"/documents/{doc_id}/view?msg=analyzing", 303)
+
+
+@app.post("/documents/{doc_id}/route")
+def document_route(request: Request, doc_id: int):
+    """«Передать по правилам»: after a rule was added for a document nobody got."""
+    guard_admin(request)
+    try:
+        route = doc_intake.route_again(doc_id, by=_who(request))
+    except doc_intake.RuleError as exc:
+        return RedirectResponse(f"/documents/{doc_id}/view?error=" + quote(str(exc)), 303)
+    if route.get("status") not in ("sent", "self", "late"):
+        reason = route.get("why") or doc_intake.ROUTE_RU.get(route.get("status") or "", "не передан")
+        return RedirectResponse(f"/documents/{doc_id}/view?error=" + quote(reason), 303)
+    return RedirectResponse(f"/documents/{doc_id}/view?msg=routed", 303)
+
+
+@app.post("/documents/{doc_id}/check")
+async def document_check(request: Request, doc_id: int):
+    """«Да, всё верно» / «Есть ошибка» under the analysis: the Documents page counts how many are right."""
+    guard_admin(request)
+    f = await request.form()
+    try:
+        doc_intake.mark(doc_id, f.get("ok") == "1", str(f.get("note") or ""), by=_who(request))
+    except doc_intake.RuleError as exc:
+        return RedirectResponse(f"/documents/{doc_id}/view?error=" + quote(str(exc)), 303)
+    return RedirectResponse(f"/documents/{doc_id}/view?msg=checked#intake", 303)
+
+
+@app.post("/documents/rules")
+async def doc_rule_save(request: Request):
+    """A «что кому» rule: the type of the document and/or its words → a person or a department."""
+    guard_admin(request)
+    f = await request.form()
+    raw_id = str(f.get("rule_id") or "").strip()
+    try:
+        doc_intake.save_rule(rule_id=int(raw_id) if raw_id.isdigit() else None, kind=str(f.get("kind") or ""),
+                             keywords=str(f.get("keywords") or ""), to=str(f.get("to") or ""),
+                             make_tasks=f.get("make_tasks") == "on", by=_who(request))
+    except doc_intake.RuleError as exc:
+        return RedirectResponse("/documents?error=" + quote(str(exc)) + "#rules", 303)
+    return RedirectResponse("/documents?msg=rule#rules", 303)
+
+
+@app.post("/documents/rules/{rule_id}/{action}")
+def doc_rule_action(request: Request, rule_id: int, action: str):
+    guard_admin(request)
+    try:
+        doc_intake.rule_action(rule_id, action)
+    except doc_intake.RuleError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return RedirectResponse("/documents?msg=rule_done#rules", 303)
+
+
+@app.post("/documents/intake")
+def doc_intake_switch(request: Request):
+    guard_admin(request)
+    settings_store.set_many({"doc_intake": not doc_intake.enabled()})
+    return RedirectResponse("/documents?msg=intake#rules", 303)
+
+
+# ----------------------------------------------------------------------------- objects and clients (entities.py)
+ENTITY_MESSAGES = {"saved": "Карточка сохранена; упоминания в истории ищутся сами.", "merged": "Объединено.",
+                   "deleted": "Карточка удалена.", "fact": "Факт добавлен.", "scanned": "Упоминания найдены заново.",
+                   "archived": "Факт убран в архив."}
+
+
+def _entity_form(f) -> dict:
+    return {k: str(f.get(k) or "") for k in ("name", "kind", "aliases", "unp", "address", "contacts", "description")}
+
+
+@app.get("/entities", response_class=HTMLResponse)
+def entities_view(request: Request, q: str = "", kind: str = "", msg: str = "", error: str = "", added: int = 0,
+                  found: int = 0):
+    """Objects and clients: the cards, possible duplicates, a new card."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        rows, dups = entities.listing(s, q, kind if kind in entities.KINDS else ""), entities.duplicates(s)
+    text = (f"Новых карточек: {added}, уже были: {found}. Упоминания в истории ищутся сами." if msg == "bulk"
+            else ENTITY_MESSAGES.get(msg, ""))
+    return page(request, "entities.html", rows=rows, dups=dups, q=q, kind=kind, kinds=entities.KINDS,
+                source_types=entities.SOURCE_TYPES, msg=text, error=error[:300])
+
+
+@app.post("/entities")
+async def entity_create(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        entity_id = entities.save(None, **_entity_form(f), by=_who(request))
+    except entities.EntityError as exc:
+        return RedirectResponse("/entities?error=" + quote(str(exc)), 303)
+    return RedirectResponse(f"/entities/{entity_id}?msg=saved", 303)
+
+
+@app.post("/entities/bulk")
+async def entity_bulk(request: Request):
+    """The list of the main objects and clients pasted at once: one per line."""
+    guard_admin(request)
+    f = await request.form()
+    added, found = entities.bulk_add(str(f.get("text") or ""), str(f.get("kind") or "client"), by=_who(request))
+    return RedirectResponse(f"/entities?msg=bulk&added={added}&found={found}", 303)
+
+
+@app.post("/entities/scan")
+def entity_scan(request: Request):
+    guard_admin(request)
+    entities.rescan()
+    return RedirectResponse("/entities?msg=scanned", 303)
+
+
+@app.get("/entities/{entity_id}", response_class=HTMLResponse)
+def entity_view(request: Request, entity_id: int, msg: str = "", error: str = ""):
+    guard_admin(request)
+    with SessionLocal() as s:
+        try:
+            e = entities.card(s, entity_id)
+        except entities.EntityError:
+            raise HTTPException(404, "Карточка не найдена") from None
+    return page(request, "entity.html", e=e, kinds=entities.KINDS, source_types=entities.SOURCE_TYPES,
+                msg=ENTITY_MESSAGES.get(msg, ""), error=error[:300])
+
+
+@app.post("/entities/{entity_id}")
+async def entity_save(request: Request, entity_id: int):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        entities.save(entity_id, **_entity_form(f), by=_who(request))
+    except entities.EntityError as exc:
+        return RedirectResponse(f"/entities/{entity_id}?error=" + quote(str(exc)), 303)
+    return RedirectResponse(f"/entities/{entity_id}?msg=saved", 303)
+
+
+@app.post("/entities/{entity_id}/merge")
+async def entity_merge(request: Request, entity_id: int):
+    """The card `gone` is a duplicate of this one: everything moves here."""
+    guard_admin(request)
+    f = await request.form()
+    gone = str(f.get("gone") or "")
+    try:
+        if not gone.isdigit():
+            raise entities.EntityError("выберите карточку-дубль")
+        entities.merge(entity_id, int(gone), by=_who(request))
+    except entities.EntityError as exc:
+        back = "/entities" if f.get("back") == "list" else f"/entities/{entity_id}"
+        return RedirectResponse(back + "?error=" + quote(str(exc)), 303)
+    return RedirectResponse("/entities?msg=merged" if f.get("back") == "list" else f"/entities/{entity_id}?msg=merged", 303)
+
+
+@app.post("/entities/{entity_id}/delete")
+def entity_delete(request: Request, entity_id: int):
+    guard_admin(request)
+    try:
+        entities.delete(entity_id)
+    except entities.EntityError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return RedirectResponse("/entities?msg=deleted", 303)
+
+
+@app.post("/entities/{entity_id}/facts")
+async def entity_fact(request: Request, entity_id: int):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        entities.add_fact(entity_id, str(f.get("text") or ""), by=_who(request))
+    except entities.EntityError as exc:
+        return RedirectResponse(f"/entities/{entity_id}?error=" + quote(str(exc)) + "#facts", 303)
+    return RedirectResponse(f"/entities/{entity_id}?msg=fact#facts", 303)
+
+
+@app.post("/entities/{entity_id}/facts/{note_id}/archive")
+def entity_fact_archive(request: Request, entity_id: int, note_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        note = s.get(Note, note_id)
+        if note is None or note.entity_id != entity_id:
+            raise HTTPException(404, "Факт не найден")
+    memory.edit_note(note_id, archived=True, by=_who(request))
+    return RedirectResponse(f"/entities/{entity_id}?msg=archived#facts", 303)
 
 
 def _document_sender(d) -> str:
@@ -1536,15 +1740,17 @@ def documents_view(request: Request, q: str = "", msg: str = "", error: str = ""
             rows.append({"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256[:12],
                          "sensitive": d.sensitive, "caption": d.caption, "at": d.created_at,
                          "summary": d.summary or "", "status": d.text_status or "pending",
-                         "sender": _document_sender(d),
+                         "sender": _document_sender(d), "intake": doc_intake.brief(d),
                          "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None,
                          "transfers": [{"to": (s.get(Employee, t.to_employee_id).name if t.to_employee_id and
                                                s.get(Employee, t.to_employee_id) else t.to_ref), "status": t.status,
                                         "at": t.sent_at} for t in transfers]})
         templates, made = doc_templates.panel_list(s), doc_templates.recent(s, 15)
+        rules, targets, checked = doc_intake.rules_view(s), doc_intake.targets(s), doc_intake.checked(s)
     return page(request, "documents.html", docs=rows, q=q, templates=templates, made=made,
-                outputs=doc_templates.OUTPUTS, msg=DOC_TEMPLATE_MESSAGES.get(msg, ""), error=error[:300],
-                draft_ru=DRAFT_RU)
+                outputs=doc_templates.OUTPUTS, msg=DOC_TEMPLATE_MESSAGES.get(msg, "") or INTAKE_MESSAGES.get(msg, ""),
+                error=error[:300], draft_ru=DRAFT_RU, rules=rules, targets=targets, doc_kinds=doc_intake.KINDS,
+                intake_on=doc_intake.enabled(), checked=checked)
 
 
 DRAFT_RU = {"draft": "ждёт «ок»", "replaced": "заменён исправленным", "cancelled": "отменён", "approved": "сохранён, отправляется",

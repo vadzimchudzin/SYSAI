@@ -968,9 +968,10 @@ def _checked_documents(s, ids) -> list:
 
 
 def start_delivery(requested_by: str, to_employee_id: int, document_ids: list, as_zip: bool,
-                   archive_name: str = "", note: str = "", requested_chat: str = "") -> int:
+                   archive_name: str = "", note: str = "", requested_chat: str = "", report: bool = True) -> int:
     """An order in the chat («перешли ему», «запакуй и отправь зипом»): a case of code-built steps
-    zip_pack → send_files → report → close. It ends only when Telegram confirmed the sending."""
+    zip_pack → send_files → report → close. It ends only when Telegram confirmed the sending. Without `report` nobody
+    is told the result (a file passed on by the «что кому» rules: the sender already heard where it goes)."""
     ids = list(dict.fromkeys(int(x) for x in document_ids))
     if not ids or len(ids) > MAX_DELIVERY_FILES:
         raise CaseError(f"нужно от 1 до {MAX_DELIVERY_FILES} файлов")
@@ -995,8 +996,9 @@ def start_delivery(requested_by: str, to_employee_id: int, document_ids: list, a
                               args={"to": recipient.id, "to_ref": recipient.telegram_chat_id,
                                     "requested_by": requested_by[:120], "requested_chat": str(requested_chat),
                                     **({"from_step": 0} if as_zip else {"document_ids": ids})}))
-        steps += [CaseStep(position=len(steps), tool="report", args={}),
-                  CaseStep(position=len(steps) + 1, tool="close", args={})]
+        if report:
+            steps.append(CaseStep(position=len(steps), tool="report", args={}))
+        steps.append(CaseStep(position=len(steps), tool="close", args={}))
         case.steps.extend(steps)
         s.add(case)
         s.flush()
@@ -1239,11 +1241,12 @@ def intake_document(msg: dict, employee_id) -> dict:
 
 
 def read_later(document_id: int) -> None:
-    """The text of a received document is read in the background (memory search, questions about it)."""
+    """The text of a received document is read in the background (memory search, questions about it), then the
+    requisites, the sums and the deadlines are taken out of it and its route is planned (doc_intake.py)."""
     if _testing():
         return  # tests call doctext.process themselves
-    from . import doctext
-    _pool().submit(doctext.process, document_id)
+    from . import doc_intake
+    _pool().submit(doc_intake.process, document_id)
 
 
 def _pick_wait(waits: list, reply_to):

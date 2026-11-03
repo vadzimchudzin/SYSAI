@@ -42,6 +42,7 @@ DEFAULTS = {
     "speaker_naming": True,          # «Спикер 1» becomes a name when the conversation proves who it is
     "speaker_name_threshold": 0.75,  # …surely enough (speakers.py); below it «Кто это?» asks with candidates
     "company_profile": "",           # what the company does, clients, products, rules everyone should know (memory)
+    "doc_intake": True,              # incoming files: requisites, sums, deadlines, routing by the rules (doc_intake.py)
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
     "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents

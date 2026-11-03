@@ -3,7 +3,33 @@
 <p class="small"><a href="/documents">← Документы</a></p>
 <div class="row between"><h1>{{ doc.filename }}</h1><a class="btn sm" href="/documents/{{ doc.id }}">Скачать</a></div>
 <p class="muted small">от {{ doc.sender }} · {{ doc.at.strftime('%d.%m.%Y %H:%M') if doc.at }} · {{ (doc.size / 1024)|round(1) }} КБ · SHA-256 {{ doc.sha[:16] }}…{% if doc.sensitive %} · <span class="pill amber">конфиденциальный</span>{% endif %}{% if doc.case %} · дело <a href="/progress?scope=open#case-{{ doc.case.id }}">«{{ doc.case.title }}»</a>{% endif %}</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">{{ error }}</div>{% endif %}
 {% if doc.summary %}<section class="card"><b>Кратко:</b> {{ doc.summary }}</section>{% endif %}
+<section class="card" id="intake"><div class="row between"><h2>Разбор{% if intake.kind %}: {{ intake.kind }}{% endif %}</h2>
+  <div class="row" style="gap:6px">{% if intake.status == 'done' and intake.route.status in ('none', 'no_contact', 'failed', 'ready') %}<form method="post" action="/documents/{{ doc.id }}/route"><button class="btn sm">Передать по правилам</button></form>{% endif %}
+  {% if doc.status == 'done' %}<form method="post" action="/documents/{{ doc.id }}/analyze"><button class="btn sm ghost">Разобрать заново</button></form>{% endif %}</div></div>
+  {% if intake.status == 'done' %}
+    {% if intake.line %}<p><b>{{ intake.line }}</b></p>{% endif %}
+    {% if intake.problems %}<div class="warn small"><b>Не сходится:</b><ul>{% for p in intake.problems %}<li>{{ p }}</li>{% endfor %}</ul></div>{% elif intake.fields %}<p class="small muted">Арифметика и УНП в порядке (что удалось проверить).</p>{% endif %}
+    {% if intake.fields %}<div class="table-wrap"><table class="small"><thead><tr><th>Реквизит</th><th>Значение</th><th>Откуда (цитата из файла)</th></tr></thead><tbody>
+      {% for f in intake.fields %}<tr><td>{{ f.name }}</td><td><b>{{ f.value }}</b></td><td class="muted">{% if f.quote %}«{{ f.quote }}»{% else %}—{% endif %}</td></tr>{% endfor %}
+    </tbody></table></div>{% else %}<p class="muted small">Реквизитов не нашлось.</p>{% endif %}
+    {% if intake.deadlines %}<h3>Сроки</h3>{% for d in intake.deadlines %}<div class="small"><b>{{ d.date }}</b> — {{ d.what }} <span class="muted">«{{ d.quote }}»</span></div>{% endfor %}{% endif %}
+    {% if intake.rows %}<details class="small"><summary>Строки таблицы ({{ intake.rows|length }})</summary><div class="table-wrap"><table class="small"><thead><tr><th>Наименование</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead><tbody>
+      {% for i in intake.rows %}<tr><td>{{ i.name }}</td><td>{{ i.qty }}</td><td>{{ i.price }}</td><td>{{ i.sum }}</td></tr>{% endfor %}</tbody></table></div></details>{% endif %}
+    {% if intake.unverified %}<details class="small"><summary>Не взято — цитата не нашлась в файле ({{ intake.unverified|length }})</summary>{% for u in intake.unverified %}<div class="muted">{{ u.name }}: {{ u.value }}{% if u.quote %} — «{{ u.quote }}»{% endif %}</div>{% endfor %}</details>{% endif %}
+    {% if intake.route %}<h3>Кому</h3><div class="small">{{ intake.route.status_ru }}{% if intake.route.to %}: <b>{{ intake.route.to }}</b>{% endif %}{% if intake.route.rule %} · правило «{{ intake.route.rule }}»{% endif %}{% if intake.route.why %} · {{ intake.route.why }}{% endif %}{% if intake.route.case_id %} · <a href="/progress?scope=week#case-{{ intake.route.case_id }}">дело</a>{% endif %}{% if intake.route.tasks %} · задач по срокам: {{ intake.route.tasks }}{% if intake.route.reminders %}, напоминаний: {{ intake.route.reminders }}{% endif %}{% endif %}</div>{% endif %}
+    <div class="row small" style="gap:6px;margin-top:10px;flex-wrap:wrap;align-items:center"><span>Разбор верный?</span>
+      <form method="post" action="/documents/{{ doc.id }}/check"><input type="hidden" name="ok" value="1"><button class="btn sm ghost">Да, всё верно</button></form>
+      <form method="post" action="/documents/{{ doc.id }}/check" class="row" style="gap:6px"><input type="hidden" name="ok" value="0"><input name="note" maxlength="300" placeholder="что не так (необязательно)"><button class="btn sm ghost">Есть ошибка</button></form>
+      {% if intake.check %}<span class="muted">отмечено: {{ 'верно' if intake.check.ok else 'есть ошибка' }}{% if intake.check.note %} — «{{ intake.check.note }}»{% endif %}{% if intake.check.by %} ({{ intake.check.by }}){% endif %}</span>{% endif %}</div>
+  {% elif intake.status in ('', 'working') %}<p class="muted">{% if intake_on %}Разбирается…{% else %}Разбор входящих выключен (Документы → «Разбор входящих»).{% endif %}</p>
+  {% elif intake.status == 'skipped' %}<p class="muted">Не разбирался: {{ intake.skipped }}.</p>
+  {% elif intake.status == 'old' %}<p class="muted">Получен до того, как появился разбор. Нажмите «Разобрать заново», чтобы достать реквизиты (по правилам он от этого не перешлётся — для этого есть кнопка «Передать по правилам»).</p>
+  {% else %}<p class="warn">Разобрать не удалось{% if intake.error %}: {{ intake.error }}{% endif %}.</p>{% endif %}
+  {% if cards %}<p class="small">Карточки: {% for c in cards %}<a href="/entities/{{ c.id }}">{{ c.name }}</a>{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
+</section>
 <section class="card"><h2>Вопрос по документу</h2>
   <form method="get" action="/documents/{{ doc.id }}/view" class="row"><input name="q" value="{{ q }}" placeholder="Например: на какую сумму акт и за какой период?" style="flex:1"> <button class="btn sm primary">Спросить</button></form>
   {% if answer %}<div style="margin-top:10px"><b>Ответ:</b> {{ answer.answer }}</div>

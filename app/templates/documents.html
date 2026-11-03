@@ -3,9 +3,33 @@
 {% block body %}
 <div class="row between"><h1>Документы</h1>
   <form method="get" action="/documents" class="row"><input name="q" value="{{ q }}" placeholder="Поиск по имени файла или подписи"> <button class="btn sm">Найти</button></form></div>
-<p class="muted small">Файлы, которые сотрудники прислали ИИ-сотруднику в Telegram, и документы, которые он сделал по шаблонам: к какому делу привязаны и кому переданы. Содержимое проверяется по SHA-256 перед каждой пересылкой.</p>
+<p class="muted small">Файлы, которые сотрудники прислали ИИ-сотруднику в Telegram, и документы, которые он сделал по шаблонам: что в них (реквизиты, суммы, сроки), к какому делу привязаны и кому переданы. Содержимое проверяется по SHA-256 перед каждой пересылкой.</p>
 {% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="people-msg warn" role="alert">Не сохранено: {{ error }}</div>{% endif %}
+<section class="card" id="rules">
+  <div class="row between"><h2>Разбор входящих: что кому</h2>
+    <form method="post" action="/documents/intake"><button class="btn sm {{ 'ghost' if intake_on else 'primary' }}">{{ 'Выключить разбор' if intake_on else 'Включить разбор' }}</button></form></div>
+  <p class="small muted">{% if intake_on %}Каждый присланный файл (PDF, скан, DOCX, XLSX) ИИ-сотрудник читает и разбирает: тип, номер, дата, контрагент, УНП, суммы и НДС, сроки — у каждого значения цитата из файла, без цитаты значение не берётся. Арифметика проверяется (без НДС + НДС = итого, НДС по ставке, строки таблицы). Потом документ уходит по первому подходящему правилу: человеку или начальнику отдела (звёздочка в «Подразделениях»), а сроки становятся его задачами с напоминанием за рабочий день. Если человек в чате сам сказал, кому передать, правило не срабатывает; конфиденциальные и документы по делам по правилам не пересылаются.{% else %}<b>Разбор выключен:</b> файлы только сохраняются и читаются для поиска.{% endif %}</p>
+  {% if rules %}<div class="table-wrap"><table class="small"><thead><tr><th>#</th><th>Правило</th><th>Сроки → задачи</th><th></th></tr></thead><tbody>
+    {% for r in rules %}<tr class="{{ '' if r.active else 'muted' }}"><td>{{ loop.index }}</td><td>{{ r.label }}{% if not r.active %} <span class="pill gray">выключено</span>{% endif %}{% if r.by %}<div class="muted">{{ r.by }}</div>{% endif %}</td>
+      <td>{{ 'да' if r.make_tasks else 'нет' }}</td>
+      <td class="row" style="gap:6px">{% if not loop.first %}<form method="post" action="/documents/rules/{{ r.id }}/up"><button class="btn sm ghost" title="Проверять раньше">выше</button></form>{% endif %}
+        <form method="post" action="/documents/rules/{{ r.id }}/toggle"><button class="btn sm ghost">{{ 'выключить' if r.active else 'включить' }}</button></form>
+        <form method="post" action="/documents/rules/{{ r.id }}/delete" onsubmit="return confirm('Удалить правило?')"><button class="btn sm ghost">удалить</button></form></td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<p class="muted small">Правил пока нет — документы разбираются, но никому не пересылаются.</p>{% endif %}
+  <form method="post" action="/documents/rules" class="doc-tpl-form">
+    <h3>Новое правило</h3>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <label class="f">Тип документа <select name="kind"><option value="">любой</option>{% for k, v in doc_kinds.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
+      <label class="f" style="flex:1">Если в файле есть слова (через запятую, необязательно) <input name="keywords" maxlength="300" placeholder="например: смета, кровля"></label>
+      <label class="f">Кому <select name="to" required><option value="">— выберите —</option>{% for t in targets %}<option value="{{ t.value }}">{{ t.label }}</option>{% endfor %}</select></label></div>
+    <label class="small"><input type="checkbox" name="make_tasks" checked> сроки из документа — в задачи получателю с напоминанием</label>
+    <div><button class="btn sm primary" style="margin-top:8px">Добавить правило</button></div>
+  </form>
+  <h3>Насколько верно разбирает</h3>
+  {% if checked.total %}<p class="small">Проверено вручную: <b>верно {{ checked.ok }} из {{ checked.total }}</b>{% if checked.wrong %} · с ошибкой: {% for w in checked.wrong %}<a href="/documents/{{ w.id }}/view#intake">{{ w.filename }}</a>{% if w.note %} ({{ w.note }}){% endif %}{{ ', ' if not loop.last }}{% endfor %}{% endif %}</p>
+  {% else %}<p class="small muted">Откройте разобранный документ и отметьте под разбором «Да, всё верно» или «Есть ошибка» — здесь будет счёт (цель: реквизиты и маршрут верны хотя бы в 9 документах из 10).</p>{% endif %}
+</section>
 <section class="card" id="templates">
   <h2>Шаблоны документов</h2>
   <p class="small muted">Письма, акты, служебки компании в формате Word (.docx) с полями в двойных фигурных скобках: <code>{{ '{{Дата}}' }}</code>, <code>{{ '{{Получатель}}' }}</code>, <code>{{ '{{Сумма}}' }}</code>. По просьбе в чате ИИ-сотрудник заполняет поля из поручения и памяти компании (недостающее спрашивает), присылает черновик тому, кто просил, и после «ок» сохраняет документ здесь и отправляет, кому сказали. Поля заполняются внутри самого шаблона — шрифты, таблицы и бланк остаются как в Word; PDF делается из заполненного документа.</p>
@@ -51,6 +75,7 @@
   <tbody>{% for d in docs %}
   <tr><td><a href="/documents/{{ d.id }}/view">{{ d.filename }}</a> <span class="pill gray">{{ d.kind }}</span>{% if d.sensitive %} <span class="pill amber">конфиденциальный</span>{% endif %}
       <div class="muted small">{{ (d.size / 1024)|round(1) }} КБ · SHA-256 {{ d.sha }}… · {{ d.at.strftime('%d.%m %H:%M') if d.at }}</div>
+      {% if d.intake %}<div class="small"><b>{{ d.intake.line }}</b>{% if d.intake.problems %} <span class="pill amber">не сходится: {{ d.intake.problems }}</span>{% endif %}{% if d.intake.route %} <span class="muted">{{ d.intake.route }}</span>{% endif %}</div>{% endif %}
       {% if d.summary %}<div class="small">{{ d.summary }}</div>{% elif d.status == 'pending' %}<div class="muted small">читается…</div>{% endif %}
       {% if d.caption %}<div class="small">«{{ d.caption }}»</div>{% endif %}</td>
     <td>{{ d.sender }}</td>

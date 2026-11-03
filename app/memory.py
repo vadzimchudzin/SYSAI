@@ -27,7 +27,7 @@ CONFIDENCE = ("high", "medium", "low")
 CONFIDENCE_RU = {"high": "высокая", "medium": "средняя", "low": "низкая"}
 SOURCE_RU = {"meeting": "совещание", "conversation": "переписка", "manual": "вручную", "system": "система"}
 TYPE_RU = {"company": "Компания", "department": "Отдел", "person": "Сотрудник", "note": "Заметка", "skill": "Навык",
-           "document": "Документ"}
+           "document": "Документ", "entity": "Объект или клиент"}
 POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
 _WORD = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
 _STOP = set("и в во на с со к ко о об от до за из у по для что кто как где когда ли же бы не ни а но или это этот эта "
@@ -107,12 +107,18 @@ def items(s) -> list:
         out.append({"key": f"person:{e.id}", "type": "person", "title": e.name, "text": _person_text(e),
                     "owner": e.id, "url": f"/memory/people/{e.id}"})
     departments = {d.id: d.name for d in s.query(Department).all()}
+    from . import entities
+    cards = entities.names(s)
+    out += entities.memory_items(s)
     for n in (s.query(Note).filter(Note.archived.is_(False), Note.kind.in_(NOTE_KINDS))
               .order_by(Note.id.desc()).limit(3000)):
         subject = (people[n.employee_id].name if n.employee_id in people else
-                   (f"отдел {departments[n.department_id]}" if n.department_id in departments else "компания"))
+                   (f"отдел {departments[n.department_id]}" if n.department_id in departments else
+                    cards.get(n.entity_id) or "компания"))
+        url = (f"/memory/people/{n.employee_id}" if n.employee_id else
+               f"/entities/{n.entity_id}" if n.entity_id in cards else "/memory")
         out.append({"key": f"note:{n.id}", "type": "note", "title": subject, "text": f"{subject}: {n.text}",
-                    "owner": n.employee_id, "url": f"/memory/people/{n.employee_id}" if n.employee_id else "/memory",
+                    "owner": n.employee_id, "url": url,
                     "meta": {"source": SOURCE_RU.get(n.source, n.source), "date": n.created_at,
                              "confidence": CONFIDENCE_RU.get(n.confidence or "medium", n.confidence)}})
     for k in s.query(Skill).filter(Skill.active.is_(True)).all():
@@ -328,16 +334,25 @@ def learn_from_meeting(meeting_id: int) -> int:
         people = {e.id: e for e in s.query(Employee).filter(Employee.active.is_(True)).all()}
         departments = {d.id: d for d in s.query(Department).filter(Department.active.is_(True)).all()}
         known = [n.text for n in s.query(Note).filter(Note.archived.is_(False)).order_by(Note.id.desc()).limit(300)]
+        from . import entities
+        cards = {e.id: e for e in s.query(entities.Entity).filter(entities.Entity.active.is_(True),
+                                                                  entities.Entity.merged_into_id.is_(None)).limit(300)}
+        meeting_title = meeting.title or ""
         facts = {"meeting": meeting.title, "people": [{"id": e.id, "name": e.name, "position": e.position or None}
                                                        for e in people.values()],
                  "departments": [{"id": d.id, "name": d.name} for d in departments.values()],
+                 "entities": [{"id": e.id, "name": e.name, "kind": entities.KINDS.get(e.kind, e.kind)}
+                              for e in cards.values()],
                  "already_known": known[:80]}
     system = voice.system_prompt(
         "Выпиши из расшифровки совещания устойчивые факты для памяти ассистента: кто за что отвечает, кто с кем работает, "
         "какие правила и порядок работы в компании и отделах, контрагенты, объекты, предпочтения в общении. Не выписывай "
         "разовые поручения (они уже в задачах), оценки людей, здоровье, личную жизнь и то, что уже есть в already_known. "
-        "Каждый факт — одно короткое утверждение в третьем лице с точной цитатой из расшифровки. "
-        'JSON: {"facts":[{"subject":"person|department|company","employee_id":ID или null,"department_id":ID или null,'
+        "Каждый факт — одно короткое утверждение в третьем лице с точной цитатой из расшифровки. Факт о клиенте, объекте, "
+        'подрядчике или другой организации — subject "entity": entity_id из entities, если она там есть, иначе '
+        "entity_name (название, как его называют) и entity_kind (client|object|contractor|org). "
+        'JSON: {"facts":[{"subject":"person|department|company|entity","employee_id":ID или null,"department_id":ID или null,'
+        '"entity_id":ID или null,"entity_name":"…","entity_kind":"…",'
         '"text":"...","quote":"дословно из расшифровки","confidence":"high|medium|low"}]} — не больше 12.')
     try:
         raw = llm.chat(voice.model(), [{"role": "system", "content": system},
@@ -366,6 +381,16 @@ def learn_from_meeting(meeting_id: int) -> int:
             subject = "person" if employee_id else ("department" if department_id else "company")
             if employee_id:
                 department_id = None
+            entity_id = f.get("entity_id") if isinstance(f.get("entity_id"), int) and f.get("entity_id") in cards else None
+            if subject == "company" and (entity_id or f.get("entity_name") or f.get("subject") == "entity"):
+                if entity_id is None and str(f.get("entity_name") or "").strip() and quote_found(quote, transcript):
+                    card = entities.get_or_create(s, str(f["entity_name"]), str(f.get("entity_kind") or "org"), "meeting",
+                                                  origin={"type": "meeting", "id": meeting_id, "title": meeting_title,
+                                                          "quote": quote[:300]})
+                    entity_id = card.id if card is not None else None
+                    if card is not None:
+                        cards[card.id] = card
+                subject = "entity" if entity_id else subject
             reason = acceptable_fact(text) or ("" if quote_found(quote, transcript) else "цитаты нет в расшифровке") or \
                 ("уже известно" if any(_similar(text, x) for x in existing) else "")
             if reason:
@@ -373,8 +398,11 @@ def learn_from_meeting(meeting_id: int) -> int:
                 continue
             confidence = f.get("confidence") if f.get("confidence") in CONFIDENCE else "medium"
             s.add(Note(employee_id=employee_id, department_id=department_id, meeting_id=meeting_id,
+                       entity_id=entity_id if subject == "entity" else None,
                        kind="company" if subject != "person" else "fact", text=text, quote=quote,
                        confidence=confidence, source="meeting", author="память"))
+            if subject == "entity":  # the card shows this meeting even when it names the object another way
+                entities.link(s, entity_id, "meeting", meeting_id, quote)
             existing.append(text)
             kept += 1
         s.commit()
@@ -382,8 +410,20 @@ def learn_from_meeting(meeting_id: int) -> int:
     return kept
 
 
+def learn_and_link(meeting_id: int) -> int:
+    """After an approved meeting: facts for the memory, then the meeting and its tasks linked to the cards of the
+    clients and objects it speaks about (entities.py)."""
+    kept = learn_from_meeting(meeting_id)
+    try:
+        from . import entities
+        entities.from_meeting(meeting_id)
+    except Exception:  # noqa: BLE001
+        log.exception("meeting %s not linked to the cards", meeting_id)
+    return kept
+
+
 def schedule_learning(meeting_id: int) -> None:
-    learn_from_meeting(meeting_id) if _testing() else POOL.submit(learn_from_meeting, meeting_id)
+    learn_and_link(meeting_id) if _testing() else POOL.submit(learn_and_link, meeting_id)
 
 
 def refresh_vectors() -> None:

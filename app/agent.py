@@ -23,8 +23,8 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import (access, agent_skills, cases, deadlines, dialog_memory, doc_templates, memory as company_memory, llm, orders,
-               reminders, settings_store, transcribe, userbot, voice)
+from . import (access, agent_skills, cases, deadlines, dialog_memory, doc_intake, doc_templates, entities,
+               memory as company_memory, llm, orders, reminders, settings_store, transcribe, userbot, voice)
 from .db import (ConversationEscalation, ConversationMessage, Document, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
@@ -508,6 +508,9 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
     # What the company memory knows about this message: an employee sees only their own card and notes.
     query = " ".join(h.text for h in history[-2:] if h.role == "user")[-600:] + " " + (getattr(row, "text", "") or "")
     ctx["known_facts"] = company_memory.for_prompt(query, viewer=None if full else (employee.id if employee else -1))
+    about = entities.for_prompt(s, query, full)
+    if about:
+        ctx["about_entities"] = about
     found_skills = company_memory.skills_for(getattr(row, "text", "") or "")
     if found_skills:
         ctx["skills"] = found_skills
@@ -626,7 +629,15 @@ DOC_RULES = (
     "недостающем без действия. С make_document в reply коротко скажи, что ниже черновик, и попроси проверить: «ок» — "
     "сохранишь (и отправишь, если назвали кому), или пусть напишет, что поправить. document_draft — черновик, который "
     "ждёт ответа: «ок» — confirm_document с ok=true, «не надо» — ok=false, поправка — новый make_document с "
-    "исправленными values. Если подходящего шаблона нет, так и скажи и не обещай документ. ")
+    "исправленными values. Если подходящего шаблона нет, так и скажи и не обещай документ. "
+    "Входящие документы: intake в file_received (и в каждом из files_received) — что код разобрал в файле: doc_type, "
+    "requisites (номер, дата, контрагент, УНП, суммы — только подтверждённое цитатой из файла), deadlines (сроки), "
+    "problems (не сходятся суммы или НДС, неверный УНП). Если человек прислал документ без вопроса — одной-двумя "
+    "фразами скажи, что это (тип, номер, от кого, сумма), и назови problems, если они есть; ничего не добавляй от себя. "
+    "route.to — кому код сам передаст файл по правилам компании после твоего ответа (route.tasks — и поставит задачи по "
+    "срокам с напоминанием): так и скажи, deliver_files для этого не нужен. Если человек сам сказал, кому передать, — "
+    "deliver_files по его словам, правило тогда не сработает. route.to нет — не обещай передать; если неясно, что с "
+    "файлом делать, спроси. intake.pending — файл ещё разбирается: скажи, что посмотришь и напишешь, без «передам». ")
 GENERAL_RULES = ORDER_RULES + DOC_RULES + (
     "Память разговора: history — последние сообщения целиком; dialog_memory — краткий пересказ более ранней части "
     "разговора; from_earlier — старые сообщения, которые код нашёл по словам этого сообщения; recalled — что нашлось, "
@@ -646,7 +657,11 @@ GENERAL_RULES = ORDER_RULES + DOC_RULES + (
     "все вместе. known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки с "
     "источником и уверенностью, фрагменты документов). На вопросы о компании, людях и документах отвечай по "
     "known_facts и данным выше; при низкой уверенности так и скажи; если ответа нет — честно скажи, что не знаешь, "
-    "и предложи уточнить у руководителя, не выдумывай. skills — навыки компании для таких ситуаций: следуй им. "
+    "и предложи уточнить у руководителя, не выдумывай. about_entities — карточки объектов и клиентов, о которых "
+    "говорит сообщение: другие написания, УНП, адрес, контакты, facts (у каждого источник), а для тех, кто видит "
+    "команду, — совещания, открытые задачи и документы по ним. Отвечай в контексте этого объекта или клиента и называй "
+    "источник («по совещанию 12.11», «в счёте № 15»); чего в карточке нет, не выдумывай. "
+    "skills — навыки компании для таких ситуаций: следуй им. "
     "Новое устойчивое знание о человеке или работе сохраняй действием note (только факты, без оценок людей). "
     "skills_with_approval — действия, которые для этого человека выполняются только после одобрения руководителя "
     "(или только предлагаются ему): проси их как обычно, но в reply не говори, что уже сделал, а скажи, что передал "
@@ -946,6 +961,12 @@ def unbacked_promises(reply: str, actions: list, ctx: dict) -> list:
     """Sentences where the assistant promises to do something («перешлю», «напомню») with no action that does it.
     Offers and conditions («могу переслать», «если пришлёшь — передам») are not promises."""
     kinds = {a.get("type") for a in actions or [] if isinstance(a, dict)}
+    for received in [ctx.get("file_received")] + list(ctx.get("files_received") or []):  # the code routes these itself
+        route = ((received or {}).get("intake") or {}).get("route") or {} if isinstance(received, dict) else {}
+        if route.get("to") and not route.get("done") and not route.get("already_theirs"):
+            kinds.add("deliver_files")
+        if route.get("tasks"):
+            kinds |= {"assign_task", "remind"}
     orders_of_person = {w.get("task_id") for w in ctx.get("assistant_waiting_for_you") or []
                         if isinstance(w, dict) and w.get("expects") == "done"}
     # «передам» after «сделал» on an order from the chat is kept by the case: it reports to whoever gave the order
@@ -1070,8 +1091,34 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
     return decision
 
 
+def _received_ids(result: dict) -> list:
+    docs = list(result.get("documents") or []) or ([result["document"]] if result.get("document") else [])
+    return [d["document_id"] for d in docs if isinstance(d, dict) and d.get("document_id")]
+
+
+def _prepare_documents(row_id: int) -> None:
+    """The files of this message are read and analyzed before the answer (doc_intake.py): the model can say what they
+    are, what does not add up and where they go. A file answering a case is the case's business."""
+    with SessionLocal() as s:
+        result = dict(s.get(ConversationMessage, row_id).result or {})
+    ids = _received_ids(result)
+    if not ids or result.get("decision") is not None or result.get("case") or result.get("documents_prepared"):
+        return
+    try:
+        views = doc_intake.prepare(ids, row_id)
+    except Exception:  # noqa: BLE001  the answer goes without the analysis
+        log.exception("message %s: files not analyzed", row_id)
+        views = {}
+    for d in [result.get("document")] + list(result.get("documents") or []):
+        if isinstance(d, dict) and views.get(d.get("document_id")):
+            d["intake"] = views[d["document_id"]]
+    result["documents_prepared"] = True
+    _store(row_id, result)
+
+
 def _process(row_id: int) -> None:
     from . import assistant
+    _prepare_documents(row_id)
     with SessionLocal() as s:  # 1. read, then let go of the connection while the model thinks
         row = s.get(ConversationMessage, row_id)
         result, chat, text = dict(row.result or {}), row.chat_id, row.text
@@ -1131,6 +1178,10 @@ def _process(row_id: int) -> None:
             doc_templates.show_pending(chat)  # the draft file follows the reply that asks to check it
             result["sent_document_draft"] = True
             _store(row_id, result)
+    if result.get("documents_prepared") and not result.get("documents_routed"):  # the files go where the rules say
+        doc_intake.after_reply(_received_ids(result), decision["actions"], by=author)
+        result["documents_routed"] = True
+        _store(row_id, result)
     with SessionLocal() as s:
         row = s.get(ConversationMessage, row_id)
         row.status, row.error, row.result = "agent_done", "", dict(result)
