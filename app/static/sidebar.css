@@ -1,0 +1,7 @@
+/* Left menu: scrolls inside itself when its items do not fit the screen (laptops, phones, browser zoom).
+   Loaded by base.html after style.css, so these rules override the pinned 100vh column there. */
+.side { height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+@media (max-width: 860px) {
+  /* The drawer takes the visible screen height from its inset: 100vh is taller than the screen in mobile browsers. */
+  .side { height: auto; }
+}
