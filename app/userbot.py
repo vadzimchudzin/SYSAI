@@ -373,7 +373,7 @@ class TelethonBackend:
         _, _, _, _, _, types = TelethonBackend._telethon()
         return entity.id if isinstance(entity, types.User) else None
 
-    def send(self, ref, text, reply_to=None, typing=0.0):
+    def send(self, ref, text, reply_to=None, typing=0.0, html=False):
         async def go():
             client = self._online()
             entity = await self._entity(client, ref)
@@ -384,7 +384,8 @@ class TelethonBackend:
             if typing:
                 async with client.action(entity, "typing"):
                     await asyncio.sleep(typing)
-            message = await client.send_message(entity, text, reply_to=reply_to, link_preview=False)
+            message = await client.send_message(entity, text, reply_to=reply_to, link_preview=False,
+                                                **({"parse_mode": "html"} if html else {}))
             return {"message_id": message.id, "user_id": self._user_id(entity)}
         return self._call(go)
 
@@ -828,14 +829,17 @@ def _flood(exc: PeerFlood):
     log.error("PeerFlood: sending paused for %s hours", PEER_FLOOD_PAUSE // 3600)
 
 
-def send_message(chat_id, text: str, buttons=None, reply_to=None, urgent: bool = False, answering: bool = False) -> dict:
+def send_message(chat_id, text: str, buttons=None, reply_to=None, urgent: bool = False, answering: bool = False,
+                 html: bool = False) -> dict:
     """Same shape as telegram.send_message. Buttons do not exist for a personal account and are ignored.
     `urgent` skips the quiet time and the hourly limit (reminders that were asked for at a given time); `answering` is
-    the reply to somebody who has just written: held only at night, never counted in the hourly limit."""
+    the reply to somebody who has just written: held only at night, never counted in the hourly limit. `html`: the
+    text is Telegram HTML (links of the morning brief); otherwise plain text."""
     with _send_lock:
         _guard_send(urgent, answering, chat_id)
         try:
-            result = _backend().send(str(chat_id), text, reply_to=reply_to, typing=_pace(len(text)))
+            result = _backend().send(str(chat_id), text, reply_to=reply_to, typing=_pace(len(text)),
+                                     **({"html": True} if html else {}))
         except PeerFlood as exc:
             _flood(exc)
             raise

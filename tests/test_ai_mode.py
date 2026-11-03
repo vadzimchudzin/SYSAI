@@ -14,6 +14,7 @@ class FakeBackend:
 
     def __init__(self):
         self.sent, self.files = [], []
+        self.html = []  # what went as Telegram HTML (the morning brief with links)
         self.fail = None
         self.connected = None
         self.password_needed = False
@@ -52,11 +53,13 @@ class FakeBackend:
     def log_out(self):
         self.logged_out, self.connected = True, None
 
-    def send(self, ref, text, reply_to=None, typing=0.0):
+    def send(self, ref, text, reply_to=None, typing=0.0, html=False):
         if self.fail:
             raise self.fail
         self.next_id += 1
         self.sent.append((ref, text))
+        if html:
+            self.html.append((ref, text))
         return {"message_id": self.next_id, "user_id": self.users.get(ref)}
 
     def send_file(self, ref, filename, content, caption=""):

@@ -11,7 +11,8 @@
 {% if error %}<div class="ck-error" role="alert">{{ error }}</div>{% endif %}
 
 {% set active_cases = cases|selectattr('active')|list %}
-{% set per_pair = scenarios|length + active_cases|length %}
+{% set active_questions = questions|selectattr('active')|list %}
+{% set per_pair = scenarios|length + active_cases|length + active_questions|length %}
 {% set live = (history|selectattr('id', 'equalto', running)|first) if running else None %}
 <section class="card" id="run" style="margin-top:16px">
   <h2>Прогон</h2>
@@ -103,6 +104,25 @@
     <span class="small muted">{{ h.done }} из {{ h.total }}{% if h.by %} · {{ h.by }}{% endif %}</span></li>{% endfor %}</ul>
 </section>
 {% endif %}
+
+<section class="card" id="questions">
+  <h2>Вопросы по компании</h2>
+  <p class="small muted">Типичные вопросы, на которые ИИ-сотрудник должен отвечать по памяти компании (совещания, документы, заметки, карточки) — со ссылкой на источник. В прогоне вопрос задаётся по настоящей памяти, как будто его написал выбранный человек (с его правами); никому ничего не отправляется. Ответ сверяет с вашим модель-судья, а код проверяет, что источник назван. Цель — 9 из 10 верных, со ссылкой и без выдумок (строка «Вопросы по компании» в таблице прогона).</p>
+  {% if questions %}<ol class="ck-questions">{% for q in questions %}<li class="{{ '' if q.active else 'off' }}">
+    <q>{{ q.text }}</q> <span class="small muted">· спрашивает {{ q.who }}</span>{% if not q.active %} <span class="pill gray">выключен</span>{% endif %}
+    <div class="small"><span class="muted">Правильно:</span> {{ q.expected }}</div>
+    <div class="ck-row small">
+      <form method="post" action="/skills/checks"><input type="hidden" name="do" value="toggle"><input type="hidden" name="back" value="questions"><input type="hidden" name="case_id" value="{{ q.id }}"><button class="btn sm ghost">{{ 'выключить' if q.active else 'включить' }}</button></form>
+      <form method="post" action="/skills/checks" onsubmit="return confirm('Удалить вопрос?')"><input type="hidden" name="do" value="delete"><input type="hidden" name="back" value="questions"><input type="hidden" name="case_id" value="{{ q.id }}"><button class="btn sm ghost">удалить</button></form></div>
+  </li>{% endfor %}</ol>{% else %}<p class="muted small">Пока нет. Добавьте 10–20 вопросов, которые вам и сотрудникам задают чаще всего.</p>{% endif %}
+  <details class="ck-mark" {{ 'open' if not questions }}><summary>Добавить вопросы</summary>
+    <form method="post" action="/skills/checks"><input type="hidden" name="do" value="questions">
+      <label class="f">По одному в строке: вопрос | правильный ответ
+        <textarea name="lines" required rows="6" maxlength="20000" placeholder="Кто подписывает акты? | Директор, Ирина Соколова&#10;Когда сдаём кровлю на Ленина 12? | 25 ноября, решили на планёрке&#10;Какой у нас расчётный счёт? | Не знает — в памяти этого нет"></textarea></label>
+      <label class="f">Кто спрашивает <select name="who"><option value="director">Директор (видит всё)</option>{% for p in people %}<option value="employee:{{ p.id }}">{{ p.name }} (с правами его карточки)</option>{% endfor %}</select></label>
+      <div><button class="btn sm primary">Добавить</button></div>
+    </form></details>
+</section>
 
 <section class="card" id="own">
   <h2>Свои случаи</h2>

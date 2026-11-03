@@ -17,7 +17,9 @@ DEFAULTS = {
     # summary of the assistant's cases for the reviewers (digest.py)
     "digest_frequency": "daily",     # off | daily | weekly
     "digest_hour": 9,                # service time zone
+    "digest_minute": 0,
     "digest_weekday": 0,             # 0 = Monday, for weekly
+    "digest_recipients": [],         # employee ids who get it (with Telegram); empty = the reviewers
     "digest_last_sent": "",          # the day / week already covered         # see everything, never asked or reported to by the assistant (access.py)      # contacts (besides the reviewers) who may ask "who does what" and get reports
     "persona": "",                   # how the AI employee talks; empty = built-in default
     "agent_model": "google/gemini-2.5-flash",

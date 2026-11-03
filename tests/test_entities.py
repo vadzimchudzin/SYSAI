@@ -149,7 +149,8 @@ def test_the_conversation_answers_in_the_context_of_the_card(tgacc, model):
     card = seen["about_entities"][0]
     assert card["name"] == "ОАО «Криница»" and card["unp"] == "100345678" and card["kind"] == "Клиент"
     assert card["contacts"] == "Ольга, +375 29 111-22-33"
-    assert card["facts"] == [{"text": "Счёт выставлять до 25-го числа", "source": "вручную"}]
+    assert card["facts"] == [{"text": "Счёт выставлять до 25-го числа", "cite": "карточка ОАО «Криница»", "ref": "k1.1"}]
+    assert card["ref"] == "k1" and "url" not in card  # the source of the answer (№20); the page is not for the model
     assert "meetings" not in card and "open_tasks" not in card  # the team's work is not shown to an employee
     assert "about_entities" in agent.GENERAL_RULES
 
@@ -174,7 +175,7 @@ def test_those_who_see_the_team_get_meetings_open_tasks_and_documents_of_the_car
     assert [t["title"] for t in full["open_tasks"]] == ["Акт сверки с Криницей"]
     assert [d["filename"] for d in full["documents"]] == ["акт_Криница.pdf"]  # not the confidential one
     assert full["documents"][0]["what"] == "Акт выполненных работ № 7"
-    assert set(brief) == {"name", "kind"}
+    assert set(brief) == {"name", "kind", "url"}  # the url goes to ctx["_links"], never to the model
 
 
 def test_the_memory_search_finds_the_card():

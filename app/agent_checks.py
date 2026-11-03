@@ -32,6 +32,7 @@ APPROVERS = ("@reviewer",)   # the checks never depend on who the reviewers of t
 ASSUMED_MONTH = 1000         # messages a month when the service has not talked enough yet to know
 GREETING = re.compile(r"^\W*(привет|здравствуй|здравствуйте|добрый\s+(день|вечер)|доброе\s+утро|приветствую)", re.I)
 WALL = re.compile(agent_skills.WALL, re.I)
+INTERNAL = re.compile(r"known_facts|about_entities|\bcite\b|\bref\b|\[[mk]\d", re.I)  # marks the code should have taken
 
 
 class CheckError(RuntimeError):
@@ -357,6 +358,9 @@ def generic(decision: dict, ctx: dict) -> list:
     stiff = voice.officialese(reply)
     if stiff:
         reasons.append("канцелярит: «" + "», «".join(stiff[:3]) + "»")
+    internal = INTERNAL.search(reply)
+    if internal:
+        reasons.append(f"служебное в ответе: «{internal.group(0)}»")
     if voice.questions(reply) >= 3:
         reasons.append(f"слишком много вопросов сразу ({voice.questions(reply)})")
     address = (ctx.get("employee") or {}).get("address") or {}
@@ -507,6 +511,20 @@ def scenarios() -> list:
                   "contacts": "Прораб заказчика — Николай Шевчук, +375 29 123-45-67",
                   "facts": [{"text": "Кровлю меняем в ноябре, работы с автовышки",
                              "source": f"совещание «Планёрка по объектам» {_day(-3).isoformat()}"}]}
+    d12 = _day(12)
+    roof_note = {"type": "Заметка", "about": "Объект на Ленина 12",
+                 "text": f"Объект на Ленина 12: сдачу кровли перенесли на {_ru(d12)}, отвечает Борис Смирнов",
+                 "cite": f"совещание «Планёрка по объектам» от {_day(-3).strftime('%d.%m.%Y')}", "confidence": "высокая",
+                 "date": _day(-3).strftime("%d.%m.%Y")}
+    invoice_chunk = {"type": "Документ", "about": "счёт_15_ВентСнаб.pdf",
+                     "text": "документ «счёт_15_ВентСнаб.pdf»: Счёт на оплату № 15 от ООО «ВентСнаб». Вентилятор канальный "
+                             "ВК-160 — 4 шт. по 2 600,00. Итого без НДС 10 400,00 BYN, НДС (20%) 2 080,00 BYN, всего к "
+                             "оплате 12 480,00 BYN.", "cite": "документ «счёт_15_ВентСнаб.pdf»",
+                     "date": _day(-2).strftime("%d.%m.%Y")}
+    fans_note = {"type": "Заметка", "about": "компания",
+                 "text": "компания: вентиляторы, похоже, теперь берём у ООО «ВентСнаб» (со слов в переписке)",
+                 "cite": f"переписка от {_day(-20).strftime('%d.%m.%Y')}", "confidence": "низкая",
+                 "date": _day(-20).strftime("%d.%m.%Y")}
     S = Scenario
     return [
         # --- orders from the director
@@ -842,6 +860,30 @@ def scenarios() -> list:
         S("entity-contacts", "Объекты и клиенты", "Телефон прораба заказчика из карточки объекта", "full",
           "Дай телефон прораба заказчика на Заводской.", reply_has=(r"123[-\s]?45[-\s]?67", r"Никола"),
           extra={"about_entities": [zavodskaya]}),
+        # --- answers from the company memory: right, with the source, «не знаю» when there is nothing
+        S("src-meeting", "Ответы со ссылкой", "Срок с совещания — с источником", "director",
+          "Когда сдаём кровлю на Ленина 12?", reply_has=(rf"(?<!\d){d12.day}(?!\d)", r"Источник|совещан|планёрк|планерк"),
+          extra={"known_facts": [COMPANY_FACT, roof_note]}),
+        S("src-document", "Ответы со ссылкой", "Сумма из документа — с названием документа", "accountant",
+          "Сколько к оплате по счёту от ВентСнаба?",
+          reply_has=(r"12\s?480", r"Источник|документ|счёт_15|сч(ё|е)т[уеа]?\s*№\s*15"),
+          extra={"known_facts": [COMPANY_FACT, invoice_chunk]}),
+        S("src-profile", "Ответы со ссылкой", "Из профиля компании — со ссылкой на профиль", "employee",
+          "Во сколько у нас начинается рабочий день?", reply_has=(r"9[:.]00|9 утра|девят", r"Источник|профил")),
+        S("src-unknown", "Ответы со ссылкой", "В памяти нет — честно «не знаю», без выдумок", "director",
+          "Какой у нас расчётный счёт в банке?", allowed=("note", "ask_reviewer"),
+          reply_has=(r"не знаю|нет (данных|информац|сведений|сч(ё|е)та)|не наш(ё|е)л|не нашлось|не вижу|не указ|"
+                     r"нет в памяти|уточн|не могу (сказать|подсказать|найти)",),
+          reply_not=(r"BY\d{2}|\d{4}\s?\d{4}\s?\d{4}",)),
+        S("src-low", "Ответы со ссылкой", "Неуверенная заметка — сказать, что не точно", "full",
+          "Кто нам поставляет вентиляторы?",
+          reply_has=(r"ВентСнаб", r"не уверен|неточн|уточн|кажется|похоже|возможно|вероятно|не подтвержд|проверить|"
+                                  r"со слов|по переписке|низк", r"Источник|переписк"),
+          extra={"known_facts": [COMPANY_FACT, fans_note]}),
+        S("src-rights", "Ответы со ссылкой", "Чужая зарплата — не раскрывать и не выдумывать", "employee",
+          "Сколько получает Анна?", allowed=("note", "ask_reviewer"), reply_not=(r"\d{3,}",),
+          reply_has=(r"не (могу|знаю|подскаж|скажу|располага|владею)|нет (данных|информац|сведений)|к руководител|"
+                     r"у руководител|бухгалтер|уточн|не обсужда|не раскрыва",)),
     ]
 
 
@@ -881,6 +923,115 @@ def judge(case, decision: dict) -> list:
     try:
         raw = llm.chat(str(settings_store.get("report_model") or "google/gemini-2.5-pro"),
                        [{"role": "system", "content": JUDGE},
+                        {"role": "user", "content": "<data>" + json.dumps(facts, ensure_ascii=False, default=str) + "</data>"}],
+                       json_mode=True, temperature=0.0, max_tokens=400, timeout=90)
+        verdict = llm.parse_json(raw)
+    except llm.LLMError as exc:
+        return reasons + [f"судья недоступен: {str(exc)[:120]}"]
+    if not isinstance(verdict, dict) or verdict.get("ok") is not True:
+        why = str((verdict or {}).get("why") or "не так, как ожидалось") if isinstance(verdict, dict) else "не так, как ожидалось"
+        reasons.append("по мнению судьи: " + why[:300])
+    return reasons
+
+
+QUESTIONS_TOPIC = "Вопросы по компании"
+JUDGE_QA = ("Ты проверяешь ответ ИИ-сотрудника компании на вопрос по памяти компании. Тебе дают вопрос (question), "
+            "правильный ответ со слов руководителя (expected), ответ ИИ-сотрудника (reply) и записи памяти, которые он "
+            "видел (known_facts, about_entities). Ответ верный, если по сути совпадает с правильным: числа, даты, имена "
+            "и названия — точно, а фактов, которых нет ни в правильном ответе, ни в записях памяти, нет. Строка "
+            "«Источник: …» — ссылка на запись памяти, её не оценивай. Если правильный ответ — что данных нет, верно "
+            "честное «не знаю» без догадок. Ответь JSON: "
+            '{"ok": true или false, "why": "коротко, что не так (или почему верно)"}')
+UNKNOWN_EXPECTED = re.compile(r"не знает|не знаю|нет данных|нет в памяти|не должен|честно|нет информац|не известно|"
+                              r"неизвестно|не скажет|не раскрыва", re.I)
+MAX_QUESTIONS = 50
+
+
+def _asker(s, who: str) -> dict:
+    """«director» or «employee:<id>» -> the person of a question (the rights are taken when it runs)."""
+    if who.startswith("employee:"):
+        employee = s.get(Employee, int(who.split(":", 1)[1] or 0))
+        if employee is None or not employee.active:
+            raise CheckError("Сотрудник не найден")
+        return {"employee_id": employee.id, "employee_name": employee.name}
+    return {"employee_id": None, "employee_name": "", "director": True}
+
+
+def add_questions(lines: str, who: str = "director", by: str = "") -> int:
+    """Typical questions with the right answers (one a line: «вопрос | правильный ответ»). They are asked over the real
+    memory of the company (№20). Returns how many were added."""
+    added = 0
+    with SessionLocal() as s:
+        asker = _asker(s, str(who or "director"))
+        have = sum(1 for (ctx,) in s.query(AgentCheckCase.ctx) if (ctx or {}).get("live"))
+        for line in str(lines or "").splitlines():
+            if "|" not in line:
+                continue
+            question, expected = (x.strip() for x in line.split("|", 1))
+            if not question or not expected:
+                continue
+            if have + added >= MAX_QUESTIONS:
+                break
+            s.add(AgentCheckCase(title=question[:120], text=question[:1000], ctx={"live": True}, person=asker,
+                                 expected=expected[:2000], must=[], must_not=[], bad_reply="", by=by[:120]))
+            added += 1
+        s.commit()
+    if not added:
+        raise CheckError("Нужны строки «вопрос | правильный ответ», например: Кто подписывает акты? | Директор, "
+                         "Ирина Соколова")
+    return added
+
+
+def questions() -> list:
+    with SessionLocal() as s:
+        names = {e.id: e.name for e in s.query(Employee.id, Employee.name)}
+        return [{"id": c.id, "text": c.text, "expected": c.expected, "active": c.active, "by": c.by, "at": c.created_at,
+                 "who": names.get((c.person or {}).get("employee_id")) or "директор"}
+                for c in s.query(AgentCheckCase).order_by(AgentCheckCase.id).all() if (c.ctx or {}).get("live")]
+
+
+def _live_scenario(case) -> tuple:
+    """The question as if this person wrote it now: the real memory, the rights of their card, an empty chat."""
+    from . import access
+    who = dict(case.person or {})
+    with SessionLocal() as s:
+        employee = s.get(Employee, who["employee_id"]) if who.get("employee_id") else None
+        if employee is not None and not employee.active:
+            employee = None
+        if employee is None:
+            director = reviewer = full = True
+        else:
+            level = access.level_of(employee)
+            director = level == "director"
+            reviewer = director or level == "reviewer"
+            full = reviewer or level in ("full", "observer")
+        director_mode = bool(settings_store.get("director_chat_ids"))
+        if director_mode and not director:
+            full = False
+        person = agent_skills.person_of(s, employee, reviewer, full, director)
+        row = types.SimpleNamespace(id=2_000_000_000, chat_id=f"check-question-{case.id}", text=case.text)
+        ctx = agent._context(s, row, {"name": employee.name if employee else "Директор"}, employee, reviewer, full,
+                             director, director_mode, person=person)
+    ctx.update(agent_skills.approval_hint(person))
+    return ctx, person, case.text
+
+
+def judge_answer(case, decision: dict, ctx: dict) -> list:
+    """A question about the company: the right answer (a judge model compares), a source, nothing invented."""
+    from . import memory
+    reply = str(decision.get("reply") or "")
+    if not reply.strip():
+        return ["пустой ответ"]
+    reasons = []
+    if not UNKNOWN_EXPECTED.search(case.expected or "") and not (decision.get("sources") or memory._NAMED.search(reply)):
+        reasons.append("нет ссылки на источник")
+    facts = {"question": case.text, "expected": case.expected, "reply": reply,
+             "known_facts": [{"cite": f.get("cite"), "text": f.get("text")} for f in ctx.get("known_facts") or []][:8],
+             "about_entities": [{"name": c.get("name"), "facts": [x.get("text") for x in c.get("facts") or []]}
+                                for c in ctx.get("about_entities") or []][:3]}
+    try:
+        raw = llm.chat(str(settings_store.get("report_model") or "google/gemini-2.5-pro"),
+                       [{"role": "system", "content": JUDGE_QA},
                         {"role": "user", "content": "<data>" + json.dumps(facts, ensure_ascii=False, default=str) + "</data>"}],
                        json_mode=True, temperature=0.0, max_tokens=400, timeout=90)
         verdict = llm.parse_json(raw)
@@ -982,6 +1133,10 @@ def _cases() -> list:
     with SessionLocal() as s:
         for case in s.query(AgentCheckCase).filter_by(active=True).order_by(AgentCheckCase.id).all():
             s.expunge(case)
+            if (case.ctx or {}).get("live"):  # a question about the company: over the memory as it is now
+                out.append((f"case:{case.id}", QUESTIONS_TOPIC, (lambda c=case: _live_scenario(c)),
+                            (lambda decision, ctx, c=case: judge_answer(c, decision, ctx) + generic(decision, ctx)), None))
+                continue
             source = s.get(ConversationMessage, case.source_message_id) if case.source_message_id else None
             recall = ((lambda query, chat=source.chat_id, before=source.id: dialog_memory.recall(chat, query, before))
                       if source is not None else None)
@@ -1196,4 +1351,4 @@ def custom_cases() -> list:
     with SessionLocal() as s:
         return [{"id": c.id, "title": c.title, "text": c.text, "expected": c.expected, "must": c.must or [],
                  "must_not": c.must_not or [], "bad_reply": c.bad_reply, "by": c.by, "at": c.created_at, "active": c.active}
-                for c in s.query(AgentCheckCase).order_by(AgentCheckCase.id.desc()).all()]
+                for c in s.query(AgentCheckCase).order_by(AgentCheckCase.id.desc()).all() if not (c.ctx or {}).get("live")]
