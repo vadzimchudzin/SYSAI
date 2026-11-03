@@ -1,0 +1,67 @@
+{% extends "base.html" %}{% block title %}Сервер — SYSAI{% endblock %}
+{% block head %}<style>.sv-list{list-style:none;padding:0;margin:0}.sv-list li{padding:6px 0 6px 26px;position:relative;line-height:1.45}.sv-list li:before{position:absolute;left:4px;top:6px;font-weight:700}.sv-ok:before{content:"✓";color:#2e7d32}.sv-warn:before{content:"!";color:#b26a00}.sv-bad:before{content:"×";color:#c62828;font-size:18px;top:2px}.sv-facts{display:grid;grid-template-columns:max-content 1fr;gap:6px 18px;margin:0}.sv-facts dt{color:var(--muted,#666)}.sv-facts dd{margin:0}.sv-crash td{color:#c62828}.sv-opts li{margin:4px 0}</style>{% endblock %}
+{% block body %}
+<h1>Сервер</h1>
+<p class="muted small">Работает ли сервис без перерывов и хватает ли ему памяти: по этому видно, пора ли уходить с бесплатного Render, а после переезда — что новое место работает без простоев. Замер идёт сам: каждый запуск, отметка «жив» раз в минуту, чистая остановка.</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сделано: {{ error }}</div>{% endif %}
+
+<section class="card">
+  <h2>Итог за 7 дней</h2>
+  <ul class="sv-list">{% for level, line in w.verdict %}<li class="sv-{{ level }}">{{ line }}</li>{% endfor %}</ul>
+</section>
+
+<section class="card">
+  <h2>Перерывы</h2>
+  {% if w.breaks %}
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Когда</th><th>Сколько</th><th>Что было</th><th>Перед этим</th></tr></thead>
+    <tbody>{% for b in w.breaks %}<tr class="{{ 'sv-crash' if b.kind == 'crash' }}"><td>{{ b.when }}</td><td>{{ b.length }}</td><td>{{ b.label }}</td>
+      <td class="muted">{% if b.busy %}{{ b.busy }}{% endif %}{% if b.peak %}{{ ' · ' if b.busy }}память до {{ b.peak }} МБ{% if b.child %}, ffmpeg до {{ b.child }} МБ{% endif %}{% if b.limit %} из {{ b.limit }}{% endif %}{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  <p class="small muted">Перезапуск короче 2 минут (обновление на своём сервере) перерывом не считается, сбой — считается всегда. Пока Render спит, сайт открывается до минуты, а напоминания и синхронизации ждут.</p>
+  {% else %}<p class="muted">Перерывов не было{% if w.tracked_h < 24 %} — замер идёт {{ w.tracked_h }} ч{% endif %}.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Ресурсы</h2>
+  <dl class="sv-facts small">
+    <dt>Где работает</dt><dd>{{ w.platform }}{% if w.commit %} · версия {{ w.commit[:7] }}{% endif %}</dd>
+    {% if w.started %}<dt>Запущен</dt><dd>{{ w.started }}, работает {{ w.uptime }}</dd>{% endif %}
+    <dt>Память</dt><dd>{% if w.memory.rss %}сейчас {{ w.memory.rss }} МБ{% endif %}{% if w.memory.peak %}, пик {{ w.memory.peak }} МБ{% endif %}{% if w.memory.child %}, ffmpeg до {{ w.memory.child }} МБ{% endif %}{% if w.memory.limit %} · доступно {{ w.memory.limit }} МБ{% endif %}{% if w.peak_week %} · пик за неделю {{ w.peak_week }} МБ{% endif %}</dd>
+    {% if w.disk %}<dt>Диск</dt><dd>свободно {{ w.disk.free_gb }} ГБ из {{ w.disk.total_gb }}</dd>{% endif %}
+    <dt>База</dt><dd>{{ 'PostgreSQL' if w.db.kind == 'postgresql' else w.db.kind }}{% if w.db.neon %} (Neon){% endif %}{% if w.db.size_mb is not none %} · {{ w.db.size_mb }} МБ{% if w.db.neon %} из 1024 МБ бесплатных{% endif %}{% endif %}</dd>
+    {% if w.neon %}<dt>Часы Neon</dt><dd>≈ {{ w.neon.used }} CU-часов в этом месяце, к концу ≈ {{ w.neon.projected }} из {{ w.neon.limit }} бесплатных (сервис работает {{ (w.neon.ratio * 100)|round|int }}% времени)</dd>{% endif %}
+    <dt>Хранилище записей</dt><dd>{{ 'подключено' if w.storage else 'не подключено — записи на диске сервера' }}</dd>
+  </dl>
+</section>
+
+<section class="card" id="backups">
+  <h2>Бэкапы базы</h2>
+  {% set b = w.backups %}
+  {% if b.here %}
+    {% if b.latest %}<p class="small">Последний ночной дамп: <b>{{ b.latest.name }}</b>, {{ b.latest.size }}, {{ b.latest.at }} ({{ b.latest.age_h }} ч назад); дампов в папке: {{ b.count }}, хранятся {{ b.keep_days }} дн.
+      {% if b.copy_on and b.storage %}Копия в хранилище: {{ 'есть' if b.latest.copied else 'ещё нет' }} (копий там: {{ b.copied }}).{% endif %}</p>
+    {% else %}<p class="small">Папка бэкапов пуста.</p>{% endif %}
+    <form method="post" action="/server/backup" class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+      <label class="check"><input type="checkbox" name="backup_copy" {{ 'checked' if b.copy_on }}> Копировать свежий дамп в хранилище записей (папка backups/) — если диск сервера сломается, база не пропадёт</label>
+      <button class="btn sm">Сохранить</button>
+      {% if b.latest %}<button class="btn sm" name="action" value="copy">Скопировать сейчас</button>{% endif %}
+    </form>
+    {% if not b.storage %}<p class="small muted">Хранилище записей не подключено: копии делать некуда (см. README, «Хранилище записей»).</p>{% endif %}
+    <p class="small muted">В дампе всё: расшифровки, документы, зашифрованная сессия Telegram. Бакет должен быть закрытым. Как восстановить — deploy/README.md, раздел «Бэкап и восстановление».</p>
+  {% else %}
+    <p class="small">Здесь ночных дампов нет: их делает свой сервер (deploy/compose.yaml) — каждую ночь в папку backups/ и копией в хранилище записей.{% if w.db.neon %} У бесплатного Neon есть только история за 6 часов: откатить базу можно не дальше этого.{% endif %}</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Куда переезжать</h2>
+  <ul class="sv-opts small">
+    <li><b>Render Starter + Render Postgres</b> — ≈ 13 $ в месяц, 10 минут в панели Render: не засыпает, но памяти те же 512 МБ.</li>
+    <li><b>Свой сервер (VPS) на 4 ГБ</b> — от ≈ 6 € (Hetzner CX23, когда есть в наличии) до 20–24 € / $ (Hetzner CPX22, DigitalOcean): база, бэкапы и HTTPS на одной машине, памяти в 8 раз больше; нужен человек на час настройки.</li>
+    <li><b>Компьютер в офисе</b> — бесплатно, но зависит от света и интернета в офисе.</li>
+  </ul>
+  <p class="small muted">Сравнение, цены и шаги — в репозитории: <a href="https://github.com/vadzimchudzin/SYSAI/blob/experimental/deploy/HOSTING.md" target="_blank" rel="noopener">deploy/HOSTING.md</a>.</p>
+</section>
+{% endblock %}
