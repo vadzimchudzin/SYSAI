@@ -264,6 +264,10 @@ def describe_plan(s, case) -> str:
             lines.append(f"доложить {a['requested_by']}" if a.get("to_chat") and a.get("requested_by") else "доложить результат")
         elif step.tool == "run_skill":
             lines.append(a.get("summary") or "выполнить просьбу")
+        elif step.tool == "mail_notice":
+            lines.append(f"переслать письмо {names[a['to']]}")
+        elif step.tool == "mail_draft":
+            lines.append(f"прислать {names[a['to']]} черновик ответа на письмо")
     return "; ".join(lines)
 
 
@@ -1059,7 +1063,8 @@ def _send_files(case_id: int, step_id: int) -> bool:
         facts.update({"from": step.args.get("requested_by") or "руководителя", "to": recipient.name,
                       "filename": archive or ", ".join(listed[:5]), "files_count": len(listed)})
         ref, name = recipient.telegram_chat_id, recipient.name
-    caption = _write("deliver", facts)
+        fixed = step.args.get("caption")  # the attachments of a letter (mail_route.py): its text went just before
+    caption = fixed if fixed is not None else _write("deliver", facts)
     with SessionLocal() as s:
         s.get(CaseStep, step_id).status = "sending"
         s.commit()
@@ -1099,6 +1104,79 @@ def _send_files(case_id: int, step_id: int) -> bool:
         what = f"архив «{archive}» ({len(listed)} файл(ов))" if archive else f"{len(listed)} файл(ов)"
         _event(s, case_id, "files_sent", f"Отправил {name} {what}", step_id)
         s.commit()
+    return True
+
+
+def _send_step(case_id: int, step_id: int, text: str, event: str) -> dict | None:
+    """Send a text made by code to the person of the step (quiet hours, retries and «uncertain» as for any message).
+    Returns what Telegram said, or None when the case waits (the quiet hours)."""
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        person = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
+        ref, name = person.telegram_chat_id, person.name
+        step.status, step.started_at = "sending", now()
+        s.commit()
+    try:
+        sent = _send_text(ref, text)
+    except userbot.QuietHours as exc:
+        with SessionLocal() as s:
+            s.get(CaseStep, step_id).status = "pending"
+            s.commit()
+        _quiet(case_id, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as s:
+            step = s.get(CaseStep, step_id)
+            step.status, step.error = "uncertain", str(exc)[:500]
+            s.commit()
+        raise CaseError(f"не удалось подтвердить доставку сообщения {name}: {str(exc)[:200]}. Проверьте чат перед повтором")
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        step.status, step.finished_at = "done", now()
+        step.result = {"message_id": sent.get("message_id"), "user_id": sent.get("user_id")}
+        case = s.get(Case, case_id)
+        case.attempts, case.retry_at = 0, None
+        _event(s, case_id, "message_sent", f"{event} {name}: {text[:600]}", step_id)
+        s.commit()
+    return sent
+
+
+def _mail_notice(case_id: int, step_id: int) -> bool:
+    """A letter for the person who handles it (mail_route.py): the text is made by code and goes as it is."""
+    if _quiet(case_id):
+        return False
+    with SessionLocal() as s:
+        text = str(s.get(CaseStep, step_id).args.get("text") or "")
+    return _send_step(case_id, step_id, text, "Переслал письмо") is not None
+
+
+def _mail_draft(case_id: int, step_id: int) -> bool:
+    """The draft of the answer to the letter (mail_reply.py) for the same person; it waits for their «ок»."""
+    from . import mail_reply
+    if _quiet(case_id):
+        return False
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        person = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
+        mail_id, employee_id = step.args.get("mail_id"), person.id
+    try:
+        draft_id, text = mail_reply.for_case(mail_id, employee_id)
+        reason = "по письму уже решено"
+    except mail_reply.DraftLater as exc:  # the model is down: the step is tried again later
+        raise Retry(str(exc)) from exc
+    except mail_reply.ReplyError as exc:
+        draft_id, text, reason = None, "", str(exc)
+    if draft_id is None:
+        with SessionLocal() as s:
+            step = s.get(CaseStep, step_id)
+            step.status, step.finished_at = "skipped", now()
+            _event(s, case_id, "note", f"Черновик ответа не готовлю: {reason}", step_id)
+            s.commit()
+        return True
+    sent = _send_step(case_id, step_id, text, "Прислал черновик ответа")
+    if sent is None:
+        return False
+    mail_reply.shown(draft_id)
     return True
 
 
@@ -1180,7 +1258,7 @@ def recent_view(hours: int = 48, limit: int = 8) -> list:
 
 _RUN = {"send_message": _send_message, "wait_reply": _wait_reply, "forward_document": _forward_document,
         "report": _report, "close": _close_step, "zip_pack": _zip_pack, "send_files": _send_files,
-        "run_skill": _run_skill}
+        "run_skill": _run_skill, "mail_notice": _mail_notice, "mail_draft": _mail_draft}
 
 
 def _close(s, case) -> None:

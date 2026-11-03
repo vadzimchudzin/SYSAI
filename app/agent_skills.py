@@ -28,14 +28,16 @@ MODE_HINT = {"auto": "выполняет сразу", "approve": "сначала
              "suggest": "только предлагает руководителю, сам не делает"}
 WHO_RU = {"anyone": "любой собеседник", "employee": "сотрудник из справочника", "full": "полный доступ",
           "reviewer": "проверяющий", "assign": "проверяющий с полным доступом",
-          "order": "кому можно поручать — в карточке сотрудника"}
+          "order": "кому можно поручать — в карточке сотрудника",
+          "mail": "кому передают письма и руководители (когда почта подключена)"}
 # To whom a person may give orders in the chat (the employee card; "" = by the access level).
 ORDER_SCOPES = ("all", "department", "self")
 SCOPE_RU = {"": "по уровню доступа", "all": "всем", "department": "своему отделу", "self": "только себе"}
 SCOPE_HINT = {"all": "любому сотруднику", "department": "людям своих подразделений",
               "self": "только себе: свои задачи и напоминания"}
 ORDER_KINDS = ("task", "ask", "request")
-PAIRED = {"confirm_order": "order", "confirm_document": "make_document"}  # on and off with the skill they belong to
+PAIRED = {"confirm_order": "order", "confirm_document": "make_document",  # on and off with the skill they belong to
+          "confirm_mail_reply": "mail_reply"}
 # Who may use a skill can be narrowed on the Skills page (never widened): only the leaders, only the director.
 LIMITS = ("leaders", "director")
 LIMIT_RU = {"": "как задумано", "leaders": "только руководители (проверяющие и директор)", "director": "только директор"}
@@ -303,6 +305,42 @@ SKILLS = {s.name: s for s in (
           {"draft_id": _int("ID черновика из document_draft"),
            "ok": {"type": "boolean", "description": "true — сохранить (и отправить), false — отменить"}},
           ("draft_id", "ok")),
+    Skill("mail_reply", "Ответ на письмо", "Подготовить ответ на письмо из почты компании по словам человека: "
+                                           "черновик — на проверку, после «ок» — отправить",
+          "человек просит ответить на письмо из mail_letters («ответь им, что…», «напиши, что сроки сдвигаются») или "
+          "поправляет черновик из mail_draft («добавь…», «сумма 12 400», «помягче»). mail_id — ID письма из "
+          "mail_letters (для поправки — mail_draft.mail_id); points — что ответить или что поправить, своими словами "
+          "человека, без выдумок. Код сам напишет письмо в деловом стиле по письму, переписке и базе знаний и пришлёт "
+          "черновик после твоего ответа: в reply коротко скажи, что ниже черновик, и попроси проверить — «ок» "
+          "отправит его, или пусть напишет, что поправить. Сам текст письма в reply не пиши и не говори, что ответ "
+          "ушёл. Если неясно, на какое письмо отвечать, спроси",
+          '{"type":"mail_reply","mail_id":ID из mail_letters,"points":"что ответить или поправить, коротко"}',
+          {"mail_id": _int("ID письма из mail_letters (или mail_draft.mail_id)"),
+           "points": _str("что ответить или что поправить в черновике — словами человека, коротко")},
+          ("mail_id",), who="mail", after_reply=True),
+    Skill("confirm_mail_reply", "Отправить ответ на письмо", "Человек ответил «ок» на черновик ответа — письмо уходит "
+                                                            "через почту компании",
+          "человек ответил на черновик из mail_draft: «ок», «да», «отправляй», «всё верно» — ok=true (код отправит "
+          "письмо с почты компании и скажет, что ушло); «не надо», «не отвечай», «отмена» — ok=false. Поправка — это "
+          "не confirm_mail_reply, а новый mail_reply с тем же mail_id. Пока человек не ответил «ок», не пиши, что "
+          "ответ отправлен",
+          '{"type":"confirm_mail_reply","draft_id":ID из mail_draft,"ok":true|false}',
+          {"draft_id": _int("ID черновика из mail_draft"),
+           "ok": {"type": "boolean", "description": "true — отправить, false — не отвечать"}},
+          ("draft_id", "ok"), who="mail"),
+    Skill("mail_pass", "Передать письмо", "Письмо не по адресу — вернуть руководителю, или передать его коллеге",
+          "о письме из mail_letters человек говорит «не моё», «это не ко мне», «не по адресу» — to=null (код вернёт "
+          "письмо руководителям на решение и снимет задачи по нему); просят передать письмо коллеге («передай это "
+          "письмо Ольге», «пусть этим займётся Виктор») — to=ID сотрудника из team (код перешлёт письмо с вложениями "
+          "и поставит задачи по срокам). note — почему, если сказали. remember=true, только если сказали «всегда», "
+          "«впредь такие ему» — код запомнит правило для писем этого отправителя",
+          '{"type":"mail_pass","mail_id":ID из mail_letters,"to":ID сотрудника из team или null,"note":"почему",'
+          '"remember":true|false}',
+          {"mail_id": _int("ID письма из mail_letters"),
+           "to": _int("ID сотрудника из team, кому передать; не указывай, если письмо просто «не моё»"),
+           "note": _str("почему, коротко, если сказали"),
+           "remember": {"type": "boolean", "description": "true — запомнить: письма этого отправителя всегда ему"}},
+          ("mail_id",), who="mail"),
 )}
 
 MEMORY_TOOL = {"type": "function", "function": {
@@ -368,6 +406,9 @@ def available(skill: Skill, person: Person) -> bool:
         return bool(person.reviewer)
     if skill.who == "assign":
         return bool(person.reviewer and person.full)
+    if skill.who == "mail":  # the letters of the company box (mail_route.py, mail_reply.py)
+        return (person.employee is not None or person.full) and (not person.switches
+                                                                 or bool(settings_store.get("mail_enabled")))
     return True
 
 
@@ -419,7 +460,7 @@ def tools(person: Person) -> list:
 
 
 _INT_FIELDS = ("task_id", "employee_id", "question_id", "meeting_id", "reminder_id", "case_id", "order_id",
-               "template_id", "draft_id")
+               "template_id", "draft_id", "mail_id")
 
 
 def _as_int(value):
@@ -456,7 +497,7 @@ def normalize(action: dict) -> dict:
             out["forward_to"] = None if out["forward_to"] in (None, "", 0, "null") else _as_int(out["forward_to"])
         if out.get("deadline") in ("", "null"):
             out["deadline"] = None
-    elif kind in ("confirm_order", "confirm_document"):
+    elif kind in ("confirm_order", "confirm_document", "confirm_mail_reply"):
         ok = out.get("ok")
         if isinstance(ok, str):
             out["ok"] = {"true": True, "false": False, "да": True, "нет": False}.get(ok.strip().lower(), ok)
@@ -473,6 +514,14 @@ def normalize(action: dict) -> dict:
             out["values"] = values
         to = out.get("send_to")
         out["send_to"] = None if to in (None, "", 0, "null", "none") else _as_int(to)
+    elif kind == "mail_pass":
+        to = out.get("to")
+        out["to"] = None if to in (None, "", 0, "null", "none") else _as_int(to)
+        remember = out.get("remember")
+        if isinstance(remember, str):
+            out["remember"] = remember.strip().lower() in ("true", "да", "1")
+    elif kind == "mail_reply":
+        out["points"] = " ".join(str(out.get("points") or "").split())
     elif kind == "remind":
         people = out.pop("people", None)
         if out.get("to") == "people":
@@ -696,6 +745,8 @@ def check(action: dict, ctx: dict, person: Person, approvers=None) -> str:
         if action.get("ok") not in (True, False):
             return "confirm_order: ok это true или false"
         return ""
+    if kind in ("mail_reply", "confirm_mail_reply", "mail_pass"):
+        return _check_mail(action, ctx, person)
     return f"неизвестное действие {kind!r}"
 
 
@@ -783,6 +834,40 @@ def _check_document(action: dict, ctx: dict, person: Person) -> str:
     return ""
 
 
+def _check_mail(action: dict, ctx: dict, person: Person) -> str:
+    kind = action.get("type")
+    letters = {x.get("id"): x for x in ctx.get("mail_letters") or [] if isinstance(x, dict)}
+    draft = ctx.get("mail_draft") if isinstance(ctx.get("mail_draft"), dict) else None
+    if kind == "confirm_mail_reply":
+        if draft is None or action.get("draft_id") != draft.get("id"):
+            return "confirm_mail_reply: черновик не найден среди ждущих ответа (mail_draft)"
+        if action.get("ok") not in (True, False):
+            return "confirm_mail_reply: ok это true или false"
+        return ""
+    mail_id = action.get("mail_id")
+    if kind == "mail_reply":
+        if mail_id not in letters and not (draft and mail_id == draft.get("mail_id")):
+            return "mail_reply: письмо не найдено среди mail_letters"
+        if not ctx.get("mail_can_reply"):
+            return ("mail_reply: отправка писем не настроена (на странице «Почта» нет сервера SMTP) — скажи, что ответить "
+                    "отсюда пока нельзя")
+        if len(str(action.get("points") or "")) > 1500:
+            return "mail_reply: points — коротко, до 1500 символов"
+        return ""
+    if mail_id not in letters:
+        return "mail_pass: письмо не найдено среди mail_letters"
+    to = action.get("to")
+    if to is not None:
+        team = {p["id"]: p for p in ctx.get("team", [])}
+        if to not in team:
+            return "mail_pass: to должен быть ID сотрудника из team или null («не моё»)"
+        if not team[to].get("reachable", True):
+            return f"mail_pass: у {team[to]['name']} нет Telegram-контакта в справочнике — письмо не дойдёт"
+    if action.get("remember") not in (None, True, False):
+        return "mail_pass: remember это true или false"
+    return ""
+
+
 def denied(action: dict, person: Person) -> bool:
     """The action needs more than this person is allowed (as opposed to a mistake in the action itself)."""
     kind = action.get("type")
@@ -809,6 +894,13 @@ def denied(action: dict, person: Person) -> bool:
     if kind == "make_document":
         to = action.get("send_to")
         if to is None or to == person.employee_id:
+            return False
+        if person.order_scope == "department":
+            return to not in person.team
+        return person.order_scope == "self"
+    if kind == "mail_pass":
+        to = action.get("to")
+        if to is None or to == person.employee_id or person.full:
             return False
         if person.order_scope == "department":
             return to not in person.team
@@ -1013,8 +1105,29 @@ def execute(action: dict, chat: str, employee_id, author: str, sender: dict | No
                 doc_templates.decide(action["draft_id"], chat, bool(action.get("ok")), author)
             except doc_templates.TemplateError as exc:
                 raise SkillError(f"confirm_document: {exc}") from exc
+        elif kind in ("mail_reply", "confirm_mail_reply", "mail_pass"):
+            s.commit()
+            _run_mail(action, chat, employee_id, author)
         else:
             raise SkillError(f"неизвестный навык {kind!r}")
+
+
+def _run_mail(action: dict, chat: str, employee_id, author: str) -> None:
+    """The letters (mail_reply.py, mail_route.py): the draft follows the reply (agent._process), the approved answer
+    goes out right after it."""
+    from . import mail_reply, mail_route
+    kind = action["type"]
+    try:
+        if kind == "mail_reply":
+            mail_reply.make(action["mail_id"], str(action.get("points") or ""), chat=chat, employee_id=employee_id,
+                            requested_by=author)
+        elif kind == "confirm_mail_reply":
+            mail_reply.decide(action["draft_id"], chat, bool(action.get("ok")), author, employee_id)
+        else:
+            mail_route.pass_on(action["mail_id"], action.get("to"), by=author, note=str(action.get("note") or ""),
+                               remember=bool(action.get("remember")))
+    except (mail_reply.ReplyError, mail_route.RouteError) as exc:
+        raise SkillError(f"{kind}: {exc}") from exc
 
 
 def describe(action: dict) -> str:
@@ -1068,6 +1181,22 @@ def describe(action: dict) -> str:
             draft = s.get(DocDraft, action.get("draft_id")) if isinstance(action.get("draft_id"), int) else None
             what = f"«{draft.title}»" if draft else f"#{action.get('draft_id')}"
             return f"{'сохранить' if action.get('ok', True) else 'отменить'} документ {what}"
+        if kind in ("mail_reply", "mail_pass"):
+            from .db import MailMessage
+            row = s.get(MailMessage, action.get("mail_id")) if isinstance(action.get("mail_id"), int) else None
+            letter = f"«{row.subject or 'без темы'}» от {row.from_name or row.from_addr}" if row else f"#{action.get('mail_id')}"
+            if kind == "mail_reply":
+                points = str(action.get("points") or "").strip()
+                return f"подготовить ответ на письмо {letter}" + (f": {points[:150]}" if points else "")
+            if action.get("to") is None:
+                return f"вернуть руководителю письмо {letter} (не по адресу)"
+            return f"передать письмо {letter} — {name(action.get('to'))}" + (" и запомнить правило"
+                                                                             if action.get("remember") else "")
+        if kind == "confirm_mail_reply":
+            from .db import MailDraft
+            draft = s.get(MailDraft, action.get("draft_id")) if isinstance(action.get("draft_id"), int) else None
+            what = f"«{draft.subject}» → {draft.to_addrs}" if draft else f"#{action.get('draft_id')}"
+            return f"{'отправить' if action.get('ok', True) else 'не отправлять'} ответ {what}"
         if kind == "silence_choice":
             case = s.get(Case, action.get("case_id")) if isinstance(action.get("case_id"), int) else None
             what = cases.SILENCE_CHOICES.get(action.get("choice"), str(action.get("choice")))

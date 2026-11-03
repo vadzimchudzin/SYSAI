@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
                storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
@@ -1744,7 +1744,23 @@ def _document_sender(d) -> str:
 # ----------------------------------------------------------------------------- the mailbox (mail.py, «Почтальон»)
 MAIL_MESSAGES = {"saved": "Сохранено.", "kinds": "Типы писем сохранены — новые письма сортируются по ним.",
                  "checking": "Смотрю почту — новые письма появятся здесь через минуту-другую.", "marked": "Отмечено.",
-                 "sorting": "Разбираю письмо заново — обновите страницу через полминуты."}
+                 "sorting": "Разбираю письмо заново — обновите страницу через полминуты.",
+                 "rule": "Правило сохранено — новые письма передаются по нему.", "rule_done": "Готово.",
+                 "route": "Пересылка писем настроена.", "reply": "Настройки ответов сохранены.",
+                 "passed": "Письмо передано — получатель увидит его в Telegram.",
+                 "back": "Письмо ждёт решения, кому передать.", "route_ok": "Отмечено: передано верно."}
+MAIL_ROUTE_KEYS = ("mail_forward", "mail_hints_auto", "mail_drafts_auto")
+MAIL_REPLY_KEYS = ("mail_sender_name", "mail_signature", "mail_reply_examples")
+
+
+def _mail_msg(msg: str) -> str:
+    """A known message key, or the text of a check of the connection («подключено…», «отправка работает…»)."""
+    return MAIL_MESSAGES.get(msg, msg[:300] if msg.startswith(("подключено", "отправка работает")) else "")
+
+
+def _mail_cards(s) -> list:
+    return [{"id": e.id, "name": e.name} for e in s.query(entities.Entity).filter(
+        entities.Entity.merged_into_id.is_(None)).order_by(entities.Entity.name).limit(1000)]
 MAIL_FORM_KEYS = ("mail_enabled", "mail_service", "mail_address", "mail_imap_host", "mail_imap_port", "mail_smtp_host",
                   "mail_smtp_port", "mail_folder", "mail_poll_minutes", "mail_history_days", "mail_labels")
 
@@ -1756,15 +1772,72 @@ def mail_view(request: Request, kind: str = "", q: str = "", only: str = "", msg
     guard_admin(request)
     kinds = mail.kinds()
     with SessionLocal() as s:
-        rows = mail.listing(s, kind if kind in kinds else "", q, only if only in ("unsorted", "unchecked") else "",
-                            max(20, min(int(limit or 100), 500)))
+        rows = mail.listing(s, kind if kind in kinds else "", q,
+                            only if only in ("unsorted", "unchecked", "unrouted") else "", max(20, min(int(limit or 100), 500)))
         score = mail.accuracy(s)
+        rules, targets, hints = mail_route.rules_view(s), mail_route.targets(s), mail_route.suggestions(s)
+        route_score, waiting = mail_route.accuracy(s), len(mail_route.waiting(s))
+        drafts, cards = mail_reply.recent(s, 10), _mail_cards(s)
     stored = settings_store.all_settings()
     form = {k: stored.get(k) for k in MAIL_FORM_KEYS}
     return page(request, "mail.html", rows=rows, score=score, st=mail.status(), kinds=kinds, kinds_text=mail.kinds_text(),
                 presets=mail.PRESETS, form=form, has_password=bool(stored.get("mail_password")), kind=kind, q=q,
-                only=only, limit=limit, msg=MAIL_MESSAGES.get(msg, msg[:300] if msg.startswith("подключено") else ""),
-                error=error[:300])
+                only=only, limit=limit, msg=_mail_msg(msg), error=error[:300], rules=rules, targets=targets,
+                suggestions=hints, route_score=route_score, waiting=waiting, drafts=drafts, cards=cards,
+                route_form={k: stored.get(k) for k in MAIL_ROUTE_KEYS},
+                reply_form={k: stored.get(k) for k in MAIL_REPLY_KEYS}, smtp_ready=mail_reply.ready())
+
+
+@app.post("/mail/rules")
+async def mail_rule_save(request: Request):
+    """«Кто чем занимается»: a rule — a type, a client or object, senders, words → a person or a department."""
+    guard_admin(request)
+    f = await request.form()
+    raw_id, raw_entity = str(f.get("rule_id") or "").strip(), str(f.get("entity_id") or "").strip()
+    try:
+        mail_route.save_rule(rule_id=int(raw_id) if raw_id.isdigit() else None, kind=str(f.get("kind") or ""),
+                             entity_id=int(raw_entity) if raw_entity.isdigit() else None,
+                             senders=str(f.get("senders") or ""), keywords=str(f.get("keywords") or ""),
+                             to=str(f.get("to") or ""), make_tasks=bool(f.get("make_tasks")), by=_who(request))
+    except mail_route.RouteError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#rules", 303)
+    return RedirectResponse("/mail?msg=rule#rules", 303)
+
+
+@app.post("/mail/rules/{rule_id}/{action}")
+def mail_rule_action(request: Request, rule_id: int, action: str):
+    guard_admin(request)
+    try:
+        mail_route.rule_action(rule_id, action)
+    except mail_route.RouteError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#rules", 303)
+    return RedirectResponse("/mail?msg=rule_done#rules", 303)
+
+
+@app.post("/mail/route-settings")
+async def mail_route_settings(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    settings_store.set_many({k: bool(f.get(k)) for k in MAIL_ROUTE_KEYS})
+    return RedirectResponse("/mail?msg=route#rules", 303)
+
+
+@app.post("/mail/reply-settings")
+async def mail_reply_settings(request: Request):
+    guard_admin(request)
+    mail_reply.save_settings(await request.form())
+    return RedirectResponse("/mail?msg=reply#replies", 303)
+
+
+@app.post("/mail/smtp-test")
+def mail_smtp_test(request: Request):
+    """«Проверить отправку»: sign in to the SMTP server (nothing is sent)."""
+    guard_admin(request)
+    try:
+        text = mail_reply.test_smtp()
+    except mail_reply.ReplyError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#replies", 303)
+    return RedirectResponse("/mail?msg=" + quote(text) + "#replies", 303)
 
 
 @app.post("/mail/settings")
@@ -1817,10 +1890,41 @@ def mail_letter_view(request: Request, mail_id: int, msg: str = "", error: str =
             letter = mail.letter(s, mail_id)
         except mail.MailError:
             raise HTTPException(404, "Письмо не найдено") from None
-        cards = [{"id": e.id, "name": e.name} for e in s.query(entities.Entity).filter(
-            entities.Entity.merged_into_id.is_(None)).order_by(entities.Entity.name).limit(1000)]
-    return page(request, "mail_letter.html", m=letter, kinds=mail.kinds(), cards=cards,
+        cards = _mail_cards(s)
+        people = [t for t in mail_route.targets(s) if t["value"].startswith("e:")]
+    return page(request, "mail_letter.html", m=letter, kinds=mail.kinds(), cards=cards, people=people,
                 msg=MAIL_MESSAGES.get(msg, ""), error=error[:300])
+
+
+@app.post("/mail/{mail_id}/route")
+async def mail_letter_route(request: Request, mail_id: int):
+    """«Передать»: the letter goes to this person (or waits for a decision again); «запомнить» makes a rule."""
+    guard_admin(request)
+    f = await request.form()
+    to = str(f.get("to") or "")
+    m = re.fullmatch(r"e:(\d+)", to)
+    try:
+        if to == "none":
+            mail_route.pass_on(mail_id, None, by=_who(request), note=str(f.get("note") or ""), tell=False)
+        elif m:
+            mail_route.pass_on(mail_id, int(m.group(1)), by=_who(request), note=str(f.get("note") or ""),
+                               remember=bool(f.get("remember")))
+        else:
+            raise mail_route.RouteError("выберите, кому передать письмо")
+    except mail_route.RouteError as exc:
+        return RedirectResponse(f"/mail/{mail_id}?error=" + quote(str(exc)) + "#route", 303)
+    return RedirectResponse(f"/mail/{mail_id}?msg=" + ("back" if to == "none" else "passed") + "#route", 303)
+
+
+@app.post("/mail/{mail_id}/route-check")
+def mail_letter_route_check(request: Request, mail_id: int):
+    """«Верно»: the letter went to the right person (the accuracy of the routing)."""
+    guard_admin(request)
+    try:
+        mail_route.mark(mail_id, True, by=_who(request))
+    except mail_route.RouteError as exc:
+        return RedirectResponse(f"/mail/{mail_id}?error=" + quote(str(exc)) + "#route", 303)
+    return RedirectResponse(f"/mail/{mail_id}?msg=route_ok#route", 303)
 
 
 @app.post("/mail/{mail_id}/check")

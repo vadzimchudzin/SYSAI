@@ -811,6 +811,12 @@ def run_due() -> None:
         check_now()
     sort_pending()
     label_pending()
+    from . import mail_reply, mail_route
+    for step in (mail_route.run_pending, mail_reply.run_pending):
+        try:
+            step()
+        except Exception:  # noqa: BLE001  one stuck letter never stops the loop
+            log.exception("mail: %s failed", step.__module__)
 
 
 # ----------------------------------------------------------------------------- the types of letters
@@ -1174,8 +1180,9 @@ def sort_letter(mail_id: int, force: bool = False) -> str:
 
 
 def after_sorting(mail_id: int) -> None:
-    """What happens to a sorted letter next (№24: the person who handles it, the tasks)."""
-    return None
+    """What happens to a sorted letter next (№24: the person who handles it, the tasks, the draft of the answer)."""
+    from . import mail_route
+    mail_route.after_sorting(mail_id)
 
 
 def sort_pending(limit: int = 4) -> int:
@@ -1304,6 +1311,7 @@ def _link_view(s, row) -> dict | None:
 
 
 def _row_view(s, row, names: dict) -> dict:
+    from . import mail_route
     sort = row.sort or {}
     return {"id": row.id, "at": local(row.sent_at or row.created_at), "from": row.from_name or row.from_addr,
             "addr": row.from_addr or "", "subject": row.subject or "(без темы)", "summary": sort.get("summary") or "",
@@ -1312,11 +1320,12 @@ def _row_view(s, row, names: dict) -> dict:
             "link": _link_view(s, row), "labels": list(row.labels or []),
             "attachments": [a for a in row.attachments or [] if a.get("document_id")],
             "checked": None if not row.checked else ("ok" if row.checked.get("ok") else "fixed"),
-            "status": row.status, "status_ru": STATUS_RU.get(row.status, row.status)}
+            "status": row.status, "status_ru": STATUS_RU.get(row.status, row.status),
+            "route": mail_route.short(row), "route_status": (row.route or {}).get("status") or ""}
 
 
 def listing(s, kind: str = "", q: str = "", only: str = "", limit: int = 100) -> list:
-    from . import entities
+    from . import entities, mail_route
     query = s.query(MailMessage).filter(MailMessage.direction == "in")
     if kind:
         query = query.filter(MailMessage.kind == kind)
@@ -1328,6 +1337,8 @@ def listing(s, kind: str = "", q: str = "", only: str = "", limit: int = 100) ->
     names = entities.names(s)
     out = []
     for row in query.order_by(MailMessage.id.desc()).limit(2000):
+        if only == "unrouted" and (row.route or {}).get("status") not in mail_route.WAITING:
+            continue
         if needle and needle not in " ".join([row.subject or "", row.from_addr or "", row.from_name or "",
                                               (row.text or "")[:5000]]).lower():
             continue
@@ -1338,7 +1349,7 @@ def listing(s, kind: str = "", q: str = "", only: str = "", limit: int = 100) ->
 
 
 def letter(s, mail_id: int) -> dict:
-    from . import doc_intake, entities
+    from . import doc_intake, entities, mail_reply, mail_route
     row = s.get(MailMessage, mail_id)
     if row is None:
         raise MailError("письмо не найдено")
@@ -1358,5 +1369,6 @@ def letter(s, mail_id: int) -> dict:
                 was_kind=kind_name((row.checked or {}).get("was", {}).get("kind")) if (row.checked or {}).get("was") else "",
                 thread=[{"id": e.id, "subject": e.subject, "from": e.from_name or e.from_addr, "at": local(e.sent_at or e.created_at),
                          "direction": e.direction} for e in _earlier(s, row)],
-                mailbox=row.mailbox, folder=row.folder)
+                mailbox=row.mailbox, folder=row.folder, route_info=mail_route.view(s, row),
+                drafts=mail_reply.for_letter(s, row.id))
     return view

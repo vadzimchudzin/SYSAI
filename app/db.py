@@ -1027,6 +1027,51 @@ class MailMessage(Base):
     created_at = Column(DateTime(timezone=True), default=now, index=True)
 
 
+class MailRule(Base):
+    """«Кто чем занимается» (mail_route.py, №24): a letter of this type, about this client or object, from these senders
+    (addresses or @domains) or with these words goes to the person or to the head of the department; its deadlines
+    become their tasks. The first active rule that fits wins."""
+    __tablename__ = "mail_rules"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(20), default="")          # mail.kinds() key; "" = any type
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True)
+    senders = Column(String(500), default="")      # «ivanov@krinica.by, @monolit.by» (comma-separated); "" = anybody
+    keywords = Column(String(300), default="")     # any of these words in the subject or the text; "" = no condition
+    to_employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    to_department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    make_tasks = Column(Boolean, nullable=False, default=True)
+    active = Column(Boolean, nullable=False, default=True)
+    position = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_by = Column(String(120), default="")
+
+
+class MailDraft(Base):
+    """An answer to a letter (mail_reply.py, №25): the person who handles the letter reads it in Telegram, asks to
+    change it or says «ок» — only then it goes out through SMTP. A newer draft for the same person replaces the older."""
+    __tablename__ = "mail_drafts"
+    id = Column(Integer, primary_key=True)
+    mail_id = Column(Integer, ForeignKey("mail_messages.id", ondelete="CASCADE"), nullable=False, index=True)
+    chat_id = Column(String(64), default="", index=True)       # the conversation that decides ("" = by the employee)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
+    requested_by = Column(String(120), default="")
+    points = Column(Text, default="")                          # what the person asked to say (their words)
+    to_addrs = Column(Text, default="")
+    subject = Column(String(1000), default="")
+    text = Column(Text, default="")                            # the answer as it will go (with the signature)
+    warnings = Column(JSON, nullable=True)                     # numbers and dates found nowhere in the sources
+    missing = Column(JSON, nullable=True)                      # what the model lacked for a full answer
+    version = Column(Integer, nullable=False, default=1)
+    # draft | replaced | cancelled | approved (sent right after the reply) | sending | sent | failed
+    status = Column(String(12), nullable=False, default="draft", index=True)
+    error = Column(Text, default="")
+    shown_at = Column(DateTime(timezone=True), nullable=True)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    sent_id = Column(Integer, nullable=True)                   # the MailMessage of the answer that went
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
 class MemoryVector(Base):
     """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
     __tablename__ = "memory_vectors"

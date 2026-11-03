@@ -4,9 +4,9 @@
 <div class="row between"><h1>Почта</h1>
   <form method="get" action="/mail" class="row"><input name="q" value="{{ q }}" placeholder="Тема, отправитель, текст">
     <select name="kind"><option value="">все типы</option>{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if kind == k }}>{{ v.name }}</option>{% endfor %}</select>
-    <select name="only"><option value="">все письма</option><option value="unsorted" {{ 'selected' if only == 'unsorted' }}>не разобранные</option><option value="unchecked" {{ 'selected' if only == 'unchecked' }}>не проверенные</option></select>
+    <select name="only"><option value="">все письма</option><option value="unsorted" {{ 'selected' if only == 'unsorted' }}>не разобранные</option><option value="unchecked" {{ 'selected' if only == 'unchecked' }}>не проверенные</option><option value="unrouted" {{ 'selected' if only == 'unrouted' }}>ждут решения, кому передать</option></select>
     <button class="btn sm">Найти</button></form></div>
-<p class="muted small">ИИ-сотрудник читает почтовый ящик компании (только чтение: в ящике ничего не меняется, письма не становятся прочитанными). Новые письма появляются здесь через несколько минут, вложения — в «Документах», где они разбираются, как файлы из Telegram. Каждое письмо получает тип, клиента или объект, связанное дело или задачу и метки; отметьте «верно» или поправьте — так считается точность сортировки.</p>
+<p class="muted small">ИИ-сотрудник читает почтовый ящик компании (только чтение: в ящике ничего не меняется, письма не становятся прочитанными). Новые письма появляются здесь через несколько минут, вложения — в «Документах», где они разбираются, как файлы из Telegram. Каждое письмо получает тип, клиента или объект, связанное дело или задачу и метки; отметьте «верно» или поправьте — так считается точность сортировки. Потом письмо уходит в Telegram тому, кто им занимается (раздел «Кто чем занимается»), а ответ на него готовится по его словам и уходит только после «ок» (раздел «Ответы на письма»).</p>
 {% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="people-msg warn" role="alert">Не сделано: {{ error }}</div>{% endif %}
 <section class="card">
@@ -20,10 +20,12 @@
 </section>
 <section class="card">
   <div class="row between"><h2>Письма</h2>
-    <p class="small" style="margin:0">{% if score.checked %}Сортировка: <b>верно {{ score.right }} из {{ score.checked }}</b> проверенных ({{ score.share }}%, цель — 9 из 10){% else %}<span class="muted">Отметьте «верно» у разобранных писем или поправьте тип — здесь будет точность сортировки (цель: 9 из 10).</span>{% endif %}</p></div>
+    <p class="small" style="margin:0">{% if score.checked %}Сортировка: <b>верно {{ score.right }} из {{ score.checked }}</b> проверенных ({{ score.share }}%, цель — 9 из 10){% else %}<span class="muted">Отметьте «верно» у разобранных писем или поправьте тип — здесь будет точность сортировки (цель: 9 из 10).</span>{% endif %}
+      {% if route_score.total %}<br>Пересылка: <b>ошибок {{ route_score.wrong }} из {{ route_score.total }}</b> переданных за 30 дней ({{ route_score.share }}%, цель — меньше 1 из 10){% endif %}
+      {% if waiting %}<br><a href="/mail?only=unrouted">Ждут решения, кому передать: {{ waiting }}</a>{% endif %}</p></div>
   {% if not rows %}<p class="muted">Писем пока нет{% if q or kind or only %} по этому запросу{% endif %}.</p>{% else %}
   <div class="table-wrap"><table class="small">
-    <thead><tr><th>Когда</th><th>От кого</th><th>Тема</th><th>Тип</th><th>Клиент / объект</th><th>Дело / задача</th><th>Метки</th><th></th></tr></thead>
+    <thead><tr><th>Когда</th><th>От кого</th><th>Тема</th><th>Тип</th><th>Клиент / объект</th><th>Дело / задача</th><th>Кому</th><th>Метки</th><th></th></tr></thead>
     <tbody>{% for r in rows %}<tr id="m{{ r.id }}">
       <td>{{ r.at.strftime('%d.%m %H:%M') if r.at }}</td>
       <td title="{{ r.addr }}">{{ r.from }}</td>
@@ -32,10 +34,48 @@
       <td>{% if r.kind %}{{ r.kind_name }}{% elif r.sort_status == 'skipped' %}<span class="muted">не разбирается</span>{% else %}<span class="muted">разбирается…</span>{% endif %}</td>
       <td>{% if r.entity %}<a href="/entities/{{ r.entity.id }}">{{ r.entity.name }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{% if r.link %}<a href="{{ r.link.url }}">{{ r.link.title }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if r.route_status in ('unclear', 'no_contact', 'failed') %}<a class="pill amber" href="/mail/{{ r.id }}#route">{{ r.route }}</a>{% elif r.route %}{{ r.route }}{% else %}<span class="muted">—</span>{% endif %}</td>
       <td class="mail-tags">{% for l in r.labels %}<span class="pill {{ 'red' if l == 'срочно' else ('amber' if l == 'ждёт ответа' else 'gray') }}">{{ l }}</span>{% endfor %}</td>
       <td>{% if r.checked == 'ok' %}<span class="mail-ok" title="проверено: верно">✓</span>{% elif r.checked == 'fixed' %}<span class="muted" title="поправлено вручную">поправлено</span>{% elif r.kind %}<form method="post" action="/mail/{{ r.id }}/check"><input type="hidden" name="ok" value="1"><input type="hidden" name="back" value="list"><button class="btn sm ghost" title="Тип и клиент определены верно">верно</button></form>{% endif %}</td></tr>{% endfor %}</tbody>
   </table></div>
   {% if rows|length >= limit %}<p class="small"><a href="/mail?limit={{ limit + 100 }}&kind={{ kind }}&q={{ q|urlencode }}&only={{ only }}">Показать ещё</a></p>{% endif %}{% endif %}
+</section>
+<section class="card" id="rules"><h2>Кто чем занимается</h2>
+  <p class="small muted">Кому ИИ-сотрудник передаёт письмо в Telegram: с кратким содержанием, вложениями и задачами по срокам из письма (задачи видны в «Прогрессе», с напоминанием и отчётом тому, кто передал). Правила проверяются сверху вниз — решает первое подходящее. Если правила нет, письмо уходит тому, кто ведёт эту переписку или задачу; если и так не ясно, ИИ-сотрудник подсказывает, кому, а письмо ждёт решения руководителя — здесь и в утренней сводке. Получатель может ответить «не моё»: письмо вернётся на решение, ошибка учтётся. Старые письма (до подключения ящика, старше недели) и рассылки не пересылаются.</p>
+  {% if rules %}<div class="table-wrap"><table class="small"><thead><tr><th>Какие письма</th><th>Кому</th><th>Задачи по срокам</th><th></th></tr></thead>
+    <tbody>{% for r in rules %}<tr{% if not r.active %} class="muted"{% endif %}><td>{{ r.condition }}</td><td>{{ r.to_name }}</td><td>{{ 'ставить' if r.make_tasks else 'нет' }}</td>
+      <td><div class="row" style="gap:4px"><form method="post" action="/mail/rules/{{ r.id }}/up"><button class="btn sm ghost" title="Выше">↑</button></form>
+        <form method="post" action="/mail/rules/{{ r.id }}/toggle"><button class="btn sm ghost">{{ 'выключить' if r.active else 'включить' }}</button></form>
+        <form method="post" action="/mail/rules/{{ r.id }}/delete" onsubmit="return confirm('Удалить правило?')"><button class="btn sm ghost">удалить</button></form></div></td></tr>{% endfor %}</tbody></table></div>
+  {% else %}<p class="small muted">Правил пока нет. Например: «Счёт → бухгалтерия», «письма от @krinica.by → Ольга», «объект ЖК Северный → прораб».</p>{% endif %}
+  <form method="post" action="/mail/rules" class="mail-form"><div class="row">
+    <label class="f">Тип <select name="kind"><option value="">любой</option>{% for k, v in kinds.items() %}<option value="{{ k }}">{{ v.name }}</option>{% endfor %}</select></label>
+    <label class="f">Клиент / объект <select name="entity_id"><option value="">любой</option>{% for c in cards %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select></label>
+    <label class="f" style="flex:1">От кого <input name="senders" maxlength="500" placeholder="ivanov@krinica.by, @krinica.by"></label>
+    <label class="f" style="flex:1">Слова в письме <input name="keywords" maxlength="300" placeholder="смета, КС-2"></label>
+    <label class="f">Кому <select name="to" required><option value="">— выберите —</option>{% for t in targets %}<option value="{{ t.value }}">{{ t.label }}</option>{% endfor %}</select></label></div>
+    <label class="small"><input type="checkbox" name="make_tasks" value="1" checked> ставить задачи по срокам из письма</label>
+    <div class="row" style="margin-top:8px"><button class="btn sm primary">Добавить правило</button></div></form>
+  {% if suggestions %}<p class="small" style="margin-top:10px"><b>Подсказки:</b></p><ul class="small">{% for x in suggestions %}<li>Письма от {{ x.sender }} уже {{ x.count }} раза передавали {{ x.to_name }}.
+    <form method="post" action="/mail/rules" style="display:inline"><input type="hidden" name="senders" value="{{ x.sender }}"><input type="hidden" name="to" value="{{ x.to }}"><input type="hidden" name="make_tasks" value="1"><button class="btn sm ghost">Сделать правилом</button></form></li>{% endfor %}</ul>{% endif %}
+  <form method="post" action="/mail/route-settings" class="mail-form" style="margin-top:10px">
+    <label class="small"><input type="checkbox" name="mail_forward" value="1" {{ 'checked' if route_form.mail_forward }}> передавать письма в Telegram тем, кто ими занимается</label><br>
+    <label class="small"><input type="checkbox" name="mail_hints_auto" value="1" {{ 'checked' if route_form.mail_hints_auto }}> если правила нет, а ИИ-сотрудник уверен, кому, — передавать по его подсказке без руководителя</label><br>
+    <label class="small"><input type="checkbox" name="mail_drafts_auto" value="1" {{ 'checked' if route_form.mail_drafts_auto }}> к письмам, которые ждут ответа, сразу присылать черновик ответа</label>
+    <div class="row" style="margin-top:8px"><button class="btn sm">Сохранить</button></div></form>
+</section>
+<section class="card" id="replies"><h2>Ответы на письма</h2>
+  <p class="small muted">Тот, кому передали письмо, пишет ИИ-сотруднику, что ответить («ответь, что сроки сдвигаются на неделю»), — тот готовит черновик по письму, переписке и базе знаний в стиле примеров ниже и присылает в Telegram. Поправки — словами («сумма 12 400», «помягче»). <b>Письмо уходит только после «ок»</b> того, кто его готовил. Числа, которых нет ни в письме, ни в словах человека, ни в базе знаний, помечаются «Проверь».</p>
+  {% if not smtp_ready %}<p class="small"><b>Отправка не настроена:</b> укажите сервер SMTP в «Подключении» (для известных сервисов он заполняется сам).</p>{% endif %}
+  <form method="post" action="/mail/reply-settings" class="mail-form">
+    <div class="row"><label class="f" style="flex:1">Имя отправителя <input name="mail_sender_name" maxlength="200" value="{{ reply_form.mail_sender_name or '' }}" placeholder="ООО «Компания»"></label></div>
+    <label class="f">Подпись <textarea name="mail_signature" rows="3" maxlength="1000" placeholder="С уважением,&#10;отдел снабжения ООО «Компания»&#10;+375 …">{{ reply_form.mail_signature or '' }}</textarea></label>
+    <label class="f">Примеры хороших ответов — образец тона и оформления (разделяйте строкой ---) <textarea name="mail_reply_examples" rows="6" maxlength="20000">{{ reply_form.mail_reply_examples or '' }}</textarea></label>
+    <div class="row" style="margin-top:8px"><button class="btn sm primary">Сохранить</button></div></form>
+  {% if smtp_ready %}<form method="post" action="/mail/smtp-test" style="margin-top:8px"><button class="btn sm ghost">Проверить отправку</button></form>{% endif %}
+  {% if drafts %}<h3 style="margin-top:12px">Последние черновики</h3><div class="table-wrap"><table class="small"><thead><tr><th>Когда</th><th>Письмо</th><th>Адресат</th><th>Кто готовил</th><th>Статус</th></tr></thead>
+    <tbody>{% for d in drafts %}<tr><td>{{ d.at.strftime('%d.%m %H:%M') if d.at }}</td><td><a href="/mail/{{ d.mail_id }}#drafts">{{ d.subject or 'без темы' }}</a></td><td>{{ d.to }}</td><td>{{ d.who }}</td>
+      <td>{{ d.status_ru }}{% if d.version > 1 %} · вариант {{ d.version }}{% endif %}{% if d.error %} <span class="mail-bad">{{ d.error }}</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>
 <section class="card" id="kinds"><h2>Типы писем</h2>
   <p class="small muted">По одному в строке: название — когда ставить. Пояснение помогает ИИ-сотруднику не путать типы. Уже разобранные письма сохраняют свой тип; «Другое» есть всегда.</p>

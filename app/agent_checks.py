@@ -225,8 +225,13 @@ def nonempty(value) -> bool:
     return bool(str(value or "").strip())
 
 
-def has(pattern: str):
-    return lambda value: bool(re.search(pattern, str(value or ""), re.I))
+def has(pattern: str, example: str | None = None):
+    """A text field that has to say this; `example` is what a perfect model would give (the tests use it)."""
+    def check(value) -> bool:
+        return bool(re.search(pattern, str(value or ""), re.I))
+    if example is not None:
+        check.example = example
+    return check
 
 
 def _same(expected, value) -> bool:
@@ -407,6 +412,27 @@ def scenarios() -> list:
                        "Если всё верно, ответь «ок» — сохраню; если нет — напиши, что поправить."))
     draft_77 = {"id": 77, "template": GUARANTEE["title"], "template_id": 31, "title": "Гарантийное письмо ООО Монолит",
                 "values": guarantee_values, "send_to": None, "shown": True}
+    letter_price = {"id": 91, "from": "Иван Петров <ivan@monolit.by>", "subject": "Цена бетона М300",
+                    "at": f"{_day(0):%d.%m} 09:40", "kind": "Запрос", "client": "ООО «Монолит»",
+                    "summary": "Монолит спрашивает цену куба бетона М300 с доставкой на Ленина 12.",
+                    "ask": "назвать цену с доставкой", "text": "Добрый день! Подскажите цену куба бетона М300 с доставкой "
+                                                               "на Ленина 12. Иван", "needs_reply": True, "answered": False,
+                    "routed_to": "Анна Петрова"}
+    letter_bill = {"id": 92, "from": "ВентСнаб <office@ventsnab.by>", "subject": "Счёт № 48 за вентиляторы",
+                   "at": f"{_day(0):%d.%m} 10:15", "kind": "Счёт", "summary": "ВентСнаб прислал счёт № 48 на 12 480 руб.",
+                   "ask": "оплатить счёт", "deadlines": [{"what": "оплатить счёт", "date": d4.isoformat()}],
+                   "needs_reply": False, "answered": False, "routed_to": "Анна Петрова"}
+    letter_roof = {"id": 93, "from": "Кровля-Сервис <info@krovlya.by>", "subject": "Смета на ремонт кровли",
+                   "at": f"{_day(0):%d.%m} 11:05", "kind": "Запрос", "summary": "Просят согласовать смету на ремонт "
+                                                                             "кровли на Ленина 12.",
+                   "needs_reply": True, "answered": False, "waits_for_decision": True, "hint": "Борис Смирнов"}
+    mail_mine = {"mail_letters": [letter_price, letter_bill], "mail_can_reply": True}
+    mail_talk = (("человек", "Ответь Монолиту, что куб М300 с доставкой — 185 рублей."),
+                 ("ты", "Готово, ниже черновик ответа. Если всё верно — ответь «ок», отправлю; если нет — напиши, что "
+                        "поправить."))
+    draft_95 = {"id": 95, "mail_id": 91, "letter": "«Цена бетона М300» от Иван Петров", "to": "ivan@monolit.by",
+                "version": 1, "shown": True, "text": "Добрый день, Иван!\n\nКуб бетона М300 с доставкой на Ленина 12 "
+                                                     "стоит 185 рублей.\n\nС уважением,\nАнна Петрова"}
     viktor_case = _case(52, "Спросить Виктора о сроках доставки арматуры", "Виктор Иванов", "ответ", "вчера 15:10",
                         [("вчера 15:10", "Спросил Виктора о сроках доставки"), ("сегодня 09:05", "Напомнил Виктору")],
                         "ты поручил это ассистенту")
@@ -827,6 +853,31 @@ def scenarios() -> list:
         S("doc-none", "Документы по шаблону", "Шаблона нет — честно сказать, не обещать документ", "director",
           "Сделай договор подряда с ИП Козловым на отделку склада.", reply_has=(r"шаблон",),
           forbid=({"type": "make_document"},), allowed=("note", "order"), extra={"document_templates": DOC_TEMPLATES}),
+        # --- the letters of the company box: what came, the answer by the person's words, «ок», «не моё»
+        S("mail-what", "Почта", "«Что пришло на почту?» — по письмам, без выдумок", "accountant",
+          "Что мне пришло на почту?", reply_has=(r"Монолит", r"ВентСнаб|48"), allowed=("note",), extra=mail_mine),
+        S("mail-reply", "Почта", "«Ответь им, что…» — черновик ответа на проверку, не отправка", "accountant",
+          "Ответь Монолиту, что куб М300 с доставкой — 185 рублей, привезём за день.",
+          actions=({"type": "mail_reply", "mail_id": 91, "points": has(r"185", "185 рублей за куб с доставкой")},),
+          forbid=({"type": "confirm_mail_reply"},), reply_not=(r"(отправил|ушло|ушёл|ушел)(?![а-яё])",), extra=mail_mine),
+        S("mail-confirm", "Почта", "«Ок» на черновик ответа — отправить", "accountant", "Ок, отправляй.",
+          actions=({"type": "confirm_mail_reply", "draft_id": 95, "ok": True},), forbid=({"type": "mail_reply"},),
+          history=mail_talk, extra={**mail_mine, "mail_draft": draft_95}),
+        S("mail-fix", "Почта", "Поправили черновик — новый черновик, а не отправка", "accountant",
+          "Добавь, что доставка завтра до обеда.", history=mail_talk,
+          actions=({"type": "mail_reply", "mail_id": 91, "points": has(r"завтра", "доставка завтра до обеда")},),
+          allowed=("note", "confirm_mail_reply"), forbid=({"type": "confirm_mail_reply", "ok": True},),
+          extra={**mail_mine, "mail_draft": draft_95}),
+        S("mail-not-mine", "Почта", "«Не моё» о письме — вернуть руководителю", "accountant",
+          "Счёт от ВентСнаба не ко мне, этим занимается снабжение.",
+          actions=({"type": "mail_pass", "mail_id": 92, "to": None},), extra=mail_mine),
+        S("mail-pass", "Почта", "Директор решает, кому передать письмо", "director",
+          "Письмо от «Кровля-Сервис» передай Борису.", actions=({"type": "mail_pass", "mail_id": 93, "to": 2},),
+          extra={"mail_letters": [letter_roof], "mail_can_reply": True}),
+        S("mail-no-smtp", "Почта", "Отправка не настроена — сказать, не обещать ответ", "accountant",
+          "Ответь Монолиту, что куб — 185 рублей.", forbid=({"type": "mail_reply"},),
+          reply_has=(r"не (могу|получится|настро|выйдет)|нельзя|пока нет|из почты|сам[аи]? ответ",),
+          extra={**mail_mine, "mail_can_reply": False}),
         # --- incoming documents: what it is, what does not add up, where it goes by the company's rules
         S("intake-tell", "Входящие документы", "Счёт без слов — сказать, что это и кому уйдёт по правилу", "director",
           "(прислал файл «счёт_15_Монолит.pdf»)", reply_has=(r"15", r"Монолит", r"Анн"),
