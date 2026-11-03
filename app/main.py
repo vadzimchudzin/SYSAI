@@ -25,13 +25,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
-               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel, gdrive,
                storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (AgentCheckCase, Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (AgentCheckCase, Artifact, BitrixLink, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1741,6 +1741,8 @@ def _document_sender(d) -> str:
         return f"{d.employee.name} (по шаблону)" if d.employee else "по шаблону"
     if d.chat_id == "mail":  # an attachment of a letter (mail.py)
         return "почта" + (": " + d.caption.split(":", 1)[0].replace("Письмо от ", "") if d.caption else "")
+    if d.chat_id == "drive":  # put into «Входящие» of the company folder (gdrive.py)
+        return "Google Drive"
     return d.employee.name if d.employee else d.chat_id
 
 
@@ -2082,6 +2084,146 @@ def tables_export(request: Request):
         body = tables.export(s, f)
     return Response(body, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{tables.filename(f)}"'})
+
+
+# ----------------------------------------------------------------------------- integrations (bitrix_sync.py, gdrive.py, №28)
+INTEGRATION_MESSAGES = {"saved": "Сохранено.", "forgot": "Отключено.", "people": "Сопоставление сохранено."}
+
+
+def _integrations_back(section: str, msg: str = "", error: str = "") -> RedirectResponse:
+    query = ("msg=" + quote(INTEGRATION_MESSAGES.get(msg, msg)[:300])) if msg else ("error=" + quote(error[:300]))
+    return RedirectResponse(f"/integrations?{query}#{section}", 303)
+
+
+@app.get("/integrations", response_class=HTMLResponse)
+def integrations_view(request: Request, msg: str = "", error: str = ""):
+    """«Интеграции»: Битрикс24 (tasks, clients) and Google Drive (documents, templates)."""
+    guard_admin(request)
+    st = {k: settings_store.get(k) for k in bitrix_sync.TOGGLES + gdrive.TOGGLES}
+    return page(request, "integrations.html", s=st, bx=bitrix_sync.status(), gd=gdrive.status(), msg=msg[:300],
+                error=error[:300])
+
+
+@app.post("/integrations/bitrix")
+async def integrations_bitrix_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    url = str(f.get("webhook") or "").strip().rstrip("/")
+    if url:
+        if not re.match(r"https://[^\s/]+/rest/\d+/[A-Za-z0-9]+$", url):
+            return _integrations_back("bitrix", error="Адрес вебхука выглядит так: https://портал.bitrix24.by/rest/1/xxxxxxxx/")
+        settings_store.set_many({"bitrix_webhook_url": url})
+    if f.get("present") == "1":
+        bitrix_sync.switched({k: bool(f.get(k)) for k in bitrix_sync.TOGGLES})
+    if url:
+        try:
+            return _integrations_back("bitrix", msg="Битрикс24 подключён: " + bitrix_sync.check())
+        except bitrix.BitrixError as exc:
+            return _integrations_back("bitrix", error=f"Вебхук сохранён, но портал ответил: {exc}")
+    return _integrations_back("bitrix", msg="saved")
+
+
+@app.post("/integrations/bitrix/check")
+def integrations_bitrix_check(request: Request):
+    guard_admin(request)
+    try:
+        return _integrations_back("bitrix", msg="Битрикс24 отвечает: " + bitrix_sync.check())
+    except bitrix.BitrixError as exc:
+        return _integrations_back("bitrix", error=str(exc))
+
+
+@app.post("/integrations/bitrix/sync")
+def integrations_bitrix_sync(request: Request):
+    guard_admin(request)
+    try:
+        state = bitrix_sync.sync()
+    except bitrix.BitrixError as exc:
+        return _integrations_back("bitrix", error=str(exc))
+    if state.get("ok") is False:
+        return _integrations_back("bitrix", error=state.get("error") or "сверка не удалась")
+    return _integrations_back("bitrix", msg="Сверено: " + (state.get("summary") or "изменений нет") + ".")
+
+
+@app.post("/integrations/bitrix/match")
+def integrations_bitrix_match(request: Request):
+    guard_admin(request)
+    try:
+        users = bitrix_sync.refresh_users()
+    except bitrix.BitrixError as exc:
+        return _integrations_back("bitrix", error=str(exc))
+    matched = bitrix_sync.match_employees(users)
+    text = (f"Пользователей портала: {len(users)}. " +
+            (f"ID подставлен: {', '.join(matched[:15])}." if matched else "Новых совпадений нет — выберите вручную."))
+    return _integrations_back("bitrix", msg=text)
+
+
+@app.post("/integrations/bitrix/people")
+async def integrations_bitrix_people(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    pairs = {int(k[4:]): str(v) for k, v in f.items() if k.startswith("emp_") and k[4:].isdigit()}
+    bitrix_sync.save_matching(pairs)
+    return _integrations_back("bitrix", msg="people")
+
+
+@app.post("/integrations/bitrix/forget")
+def integrations_bitrix_forget(request: Request):
+    guard_admin(request)
+    settings_store.set_many({"bitrix_webhook_url": "", "bitrix_state": {}, "bitrix_users": [],
+                             **{k: False for k in bitrix_sync.TOGGLES}})
+    with SessionLocal() as s:
+        s.query(BitrixLink).delete()
+        s.commit()
+    return _integrations_back("bitrix", msg="forgot")
+
+
+@app.post("/integrations/drive")
+async def integrations_drive_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        gdrive.save(str(f.get("key") or ""), str(f.get("folder") or ""), by=_who(request))
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=str(exc))
+    if f.get("present") == "1":
+        gdrive.switched({k: bool(f.get(k)) for k in gdrive.TOGGLES})
+    try:
+        state = gdrive.check()
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=f"Сохранено, но папка не открылась: {exc}")
+    text = f"Google Drive подключён: папка «{state.get('root_name')}»." + (
+        " Класть файлы в неё нельзя — см. ниже." if state.get("upload_blocked") else "")
+    return _integrations_back("drive", msg=text)
+
+
+@app.post("/integrations/drive/check")
+def integrations_drive_check(request: Request):
+    guard_admin(request)
+    try:
+        state = gdrive.check()
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=str(exc))
+    return _integrations_back("drive", msg=f"Папка «{state.get('root_name')}» открывается." + (
+        " Класть файлы нельзя — см. ниже." if state.get("upload_blocked") else " Читать и класть файлы можно."))
+
+
+@app.post("/integrations/drive/sync")
+def integrations_drive_sync(request: Request):
+    guard_admin(request)
+    try:
+        state = gdrive.sync()
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=str(exc))
+    if state.get("ok") is False:
+        return _integrations_back("drive", error=state.get("error") or "сверка не удалась")
+    return _integrations_back("drive", msg="Сверено: " + (state.get("summary") or "изменений нет") + ".")
+
+
+@app.post("/integrations/drive/forget")
+def integrations_drive_forget(request: Request):
+    guard_admin(request)
+    gdrive.forget()
+    return _integrations_back("drive", msg="forgot")
 
 
 DOC_TEMPLATE_MESSAGES = {"saved": "Шаблон сохранён: ИИ-сотрудник видит его со следующего сообщения.",

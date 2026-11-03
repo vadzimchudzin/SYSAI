@@ -67,6 +67,18 @@ DEFAULTS = {
     "calendar_salt": "",             # part of every address; «Сменить ссылки» replaces it
     "calendar_ics_url": "",          # the secret ICS address of the company calendar, sealed; never sent to the browser
     "calendar_state": {},            # the last reading: when, ok, error, how many meetings
+    # Битрикс24 и Google Drive (bitrix_sync.py, gdrive.py, №28); «Ставить задачи в Битрикс24» is bitrix_enabled below
+    "bitrix_sync_tasks": False,      # the status, the deadline, the title and the person of linked tasks: both ways
+    "bitrix_import_tasks": False,    # new tasks set in Bitrix24 for our people come here
+    "bitrix_sync_contacts": False,   # companies (with their contact persons) of the CRM ↔ the cards of clients
+    "bitrix_state": {},              # the last sync: when, ok, error, what was done, the change marks of each list
+    "bitrix_users": [],              # the users of the portal [{"id", "name", "email", "position"}] for the matching
+    "gdrive_key": "",                # the JSON key of the service account, sealed; never sent to the browser
+    "gdrive_folder": "",             # the id of the company folder (shared with the service account as an editor)
+    "gdrive_inbox": True,            # files put into «Входящие» come to «Документы»
+    "gdrive_upload": True,           # the documents of SYSAI go to «Документы» by month (not the confidential ones)
+    "gdrive_templates": True,        # «Шаблоны» ↔ «Документы по шаблону», both ways
+    "gdrive_state": {},              # the folders, the last sync, errors; upload_blocked when Google gives no space
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
     "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents
@@ -175,7 +187,7 @@ def set_many(values: dict):
 SECRET_KEYS = ("openrouter_api_key", "telegram_bot_token", "bitrix_webhook_url", "ticnote_appkey")
 # Never sent to the browser (sealed Telegram account data).
 HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me",
-               "mail_password", "calendar_ics_url", "calendar_salt")
+               "mail_password", "calendar_ics_url", "calendar_salt", "gdrive_key")
 
 
 def mask(v: str) -> str:

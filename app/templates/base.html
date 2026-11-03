@@ -20,6 +20,7 @@
     <a class="nav {{ 'on' if path.startswith('/reminders') }}" href="/reminders">{{ icon('bell') }} Напоминания</a>
     <a class="nav {{ 'on' if path.startswith('/calendar') }}" href="/calendar">{{ icon('calendar') }} Календарь</a>
     <a class="nav {{ 'on' if path.startswith('/tables') }}" href="/tables">{{ icon('table') }} Таблицы</a>
+    <a class="nav {{ 'on' if path.startswith('/integrations') }}" href="/integrations">{{ icon('link') }} Интеграции</a>
     <a class="nav {{ 'on' if path.startswith('/admin/users') }}" href="/admin/users">{{ icon('key') }} Пользователи{% if pending_users %} <span class="pill red">{{ pending_users }}</span>{% endif %}</a>
     <a class="nav {{ 'on' if path.startswith('/settings') }}" href="/settings">{{ icon('gear') }} Настройки</a>
     {% endif %}
