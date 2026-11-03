@@ -1039,6 +1039,7 @@ class MailMessage(Base):
     checked = Column(JSON, nullable=True)                          # the panel: {"ok", "kind", "entity_id", "was", "by", "at"}
     route = Column(JSON, nullable=True)                            # who it went to and the tasks it gave (№24)
     draft = Column(JSON, nullable=True)                            # the answer being prepared (№25)
+    place = Column(JSON, nullable=True)                            # the folder of the box it was moved into (mail_folders.py)
     status = Column(String(12), nullable=False, default="new", index=True)  # new | sorted | routed | answered | done | ignored
     created_at = Column(DateTime(timezone=True), default=now, index=True)
 
@@ -1216,6 +1217,7 @@ def init_db():
     _add_column_if_missing("tasks", "routing_note", "routing_note VARCHAR(500) DEFAULT ''")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
     _add_column_if_missing("recordings", "device_label", "device_label VARCHAR(120) NOT NULL DEFAULT ''")
+    _add_column_if_missing("mail_messages", "place", "place JSON")
     _add_column_if_missing("employees", "department", "department VARCHAR(200) DEFAULT ''")
     _add_column_if_missing("employees", "competencies", "competencies TEXT DEFAULT ''")
     _add_column_if_missing("employees", "responsibilities", "responsibilities TEXT DEFAULT ''")
