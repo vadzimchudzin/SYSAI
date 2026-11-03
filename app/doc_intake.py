@@ -42,7 +42,8 @@ ROUTE_RU = {"planned": "будет передан после ответа", "sen
             "none": "правила нет", "no_contact": "у получателя нет Telegram", "by_person": "передан по просьбе в чате",
             "in_case": "документ по делу — его передаёт дело", "sensitive": "конфиденциальный — по правилам не пересылается",
             "late": "передан (разобран после ответа)", "failed": "передать не удалось", "off": "разбор выключен",
-            "ready": "готов к передаче по правилам (кнопка «Передать по правилам»)"}
+            "ready": "готов к передаче по правилам (кнопка «Передать по правилам»)",
+            "in_mail": "вложение письма — передаётся вместе с письмом (страница «Почта»)"}
 WAIT_SECONDS = 45     # the answer to the person waits this long for the reading and the analysis of their files
 LATE_SECONDS = 120    # a plan nobody carried out after the answer is carried out by the background loop
 FRESH_HOURS = 48      # only files this fresh are analyzed and routed by the background loop
@@ -610,7 +611,7 @@ def analyze(document_id: int, force: bool = False) -> str:
             facts = clean(raw, text)
             facts["problems"] = problems(facts)
             facts["at"], facts["attempts"] = now().isoformat(), int(before.get("attempts") or 0) + 1
-            for key in ("held_by", "told", "route", "working_since"):
+            for key in ("held_by", "told", "route", "working_since", "mail_id"):
                 if key in before:
                     facts[key] = before[key]
             route = facts.get("route") or {}
@@ -792,6 +793,8 @@ def carry_out(document_id: int, by: str = "", by_person: bool = False, late: boo
             transferred = s.query(DocumentTransfer.id).filter_by(document_id=doc.id).first() is not None
             if by_person or doc.case_id is not None or transferred:
                 route["status"] = "by_person" if (by_person or transferred) else "in_case"
+            elif facts.get("mail_id") and not by:
+                route["status"] = "in_mail"  # the letter goes to the person with its attachments (mail.py)
             elif doc.sensitive:
                 route["status"] = "sensitive"
             person = s.get(Employee, route.get("to_id")) if route.get("to_id") else None

@@ -29,7 +29,7 @@
   {% for k, label in source_types.items() %}{% if e.links[k] %}<h3>{{ label }} ({{ e.links[k]|length }})</h3>
     {% for l in e.links[k][:30] %}<div class="ent-link small">{% if l.url %}<a href="{{ l.url }}">{{ l.title }}</a>{% else %}<b>{{ l.title }}</b>{% endif %}{% if l.who %} · {{ l.who }}{% endif %}{% if l.date %} · {{ l.date.strftime('%d.%m.%Y') }}{% endif %}{% if l.line %} · {{ l.line }}{% endif %}
       {% if l.quote %}<div class="muted">«{{ l.quote }}»</div>{% endif %}</div>{% endfor %}{% endif %}{% endfor %}
-  {% if not (e.links.meeting or e.links.task or e.links.document or e.links.message) %}<p class="muted small">Пока нигде.</p>{% endif %}
+  {% if not (e.links.meeting or e.links.task or e.links.document or e.links.message or e.links.mail) %}<p class="muted small">Пока нигде.</p>{% endif %}
 </section>
 {% if not e.merged_into %}<section class="card"><h2>Объединить с дублем</h2>
   <p class="small muted">Всё из выбранной карточки (написания, факты, упоминания) перейдёт сюда, она сама останется ссылкой на эту.</p>

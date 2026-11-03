@@ -1,0 +1,46 @@
+{% extends "base.html" %}{% block title %}{{ m.subject }} — Почта — SYSAI{% endblock %}
+{% block head %}<style>.mail-text{white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.5;max-height:640px;overflow:auto}.mail-meta td{padding:2px 10px 2px 0;vertical-align:top}.mail-tags .pill{margin:0 4px 2px 0}.mail-form .row{gap:8px;flex-wrap:wrap;align-items:flex-end}.mail-ok{color:#2e7d32}</style>{% endblock %}
+{% block body %}
+<p class="small"><a href="/mail">← Почта</a></p>
+<h1>{{ m.subject }}</h1>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сделано: {{ error }}</div>{% endif %}
+<section class="card">
+  <table class="mail-meta small"><tbody>
+    <tr><td class="muted">От</td><td>{{ m.from }}{% if m.addr and m.addr != m.from %} &lt;{{ m.addr }}&gt;{% endif %}{% if m.reply_to and m.reply_to != m.addr %} · ответ на {{ m.reply_to }}{% endif %}</td></tr>
+    {% if m.to %}<tr><td class="muted">Кому</td><td>{{ m.to }}</td></tr>{% endif %}
+    {% if m.cc %}<tr><td class="muted">Копия</td><td>{{ m.cc }}</td></tr>{% endif %}
+    <tr><td class="muted">Когда</td><td>{{ m.at.strftime('%d.%m.%Y %H:%M') if m.at }} · ящик {{ m.mailbox }}, папка «{{ m.folder }}»</td></tr>
+    {% if m.signals %}<tr><td class="muted">Признаки</td><td>{{ m.signals|join(', ') }}</td></tr>{% endif %}
+    {% if m.files %}<tr><td class="muted">Вложения</td><td>{% for f in m.files %}<div>{% if f.document_id %}<a href="/documents/{{ f.document_id }}/view">📎 {{ f.filename }}</a>{% else %}📎 {{ f.filename }}{% endif %} <span class="muted">{{ (f.size / 1024)|round(1) }} КБ{% if f.what %} · {{ f.what }}{% elif f.skipped %} · {{ f.skipped }}{% elif f.read == 'pending' %} · читается…{% endif %}</span></div>{% endfor %}</td></tr>{% endif %}
+  </tbody></table>
+</section>
+<section class="card" id="sort"><h2>Сортировка</h2>
+  {% if m.kind %}
+  <p><b>{{ m.kind_name }}</b>{% if m.sort.why %} — {{ m.sort.why }}{% endif %}{% if m.sort.quote %} <span class="muted">(«{{ m.sort.quote }}»)</span>{% endif %}{% if m.sort.by == 'rules' %} <span class="pill gray">без модели — по заголовкам</span>{% endif %}</p>
+  {% if m.summary %}<p class="small">{{ m.summary }}{% if m.sort.ask %} <b>Нужно:</b> {{ m.sort.ask }}{% endif %}</p>{% endif %}
+  <p class="small">Клиент / объект: {% if m.entity %}<a href="/entities/{{ m.entity.id }}">{{ m.entity.name }}</a>{% if m.sort.entity_why %} <span class="muted">— {{ m.sort.entity_why }}</span>{% endif %}{% else %}<span class="muted">не определён</span>{% endif %}<br>
+    Дело / задача: {% if m.link %}<a href="{{ m.link.url }}">{{ m.link.title }}</a>{% if m.sort.link_why %} <span class="muted">— {{ m.sort.link_why }}</span>{% endif %}{% else %}<span class="muted">нет</span>{% endif %}</p>
+  {% if m.labels %}<p class="mail-tags">{% for l in m.labels %}<span class="pill {{ 'red' if l == 'срочно' else ('amber' if l == 'ждёт ответа' else 'gray') }}">{{ l }}</span>{% endfor %}</p>{% endif %}
+  {% if m.deadlines %}<p class="small">Сроки из письма: {% for d in m.deadlines %}{{ d.what }} — <b>{{ d.date[8:10] }}.{{ d.date[5:7] }}.{{ d.date[0:4] }}</b> <span class="muted">(«{{ d.quote }}»)</span>{{ '; ' if not loop.last }}{% endfor %}</p>{% endif %}
+  {% if m.sort.box %}<p class="small muted">Метки в ящике: {{ 'поставлены' if m.sort.box == 'ok' else m.sort.box }}</p>{% endif %}
+  {% if m.checked == 'ok' %}<p class="small mail-ok">✓ Проверено: верно{% if m.checked_info.by %} ({{ m.checked_info.by }}){% endif %}</p>
+  {% elif m.checked == 'fixed' %}<p class="small">Поправлено вручную{% if m.was_kind %}: было «{{ m.was_kind }}»{% endif %}{% if m.checked_info.by %} ({{ m.checked_info.by }}){% endif %}</p>{% endif %}
+  <form method="post" action="/mail/{{ m.id }}/check" class="mail-form">
+    <div class="row">{% if m.checked != 'ok' %}<button class="btn sm" name="ok" value="1">Верно</button>{% endif %}
+      <label class="f">Тип <select name="kind">{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if k == m.kind }}>{{ v.name }}</option>{% endfor %}</select></label>
+      <label class="f">Клиент / объект <select name="entity_id"><option value="none" {{ 'selected' if not m.entity }}>— нет —</option>{% for c in cards %}<option value="{{ c.id }}" {{ 'selected' if m.entity and m.entity.id == c.id }}>{{ c.name }}</option>{% endfor %}</select></label>
+      <button class="btn sm ghost" name="ok" value="0">Исправить</button></div>
+  </form>
+  {% elif m.sort_status == 'skipped' %}<p class="muted small">Письмо не разбирается{% if m.sort.error %}: {{ m.sort.error }}{% endif %}.</p>
+  {% else %}<p class="muted small">Разбирается{% if m.sort.error %} (последняя попытка: {{ m.sort.error }}){% endif %}…</p>{% endif %}
+  <form method="post" action="/mail/{{ m.id }}/sort" style="margin-top:8px"><button class="btn sm ghost">Разобрать заново</button></form>
+</section>
+<section class="card"><h2>Текст письма</h2>
+  {% if m.fresh %}<div class="mail-text">{{ m.fresh }}</div>{% else %}<p class="muted small">Текста нет.</p>{% endif %}
+  {% if m.quoted %}<details style="margin-top:8px"><summary class="small">Ранее в переписке</summary><div class="mail-text muted">{{ m.quoted }}</div></details>{% endif %}
+</section>
+{% if m.thread %}<section class="card"><h2>Переписка</h2>
+  {% for t in m.thread %}<div class="small">{{ t.at.strftime('%d.%m %H:%M') if t.at }} · {% if t.direction == 'out' %}мы ответили{% else %}{{ t.from }}{% endif %} · <a href="/mail/{{ t.id }}">{{ t.subject or '(без темы)' }}</a></div>{% endfor %}
+</section>{% endif %}
+{% endblock %}

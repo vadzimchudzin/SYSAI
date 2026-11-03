@@ -45,6 +45,17 @@ DEFAULTS = {
     "speaker_name_threshold": 0.75,  # …surely enough (speakers.py); below it «Кто это?» asks with candidates
     "company_profile": "",           # what the company does, clients, products, rules everyone should know (memory)
     "doc_intake": True,              # incoming files: requisites, sums, deadlines, routing by the rules (doc_intake.py)
+    "mail_enabled": False,           # read the company mailbox (mail.py, №22): IMAP, reading only
+    "mail_service": "",              # mail.PRESETS key: the servers of a known mail service
+    "mail_address": "",              # the box (its login)
+    "mail_password": "",             # app password, sealed (mail.py); never sent to the browser
+    "mail_imap_host": "", "mail_imap_port": 993, "mail_smtp_host": "", "mail_smtp_port": 465,
+    "mail_folder": "INBOX",
+    "mail_poll_minutes": 3,          # how often the box is looked at
+    "mail_history_days": 3,          # the first look takes the letters of these last days
+    "mail_labels": False,            # the type and the labels are put into the box too (needs writing to the box)
+    "mail_kinds": [],                # the types of letters [{"key", "name", "hint"}]; empty = mail.DEFAULT_KINDS
+    "mail_state": {},                # {"uidvalidity", "last_uid", "checked_at", "ok", "error", "new"} (mail.py)
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
     "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents
@@ -152,7 +163,8 @@ def set_many(values: dict):
 
 SECRET_KEYS = ("openrouter_api_key", "telegram_bot_token", "bitrix_webhook_url", "ticnote_appkey")
 # Never sent to the browser (sealed Telegram account data).
-HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me")
+HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me",
+               "mail_password")
 
 
 def mask(v: str) -> str:
