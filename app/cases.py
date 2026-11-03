@@ -27,7 +27,7 @@ import zipfile
 
 from sqlalchemy.exc import IntegrityError
 
-from . import config, llm, settings_store, task_routing, userbot, voice
+from . import config, llm, settings_store, skill_stats, task_routing, userbot, voice
 from .db import (Artifact, Case, CaseEvent, CaseStep, CaseWait, Document, DocumentTransfer, Employee, Note, SessionLocal, Task,
                  now)
 
@@ -917,13 +917,18 @@ def _run_skill(case_id: int, step_id: int) -> bool:
         if action["type"] == "team_report" and a.get("chat"):
             assistant.send_team_report(a["chat"], action.get("scope") or "all")
     except agent_skills.SkillError as exc:
+        skill_stats.record(action["type"], "error", str(exc), a.get("chat") or "")
         raise CaseError(str(exc)) from exc
+    skill_stats.record(action["type"], "done", chat=a.get("chat") or "")
     with SessionLocal() as s:
         step = s.get(CaseStep, step_id)
         step.status, step.finished_at, step.result = "done", now(), {"done": a.get("summary") or ""}
         _event(s, case_id, "skill_done", f"Сделано: {a.get('summary') or action['type']}", step_id)
         s.commit()
     _tell_requester(case_id, "skill_done", {"done": a.get("summary") or ""})
+    if action["type"] == "make_document" and a.get("chat"):
+        from . import doc_templates
+        doc_templates.show_pending(a["chat"], explain=True)  # the approved draft goes to the person who asked
     return True
 
 
@@ -1387,8 +1392,10 @@ def cancel(case_id: int, by: str = "") -> bool:
         _event(s, case_id, "cancelled", f"Дело отменил {by or 'руководитель'}")
         s.commit()
         declined = case.kind == "skill" and not any(x.tool == "run_skill" and x.status == "done" for x in case.steps)
+        skill = next(((x.args or {}).get("skill") for x in case.steps if x.tool == "run_skill"), None)
         title = case.title
     if declined:
+        skill_stats.record(skill or "?", "cancelled", title)
         _tell_requester(case_id, "skill_declined", {"asked": title})
     return True
 

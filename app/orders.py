@@ -9,7 +9,7 @@ correction («нет, до среды») is a new order that replaces this one. 
 import datetime as dt
 import logging
 
-from . import cases
+from . import cases, skill_stats
 from .db import Case, CaseStep, ChatOrder, Employee, Note, SessionLocal, Task, now
 
 log = logging.getLogger("sysai.orders")
@@ -92,6 +92,7 @@ def decide(order_id: int, chat: str, ok: bool, by: str = "") -> dict:
         if not ok:
             order.status, order.decided_at = "cancelled", now()
             s.commit()
+            skill_stats.record("order", "cancelled", "ответ «нет» на пересказ", chat)
             return {"cancelled": True}
     return start(order_id)
 

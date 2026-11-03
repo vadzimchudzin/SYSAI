@@ -7,14 +7,24 @@
   <p class="small muted">Каждое действие — навык: когда его применять, кто может о нём попросить и как его выполняет код. Модель только предлагает действие; код проверяет права и данные и лишь потом выполняет. Для навыков с выбором режима можно включить одобрение: тогда просьбы сотрудников сначала уходят руководителю (ответ «да» в чате или «Одобрить» на странице <a href="/progress?scope=chat">Прогресс</a>), а просьбы самих руководителей выполняются сразу.</p>
   {% if saved %}<div class="people-msg" role="status">Сохранено: режимы навыков и способ вызова действуют со следующего сообщения.</div>{% endif %}
   <form method="post" action="/skills/agent">
+    <input type="hidden" name="present_switches" value="1">
     <div class="table-wrap"><table class="small skill-table">
-      <thead><tr><th>Навык</th><th>Когда</th><th>Кто может</th><th>Режим</th></tr></thead>
+      <thead><tr><th>Вкл.</th><th>Навык</th><th>Когда</th><th>Кто может</th><th>Режим</th><th>За 30 дней</th></tr></thead>
       <tbody>{% for k in builtin %}
-        <tr><td><b>{{ k.title }}</b><br><code class="muted">{{ k.name }}</code></td><td data-label="Когда">{{ k.hint }}</td><td data-label="Кто может">{{ k.who }}</td>
-          <td data-label="Режим">{% if k.modes %}<select name="mode_{{ k.name }}" aria-label="Режим: {{ k.title }}">{% for m, label in modes_ru.items() %}<option value="{{ m }}" {{ 'selected' if k.mode == m }} title="{{ mode_hints[m] }}">{{ label }}</option>{% endfor %}</select>
-          {%- else %}<span class="muted" title="Это само обращение к руководителю или его решение — одобрять нечего">всегда сразу</span>{% endif %}</td></tr>
+        <tr class="{{ '' if k.on else 'muted' }}"><td data-label="Включён"><input type="checkbox" name="on_{{ k.name }}" {{ 'checked' if k.on }} aria-label="Включить: {{ k.title }}"></td>
+          <td><b>{{ k.title }}</b><br><code class="muted">{{ k.name }}</code></td><td data-label="Когда">{{ k.hint }}</td>
+          <td data-label="Кто может"><select name="who_{{ k.name }}" aria-label="Кто может: {{ k.title }}">
+            <option value="">{{ k.who }}</option>
+            {% for x in k.limits %}<option value="{{ x }}" {{ 'selected' if k.limit == x }}>{{ limit_ru[x] }}</option>{% endfor %}
+          </select>{% if k.limit == 'director' and not director_set %}<br><span class="warn">директор не указан в Настройках — навык никому не доступен</span>{% endif %}</td>
+          <td data-label="Режим">{% if k.modes %}<select name="mode_{{ k.mode_name }}" aria-label="Режим: {{ k.title }}">{% for m, label in modes_ru.items() %}<option value="{{ m }}" {{ 'selected' if k.mode == m }} title="{{ mode_hints[m] }}">{{ label }}</option>{% endfor %}</select>
+          {%- else %}<span class="muted" title="Это само обращение к руководителю или его решение — одобрять нечего">всегда сразу</span>{% endif %}</td>
+          <td data-label="За 30 дней" class="skill-stats">{% set st = k.stats %}
+            {%- if st %}сработал {{ st.done or 0 }}{% if st.approval or st.suggested %} · на одобрение {{ (st.approval or 0) + (st.suggested or 0) }}{% endif %} · отмен {{ st.cancelled or 0 }} · <span class="{{ 'warn' if st.error }}" title="{{ st.last_error or '' }}">ошибок {{ st.error or 0 }}</span>
+            {%- else %}<span class="muted">не применялся</span>{% endif %}</td></tr>
       {% endfor %}</tbody>
     </table></div>
+    <p class="small muted">Снятая галочка выключает навык для всех, директора тоже: ассистент мягко ответит, что этого сейчас не делает. «Кто может» только сужает круг (например, оставить отчёт по команде одному директору). Для отдельного человека навыки выключаются в его карточке. «Ошибок» — сколько раз навык не удалось выполнить (наведите, чтобы увидеть последнюю причину); «отмен» — просьбы, которые руководитель отклонил, и поручения, на которые ответили «нет».</p>
     <div class="skill-way">
       <label class="f">Как модель просит действия
         <select name="transport">{% for t, label in transports.items() %}<option value="{{ t }}" {{ 'selected' if transport == t }}>{{ label }}{{ ' (вызов функций OpenRouter)' if t == 'tools' else ' (как раньше)' }}</option>{% endfor %}</select></label>

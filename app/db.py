@@ -879,6 +879,59 @@ class Skill(Base):
     updated_by = Column(String(120), default="")
 
 
+class DocTemplate(Base):
+    """A DOCX template of the company (a letter, an act, a memo) with fields {{…}}: the assistant fills it on request
+    (doc_templates.py). fields: [{"name", "hint"}] in the order of the document; output: docx | pdf | both."""
+    __tablename__ = "doc_templates"
+    id = Column(Integer, primary_key=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, default="")  # when to use it, for the assistant
+    filename = Column(String(255), default="")
+    data = Column(LargeBinary, nullable=False)
+    fields = Column(JSON, nullable=False, default=list)
+    output = Column(String(8), nullable=False, default="docx")
+    active = Column(Boolean, nullable=False, default=True)
+    uses = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+    updated_by = Column(String(120), default="")
+
+
+class DocDraft(Base):
+    """A document filled from a template for a person who asked: the draft goes to them first; after their «ок» it is
+    kept in the document library and sent to send_to, if they named somebody."""
+    __tablename__ = "doc_drafts"
+    id = Column(Integer, primary_key=True)
+    template_id = Column(Integer, ForeignKey("doc_templates.id", ondelete="SET NULL"), nullable=True, index=True)
+    chat_id = Column(String(40), nullable=False, index=True)
+    requested_by = Column(String(120), default="")
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    title = Column(String(300), default="")
+    values = Column(JSON, nullable=False, default=dict)
+    send_to_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    # draft | replaced | cancelled | approved (kept, not sent yet) | sent | kept (approved, nobody to send to)
+    status = Column(String(12), nullable=False, default="draft", index=True)
+    docx = Column(LargeBinary, nullable=True)
+    pdf = Column(LargeBinary, nullable=True)
+    shown_at = Column(DateTime(timezone=True), nullable=True)   # the draft file went to the person who asked
+    document_ids = Column(JSON, nullable=True)                  # the library entries after «ок»
+    error = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class SkillRun(Base):
+    """One use of a built-in skill of the AI employee (the Skills page counts them): done, sent for approval or as a
+    suggestion, cancelled (the request declined, the order answered «нет») or failed."""
+    __tablename__ = "skill_runs"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(40), nullable=False, index=True)
+    outcome = Column(String(12), nullable=False)  # done | approval | suggested | cancelled | error
+    detail = Column(Text, default="")
+    chat = Column(String(64), default="")
+    created_at = Column(DateTime(timezone=True), default=now, index=True)
+
+
 class MemoryVector(Base):
     """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
     __tablename__ = "memory_vectors"

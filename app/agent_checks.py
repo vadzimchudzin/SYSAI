@@ -107,6 +107,15 @@ ROLE_RU = {"employee": "сотрудник", "accountant": "сотрудник",
            "director": "директор", "reviewer_dm": "проверяющий при директоре", "head": "руководитель отдела",
            "full_noremind": "полный доступ без напоминаний"}
 REFER_TO = [{"name": "Ирина Соколова", "role": "проверяющий"}]  # whom to go to with what is beyond the rights
+GUARANTEE = {"id": 31, "title": "Гарантийное письмо об оплате", "when": "Письмо заказчику или поставщику: гарантируем "
+             "оплату суммы до даты", "output": "DOCX и PDF",
+             "fields": [{"name": "Дата", "hint": "дата письма; сегодня, если не сказали"},
+                        {"name": "Получатель", "hint": "организация, которой пишем"},
+                        {"name": "Сумма", "hint": "сумма в рублях, цифрами"},
+                        {"name": "Срок оплаты", "hint": "до какого числа оплатим"}]}
+MEMO = {"id": 32, "title": "Служебная записка", "when": "Внутренняя записка директору от сотрудника", "output": "DOCX",
+        "fields": [{"name": "От кого"}, {"name": "Тема"}, {"name": "Текст", "hint": "суть записки, 2–5 предложений"}]}
+DOC_TEMPLATES = [GUARANTEE, MEMO]
 
 
 def _person_row(employee_id: int) -> dict:
@@ -141,7 +150,8 @@ def build_ctx(role: str, *, history=(), talking=None, voice=False, voice_problem
     off = tuple(flags.get("skills_off") or ())
     person = agent_skills.Person(employee=employee, reviewer=reviewer, full=full and not (director_mode and not director),
                                  director=director, scope=flags.get("scope", ""), team=frozenset(flags.get("team") or ()),
-                                 skills=frozenset(n for n in agent_skills.SKILLS if n not in off) if off else None)
+                                 skills=frozenset(n for n in agent_skills.SKILLS if n not in off) if off else None,
+                                 switches=False)  # the test company: the Skills page switches do not apply
     talking = bool(history) if talking is None else talking
     ctx = {"today": deadlines.today().isoformat(), "now": reminders.now_view(), "sender_name": flags["sender"],
            "voice_message": bool(voice), "voice_problem": voice_problem,
@@ -228,6 +238,20 @@ def _same(expected, value) -> bool:
 
 def _matches(spec: dict, action: dict) -> bool:
     return action.get("type") == spec["type"] and all(_same(v, action.get(k)) for k, v in spec.items() if k != "type")
+
+
+def filled(template: dict, expected: dict, example: dict):
+    """The values of make_document: every field of the template filled, the named ones as expected. `.example` is what
+    a perfect model would give (the tests check that it passes the real checks)."""
+    names = [f["name"] for f in template["fields"]]
+
+    def check(values) -> bool:
+        if not isinstance(values, dict):
+            return False
+        values = {" ".join(str(k).split()): v for k, v in values.items()}
+        return all(nonempty(values.get(n)) for n in names) and all(_same(v, values.get(k)) for k, v in expected.items())
+    check.example = {n: example.get(n, "по данным разговора") for n in names}
+    return check
 
 
 def _show(spec: dict) -> str:
@@ -372,6 +396,13 @@ def scenarios() -> list:
                 "status_ru": "ждёт одобрения плана",
                 "plan": "попросить документ у Анна Петрова; дождаться документа от Анна Петрова; доложить результат",
                 "note": None}]
+    guarantee_values = {"Дата": deadlines.today().strftime("%d.%m.%Y"), "Получатель": "ООО «Монолит»",
+                        "Сумма": "120 000", "Срок оплаты": d10.strftime("%d.%m.%Y")}
+    doc_talk = (("человек", f"Сделай гарантийное письмо для ООО «Монолит»: оплатим 120 000 рублей до {_ru(d10)}."),
+                ("ты", f"Готово, ниже черновик: гарантийное письмо ООО «Монолит» на 120 000 ₽ с оплатой до {_ru(d10)}. "
+                       "Если всё верно, ответь «ок» — сохраню; если нет — напиши, что поправить."))
+    draft_77 = {"id": 77, "template": GUARANTEE["title"], "template_id": 31, "title": "Гарантийное письмо ООО Монолит",
+                "values": guarantee_values, "send_to": None, "shown": True}
     viktor_case = _case(52, "Спросить Виктора о сроках доставки арматуры", "Виктор Иванов", "ответ", "вчера 15:10",
                         [("вчера 15:10", "Спросил Виктора о сроках доставки"), ("сегодня 09:05", "Напомнил Виктору")],
                         "ты поручил это ассистенту")
@@ -688,6 +719,33 @@ def scenarios() -> list:
           extra={"silence_to_decide": [{"case_id": 54, "title": "Спросить Сергея, когда заменят щит в бытовке",
                                         "person": "Сергей Волков", "expects": "ответа", "silent_hours": 26,
                                         "reminders": 2}]}),
+        # --- documents from the company's templates: fill, ask for what is missing, the draft, «ок», a correction
+        S("doc-make", "Документы по шаблону", "Гарантийное письмо по шаблону — черновик на проверку", "director",
+          f"Сделай гарантийное письмо для ООО «Монолит»: оплатим 120 000 рублей до {_ru(d10)}.",
+          actions=({"type": "make_document", "template_id": 31,
+                    "values": filled(GUARANTEE, {"Получатель": has(r"Монолит"), "Сумма": has(r"120"),
+                                                 "Срок оплаты": has(rf"{d10.day}")}, guarantee_values)},),
+          forbid=({"type": "confirm_document"},), extra={"document_templates": DOC_TEMPLATES}),
+        S("doc-missing", "Документы по шаблону", "Не хватает суммы и срока — спросить, а не выдумывать", "director",
+          "Подготовь гарантийное письмо для «Монолита».", question=True, forbid=({"type": "make_document"},),
+          extra={"document_templates": DOC_TEMPLATES}),
+        S("doc-send", "Документы по шаблону", "После проверки отправить документ сотруднику", "director",
+          f"Сделай гарантийное письмо «Монолиту» на 120 000 до {_ru(d10)} и после проверки отправь его Анне.",
+          actions=({"type": "make_document", "template_id": 31, "send_to": 1,
+                    "values": filled(GUARANTEE, {"Сумма": has(r"120")}, guarantee_values)},),
+          extra={"document_templates": DOC_TEMPLATES}),
+        S("doc-confirm", "Документы по шаблону", "«Ок» на черновик — документ сохраняется", "director", "Ок, всё верно.",
+          actions=({"type": "confirm_document", "draft_id": 77, "ok": True},), forbid=({"type": "make_document"},),
+          history=doc_talk, extra={"document_templates": DOC_TEMPLATES, "document_draft": draft_77}),
+        S("doc-fix", "Документы по шаблону", "Поправили сумму — новый черновик, а не «ок»", "director",
+          "Сумму поправь на 130 000.", history=doc_talk,
+          actions=({"type": "make_document", "template_id": 31,
+                    "values": filled(GUARANTEE, {"Сумма": has(r"130")}, {**guarantee_values, "Сумма": "130 000"})},),
+          allowed=("note", "confirm_document"), forbid=({"type": "confirm_document", "ok": True},),
+          extra={"document_templates": DOC_TEMPLATES, "document_draft": draft_77}),
+        S("doc-none", "Документы по шаблону", "Шаблона нет — честно сказать, не обещать документ", "director",
+          "Сделай договор подряда с ИП Козловым на отделку склада.", reply_has=(r"шаблон",),
+          forbid=({"type": "make_document"},), allowed=("note", "order"), extra={"document_templates": DOC_TEMPLATES}),
     ]
 
 
