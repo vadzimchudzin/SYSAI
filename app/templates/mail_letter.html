@@ -36,6 +36,34 @@
   {% else %}<p class="muted small">Разбирается{% if m.sort.error %} (последняя попытка: {{ m.sort.error }}){% endif %}…</p>{% endif %}
   <form method="post" action="/mail/{{ m.id }}/sort" style="margin-top:8px"><button class="btn sm ghost">Разобрать заново</button></form>
 </section>
+<section class="card" id="route"><h2>Кому передано</h2>
+  {% set r = m.route_info %}
+  {% if not r %}<p class="muted small">{% if m.kind %}Пока никому{% if m.sort_status == 'done' %} — решается{% endif %}.{% else %}Сначала письмо разбирается.{% endif %}</p>
+  {% else %}
+  <p>{% if r.status == 'sent' %}<b>→ {{ r.to }}</b>{% if r.how %} · {{ r.how }}{% endif %}{% else %}<span class="pill {{ 'amber' if r.status in ('unclear', 'no_contact', 'failed') else 'gray' }}">{{ r.status_ru }}</span>{% if r.to %} {{ r.to }}{% endif %}{% endif %}
+    {% if r.rule %} <span class="muted small">(правило: {{ r.rule }})</span>{% endif %}{% if r.by %} <span class="muted small">— {{ r.by }}</span>{% endif %}</p>
+  {% if r.why %}<p class="small">{{ r.why }}</p>{% endif %}
+  {% if r.hint and r.status != 'sent' %}<p class="small">Подсказка ИИ-сотрудника: <b>{{ r.hint.to }}</b>{% if r.hint.why %} — {{ r.hint.why }}{% endif %}{% if not r.hint.sure %} <span class="muted">(не уверен)</span>{% endif %}</p>{% endif %}
+  {% if r.case %}<p class="small">Дело: <a href="/progress?scope=open#case-{{ r.case.id }}">{{ r.case.status }}</a>{% if r.case.note %} — {{ r.case.note }}{% endif %}{% if r.files %} · вложений отправлено: {{ r.files }}{% endif %}</p>{% endif %}
+  {% if r.tasks %}<p class="small">Задачи: {% for t in r.tasks %}«{{ t.title }}» до {{ t.deadline.strftime('%d.%m') if t.deadline }} <span class="muted">({{ t.status }})</span>{{ '; ' if not loop.last }}{% endfor %}</p>{% endif %}
+  {% if r.errors %}<p class="small mail-bad">Ошибка маршрута: письмо попало не тому{% if r.errors > 1 %} ({{ r.errors }} раза){% endif %}.</p>{% endif %}
+  {% if r.check and r.check.ok %}<p class="small mail-ok">✓ Передано верно{% if r.check.by %} ({{ r.check.by }}){% endif %}</p>{% endif %}
+  {% if r.history %}<details class="small"><summary>Раньше</summary>{% for h in r.history %}<div>{{ h.at or '' }} {{ h.to or h.status }}{% if h.by %} — {{ h.by }}{% endif %}</div>{% endfor %}</details>{% endif %}
+  {% endif %}
+  {% if m.kind %}<form method="post" action="/mail/{{ m.id }}/route" class="mail-form" style="margin-top:8px"><div class="row">
+    <label class="f">Передать <select name="to" required><option value="">— кому —</option>{% for p in people %}<option value="{{ p.value }}" {{ 'selected' if r and r.hint and not r.to and r.hint.to_id and p.value == 'e:' ~ r.hint.to_id }}>{{ p.label }}</option>{% endfor %}{% if r and r.status == 'sent' %}<option value="none">— вернуть на решение —</option>{% endif %}</select></label>
+    <label class="f" style="flex:1">Комментарий <input name="note" maxlength="300" placeholder="необязательно"></label>
+    <label class="small"><input type="checkbox" name="remember" value="1"> запомнить: письма от этого отправителя — ему</label>
+    <button class="btn sm">Передать</button>
+    {% if r and r.status == 'sent' and not (r.check and r.check.ok) %}<button class="btn sm ghost" formaction="/mail/{{ m.id }}/route-check" formnovalidate>Верно</button>{% endif %}</div></form>{% endif %}
+</section>
+{% if m.drafts %}<section class="card" id="drafts"><h2>Ответы</h2>
+  {% for d in m.drafts %}<div style="margin-bottom:12px"><p class="small"><b>{{ d.status_ru }}</b>{% if d.version > 1 %} · вариант {{ d.version }}{% endif %} · {{ d.who }} · {{ d.at.strftime('%d.%m %H:%M') if d.at }} → {{ d.to }}{% if d.error %} <span class="mail-bad">{{ d.error }}</span>{% endif %}</p>
+    {% if d.points %}<p class="small muted">Что просили сказать: {{ d.points }}</p>{% endif %}
+    <div class="mail-text">{{ d.text }}</div>
+    {% if d.warnings %}<p class="small">⚠️ Проверить: {{ d.warnings|join(', ') }}</p>{% endif %}
+    {% if d.missing %}<p class="small">Не хватило данных: {{ d.missing|join('; ') }}</p>{% endif %}</div>{% endfor %}
+</section>{% endif %}
 <section class="card"><h2>Текст письма</h2>
   {% if m.fresh %}<div class="mail-text">{{ m.fresh }}</div>{% else %}<p class="muted small">Текста нет.</p>{% endif %}
   {% if m.quoted %}<details style="margin-top:8px"><summary class="small">Ранее в переписке</summary><div class="mail-text muted">{{ m.quoted }}</div></details>{% endif %}

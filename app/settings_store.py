@@ -56,6 +56,12 @@ DEFAULTS = {
     "mail_labels": False,            # the type and the labels are put into the box too (needs writing to the box)
     "mail_kinds": [],                # the types of letters [{"key", "name", "hint"}]; empty = mail.DEFAULT_KINDS
     "mail_state": {},                # {"uidvalidity", "last_uid", "checked_at", "ok", "error", "new"} (mail.py)
+    "mail_forward": True,            # the sorted letters go to the people who handle them (mail_route.py, №24)
+    "mail_hints_auto": False,        # no rule fits: forward by the agent's hint when it is sure (otherwise it waits)
+    "mail_drafts_auto": True,        # a letter that waits for an answer comes with a draft of the answer (№25)
+    "mail_sender_name": "",          # the name in «From» of the answers; "" = the company name
+    "mail_signature": "",            # added under every answer
+    "mail_reply_examples": "",       # good answers of the company (the style of the drafts), separated by «---»
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
     "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents

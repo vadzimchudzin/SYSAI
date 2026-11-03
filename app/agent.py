@@ -583,6 +583,16 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         draft = doc_templates.pending_view(s, chat)
         if draft:
             ctx["document_draft"] = draft
+    if any(agent_skills.available(agent_skills.SKILLS[n], person) for n in ("mail_reply", "mail_pass")):
+        from . import mail_reply, mail_route  # the letters of the company box passed to this person (№24, №25)
+        letters = mail_route.for_prompt(s, employee, bool(reviewer or director))
+        if letters:
+            ctx["mail_letters"] = letters
+        waiting_draft = mail_reply.pending_view(s, chat, employee.id if employee is not None else None)
+        if waiting_draft:
+            ctx["mail_draft"] = waiting_draft
+        if letters or waiting_draft:
+            ctx["mail_can_reply"] = mail_reply.ready()
     silences = cases.silence_view({"user_id": chat, "username": result.get("username") or "",
                                    "phone": result.get("phone") or ""})
     if silences:
@@ -639,7 +649,19 @@ DOC_RULES = (
     "срокам с напоминанием): так и скажи, deliver_files для этого не нужен. Если человек сам сказал, кому передать, — "
     "deliver_files по его словам, правило тогда не сработает. route.to нет — не обещай передать; если неясно, что с "
     "файлом делать, спроси. intake.pending — файл ещё разбирается: скажи, что посмотришь и напишешь, без «передам». ")
-GENERAL_RULES = ORDER_RULES + DOC_RULES + (
+MAIL_RULES = (
+    "Почта компании: mail_letters — письма из ящика компании: переданные этому человеку (routed_to — кому передано), "
+    "ждущие решения, кому их передать (waits_for_decision, hint — подсказка кода), и ждущие ответа (needs_reply). На "
+    "«что пришло на почту?», «что пишет Монолит?» отвечай по ним (from, subject, summary, ask, deadlines); писем, "
+    "которых там нет, не выдумывай. «Ответь им, что…» — mail_reply: в points перескажи словами человека, что сказать; "
+    "код сам напишет письмо и пришлёт черновик после твоего ответа, а в reply коротко скажи, что ниже черновик, и "
+    "попроси проверить. mail_draft — черновик, который ждёт ответа: «ок», «отправляй» — confirm_mail_reply с ok=true, "
+    "«не надо» — ok=false, поправка — новый mail_reply с тем же mail_id и поправкой в points. Пока человек не ответил "
+    "«ок», не пиши, что письмо отправлено; после confirm_mail_reply с ok=true коротко скажи, что отправляешь (код сам "
+    "сообщит, когда письмо уйдёт). mail_can_reply=false — отвечать на письма из чата пока нельзя (не настроена "
+    "отправка): так и скажи. «Не моё», «это не ко мне» о письме — mail_pass с to=null; «передай это письмо Ольге» — "
+    "mail_pass с to=ID из team. ")
+GENERAL_RULES = ORDER_RULES + DOC_RULES + MAIL_RULES + (
     "Память разговора: history — последние сообщения целиком; dialog_memory — краткий пересказ более ранней части "
     "разговора; from_earlier — старые сообщения, которые код нашёл по словам этого сообщения; recalled — что нашлось, "
     "когда ты сам попросил вспомнить. На «как договаривались», «тот акт», «как в прошлый раз» отвечай по ним и "
@@ -921,12 +943,12 @@ _W = r"(?<![а-яёa-z])({})(?![а-яёa-z])"
 PROMISES = (  # (words in the reply, actions that keep the promise, does a running case keep it)
     (_W.format("перешлю|передам|отправлю|скину|пришлю|упакую|запакую|заархивирую"),
      {"deliver_files", "relay_answer", "assign_task", "team_report", "order", "confirm_order", "make_document",
-      "confirm_document"}, True),
+      "confirm_document", "mail_reply", "confirm_mail_reply", "mail_pass"}, True),
     (_W.format("напомню"), {"remind", "order", "confirm_order"}, False),
     (_W.format("уточню|спрошу|узнаю|запрошу"), {"ask_reviewer", "assign_task", "relay_answer", "order", "confirm_order"},
      False),
     (_W.format("подготовлю|соберу|сделаю|составлю"), {"team_report", "assign_task", "deliver_files", "remind",
-                                                      "make_document"}, False),
+                                                      "make_document", "mail_reply"}, False),
     (_W.format("поручу|назначу|поставлю задачу"), {"order", "confirm_order", "assign_task"}, False),
 )
 _CONDITIONAL = re.compile(r"(?<![а-яё])(если|как только|когда|после того как|могу|можно|хочешь|нужно ли)(?![а-яё])")
@@ -1186,6 +1208,17 @@ def _process(row_id: int) -> None:
         if action["type"] == "make_document" and done and not result.get("sent_document_draft"):
             doc_templates.show_pending(chat)  # the draft file follows the reply that asks to check it
             result["sent_document_draft"] = True
+            _store(row_id, result)
+        if action["type"] == "mail_reply" and done and not result.get("sent_mail_draft"):
+            from . import mail_reply
+            mail_reply.show_pending(chat, person.employee_id)  # the draft of the answer follows the reply
+            result["sent_mail_draft"] = True
+            _store(row_id, result)
+        if (action["type"] == "confirm_mail_reply" and action.get("ok") and done
+                and not result.get("sent_mail_reply")):
+            from . import mail_reply
+            mail_reply.send_approved(chat, person.employee_id)  # «ок»: the letter goes out after the reply
+            result["sent_mail_reply"] = True
             _store(row_id, result)
     if result.get("documents_prepared") and not result.get("documents_routed"):  # the files go where the rules say
         doc_intake.after_reply(_received_ids(result), decision["actions"], by=author)

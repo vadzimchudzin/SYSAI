@@ -218,6 +218,13 @@ def _decisions(s) -> list:
     failed = s.query(Task).filter(Task.status == "assistant_failed").order_by(Task.id.desc()).limit(10).all()
     for t in failed[:3]:
         out.append((f"Ассистент не смог: {t.title[:140]}", _task_page(s, t)))
+    from . import mail_route  # letters nobody was found for (№24)
+    letters = mail_route.waiting(s)
+    for x in letters[:3]:
+        hint = f" (подсказка: {x['hint']})" if x["hint"] else ""
+        out.append((f"Письмо «{x['subject'][:120]}» от {x['from'][:60]} — кому передать?{hint}", f"/mail/{x['id']}"))
+    if len(letters) > 3:
+        out.append((f"Ещё писем ждут решения, кому передать: {len(letters) - 3}", "/mail?only=unrouted"))
     return out
 
 

@@ -11,6 +11,7 @@ from app.db import Case, Note, Reminder, SessionLocal, Task
 from test_ai_mode import FakeBackend, FakeModel, incoming, make_meeting, tgacc  # noqa: F401  (fixtures)
 
 ANYONE = {"task_status", "note", "remind", "cancel_reminder", "silence_choice", "make_document", "confirm_document"}
+MAIL = {"mail_reply", "confirm_mail_reply", "mail_pass"}
 
 
 class SkillModel(FakeModel):
@@ -56,7 +57,8 @@ def test_every_action_is_a_skill_with_a_form_and_a_rule():
     assert set(agent_skills.SKILLS) == {
         "set_deadline", "task_status", "note", "ask_reviewer", "relay_answer", "approve_meeting", "reject_meeting",
         "assign_task", "deliver_files", "team_report", "remind", "cancel_reminder", "approve_case", "cancel_case",
-        "order", "confirm_order", "silence_choice", "make_document", "confirm_document"}
+        "order", "confirm_order", "silence_choice", "make_document", "confirm_document", "mail_reply",
+        "confirm_mail_reply", "mail_pass"}
     for name, skill in agent_skills.SKILLS.items():
         assert skill.title and skill.hint and skill.when and skill.who in agent_skills.WHO_RU
         assert f'"type":"{name}"' in skill.template.replace(" ", "")
@@ -76,7 +78,11 @@ def test_function_definitions_follow_the_rights():
     worker = agent_skills.Person(employee=types.SimpleNamespace(id=3))
     assert names(worker) == ANYONE | {"set_deadline", "ask_reviewer", "update_memory", "order", "confirm_order"}
     boss = agent_skills.Person(employee=types.SimpleNamespace(id=1), reviewer=True, full=True)
+    assert names(boss) == set(agent_skills.SKILLS) - MAIL | {"update_memory"}  # the letters: once the box is read
+    settings_store.set_many({"mail_enabled": True})
     assert names(boss) == set(agent_skills.SKILLS) | {"update_memory"}
+    assert names(worker) == ANYONE | MAIL | {"set_deadline", "ask_reviewer", "update_memory", "order", "confirm_order"}
+    assert names(nobody) == ANYONE | {"update_memory"}
     for tool in agent_skills.tools(boss):
         params = tool["function"]["parameters"]
         assert params["type"] == "object" and set(params["required"]) <= set(params["properties"])
