@@ -1,0 +1,39 @@
+{% extends "base.html" %}{% block title %}{{ e.name }} — Объекты и клиенты{% endblock %}
+{% block head %}<style>.ent-form .row{gap:8px;flex-wrap:wrap}.ent-form textarea{width:100%;min-height:54px}.ent-src{font-size:12px;color:var(--muted,#888)}.ent-link{padding:5px 0;border-top:1px solid rgba(127,127,127,.18)}</style>{% endblock %}
+{% block body %}
+<p class="small"><a href="/entities">← Объекты и клиенты</a></p>
+<div class="row between"><h1>{{ e.name }}</h1><span class="pill gray">{{ e.kind_ru }}</span></div>
+{% if e.merged_into %}<div class="people-msg warn">Это дубль, объединён с <a href="/entities/{{ e.merged_into.id }}">«{{ e.merged_into.name }}»</a>.</div>{% endif %}
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сохранено: {{ error }}</div>{% endif %}
+<section class="card"><h2>Карточка</h2>
+  <form method="post" action="/entities/{{ e.id }}" class="ent-form">
+    <div class="row"><label class="f" style="flex:2">Название <input name="name" required maxlength="300" value="{{ e.name }}">{% if e.sources.name %}<span class="ent-src">источник: {% if e.source_urls.name %}<a href="{{ e.source_urls.name }}">{{ e.sources.name }}</a>{% else %}{{ e.sources.name }}{% endif %}</span>{% endif %}</label>
+      <label class="f">Тип <select name="kind">{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if e.kind == k }}>{{ v }}</option>{% endfor %}</select></label>
+      <label class="f">УНП <input name="unp" maxlength="20" value="{{ e.unp }}" inputmode="numeric">{% if e.sources.unp %}<span class="ent-src">источник: {% if e.source_urls.unp %}<a href="{{ e.source_urls.unp }}">{{ e.sources.unp }}</a>{% else %}{{ e.sources.unp }}{% endif %}</span>{% endif %}</label></div>
+    <label class="f">Другие написания (через запятую) <input name="aliases" maxlength="1000" value="{{ e.aliases|join(', ') }}"></label>
+    <label class="f">Адрес <input name="address" maxlength="300" value="{{ e.address }}">{% if e.sources.address %}<span class="ent-src">источник: {{ e.sources.address }}</span>{% endif %}</label>
+    <label class="f">Контакты <textarea name="contacts" maxlength="2000">{{ e.contacts }}</textarea></label>
+    <label class="f">Описание <textarea name="description" maxlength="4000">{{ e.description }}</textarea></label>
+    <div class="row small" style="gap:8px;margin-top:8px"><button class="btn sm primary">Сохранить</button>{% if e.by %}<span class="muted">правил(а) {{ e.by }}{% if e.updated_at %} · {{ e.updated_at.strftime('%d.%m.%Y %H:%M') }}{% endif %}</span>{% endif %}</div>
+  </form>
+</section>
+<section class="card" id="facts"><h2>Факты</h2>
+  {% for f in e.facts %}<div class="ent-link {{ 'muted' if f.archived }}">{{ f.text }}{% if f.archived %} <span class="pill gray">в архиве</span>{% endif %}
+    <div class="ent-src">{% if f.url %}<a href="{{ f.url }}">{{ f.source }}</a>{% else %}{{ f.source }}{% endif %}{% if f.at %} · {{ f.at.strftime('%d.%m.%Y') }}{% endif %}{% if f.quote %} · «{{ f.quote }}»{% endif %}</div>
+    {% if not f.archived %}<form method="post" action="/entities/{{ e.id }}/facts/{{ f.id }}/archive"><button class="btn sm ghost">в архив</button></form>{% endif %}</div>
+  {% else %}<p class="muted small">Фактов пока нет. Они появляются из утверждённых совещаний (с цитатой) или добавляются здесь.</p>{% endfor %}
+  <form method="post" action="/entities/{{ e.id }}/facts" class="row" style="margin-top:8px"><input name="text" maxlength="1500" placeholder="Например: заказчик требует исполнительную до 5-го числа" style="flex:1"> <button class="btn sm">Добавить факт</button></form>
+</section>
+<section class="card"><h2>Где встречается</h2>
+  {% for k, label in source_types.items() %}{% if e.links[k] %}<h3>{{ label }} ({{ e.links[k]|length }})</h3>
+    {% for l in e.links[k][:30] %}<div class="ent-link small">{% if l.url %}<a href="{{ l.url }}">{{ l.title }}</a>{% else %}<b>{{ l.title }}</b>{% endif %}{% if l.who %} · {{ l.who }}{% endif %}{% if l.date %} · {{ l.date.strftime('%d.%m.%Y') }}{% endif %}{% if l.line %} · {{ l.line }}{% endif %}
+      {% if l.quote %}<div class="muted">«{{ l.quote }}»</div>{% endif %}</div>{% endfor %}{% endif %}{% endfor %}
+  {% if not (e.links.meeting or e.links.task or e.links.document or e.links.message) %}<p class="muted small">Пока нигде.</p>{% endif %}
+</section>
+{% if not e.merged_into %}<section class="card"><h2>Объединить с дублем</h2>
+  <p class="small muted">Всё из выбранной карточки (написания, факты, упоминания) перейдёт сюда, она сама останется ссылкой на эту.</p>
+  <form method="post" action="/entities/{{ e.id }}/merge" class="row"><select name="gone" required><option value="">— дубль —</option>{% for o in e.others %}<option value="{{ o.id }}">{{ o.name }}</option>{% endfor %}</select> <button class="btn sm">Объединить</button></form>
+  <form method="post" action="/entities/{{ e.id }}/delete" onsubmit="return confirm('Удалить карточку? Факты останутся в памяти без привязки.')" style="margin-top:10px"><button class="btn sm ghost">Удалить карточку</button></form>
+</section>{% endif %}
+{% endblock %}

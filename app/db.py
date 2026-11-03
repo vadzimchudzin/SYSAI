@@ -567,6 +567,7 @@ class Note(Base):
     archived = Column(Boolean, nullable=False, default=False)  # hidden from memory, kept for the audit trail
     updated_at = Column(DateTime(timezone=True), nullable=True)
     edited_by = Column(String(120), default="")
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)  # a client/object
 
 
 class PersonMemory(Base):
@@ -832,8 +833,61 @@ class Document(Base):
     text = Column(Text, default="")  # extracted text (PDF/DOCX/XLSX, scans through the vision model)
     text_status = Column(String(12), default="pending")  # pending | done | empty | failed
     summary = Column(Text, default="")
+    # What doc_intake.py found in it: the type, the requisites with their quotes, the deadlines, the problems with the
+    # sums, the route by the rules and what was done (see doc_intake.py for the shape)
+    facts = Column(JSON, nullable=True)
+    facts_status = Column(String(12), default="")  # "" not yet | working | done | failed | skipped | old (before №18)
     created_at = Column(DateTime(timezone=True), default=now, index=True)
     employee = relationship("Employee")
+
+
+class DocRule(Base):
+    """«Что кому»: an incoming document of this type (and with these words) goes to the person or to the head of the
+    department; its deadlines become their tasks with reminders (doc_intake.py). The first active rule that fits wins."""
+    __tablename__ = "doc_rules"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(20), default="")          # doc_intake.KINDS key; "" = any type
+    keywords = Column(String(300), default="")     # any of these words in the file (comma-separated); "" = no condition
+    to_employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    to_department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    make_tasks = Column(Boolean, nullable=False, default=True)
+    active = Column(Boolean, nullable=False, default=True)
+    position = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_by = Column(String(120), default="")
+
+
+class Entity(Base):
+    """A client, an object or another organization the company works with (entities.py, №19): one card for «Криница»,
+    «ОАО «Криница»» and «Криницы». A merged duplicate points to the card it went into."""
+    __tablename__ = "entities"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(12), nullable=False, default="org")  # object | client | contractor | org
+    name = Column(String(300), nullable=False)
+    aliases = Column(JSON, nullable=False, default=list)       # other spellings: «ОАО Криница», «Криница-Минск»
+    unp = Column(String(20), default="")
+    address = Column(String(300), default="")
+    contacts = Column(Text, default="")
+    description = Column(Text, default="")
+    sources = Column(JSON, nullable=True)  # where a field came from: {"unp": {"type": "document", "id": 5, "quote": "…"}}
+    source = Column(String(20), default="manual")              # how the card appeared: manual | meeting | document
+    active = Column(Boolean, nullable=False, default=True)
+    merged_into_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+    updated_by = Column(String(120), default="")
+
+
+class EntityLink(Base):
+    """Where a client or an object comes up: a meeting, a task, a document, a message — with the words."""
+    __tablename__ = "entity_links"
+    __table_args__ = (UniqueConstraint("entity_id", "source_type", "source_id"),)
+    id = Column(Integer, primary_key=True)
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type = Column(String(12), nullable=False)  # meeting | task | document | message
+    source_id = Column(Integer, nullable=False)
+    quote = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
 
 
 class DocumentTransfer(Base):
@@ -1010,6 +1064,10 @@ def init_db():
     _add_column_if_missing("documents", "text", "text TEXT DEFAULT ''")
     _add_column_if_missing("documents", "text_status", "text_status VARCHAR(12) DEFAULT 'pending'")
     _add_column_if_missing("documents", "summary", "summary TEXT DEFAULT ''")
+    _add_column_if_missing("documents", "facts", "facts JSON")
+    _add_column_if_missing("notes", "entity_id", "entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL")
+    # The files already in the library are not routed by the new rules: they are marked «old» once (new rows get "")
+    _add_column_if_missing("documents", "facts_status", "facts_status VARCHAR(12) DEFAULT 'old'")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
     _add_column_if_missing("employee_voice_samples", "source_kind", "source_kind VARCHAR(32) NOT NULL DEFAULT 'manual'")
     _add_column_if_missing("employee_voice_samples", "source_meeting_id", "source_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL")

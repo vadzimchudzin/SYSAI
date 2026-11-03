@@ -444,6 +444,69 @@ def scenarios() -> list:
                   ("ты", f"Понял: Виктор Иванов — купить перфоратор до {_ru(d4)}. Делаю?"))
     order_61 = {"id": 61, "kind": "task", "to": "Виктор Иванов", "title": "Купить перфоратор", "details": None,
                 "deadline": d4.isoformat(), "forward_to": None, "asked_at": "сегодня 10:02"}
+    pay_by = _day(3)
+    invoice_15 = {"document_id": 531, "filename": "счёт_15_Монолит.pdf", "kind": "document", "size": 92_000,
+                  "intake": {"doc_type": "Счёт",
+                             "requisites": {"number": "15", "date": _day(-1).strftime("%d.%m.%Y"),
+                                            "counterparty": "ООО «Монолит»", "unp": "190123456", "amount": "1 200,00",
+                                            "vat": "200,00", "vat_rate": "20%", "currency": "BYN",
+                                            "subject": "Бетон М300, 10 м³"},
+                             "deadlines": [{"what": "оплатить счёт", "date": pay_by.isoformat()}], "problems": [],
+                             "route": {"to": "Анна Петрова", "rule": "Счёт → Анна Петрова",
+                                       "tasks": [f"оплатить счёт до {pay_by.strftime('%d.%m.%Y')}"], "reminders": True}}}
+    act_7 = {"document_id": 532, "filename": "акт_7_Стройресурс.pdf", "kind": "document", "size": 71_000,
+             "intake": {"doc_type": "Акт выполненных работ",
+                        "requisites": {"number": "7", "date": _day(-2).strftime("%d.%m.%Y"),
+                                       "counterparty": "ООО «Стройресурс»", "amount_without_vat": "1 000,00",
+                                       "vat": "180,00", "vat_rate": "20%", "amount": "1 180,00", "currency": "BYN",
+                                       "object": "Ленина 12"},
+                        "deadlines": [],
+                        "problems": ["НДС 20% от 1 000,00 — это 200,00, а в документе 180,00"],
+                        "route": {"to": "Борис Смирнов", "rule": "Акт выполненных работ → отдел «ПТО»", "tasks": [],
+                                  "reminders": False}}}
+    contract_kozlov = {"document_id": 533, "filename": "договор_подряда_Козлов.pdf", "kind": "document", "size": 140_000,
+                       "intake": {"doc_type": "Договор",
+                                  "requisites": {"number": "12/25", "date": _day(-3).strftime("%d.%m.%Y"),
+                                                 "counterparty": "ИП Козлов А. В.",
+                                                 "subject": "Отделка помещений склада на Заводской"},
+                                  "deadlines": [], "problems": [],
+                                  "route": {"to": None, "why": "нет правила для такого документа"}}}
+    scan_pending = {"document_id": 534, "filename": "скан_пакет_документов.pdf", "kind": "document", "size": 4_800_000,
+                    "intake": {"pending": True}}
+    recon_due = _day(4)
+    recon_monolit = {"document_id": 535, "filename": "акт_сверки_Монолит_3кв.pdf", "kind": "document", "size": 58_000,
+                     "intake": {"doc_type": "Акт сверки",
+                                "requisites": {"date": _day(-1).strftime("%d.%m.%Y"), "counterparty": "ООО «Монолит»",
+                                               "amount": "4 350,00", "currency": "BYN",
+                                               "subject": "Сверка взаиморасчётов за 3 квартал"},
+                                "deadlines": [{"what": "подписать и вернуть акт сверки", "date": recon_due.isoformat()}],
+                                "problems": [],
+                                "route": {"to": "Анна Петрова", "rule": "Акт сверки → Анна Петрова",
+                                          "already_theirs": True,
+                                          "tasks": [f"подписать и вернуть акт сверки до {recon_due.strftime('%d.%m.%Y')}"],
+                                          "reminders": True}}}
+    krinica = {"name": "ОАО «Криница»", "kind": "Клиент", "also_called": ["Криница", "пивзавод Криница"],
+               "unp": "100345678", "address": "г. Минск, ул. Аранская, 15",
+               "facts": [{"text": "Оплачивают акты с задержкой 2–3 недели, счёт выставлять до 25-го числа",
+                          "source": f"совещание «Планёрка по объектам» {_day(-3).isoformat()}"}]}
+    lenina = {"name": "Объект на Ленина 12", "kind": "Объект", "also_called": ["Ленина 12"],
+              "address": "г. Борисов, ул. Ленина, 12",
+              "facts": [{"text": "Заказчик перенёс сдачу объекта на 20 декабря",
+                         "source": f"совещание «Планёрка по объектам» {_day(-3).isoformat()}"},
+                        {"text": "Фасад красим только после согласования цвета с заказчиком", "source": "вручную"}],
+              "meetings": [{"title": "Планёрка по объектам", "date": _day(-3).isoformat()}],
+              "open_tasks": [{"title": "Исполнительная по объекту на Ленина 12", "who": "Борис Смирнов",
+                              "deadline": _day(7).isoformat(), "status": "sent"},
+                             {"title": "Доставка арматуры на Ленина 12", "who": "Виктор Иванов",
+                              "deadline": _day(2).isoformat(), "status": "sent"}],
+              "documents": [{"id": 532, "filename": "акт_7_Стройресурс.pdf",
+                             "what": "Акт выполненных работ № 7 · ООО «Стройресурс» · 1 180,00 BYN, НДС 180,00",
+                             "date": _day(-2).isoformat()}]}
+    zavodskaya = {"name": "Склад на Заводской", "kind": "Объект", "also_called": ["Заводская"],
+                  "address": "г. Борисов, ул. Заводская, 3",
+                  "contacts": "Прораб заказчика — Николай Шевчук, +375 29 123-45-67",
+                  "facts": [{"text": "Кровлю меняем в ноябре, работы с автовышки",
+                             "source": f"совещание «Планёрка по объектам» {_day(-3).isoformat()}"}]}
     S = Scenario
     return [
         # --- orders from the director
@@ -746,6 +809,39 @@ def scenarios() -> list:
         S("doc-none", "Документы по шаблону", "Шаблона нет — честно сказать, не обещать документ", "director",
           "Сделай договор подряда с ИП Козловым на отделку склада.", reply_has=(r"шаблон",),
           forbid=({"type": "make_document"},), allowed=("note", "order"), extra={"document_templates": DOC_TEMPLATES}),
+        # --- incoming documents: what it is, what does not add up, where it goes by the company's rules
+        S("intake-tell", "Входящие документы", "Счёт без слов — сказать, что это и кому уйдёт по правилу", "director",
+          "(прислал файл «счёт_15_Монолит.pdf»)", reply_has=(r"15", r"Монолит", r"Анн"),
+          forbid=({"type": "deliver_files"},), extra={"file_received": invoice_15}),
+        S("intake-problem", "Входящие документы", "НДС не сходится — сразу сказать", "full",
+          "(прислал файл «акт_7_Стройресурс.pdf»)", reply_has=(r"НДС", r"180|200|не сход|ошиб|неверн"),
+          forbid=({"type": "deliver_files"},), extra={"file_received": act_7}),
+        S("intake-person-says", "Входящие документы", "Сказали, кому передать, — по словам, а не по правилу", "director",
+          "Это Борису, пусть проверит объёмы.",
+          actions=({"type": "deliver_files", "to": 2, "document_ids": [531]},), allowed=("note", "order"),
+          extra={"file_received": invoice_15}),
+        S("intake-no-route", "Входящие документы", "Правила нет — спросить, что делать, не обещать передать", "director",
+          "(прислал файл «договор_подряда_Козлов.pdf»)", question=True, max_questions=1, reply_has=(r"Козлов|договор",),
+          forbid=({"type": "deliver_files"},), extra={"file_received": contract_kozlov}),
+        S("intake-pending", "Входящие документы", "Файл ещё разбирается — не выдумывать, что в нём", "employee",
+          "(прислал файл «скан_пакет_документов.pdf»)", allowed=("note", "task_status"),
+          reply_not=(r"передал|отправил|\d[\d\s]*,\d\d", r"сч(ё|е)т\s*№"), extra={"file_received": scan_pending}),
+        S("intake-deadline", "Входящие документы", "Свой документ со сроком — назвать срок и напоминание", "accountant",
+          "(прислал файл «акт_сверки_Монолит_3кв.pdf»)", allowed=("note", "task_status"),
+          reply_has=(rf"(?<!\d){recon_due.day}(?!\d)",), extra={"file_received": recon_monolit}),
+        # --- objects and clients: the card of the one the message speaks about, with sources
+        S("entity-unp", "Объекты и клиенты", "УНП клиента из карточки", "accountant", "Какой УНП у Криницы?",
+          reply_has=(r"100\s?345\s?678",), extra={"about_entities": [krinica]}),
+        S("entity-source", "Объекты и клиенты", "Что по объекту — с источником", "director", "Что у нас по Ленина 12?",
+          reply_has=(r"20\s*декабр|20\.12", r"совещан|планёрк|планерк"), allowed=("note",),
+          extra={"about_entities": [lenina]}),
+        S("entity-unknown", "Объекты и клиенты", "Контакта в карточке нет — не выдумывать", "employee",
+          "Кто контактное лицо у «Криницы» и какой у него телефон?", allowed=("note", "ask_reviewer"),
+          reply_has=(r"не знаю|нет (контакт|телефон|данных|информац)|не указ|не вижу|нет в карточке|уточн|не нашёл|не нашел",),
+          reply_not=(r"\+?375|\d{3}-\d{2}-\d{2}",), extra={"about_entities": [krinica]}),
+        S("entity-contacts", "Объекты и клиенты", "Телефон прораба заказчика из карточки объекта", "full",
+          "Дай телефон прораба заказчика на Заводской.", reply_has=(r"123[-\s]?45[-\s]?67", r"Никола"),
+          extra={"about_entities": [zavodskaya]}),
     ]
 
 

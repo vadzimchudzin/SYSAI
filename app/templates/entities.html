@@ -1,0 +1,44 @@
+{% extends "base.html" %}{% block title %}Объекты и клиенты — SYSAI{% endblock %}
+{% block head %}<style>.ent-form .row{gap:8px;flex-wrap:wrap}.ent-form textarea{width:100%;min-height:54px}.ent-dup{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid rgba(127,127,127,.2)}</style>{% endblock %}
+{% block body %}
+<div class="row between"><h1>Объекты и клиенты</h1>
+  <form method="get" action="/entities" class="row"><input name="q" value="{{ q }}" placeholder="Название, УНП, описание">
+    <select name="kind"><option value="">все</option>{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if kind == k }}>{{ v }}</option>{% endfor %}</select>
+    <button class="btn sm">Найти</button></form></div>
+<p class="muted small">Карточки клиентов, объектов, подрядчиков: откуда о них известно и где они упоминаются — совещания, задачи, документы, переписка. Карточки появляются сами из входящих документов (контрагент с УНП) и из утверждённых совещаний (факты с цитатой), их можно добавить и поправить вручную. Названия сравниваются без ООО/ОАО и кавычек, поэтому «Криница» и «ОАО «Криница»» — одна карточка; похожие написания показаны ниже как возможные дубли. ИИ-сотрудник отвечает про объект или клиента по его карточке.</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сохранено: {{ error }}</div>{% endif %}
+{% if dups %}<section class="card"><h2>Возможные дубли</h2>
+  {% for d in dups %}<div class="ent-dup small"><a href="/entities/{{ d.a.id }}"><b>{{ d.a.name }}</b></a> <span class="muted">({{ d.a.kind }})</span> и <a href="/entities/{{ d.b.id }}"><b>{{ d.b.name }}</b></a> <span class="muted">({{ d.b.kind }}) — {{ d.why }}</span>
+    <form method="post" action="/entities/{{ d.a.id }}/merge"><input type="hidden" name="gone" value="{{ d.b.id }}"><input type="hidden" name="back" value="list"><button class="btn sm ghost">оставить «{{ d.a.name }}»</button></form>
+    <form method="post" action="/entities/{{ d.b.id }}/merge"><input type="hidden" name="gone" value="{{ d.a.id }}"><input type="hidden" name="back" value="list"><button class="btn sm ghost">оставить «{{ d.b.name }}»</button></form></div>{% endfor %}
+</section>{% endif %}
+<section class="card">
+{% if not rows %}<p class="muted">Карточек пока нет{% if q or kind %} по этому запросу{% endif %}.</p>{% else %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Название</th><th>Тип</th><th>Где встречается</th></tr></thead>
+  <tbody>{% for r in rows %}<tr class="{{ '' if r.active else 'muted' }}"><td><a href="/entities/{{ r.id }}"><b>{{ r.name }}</b></a>{% if r.aliases %}<div class="muted small">также: {{ r.aliases|join(', ') }}</div>{% endif %}{% if r.unp %}<div class="muted small">УНП {{ r.unp }}</div>{% endif %}</td>
+    <td>{{ r.kind_ru }}</td>
+    <td class="small">{% for k, v in source_types.items() %}{% if r.links.get(k) %}{{ v }}: {{ r.links.get(k) }}<br>{% endif %}{% endfor %}{% if r.facts %}фактов: {{ r.facts }}{% endif %}{% if not r.links and not r.facts %}<span class="muted">—</span>{% endif %}</td></tr>{% endfor %}</tbody>
+</table></div>{% endif %}
+  <form method="post" action="/entities/scan" style="margin-top:8px"><button class="btn sm ghost">Найти упоминания заново по всей истории</button></form>
+</section>
+<section class="card"><h2>Новая карточка</h2>
+  <form method="post" action="/entities" class="ent-form">
+    <div class="row"><label class="f" style="flex:2">Название <input name="name" required maxlength="300" placeholder="ОАО «Криница»"></label>
+      <label class="f">Тип <select name="kind">{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if k == 'client' }}>{{ v }}</option>{% endfor %}</select></label>
+      <label class="f">УНП <input name="unp" maxlength="20" inputmode="numeric"></label></div>
+    <label class="f">Другие написания (через запятую) <input name="aliases" maxlength="1000" placeholder="Криница, пивзавод Криница"></label>
+    <label class="f">Адрес <input name="address" maxlength="300"></label>
+    <label class="f">Контакты <textarea name="contacts" maxlength="2000" placeholder="Кто там главный, телефоны, почта"></textarea></label>
+    <label class="f">Описание <textarea name="description" maxlength="4000" placeholder="Что за клиент или объект, что мы там делаем"></textarea></label>
+    <button class="btn sm primary" style="margin-top:8px">Добавить</button>
+  </form>
+  <details style="margin-top:12px"><summary class="small">Добавить списком (основные объекты и клиенты)</summary>
+    <form method="post" action="/entities/bulk" class="ent-form">
+      <label class="f">По одному в строке; через «;» можно дописать УНП и тип (клиент, объект, подрядчик) <textarea name="text" rows="7" placeholder="ОАО «Криница»; 100345678&#10;Беларуськалий; клиент&#10;Склад на Заводской; объект"></textarea></label>
+      <label class="f">Тип, если в строке не указан <select name="kind">{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if k == 'client' }}>{{ v }}</option>{% endfor %}</select></label>
+      <button class="btn sm" style="margin-top:8px">Добавить списком</button>
+    </form></details>
+</section>
+{% endblock %}
