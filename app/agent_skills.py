@@ -41,6 +41,19 @@ PAIRED = {"confirm_order": "order", "confirm_document": "make_document",  # on a
 # Who may use a skill can be narrowed on the Skills page (never widened): only the leaders, only the director.
 LIMITS = ("leaders", "director")
 LIMIT_RU = {"": "как задумано", "leaders": "только руководители (проверяющие и директор)", "director": "только директор"}
+# Short words for the Skills page (the full ones stay in the hints): a long option made the selects as wide as a column.
+WHO_SHORT = {"anyone": "любой собеседник", "employee": "сотрудники", "full": "полный доступ", "reviewer": "проверяющие",
+             "assign": "проверяющие", "order": "сотрудники", "mail": "сотрудники"}
+WHO_NOTE = {"assign": "с полным доступом", "order": "кому поручать — в карточке", "mail": "когда почта подключена"}
+LIMIT_SHORT = {"": "как задумано", "leaders": "руководители", "director": "директор"}
+MODE_SHORT = {"auto": "сразу", "approve": "с одобрением", "suggest": "только предложить"}
+# How the Skills page groups the built-in skills; a skill missing here is shown under «Другое».
+GROUPS = (("Задачи и поручения", ("set_deadline", "task_status", "assign_task", "order")),
+          ("Напоминания и заметки", ("remind", "cancel_reminder", "silence_choice", "note")),
+          ("Вопросы и решения руководителя", ("ask_reviewer", "relay_answer", "approve_case", "cancel_case")),
+          ("Совещания", ("approve_meeting", "reject_meeting")),
+          ("Документы и файлы", ("make_document", "deliver_files", "team_report")),
+          ("Почта", ("mail_reply", "mail_pass")))
 TRANSPORTS = ("json", "tools")
 TRANSPORT_RU = {"json": "ответ в JSON", "tools": "вызов функций"}
 WALL = r"нет доступа|недостаточно прав|нет прав|запрещено|не уполномочен"
