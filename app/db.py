@@ -7,7 +7,7 @@ import time
 from urllib.parse import urlparse
 
 from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint,
-                        create_engine, text)
+                        create_engine, event, text)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, deferred, relationship, sessionmaker
 
@@ -153,6 +153,7 @@ class Employee(Base):
     telegram_chat_id = Column(String(40), default="")  # bot chat id; in AI-employee mode @username, +phone or id
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
     bitrix_user_id = Column(String(40), default="")
+    email = Column(String(200), default="")  # work address: the invited of the company calendar are matched by it
     active = Column(Boolean, default=True)
     org_order = Column(Integer, nullable=False, default=0)
     map_x = Column(Float, nullable=True)
@@ -432,9 +433,24 @@ class Task(Base):
     counterparts = Column(JSON, default=list)  # [{"role": "source|recipient|target", "employee_id": 3, "name": "Аня"}]
     routing_note = Column(String(500), default="")  # why the executor differs from what the model proposed
     bitrix_task_id = Column(String(40), default="")
+    created_at = Column(DateTime(timezone=True), default=now, nullable=True)  # older tasks: unknown (the meeting's date)
+    done_at = Column(DateTime(timezone=True), nullable=True)  # set when the status becomes done (see below)
     meeting = relationship("Meeting", back_populates="tasks")
     assignee = relationship("Employee", foreign_keys=[assignee_id])
     target_employee = relationship("Employee", foreign_keys=[target_employee_id])
+
+
+TASK_DONE = ("done", "assistant_done")
+
+
+@event.listens_for(Task.status, "set")
+def _task_done_at(task, value, old, initiator):
+    """When a task was done: for «выполнено в срок» of the tables (№27). Reopened, it is not done any more."""
+    if value in TASK_DONE:
+        if old not in TASK_DONE or task.done_at is None:
+            task.done_at = now()
+    elif old in TASK_DONE:
+        task.done_at = None
 
 
 class DeadlineRequest(Base):
@@ -1072,6 +1088,21 @@ class MailDraft(Base):
     created_at = Column(DateTime(timezone=True), default=now)
 
 
+class CalendarEvent(Base):
+    """A meeting of the company calendar (calendars.py, №26), each recurrence on its own: who was invited is who is
+    expected at a recording made at that time. Read again every 15 minutes."""
+    __tablename__ = "calendar_events"
+    id = Column(Integer, primary_key=True)
+    uid = Column(String(300), nullable=False, default="")
+    title = Column(String(300), default="")
+    location = Column(String(300), default="")
+    starts_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    ends_at = Column(DateTime(timezone=True), nullable=True)
+    organizer = Column(JSON, nullable=True)                  # {"name", "email", "status", "kind"}
+    attendees = Column(JSON, nullable=False, default=list)   # [{"name", "email", "status": ACCEPTED | DECLINED…, "kind"}]
+    fetched_at = Column(DateTime(timezone=True), default=now)
+
+
 class MemoryVector(Base):
     """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
     __tablename__ = "memory_vectors"
@@ -1180,6 +1211,9 @@ def init_db():
     _add_column_if_missing("employees", "address_as", "address_as VARCHAR(120) DEFAULT ''")
     _add_column_if_missing("employees", "address_form", "address_form VARCHAR(3) DEFAULT ''")
     _add_column_if_missing("case_waits", "escalated_to", "escalated_to JSON")
+    _add_column_if_missing("employees", "email", "email VARCHAR(200) DEFAULT ''")
+    _add_column_if_missing("tasks", "created_at", "created_at TIMESTAMP")
+    _add_column_if_missing("tasks", "done_at", "done_at TIMESTAMP")
     _ensure_voice_sample_constraints()
     _forget_pyannote()
 

@@ -25,8 +25,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
-               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel,
                storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
@@ -550,7 +550,7 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
             reference["runs"] = diarization_runs.brief(loaded.diarization_reference,
                                                        diarize.threshold_of(settings_store.all_settings()))
         present = participants.view(s, loaded)
-        hint = participants.match_alert(s, loaded) if (loaded.participants or {}).get("source") != "alert" else None
+        hint = participants.suggestion(s, loaded)
     if not may_listen:  # recorded in someone else's browser: the same rule as for the voice clips
         kept = {"state": "none", "text": "Запись этого совещания доступна только тому, кто его записал."}
     client = voice_diagram.client_payload(diagram) if diagram else None
@@ -569,7 +569,7 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
                 edits=edits, seg_msg=SEGMENT_MESSAGES.get(seg, ""), local_time=userbot.local_time,
                 reference=reference, reference_admin=reference_admin, ref_msg=REFERENCE_MESSAGES.get(ref, ""),
                 pct=diarization_eval.pct, label_list=diarization_eval.label_list,
-                attendance=present, participant_ids=present["ids"], alert_hint=hint.title if hint is not None else "",
+                attendance=present, participant_ids=present["ids"], alert_hint=hint,
                 people_msg=PARTICIPANT_MESSAGES.get(people, ""), diarization_note=_diarization_note(m),
                 relabel=relabel_view)
 
@@ -590,8 +590,9 @@ def _diarization_note(meeting) -> dict | None:
 PARTICIPANT_MESSAGES = {
     "saved": "Участники сохранены. Имена голосам теперь подбираются только из них; протокол учтёт список после «Пересобрать».",
     "alert": "Участники взяты из напоминания.",
+    "calendar": "Участники взяты из календаря: приглашённые на встречу в это время.",
     "cleared": "Список участников сброшен: имена голосам подбираются из всех сотрудников.",
-    "noalert": "Для этой встречи не нашлось напоминания с участниками.",
+    "noalert": "Для этой встречи не нашлось ни встречи в календаре, ни напоминания с участниками.",
 }
 
 
@@ -616,6 +617,8 @@ async def meeting_participants(request: Request, mid: int):
             code = "alert" if participants.ensure(s, meeting) else "noalert"
             if code == "noalert":
                 meeting.participants = previous
+            elif (meeting.participants or {}).get("source") == "calendar":
+                code = "calendar"
         else:
             raise HTTPException(400, "Неизвестное действие со списком участников.")
         s.commit()
@@ -1955,6 +1958,132 @@ def mail_letter_sort(request: Request, mail_id: int):
     return RedirectResponse(f"/mail/{mail_id}?msg=sorting", 303)
 
 
+# ----------------------------------------------------------------------------- the calendar (calendars.py, №26)
+CALENDAR_MESSAGES = {
+    "saved": "Адрес календаря сохранён и прочитан.", "synced": "Календарь прочитан.",
+    "forgot": "Календарь компании отключён: встречи из него удалены.", "feed": "Готово.",
+    "reset": "Ссылки сменены: старые больше не работают — разошлите новые.",
+}
+
+
+def _calendar_base(request: Request) -> str:
+    return calendars.base_url(str(request.base_url))
+
+
+@app.get("/calendar", response_class=HTMLResponse)
+def calendar_view(request: Request, msg: str = "", error: str = ""):
+    """«Календарь»: the addresses of the employees for subscription and the company calendar for the participants."""
+    guard_admin(request)
+    base = _calendar_base(request)
+    with SessionLocal() as s:
+        rows, coming = calendars.links(s, base), calendars.upcoming(s)
+        no_email = s.query(Employee).filter(Employee.active.is_(True), (Employee.email == "") | Employee.email.is_(None)).count()
+    text = CALENDAR_MESSAGES.get(msg, msg[:300])
+    return page(request, "calendar.html", rows=rows, coming=coming, st=calendars.status(), msg=text, error=error[:300],
+                all_url=calendars.link("all", base), feed_on=calendars.feed_on(), no_email=no_email,
+                howto=calendars.HOWTO, public=bool(config.PUBLIC_URL))
+
+
+@app.post("/calendar/address")
+async def calendar_address(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        calendars.save_address(str(f.get("url") or ""), by=_who(request))
+        calendars.sync()
+    except calendars.CalendarError as exc:
+        return RedirectResponse("/calendar?error=" + quote(str(exc)) + "#company", 303)
+    return RedirectResponse("/calendar?msg=saved#company", 303)
+
+
+@app.post("/calendar/sync")
+def calendar_sync(request: Request):
+    guard_admin(request)
+    try:
+        state = calendars.sync()
+    except calendars.CalendarError as exc:
+        return RedirectResponse("/calendar?error=" + quote(str(exc)) + "#company", 303)
+    text = f"Календарь прочитан: встреч на 60 дней назад и 90 вперёд — {state.get('events', 0)}."
+    return RedirectResponse("/calendar?msg=" + quote(text) + "#company", 303)
+
+
+@app.post("/calendar/forget")
+def calendar_forget(request: Request):
+    guard_admin(request)
+    calendars.forget()
+    return RedirectResponse("/calendar?msg=forgot#company", 303)
+
+
+@app.post("/calendar/feed-settings")
+async def calendar_feed_settings(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    settings_store.set_many({"calendar_feed_on": bool(f.get("calendar_feed_on"))})
+    return RedirectResponse("/calendar?msg=feed#links", 303)
+
+
+@app.post("/calendar/send-links")
+async def calendar_send_links(request: Request):
+    """«Разослать ссылки»: everyone with Telegram gets their own address (one person: employee_id)."""
+    guard_admin(request)
+    f = await request.form()
+    raw = str(f.get("employee_id") or "").strip()
+    only = {int(raw)} if raw.isdigit() else None
+    sent, failed, skipped = calendars.send_links(_calendar_base(request), only=only)
+    text = f"Ссылки отправлены: {sent}." + (f" Не дошло: {failed}." if failed else "") + (
+        f" Без Telegram: {skipped} — им ссылку передайте сами." if skipped else "")
+    return RedirectResponse("/calendar?msg=" + quote(text) + "#links", 303)
+
+
+@app.post("/calendar/reset-links")
+def calendar_reset_links(request: Request):
+    guard_admin(request)
+    calendars.reset_links()
+    return RedirectResponse("/calendar?msg=reset#links", 303)
+
+
+@app.get("/calendar/feed/{value}.ics")
+def calendar_feed(value: str, request: Request):
+    """The address a calendar subscribes to: secret, no sign-in (calendars cannot sign in)."""
+    if not calendars.feed_on():
+        raise HTTPException(404, "Календарь выключен.")
+    with SessionLocal() as s:
+        who = calendars.owner(s, value)
+        if who is None:
+            raise HTTPException(404, "Нет такого календаря.")
+        body = calendars.feed(s, who, _calendar_base(request))
+    return Response(body, media_type="text/calendar; charset=utf-8",
+                    headers={"Cache-Control": "private, max-age=300", "Content-Disposition": 'inline; filename="sysai.ics"'})
+
+
+# ----------------------------------------------------------------------------- the tables (tables.py, №27)
+@app.get("/tables", response_class=HTMLResponse)
+def tables_view(request: Request):
+    """«Таблицы»: the filters, the pivots at a glance and one button for the whole workbook."""
+    guard_admin(request)
+    f = tables.filters(request.query_params)
+    with SessionLocal() as s:
+        view = tables.page_data(s, f)
+        people = [{"id": e.id, "name": e.name} for e in
+                  s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()]
+        departments = [{"id": d.id, "name": d.name} for d in s.query(Department).order_by(Department.name).all()]
+        places = [{"id": e.id, "name": e.name} for e in
+                  s.query(entities.Entity).filter(entities.Entity.active.is_(True), entities.Entity.merged_into_id.is_(None))
+                  .order_by(entities.Entity.name).all()]
+    return page(request, "tables.html", f=f, view=view, people=people, departments=departments, places=places,
+                presets=tables.PRESETS, states=tables.STATES, query=tables.query_string(f))
+
+
+@app.get("/tables/export.xlsx")
+def tables_export(request: Request):
+    guard_admin(request)
+    f = tables.filters(request.query_params)
+    with SessionLocal() as s:
+        body = tables.export(s, f)
+    return Response(body, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{tables.filename(f)}"'})
+
+
 DOC_TEMPLATE_MESSAGES = {"saved": "Шаблон сохранён: ИИ-сотрудник видит его со следующего сообщения.",
                          "toggled": "Готово.", "deleted": "Шаблон удалён."}
 
@@ -3107,6 +3236,11 @@ def _employee_store(form, id, name, aliases, position, department, competencies,
             e.telegram_user_id = ""
         e.telegram_chat_id = ref
         e.bitrix_user_id = bitrix_user_id.strip()
+        if "email" in form:  # the full card has it; the quick forms of the org chart do not
+            email = str(form.get("email") or "").strip().lower()[:200]
+            if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise HTTPException(400, "Рабочая почта указана неверно: нужен адрес вида ivan@company.by")
+            e.email = email
         e.active = bool(active) if id else True
         if form.get("skills_form"):  # whom they may give orders to and which skills are on (not for the director)
             scope = str(form.get("order_scope") or "").strip()

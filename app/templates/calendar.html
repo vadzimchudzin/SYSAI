@@ -1,0 +1,60 @@
+{% extends "base.html" %}{% block title %}Календарь — SYSAI{% endblock %}
+{% block head %}<style>.cal-link{width:100%;min-width:260px;font-family:monospace;font-size:12px}.cal-st{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.cal-ok{color:#2e7d32}.cal-bad{color:#c62828}.cal-people .pill{margin:0 4px 2px 0}.cal-form .row{gap:8px;flex-wrap:wrap}</style>{% endblock %}
+{% block body %}
+<h1>Календарь</h1>
+<p class="muted small">Сроки задач и совещания видны в привычном календаре каждого сотрудника (Google, Outlook, Яндекс, iPhone) — по личной ссылке для подписки. А из календаря компании берётся, кто был на совещании: у записи, сделанной во время встречи, участники — приглашённые на неё.</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сделано: {{ error }}</div>{% endif %}
+
+<section class="card" id="links">
+  <div class="row between"><h2>Сроки и совещания в календаре сотрудников</h2>
+    <form method="post" action="/calendar/feed-settings" class="row"><label class="check"><input type="checkbox" name="calendar_feed_on" {{ 'checked' if feed_on }} onchange="this.form.submit()"> ссылки работают</label></form></div>
+  <p class="small muted">В календаре появятся сроки задач человека (событие на весь день, «✓» — выполнено) и его регулярные совещания из «Напоминаний». Календари обновляют подписку сами: Google — несколько раз в день, Outlook — раз в несколько часов. {{ howto }}</p>
+  {% if not public %}<p class="small"><span class="pill amber">внимание</span> Адрес сервиса не задан (PUBLIC_URL): ссылки построены по адресу, с которого открыта страница.</p>{% endif %}
+  <div class="row" style="gap:8px;flex-wrap:wrap;margin:6px 0 10px">
+    <form method="post" action="/calendar/send-links"><button class="btn primary" {{ 'disabled' if not feed_on }}>Разослать ссылки в Telegram</button></form>
+    <form method="post" action="/calendar/reset-links" onsubmit="return confirm('Старые ссылки перестанут работать. Сменить?')"><button class="btn ghost">Сменить ссылки</button></form>
+  </div>
+  <label class="f">Всё вместе — для директора (сроки всех задач и все совещания)<input class="cal-link" readonly value="{{ all_url }}" onclick="this.select()"></label>
+  {% if not rows %}<p class="muted">Сотрудников пока нет.</p>{% else %}
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Сотрудник</th><th>Открытых задач со сроком</th><th>Ссылка для подписки</th><th></th></tr></thead>
+    <tbody>{% for r in rows %}<tr>
+      <td><a href="/employees?edit={{ r.id }}&tab=contacts">{{ r.name }}</a>{% if r.position %}<div class="muted">{{ r.position }}</div>{% endif %}</td>
+      <td>{{ r.tasks }}</td>
+      <td><input class="cal-link" readonly value="{{ r.url }}" onclick="this.select()" aria-label="Ссылка {{ r.name }}"></td>
+      <td>{% if r.telegram %}<form method="post" action="/calendar/send-links"><input type="hidden" name="employee_id" value="{{ r.id }}"><button class="btn sm" {{ 'disabled' if not feed_on }}>Отправить</button></form>{% else %}<span class="muted">нет Telegram</span>{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>{% endif %}
+</section>
+
+<section class="card" id="company">
+  <h2>Состав встреч из календаря компании</h2>
+  <div class="cal-st small">
+    {% if st.configured %}<span><b>подключён</b></span>
+      {% if st.checked_local %}<span>прочитан {{ st.checked_local }}{% if st.ok %} <span class="cal-ok">✓</span> · встреч: {{ st.events or 0 }}{% if st.with_people is not none %} · с приглашёнными: {{ st.with_people }}{% endif %}{% endif %}</span>{% endif %}
+      {% if st.ok == false %}<span class="cal-bad">ошибка: {{ st.error }}</span>{% endif %}
+      <form method="post" action="/calendar/sync"><button class="btn sm">Обновить сейчас</button></form>
+      <form method="post" action="/calendar/forget" onsubmit="return confirm('Отключить календарь компании?')"><button class="btn sm ghost">Отключить</button></form>
+    {% else %}<span class="muted">не подключён — участники берутся из «Напоминаний», как раньше</span>{% endif %}
+  </div>
+  <form method="post" action="/calendar/address" class="cal-form">
+    <label class="f">Закрытый адрес календаря в формате iCal (ICS)<input name="url" type="password" autocomplete="off" placeholder="{{ 'адрес сохранён — вставьте новый, чтобы заменить' if st.configured else 'https://calendar.google.com/calendar/ical/…/private-…/basic.ics' }}"></label>
+    <div class="row"><button class="btn primary">Сохранить и прочитать</button></div>
+  </form>
+  <p class="small muted">Где взять: Google — «Настройки и общий доступ» календаря → «Закрытый адрес в формате iCal». Outlook — «Параметры» → «Календарь» → «Общие календари» → «Опубликовать календарь» (все сведения) → ссылка ICS. Яндекс — настройки календаря → «Экспорт» → ссылка. Адрес хранится зашифрованным и на страницу не выводится. Календарь читается каждые 15 минут: встреча, идущая во время записи, даёт её участников — раньше «Напоминаний». Приглашённые узнаются по рабочей почте в карточке сотрудника, иначе по имени; остальные — гости; отказавшиеся не включаются.</p>
+  {% if no_email %}<p class="small"><span class="pill amber">{{ no_email }}</span> сотрудников без рабочей почты в карточке — их узнают только по имени. <a href="/employees">Заполнить →</a></p>{% endif %}
+  {% if st.configured %}
+  <h3>Ближайшие встречи</h3>
+  {% if not coming %}<p class="muted small">На ближайшую неделю встреч нет.</p>{% else %}
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Когда</th><th>Встреча</th><th>Сотрудники</th><th>Гости</th></tr></thead>
+    <tbody>{% for c in coming %}<tr>
+      <td>{{ c.when }}</td><td>{{ c.title }}</td>
+      <td class="cal-people">{% for p in c.people %}<span class="pill">{{ p }}</span>{% else %}<span class="muted">—</span>{% endfor %}</td>
+      <td class="cal-people">{% for g in c.guests %}<span class="pill gray">{{ g }}</span>{% else %}<span class="muted">—</span>{% endfor %}{% if c.unknown %}<div class="muted">Если это сотрудники — впишите почту в их карточки.</div>{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>{% endif %}
+  {% endif %}
+</section>
+{% endblock %}

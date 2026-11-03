@@ -46,6 +46,7 @@
         <input name="telegram_manual" maxlength="200" placeholder="Или @username / chat_id вручную" value="{{ e.telegram_chat_id if e and e.telegram_chat_id not in chats|map(attribute='chat_id')|list else '' }}" autocomplete="off">
       </label>
       {% endif %}
+      <label class="f">Рабочая почта<input name="email" type="email" maxlength="200" value="{{ (e.email or '') if e else '' }}" placeholder="ivan@company.by" autocomplete="off"><small class="muted">По ней приглашённые в календаре узнаются как этот сотрудник.</small></label>
       {% if e %}
         {% set level = rights.get(e.id) or 'employee' %}
         {% if level == 'director' %}

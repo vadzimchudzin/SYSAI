@@ -1,21 +1,26 @@
 """Who was at a meeting (task «Кто говорит» №4).
 
-A new meeting takes its people from its regular meeting in «Напоминания» (an alert has the time, the days and the
+A new meeting takes its people from the company calendar — the meeting held at that time and the people invited to it
+(calendars.py, №26) — else from its regular meeting in «Напоминания» (an alert has the time, the days and the
 people to remind); on the meeting page the list is corrected: people added or removed, guests written in. The list then
 works everywhere a name is chosen for a voice: names come only from the participants, the number of participants is a
 hint for the whole-record speaker labelling (diarize.py), and the protocol says «Присутствовали».
 
 Meeting.participants = {"people": [{"employee_id": 3}, {"guest": "Иван, подрядчик"}],
-                        "source": "alert" | "manual", "alert_id": 5, "alert_title": "Планёрка", "by": "...", "at": "..."}
+                        "source": "calendar" | "alert" | "manual", "alert_id": 5, "alert_title": "Планёрка",
+                        "event_title": "Планёрка", "event_at": "02.03 10:00", "by": "...", "at": "..."}
 None means nobody has set it yet (no matching alert): then every active employee may be named, as before.
 """
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import re
 
 from . import meeting_alerts, reminders
 from .db import Employee, MeetingAlert
+
+log = logging.getLogger("sysai.participants")
 
 MAX_PEOPLE = 80
 GUEST_LENGTH = 80
@@ -56,7 +61,7 @@ def count(meeting) -> int:
     return len(employee_ids(meeting)) + len(guests(meeting))
 
 
-def _store(meeting, ids, guest_names, source: str, by: str = "", alert=None) -> None:
+def _store(meeting, ids, guest_names, source: str, by: str = "", alert=None, event=None) -> None:
     people = [{"employee_id": int(value)} for value in dict.fromkeys(ids)]
     seen = set()
     for name in guest_names:
@@ -68,6 +73,11 @@ def _store(meeting, ids, guest_names, source: str, by: str = "", alert=None) -> 
     previous = meeting.participants if isinstance(meeting.participants, dict) else {}
     if alert is not None:
         data.update(alert_id=alert.id, alert_title=alert.title or "Совещание")
+    elif event is not None:
+        from . import calendars
+        data.update(event_title=(event.title or "Встреча")[:200], event_at=calendars.event_label(event))
+    elif previous.get("event_title"):
+        data.update(event_title=previous.get("event_title"), event_at=previous.get("event_at", ""))
     elif previous.get("alert_id"):
         data.update(alert_id=previous.get("alert_id"), alert_title=previous.get("alert_title", ""))
     meeting.participants = data
@@ -88,6 +98,9 @@ def _started_at(meeting):
         created = meeting.created_at
         return created if created.tzinfo else created.replace(tzinfo=dt.timezone.utc)
     return None
+
+
+started_at = _started_at
 
 
 def match_alert(session, meeting):
@@ -121,10 +134,26 @@ def match_alert(session, meeting):
     return named[0] if len(named) == 1 else None
 
 
+def from_calendar(session, meeting):
+    """(the meeting of the company calendar, employee ids, guests) or None (calendars.py)."""
+    try:
+        from . import calendars
+        return calendars.people_for(session, meeting)
+    except Exception:  # noqa: BLE001  the calendar is a hint: without it the reminders are asked as before
+        log.exception("calendar participants of meeting %s are unavailable", getattr(meeting, "id", None))
+        return None
+
+
 def ensure(session, meeting) -> bool:
-    """Give a meeting without a list the people of its regular meeting. True when the list was set now."""
+    """Give a meeting without a list the people invited to it in the calendar, else the people of its regular meeting.
+    True when the list was set now."""
     if is_set(meeting):
         return False
+    found = from_calendar(session, meeting)
+    if found is not None:
+        event, ids, names = found
+        _store(meeting, ids, names, "calendar", event=event)
+        return True
     alert = match_alert(session, meeting)
     if alert is None:
         return False
@@ -184,12 +213,29 @@ def view(session, meeting) -> dict:
         origin = "Список не задан: имена голосам подбираются из всех сотрудников."
     elif data.get("source") == "alert":
         origin = f"Из напоминания «{data.get('alert_title') or 'Совещание'}»."
+    elif data.get("source") == "calendar":
+        origin = (f"Из календаря: «{data.get('event_title') or 'Встреча'}»"
+                  + (f" {data['event_at']}" if data.get("event_at") else "") + ".")
     else:
         origin = "Исправлено вручную" + (f" · {data.get('by')}" if data.get("by") else "") + "."
-        if data.get("alert_title"):
+        if data.get("event_title"):
+            origin += f" Сначала было из календаря: «{data['event_title']}»."
+        elif data.get("alert_title"):
             origin += f" Сначала было из напоминания «{data['alert_title']}»."
     return {"set": bool(data), "people": people, "guests": guests(meeting), "count": len(people) + len(guests(meeting)),
             "ids": [person["id"] for person in people], "origin": origin}
+
+
+def suggestion(session, meeting) -> str:
+    """The button of the meeting page: «Взять из календаря «…»» or «Взять из напоминания «…»», or none."""
+    source = (meeting.participants or {}).get("source") if is_set(meeting) else ""
+    found = from_calendar(session, meeting)
+    if found is not None:
+        return "" if source == "calendar" else f"из календаря «{found[0].title or 'Встреча'}»"
+    if source in ("alert", "calendar"):
+        return ""
+    alert = match_alert(session, meeting)
+    return f"из напоминания «{alert.title}»" if alert is not None else ""
 
 
 def present(session, meeting) -> list:

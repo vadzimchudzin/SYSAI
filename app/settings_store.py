@@ -62,6 +62,11 @@ DEFAULTS = {
     "mail_sender_name": "",          # the name in «From» of the answers; "" = the company name
     "mail_signature": "",            # added under every answer
     "mail_reply_examples": "",       # good answers of the company (the style of the drafts), separated by «---»
+    # Календарь (calendars.py, №26): the addresses for subscription and the company calendar read for the participants
+    "calendar_feed_on": True,        # the personal ICS addresses answer (off: every address says «нет»)
+    "calendar_salt": "",             # part of every address; «Сменить ссылки» replaces it
+    "calendar_ics_url": "",          # the secret ICS address of the company calendar, sealed; never sent to the browser
+    "calendar_state": {},            # the last reading: when, ok, error, how many meetings
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
     "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents
@@ -170,7 +175,7 @@ def set_many(values: dict):
 SECRET_KEYS = ("openrouter_api_key", "telegram_bot_token", "bitrix_webhook_url", "ticnote_appkey")
 # Never sent to the browser (sealed Telegram account data).
 HIDDEN_KEYS = ("userbot_api_id", "userbot_api_hash", "userbot_session", "userbot_phone", "userbot_pending", "userbot_me",
-               "mail_password")
+               "mail_password", "calendar_ics_url", "calendar_salt")
 
 
 def mask(v: str) -> str:

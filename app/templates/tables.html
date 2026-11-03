@@ -1,0 +1,60 @@
+{% extends "base.html" %}{% block title %}Таблицы — SYSAI{% endblock %}
+{% block head %}<style>.tb-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}.tb-filters label.f{min-width:150px}.tb-nums{display:flex;gap:18px;flex-wrap:wrap}.tb-nums div{min-width:110px}.tb-nums b{font-size:22px;display:block}.tb-bad{color:#c62828}.tb-sum td{font-weight:600}</style>{% endblock %}
+{% block body %}
+<div class="row between"><h1>Таблицы</h1>
+  <a class="btn primary" href="/tables/export.xlsx?{{ query }}">{{ icon('download') }} Скачать Excel</a></div>
+<p class="muted small">Выгрузка задач, дел и совещаний и готовые сводные — по людям, по объектам, по срокам — одной кнопкой в один файл Excel (открывается и в Google Таблицах: «Файл» → «Импорт»). Задача попадает в период, если в нём она поставлена, её срок или она выполнена.</p>
+<form method="get" action="/tables" class="card tb-filters">
+  <label class="f">Период<select name="period" onchange="document.getElementById('tb-dates').hidden = this.value !== 'custom'">
+    {% for k, v in presets.items() %}<option value="{{ k }}" {{ 'selected' if f.period == k }}>{{ v }}</option>{% endfor %}</select></label>
+  <span id="tb-dates" class="tb-filters" {{ 'hidden' if f.period != 'custom' }}>
+    <label class="f">С<input type="date" name="from" value="{{ f['from'].isoformat() if f['from'] else '' }}"></label>
+    <label class="f">По<input type="date" name="to" value="{{ f['to'].isoformat() if f['to'] else '' }}"></label></span>
+  <label class="f">Сотрудник<select name="employee"><option value="">все</option>
+    {% for p in people %}<option value="{{ p.id }}" {{ 'selected' if f.employee_id == p.id }}>{{ p.name }}</option>{% endfor %}</select></label>
+  {% if departments %}<label class="f">Отдел<select name="department"><option value="">все</option>
+    {% for d in departments %}<option value="{{ d.id }}" {{ 'selected' if f.department_id == d.id }}>{{ d.name }}</option>{% endfor %}</select></label>{% endif %}
+  {% if places %}<label class="f">Объект / клиент<select name="entity"><option value="">все</option>
+    {% for e in places %}<option value="{{ e.id }}" {{ 'selected' if f.entity_id == e.id }}>{{ e.name }}</option>{% endfor %}</select></label>{% endif %}
+  <label class="f">Задачи<select name="state">{% for k, v in states.items() %}<option value="{{ k }}" {{ 'selected' if f.state == k }}>{{ v }}</option>{% endfor %}</select></label>
+  <button class="btn">Показать</button>
+</form>
+{% set n = view.summary %}
+<section class="card">
+  <p class="small muted">{{ view.head }}</p>
+  <div class="tb-nums">
+    <div><b>{{ n.tasks }}</b>задач</div><div><b>{{ n.open }}</b>открыто</div>
+    <div><b class="{{ 'tb-bad' if n.overdue }}">{{ n.overdue }}</b>просрочено</div><div><b>{{ n.done }}</b>выполнено</div>
+    <div><b>{% if n.share is not none %}{{ (n.share * 100)|round|int }}%{% else %}—{% endif %}</b>в срок{% if n.known %} <span class="muted">(из {{ n.known }})</span>{% endif %}</div>
+    <div><b>{{ n.meetings }}</b>совещаний</div><div><b>{{ n.cases_open }}</b>дел в работе</div>
+  </div>
+</section>
+<section class="card">
+  <h2>По людям</h2>
+  {% if not view.people %}<p class="muted">Задач по этому отбору нет.</p>{% else %}
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Сотрудник</th><th>Отдел</th><th>Задач</th><th>Открыто</th><th>Просрочено</th><th>Выполнено</th><th>% в срок</th><th>Средняя просрочка</th><th>Ближайший срок</th></tr></thead>
+    <tbody>{% for g in view.people %}<tr><td>{{ g.person }}</td><td>{{ g.department }}</td><td>{{ g.total }}</td><td>{{ g.open }}</td>
+      <td class="{{ 'tb-bad' if g.overdue }}">{{ g.overdue }}</td><td>{{ g.done }}</td>
+      <td>{% if g.share is not none %}{{ (g.share * 100)|round|int }}%{% else %}—{% endif %}</td>
+      <td>{% if g.avg_late %}{{ g.avg_late }} дн.{% else %}—{% endif %}</td><td>{{ g.nearest.strftime('%d.%m.%Y') if g.nearest else '—' }}</td></tr>{% endfor %}</tbody>
+  </table></div>{% endif %}
+</section>
+<section class="card">
+  <h2>По срокам — открытые задачи</h2>
+  {% if not view.deadlines %}<p class="muted">Открытых задач нет.</p>{% else %}
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Сотрудник</th>{% for b in view.buckets %}<th>{{ b }}</th>{% endfor %}<th>Всего</th></tr></thead>
+    <tbody>{% for r in view.deadlines %}<tr class="{{ 'tb-sum' if r.sum }}"><td>{{ r.person }}</td>{% for b in view.buckets %}<td class="{{ 'tb-bad' if b == 'Просрочено' and r[b] }}">{{ r[b] or '' }}</td>{% endfor %}<td>{{ r.total }}</td></tr>{% endfor %}</tbody>
+  </table></div>{% endif %}
+</section>
+<section class="card">
+  <h2>По объектам и клиентам</h2>
+  {% if not view.places %}<p class="muted">По этому отбору объектов и клиентов нет: они появляются, когда задачи, совещания, документы или письма их упоминают.</p>{% else %}
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Объект / клиент</th><th>Задач</th><th>Открыто</th><th>Просрочено</th><th>Совещаний</th><th>Документов</th><th>Писем</th></tr></thead>
+    <tbody>{% for g in view.places %}<tr><td><a href="/entities/{{ g.id }}">{{ g.name }}</a>{% if g.kind %} <span class="muted">· {{ g.kind }}</span>{% endif %}</td><td>{{ g.tasks }}</td><td>{{ g.open }}</td><td class="{{ 'tb-bad' if g.overdue }}">{{ g.overdue }}</td><td>{{ g.meetings }}</td><td>{{ g.documents }}</td><td>{{ g.letters }}</td></tr>{% endfor %}</tbody>
+  </table></div><p class="small muted">Первые 15 — в файле все.</p>{% endif %}
+</section>
+<p class="small muted">В файле листы: «Сводка», «Задачи», «Дела», «Совещания», «По людям», «По объектам», «По срокам» — с фильтрами в заголовках и закреплённой первой строкой. «В срок» считается по задачам, у которых известен день выполнения (он записывается с этой версии; у закрытых раньше — только «выполнено»).</p>
+{% endblock %}
