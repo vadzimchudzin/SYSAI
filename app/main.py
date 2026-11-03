@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
                storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
@@ -1502,7 +1502,8 @@ def document_view(request: Request, doc_id: int, q: str = ""):
                              else t.to_ref), "status": t.status, "at": t.sent_at or t.created_at, "by": t.approved_by or ""}
                      for t in s.query(DocumentTransfer).filter_by(document_id=d.id).order_by(DocumentTransfer.id)]
         doc = {"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256, "at": d.created_at,
-               "sender": d.employee.name if d.employee else d.chat_id, "caption": d.caption or "", "sensitive": d.sensitive,
+               "sender": _document_sender(d), "caption": d.caption or "", "sensitive": d.sensitive,
+               "mail_id": (d.facts or {}).get("mail_id") if d.chat_id == "mail" else None,
                "status": d.text_status or "pending", "summary": d.summary or "", "text": (d.text or "")[:20000],
                "truncated": len(d.text or "") > 20000,
                "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None}
@@ -1735,7 +1736,119 @@ def entity_fact_archive(request: Request, entity_id: int, note_id: int):
 def _document_sender(d) -> str:
     if d.chat_id == "generated":  # made from a template for the person who asked
         return f"{d.employee.name} (по шаблону)" if d.employee else "по шаблону"
+    if d.chat_id == "mail":  # an attachment of a letter (mail.py)
+        return "почта" + (": " + d.caption.split(":", 1)[0].replace("Письмо от ", "") if d.caption else "")
     return d.employee.name if d.employee else d.chat_id
+
+
+# ----------------------------------------------------------------------------- the mailbox (mail.py, «Почтальон»)
+MAIL_MESSAGES = {"saved": "Сохранено.", "kinds": "Типы писем сохранены — новые письма сортируются по ним.",
+                 "checking": "Смотрю почту — новые письма появятся здесь через минуту-другую.", "marked": "Отмечено.",
+                 "sorting": "Разбираю письмо заново — обновите страницу через полминуты."}
+MAIL_FORM_KEYS = ("mail_enabled", "mail_service", "mail_address", "mail_imap_host", "mail_imap_port", "mail_smtp_host",
+                  "mail_smtp_port", "mail_folder", "mail_poll_minutes", "mail_history_days", "mail_labels")
+
+
+@app.get("/mail", response_class=HTMLResponse)
+def mail_view(request: Request, kind: str = "", q: str = "", only: str = "", msg: str = "", error: str = "",
+              limit: int = 100):
+    """The mailbox: the letters with their type, client or object, case and labels; the connection; the types."""
+    guard_admin(request)
+    kinds = mail.kinds()
+    with SessionLocal() as s:
+        rows = mail.listing(s, kind if kind in kinds else "", q, only if only in ("unsorted", "unchecked") else "",
+                            max(20, min(int(limit or 100), 500)))
+        score = mail.accuracy(s)
+    stored = settings_store.all_settings()
+    form = {k: stored.get(k) for k in MAIL_FORM_KEYS}
+    return page(request, "mail.html", rows=rows, score=score, st=mail.status(), kinds=kinds, kinds_text=mail.kinds_text(),
+                presets=mail.PRESETS, form=form, has_password=bool(stored.get("mail_password")), kind=kind, q=q,
+                only=only, limit=limit, msg=MAIL_MESSAGES.get(msg, msg[:300] if msg.startswith("подключено") else ""),
+                error=error[:300])
+
+
+@app.post("/mail/settings")
+async def mail_settings_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        mail.save_settings(f)
+    except mail.MailError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#connect", 303)
+    return RedirectResponse("/mail?msg=saved#connect", 303)
+
+
+@app.post("/mail/test")
+def mail_test(request: Request):
+    """«Проверить подключение»: sign in and open the folder."""
+    guard_admin(request)
+    try:
+        text = mail.test_connection()
+    except mail.MailError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#connect", 303)
+    return RedirectResponse("/mail?msg=" + quote(text) + "#connect", 303)
+
+
+@app.post("/mail/check")
+def mail_check_now(request: Request):
+    guard_admin(request)
+    if not mail.configured():
+        return RedirectResponse("/mail?error=" + quote("почта не подключена") + "#connect", 303)
+    mail.check_soon()
+    return RedirectResponse("/mail?msg=checking", 303)
+
+
+@app.post("/mail/kinds")
+async def mail_kinds_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        mail.save_kinds(str(f.get("text") or ""))
+    except mail.MailError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#kinds", 303)
+    return RedirectResponse("/mail?msg=kinds#kinds", 303)
+
+
+@app.get("/mail/{mail_id}", response_class=HTMLResponse)
+def mail_letter_view(request: Request, mail_id: int, msg: str = "", error: str = ""):
+    guard_admin(request)
+    with SessionLocal() as s:
+        try:
+            letter = mail.letter(s, mail_id)
+        except mail.MailError:
+            raise HTTPException(404, "Письмо не найдено") from None
+        cards = [{"id": e.id, "name": e.name} for e in s.query(entities.Entity).filter(
+            entities.Entity.merged_into_id.is_(None)).order_by(entities.Entity.name).limit(1000)]
+    return page(request, "mail_letter.html", m=letter, kinds=mail.kinds(), cards=cards,
+                msg=MAIL_MESSAGES.get(msg, ""), error=error[:300])
+
+
+@app.post("/mail/{mail_id}/check")
+async def mail_letter_check(request: Request, mail_id: int):
+    """«Верно» or the right type and client: the accuracy of the sorting."""
+    guard_admin(request)
+    f = await request.form()
+    back = "/mail" if f.get("back") == "list" else f"/mail/{mail_id}"
+    try:
+        if f.get("ok") == "1":
+            mail.check(mail_id, True, by=_who(request))
+        else:
+            raw = str(f.get("entity_id") or "").strip()
+            entity_id = int(raw) if raw.isdigit() else (0 if raw == "none" else None)
+            mail.check(mail_id, False, kind=str(f.get("kind") or ""), entity_id=entity_id, by=_who(request))
+    except mail.MailError as exc:
+        return RedirectResponse(back + "?error=" + quote(str(exc)), 303)
+    return RedirectResponse(back + "?msg=marked" + (f"#m{mail_id}" if back == "/mail" else ""), 303)
+
+
+@app.post("/mail/{mail_id}/sort")
+def mail_letter_sort(request: Request, mail_id: int):
+    guard_admin(request)
+    if config.TESTING:
+        mail.sort_letter(mail_id, force=True)
+    else:
+        threading.Thread(target=mail.sort_letter, args=(mail_id,), kwargs={"force": True}, daemon=True).start()
+    return RedirectResponse(f"/mail/{mail_id}?msg=sorting", 303)
 
 
 DOC_TEMPLATE_MESSAGES = {"saved": "Шаблон сохранён: ИИ-сотрудник видит его со следующего сообщения.",

@@ -1,0 +1,71 @@
+{% extends "base.html" %}{% block title %}Почта — SYSAI{% endblock %}
+{% block head %}<style>.mail-form .row{gap:8px;flex-wrap:wrap}.mail-form textarea{width:100%}.mail-sum{max-width:520px}.mail-tags .pill{margin:0 4px 2px 0}.mail-st{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.mail-ok{color:#2e7d32}.mail-bad{color:#c62828}</style>{% endblock %}
+{% block body %}
+<div class="row between"><h1>Почта</h1>
+  <form method="get" action="/mail" class="row"><input name="q" value="{{ q }}" placeholder="Тема, отправитель, текст">
+    <select name="kind"><option value="">все типы</option>{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if kind == k }}>{{ v.name }}</option>{% endfor %}</select>
+    <select name="only"><option value="">все письма</option><option value="unsorted" {{ 'selected' if only == 'unsorted' }}>не разобранные</option><option value="unchecked" {{ 'selected' if only == 'unchecked' }}>не проверенные</option></select>
+    <button class="btn sm">Найти</button></form></div>
+<p class="muted small">ИИ-сотрудник читает почтовый ящик компании (только чтение: в ящике ничего не меняется, письма не становятся прочитанными). Новые письма появляются здесь через несколько минут, вложения — в «Документах», где они разбираются, как файлы из Telegram. Каждое письмо получает тип, клиента или объект, связанное дело или задачу и метки; отметьте «верно» или поправьте — так считается точность сортировки.</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сделано: {{ error }}</div>{% endif %}
+<section class="card">
+  {% if not st.configured %}<p><b>Почта не подключена.</b> Заполните «Подключение» внизу страницы: адрес ящика и пароль приложения.</p>
+  {% else %}<div class="mail-st small"><span><b>{{ st.address }}</b>{% if st.service %} · {{ st.service }}{% endif %} · папка «{{ st.folder }}»</span>
+    {% if not st.enabled %}<span class="pill gray">чтение выключено</span>{% endif %}
+    {% if st.checked_at %}<span>посмотрено {{ st.checked_at.strftime('%d.%m %H:%M') }}{% if st.ok %} <span class="mail-ok">✓</span>{% if st.new %} · новых {{ st.new }}{% endif %}{% endif %}</span>{% endif %}
+    {% if st.ok == false %}<span class="mail-bad">ошибка: {{ st.error }}</span>{% endif %}
+    <span class="muted">писем: {{ st.total }}{% if st.waiting %} · ждут разбора: {{ st.waiting }}{% endif %}</span>
+    <form method="post" action="/mail/check"><button class="btn sm">Проверить почту сейчас</button></form></div>{% endif %}
+</section>
+<section class="card">
+  <div class="row between"><h2>Письма</h2>
+    <p class="small" style="margin:0">{% if score.checked %}Сортировка: <b>верно {{ score.right }} из {{ score.checked }}</b> проверенных ({{ score.share }}%, цель — 9 из 10){% else %}<span class="muted">Отметьте «верно» у разобранных писем или поправьте тип — здесь будет точность сортировки (цель: 9 из 10).</span>{% endif %}</p></div>
+  {% if not rows %}<p class="muted">Писем пока нет{% if q or kind or only %} по этому запросу{% endif %}.</p>{% else %}
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Когда</th><th>От кого</th><th>Тема</th><th>Тип</th><th>Клиент / объект</th><th>Дело / задача</th><th>Метки</th><th></th></tr></thead>
+    <tbody>{% for r in rows %}<tr id="m{{ r.id }}">
+      <td>{{ r.at.strftime('%d.%m %H:%M') if r.at }}</td>
+      <td title="{{ r.addr }}">{{ r.from }}</td>
+      <td class="mail-sum"><a href="/mail/{{ r.id }}"><b>{{ r.subject }}</b></a>{% if r.summary %}<div class="muted">{{ r.summary }}</div>{% endif %}
+        {% if r.attachments %}<div class="muted">📎 {% for a in r.attachments %}<a href="/documents/{{ a.document_id }}/view">{{ a.filename }}</a>{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}</td>
+      <td>{% if r.kind %}{{ r.kind_name }}{% elif r.sort_status == 'skipped' %}<span class="muted">не разбирается</span>{% else %}<span class="muted">разбирается…</span>{% endif %}</td>
+      <td>{% if r.entity %}<a href="/entities/{{ r.entity.id }}">{{ r.entity.name }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if r.link %}<a href="{{ r.link.url }}">{{ r.link.title }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="mail-tags">{% for l in r.labels %}<span class="pill {{ 'red' if l == 'срочно' else ('amber' if l == 'ждёт ответа' else 'gray') }}">{{ l }}</span>{% endfor %}</td>
+      <td>{% if r.checked == 'ok' %}<span class="mail-ok" title="проверено: верно">✓</span>{% elif r.checked == 'fixed' %}<span class="muted" title="поправлено вручную">поправлено</span>{% elif r.kind %}<form method="post" action="/mail/{{ r.id }}/check"><input type="hidden" name="ok" value="1"><input type="hidden" name="back" value="list"><button class="btn sm ghost" title="Тип и клиент определены верно">верно</button></form>{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if rows|length >= limit %}<p class="small"><a href="/mail?limit={{ limit + 100 }}&kind={{ kind }}&q={{ q|urlencode }}&only={{ only }}">Показать ещё</a></p>{% endif %}{% endif %}
+</section>
+<section class="card" id="kinds"><h2>Типы писем</h2>
+  <p class="small muted">По одному в строке: название — когда ставить. Пояснение помогает ИИ-сотруднику не путать типы. Уже разобранные письма сохраняют свой тип; «Другое» есть всегда.</p>
+  <form method="post" action="/mail/kinds" class="mail-form"><textarea name="text" rows="{{ kinds|length + 2 }}">{{ kinds_text }}</textarea>
+    <button class="btn sm" style="margin-top:8px">Сохранить типы</button></form>
+</section>
+<section class="card" id="connect"><h2>Подключение</h2>
+  <p class="small muted">Нужен адрес ящика и <b>пароль приложения</b> (не обычный пароль от почты): его создают в настройках безопасности почтового сервиса. Пароль хранится зашифрованным и больше не показывается. Почта только читается; ответы (черновики) отправляются лишь после подтверждения ответственного.</p>
+  <form method="post" action="/mail/settings" class="mail-form">
+    <input type="hidden" name="present_flags" value="1">
+    <div class="row"><label class="f">Почтовый сервис <select name="mail_service">{% for k, p in presets.items() %}<option value="{{ k }}" {{ 'selected' if (form.mail_service or 'custom') == k }}>{{ p.name }}</option>{% endfor %}</select></label>
+      <label class="f" style="flex:1">Адрес ящика <input name="mail_address" type="email" maxlength="320" value="{{ form.mail_address or '' }}" placeholder="office@company.by" autocomplete="off"></label></div>
+    <div class="row"><label class="f" style="flex:1">Пароль приложения {% if has_password %}<span class="pill green">сохранён</span>{% endif %}
+        <input name="mail_password" type="password" maxlength="300" autocomplete="new-password" placeholder="{{ 'оставьте пустым, чтобы не менять' if has_password else 'пароль приложения' }}"
+               oninput="this.form.password_action.value = this.value ? 'replace' : 'keep'"></label>
+      <label class="f">Пароль <select name="password_action"><option value="keep">не менять</option><option value="replace">заменить</option>{% if has_password %}<option value="clear">удалить</option>{% endif %}</select></label></div>
+    <details class="small" {{ 'open' if (form.mail_service or 'custom') == 'custom' }}><summary>Серверы и папка (для известных сервисов заполнятся сами)</summary>
+      <div class="row"><label class="f" style="flex:1">Сервер IMAP <input name="mail_imap_host" maxlength="200" value="{{ form.mail_imap_host or '' }}" placeholder="imap.company.by"></label>
+        <label class="f">Порт <input name="mail_imap_port" inputmode="numeric" maxlength="5" value="{{ form.mail_imap_port or 993 }}" style="width:80px"></label>
+        <label class="f" style="flex:1">Сервер SMTP (для ответов) <input name="mail_smtp_host" maxlength="200" value="{{ form.mail_smtp_host or '' }}" placeholder="smtp.company.by"></label>
+        <label class="f">Порт <input name="mail_smtp_port" inputmode="numeric" maxlength="5" value="{{ form.mail_smtp_port or 465 }}" style="width:80px"></label></div>
+      <div class="row"><label class="f">Папка <input name="mail_folder" maxlength="200" value="{{ form.mail_folder or 'INBOX' }}"></label>
+        <label class="f">Смотреть почту каждые, минут <input name="mail_poll_minutes" inputmode="numeric" maxlength="2" value="{{ form.mail_poll_minutes or 3 }}" style="width:80px"></label>
+        <label class="f">В первый раз взять письма за, дней <input name="mail_history_days" inputmode="numeric" maxlength="2" value="{{ form.mail_history_days if form.mail_history_days is not none else 3 }}" style="width:80px"></label></div>
+    </details>
+    <p class="small muted">{% for k, p in presets.items() %}<span data-preset="{{ k }}"><b>{{ p.name }}:</b> {{ p.hint }}</span><br>{% endfor %}</p>
+    <label class="small"><input type="checkbox" name="mail_enabled" value="1" {{ 'checked' if form.mail_enabled }}> читать почту (новые письма появляются здесь)</label><br>
+    <label class="small"><input type="checkbox" name="mail_labels" value="1" {{ 'checked' if form.mail_labels }}> ставить тип и метки и в самом ящике (Gmail — ярлыки «SYSAI/…», другие почты — ключевые слова; нужен доступ на запись)</label>
+    <div class="row" style="margin-top:8px"><button class="btn sm primary">Сохранить</button></div>
+  </form>
+  {% if st.configured %}<form method="post" action="/mail/test" style="margin-top:8px"><button class="btn sm ghost">Проверить подключение</button></form>{% endif %}
+</section>
+{% endblock %}

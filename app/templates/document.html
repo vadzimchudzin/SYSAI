@@ -2,7 +2,7 @@
 {% block body %}
 <p class="small"><a href="/documents">← Документы</a></p>
 <div class="row between"><h1>{{ doc.filename }}</h1><a class="btn sm" href="/documents/{{ doc.id }}">Скачать</a></div>
-<p class="muted small">от {{ doc.sender }} · {{ doc.at.strftime('%d.%m.%Y %H:%M') if doc.at }} · {{ (doc.size / 1024)|round(1) }} КБ · SHA-256 {{ doc.sha[:16] }}…{% if doc.sensitive %} · <span class="pill amber">конфиденциальный</span>{% endif %}{% if doc.case %} · дело <a href="/progress?scope=open#case-{{ doc.case.id }}">«{{ doc.case.title }}»</a>{% endif %}</p>
+<p class="muted small">от {{ doc.sender }} · {{ doc.at.strftime('%d.%m.%Y %H:%M') if doc.at }} · {{ (doc.size / 1024)|round(1) }} КБ · SHA-256 {{ doc.sha[:16] }}…{% if doc.sensitive %} · <span class="pill amber">конфиденциальный</span>{% endif %}{% if doc.case %} · дело <a href="/progress?scope=open#case-{{ doc.case.id }}">«{{ doc.case.title }}»</a>{% endif %}{% if doc.mail_id %} · <a href="/mail/{{ doc.mail_id }}">письмо</a>{% endif %}</p>
 {% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="people-msg warn" role="alert">{{ error }}</div>{% endif %}
 {% if doc.summary %}<section class="card"><b>Кратко:</b> {{ doc.summary }}</section>{% endif %}

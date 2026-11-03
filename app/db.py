@@ -986,6 +986,47 @@ class SkillRun(Base):
     created_at = Column(DateTime(timezone=True), default=now, index=True)
 
 
+class MailMessage(Base):
+    """One letter of the connected mailbox (mail.py, «Почтальон» №22–25): what came, its attachments in «Документы»,
+    the type, the client or object and the case it belongs to (№23), who it went to and the tasks it gave (№24), the
+    draft of the answer (№25). Our own answers sent through SMTP are kept here too (direction «out»)."""
+    __tablename__ = "mail_messages"
+    __table_args__ = (UniqueConstraint("mailbox", "folder", "uidvalidity", "uid"),)
+    id = Column(Integer, primary_key=True)
+    mailbox = Column(String(320), nullable=False, default="")    # the address of the box
+    folder = Column(String(200), nullable=False, default="INBOX")
+    uidvalidity = Column(String(40), nullable=False, default="")
+    uid = Column(Integer, nullable=False, default=0)               # 0 for our own answers
+    direction = Column(String(4), nullable=False, default="in")   # in | out
+    message_id = Column(String(500), default="", index=True)       # the Message-ID header: the same letter is kept once
+    in_reply_to = Column(String(500), default="")
+    refs = Column(Text, default="")                                # the References header
+    thread = Column(String(500), default="", index=True)           # the first Message-ID of the conversation
+    from_addr = Column(String(320), default="", index=True)
+    from_name = Column(String(300), default="")
+    reply_to = Column(String(320), default="")
+    to_addrs = Column(Text, default="")
+    cc_addrs = Column(Text, default="")
+    subject = Column(String(1000), default="")
+    sent_at = Column(DateTime(timezone=True), nullable=True)       # the Date header
+    text = Column(Text, default="")                                # the body as text (HTML turned into text)
+    size = Column(Integer, nullable=False, default=0)
+    signals = Column(JSON, nullable=True)                          # bulk mail, auto-reply… (headers that tell the kind)
+    attachments = Column(JSON, nullable=True)                      # [{"filename", "mime", "size", "document_id", "skipped"}]
+    kind = Column(String(20), default="")                          # the type (mail.kinds()); "" = not sorted yet
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="SET NULL"), nullable=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    labels = Column(JSON, nullable=True)                           # ["срочно", "ждёт ответа", "срок 05.12"]
+    sort = Column(JSON, nullable=True)                             # what the sorting found and why (mail.py)
+    sort_status = Column(String(12), nullable=False, default="")   # "" not yet | working | done | failed | skipped
+    checked = Column(JSON, nullable=True)                          # the panel: {"ok", "kind", "entity_id", "was", "by", "at"}
+    route = Column(JSON, nullable=True)                            # who it went to and the tasks it gave (№24)
+    draft = Column(JSON, nullable=True)                            # the answer being prepared (№25)
+    status = Column(String(12), nullable=False, default="new", index=True)  # new | sorted | routed | answered | done | ignored
+    created_at = Column(DateTime(timezone=True), default=now, index=True)
+
+
 class MemoryVector(Base):
     """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
     __tablename__ = "memory_vectors"

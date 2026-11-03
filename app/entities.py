@@ -20,7 +20,8 @@ from .db import (ConversationMessage, Document, Entity, EntityLink, Meeting, Not
 log = logging.getLogger("sysai.entities")
 
 KINDS = {"client": "Клиент", "object": "Объект", "contractor": "Подрядчик / поставщик", "org": "Организация"}
-SOURCE_TYPES = {"meeting": "Совещания", "task": "Задачи", "document": "Документы", "message": "Переписка"}
+SOURCE_TYPES = {"meeting": "Совещания", "task": "Задачи", "document": "Документы", "message": "Переписка",
+                "mail": "Почта"}
 _LEGAL_LONG = sorted((
     "общество с ограниченной ответственностью", "общество с дополнительной ответственностью",
     "совместное общество с ограниченной ответственностью", "иностранное общество с ограниченной ответственностью",
@@ -295,7 +296,7 @@ def run_pending() -> None:
 
 
 def rescan(entity_ids=None) -> int:
-    """Look for these cards (all of them when None) in the whole history: meetings, tasks, documents, messages."""
+    """Look for these cards (all of them when None) in the whole history: meetings, tasks, documents, messages, mail."""
     with SessionLocal() as s:
         only = set(entity_ids) if entity_ids else None
         added = 0
@@ -308,6 +309,9 @@ def rescan(entity_ids=None) -> int:
         for row in (s.query(ConversationMessage).filter(ConversationMessage.role.in_(("user", "assistant")))
                     .order_by(ConversationMessage.id.desc()).limit(5000)):
             added += link_text(s, "message", row.id, row.text or "", only)
+        from .db import MailMessage
+        for letter in s.query(MailMessage).filter(MailMessage.direction == "in").order_by(MailMessage.id.desc()).limit(2000):
+            added += link_text(s, "mail", letter.id, f"{letter.subject or ''}\n{(letter.text or '')[:20000]}", only)
         s.commit()
     return added
 
@@ -532,6 +536,12 @@ def _source_link(s, source_type: str, source_id: int) -> dict:
         d = s.get(Document, source_id)
         return {"title": d.filename if d else "удалён", "url": f"/documents/{source_id}/view" if d else "",
                 "date": d.created_at if d else None, "line": doc_intake.line(d.facts or {}) if d and d.facts else ""}
+    if source_type == "mail":
+        from .db import MailMessage
+        letter = s.get(MailMessage, source_id)
+        return {"title": (letter.subject or "(без темы)") if letter else "удалено",
+                "url": f"/mail/{source_id}" if letter else "", "date": (letter.sent_at or letter.created_at) if letter else None,
+                "who": (letter.from_name or letter.from_addr or "") if letter else ""}
     row = s.get(ConversationMessage, source_id)
     return {"title": "сообщение" if row else "удалено", "url": "", "date": row.created_at if row else None,
             "who": ("ассистент" if row and row.role == "assistant" else "человек") if row else ""}
