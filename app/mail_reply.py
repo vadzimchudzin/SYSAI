@@ -311,7 +311,7 @@ def make(mail_id: int, points: str = "", *, chat: str = "", employee_id=None, re
         if row is None or row.direction != "in":
             raise ReplyError("письмо не найдено")
         if not ready():
-            raise ReplyError("отправка писем не настроена: на странице «Почта» нужен сервер SMTP и пароль приложения")
+            raise ReplyError("отправка писем не настроена: в настройках «Секретаря» → «Подключение» нужен сервер SMTP и пароль приложения")
         to = _address(row)
         if not to:
             raise ReplyError("у письма нет адреса, на который можно ответить")
@@ -341,7 +341,7 @@ def text_for(draft_id: int) -> str:
         box = mail.connection()["address"]
         body = draft.text
         if len(body) > MAX_SHOWN:
-            link = f" {config.PUBLIC_URL}/mail/{row.id}" if config.PUBLIC_URL else " в кабинете, раздел «Почта»"
+            link = f" {config.PUBLIC_URL}/mail/{row.id}" if config.PUBLIC_URL else " в кабинете, раздел «Секретарь»"
             body = body[:MAX_SHOWN].rstrip() + f"\n… (полностью —{link})"
         lines = [f"✉️ Черновик ответа на «{row.subject or 'без темы'}» → {draft.to_addrs}"
                  + (f" (вариант {draft.version})" if draft.version > 1 else "") + ":", "", body, ""]

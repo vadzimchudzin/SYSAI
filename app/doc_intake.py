@@ -43,7 +43,7 @@ ROUTE_RU = {"planned": "будет передан после ответа", "sen
             "in_case": "документ по делу — его передаёт дело", "sensitive": "конфиденциальный — по правилам не пересылается",
             "late": "передан (разобран после ответа)", "failed": "передать не удалось", "off": "разбор выключен",
             "ready": "готов к передаче по правилам (кнопка «Передать по правилам»)",
-            "in_mail": "вложение письма — передаётся вместе с письмом (страница «Почта»)"}
+            "in_mail": "вложение письма — передаётся вместе с письмом (страница «Секретарь»)"}
 WAIT_SECONDS = 45     # the answer to the person waits this long for the reading and the analysis of their files
 LATE_SECONDS = 120    # a plan nobody carried out after the answer is carried out by the background loop
 FRESH_HOURS = 48      # only files this fresh are analyzed and routed by the background loop

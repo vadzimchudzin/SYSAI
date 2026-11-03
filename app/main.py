@@ -203,12 +203,14 @@ def guard_admin(request: Request):
 
 def page(request: Request, name: str, **ctx):
     me = current_user(request)
-    pending_users = accounts.pending_count() if me and me["role"] == "superuser" else 0
+    boss = bool(me and me["role"] == "superuser")
+    pending_users = accounts.pending_count() if boss else 0
+    mail_on = bool(settings_store.get("mail_enabled")) if boss else False  # the dot of «Секретарь» at the bottom of the menu
     ai = userbot.ai_mode()
     return tpl.TemplateResponse(request, name, {"request": request, "llm": config.llm_enabled(), "ai": ai,
                                                 "tg": userbot.ready() if ai else config.telegram_enabled(),
                                                 "ephemeral": EPHEMERAL,
-                                                "me": me, "pending_users": pending_users, **ctx})
+                                                "me": me, "pending_users": pending_users, "mail_on": mail_on, **ctx})
 
 
 EPHEMERAL = config.DATABASE_URL.startswith("sqlite") and bool(os.getenv("RENDER"))

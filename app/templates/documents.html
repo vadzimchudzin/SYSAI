@@ -3,7 +3,7 @@
 {% block body %}
 <div class="row between"><h1>Документы</h1>
   <form method="get" action="/documents" class="row"><input name="q" value="{{ q }}" placeholder="Поиск по имени файла или подписи"> <button class="btn sm">Найти</button></form></div>
-<p class="muted small">Файлы, которые сотрудники прислали ИИ-сотруднику в Telegram, вложения писем (<a href="/mail">«Почта»</a>) и документы, которые он сделал по шаблонам: что в них (реквизиты, суммы, сроки), к какому делу привязаны и кому переданы. Содержимое проверяется по SHA-256 перед каждой пересылкой.</p>
+<p class="muted small">Файлы, которые сотрудники прислали ИИ-сотруднику в Telegram, вложения писем (<a href="/mail">«Секретарь»</a>) и документы, которые он сделал по шаблонам: что в них (реквизиты, суммы, сроки), к какому делу привязаны и кому переданы. Содержимое проверяется по SHA-256 перед каждой пересылкой.</p>
 {% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="people-msg warn" role="alert">Не сохранено: {{ error }}</div>{% endif %}
 <section class="card" id="rules">
