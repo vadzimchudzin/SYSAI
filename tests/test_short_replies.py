@@ -67,6 +67,8 @@ def test_word_times_cut_the_text_at_pauses_and_the_model_names_each_piece(monkey
     monkeypatch.setattr(llm, "chat", chat)
     out = transcribe._by_words(path, result, {}, 10.0, "")["segments"]
     assert [item["text"] for item in asked[0]] == ["Акт подписан вчера?", "Да.", "Тогда отправляем оригинал."]
+    assert out[0]["heard"] == [[0.0, 1.5]]  # word times stay with the replica for the checks (verify.py)
+    out = [{k: v for k, v in item.items() if k not in transcribe.TRACE_KEYS} for item in out]
     assert out == [{"start": 0.0, "end": 1.5, "text": "Акт подписан вчера?", "speaker": "Спикер 1"},
                    {"start": 1.9, "end": 2.1, "text": "Да.", "speaker": "Спикер 2"},
                    {"start": 2.9, "end": 4.6, "text": "Тогда отправляем оригинал.", "speaker": "Спикер 1"}]

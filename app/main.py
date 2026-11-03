@@ -27,7 +27,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_folders, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel, gdrive,
-               server_watch, storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
+               server_watch, storage, stt_compare, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
@@ -575,7 +575,41 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
                 pct=diarization_eval.pct, label_list=diarization_eval.label_list,
                 attendance=present, participant_ids=present["ids"], alert_hint=hint,
                 people_msg=PARTICIPANT_MESSAGES.get(people, ""), diarization_note=_diarization_note(m),
-                relabel=relabel_view)
+                relabel=relabel_view, recognition_note=_recognition_note(m))
+
+
+def _plural_count(n, one: str, few: str, many: str) -> str:
+    n = int(n)
+    form = one if n % 10 == 1 and n % 100 != 11 else few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
+    return f"{n} {form}"
+
+
+def _recognition_note(meeting) -> str:
+    """What the checks of the recognition found (pipeline._note_recognition), in one line for the transcript."""
+    note = (meeting.options or {}).get("recognition") if isinstance(meeting.options, dict) else None
+    if not isinstance(note, dict) or not note.get("engine"):
+        return ""
+    number = lambda key: int(note.get(key) or 0) if isinstance(note.get(key), (int, float)) else 0
+    parts = [f"Распознавание: {note['engine']}"]
+    if note.get("detector"):
+        found = number("gaps")
+        if found:
+            heard = f"детектор речи нашёл {_plural_count(found, 'место', 'места', 'мест')} с голосом без слов"
+            if number("recovered"):
+                heard += f", дослышано {_plural_count(number('recovered'), 'фраза', 'фразы', 'фраз')}"
+            if number("unclear"):
+                heard += f", «неразборчиво» — {number('unclear')}"
+            parts.append(heard)
+        else:
+            parts.append("детектор речи: пропусков нет")
+    if number("doubts"):
+        parts.append(f"сомнительных слов {number('doubts')}: перепроверено на слух {number('checked')}, "
+                     f"исправлено {number('fixed')}")
+    if number("phantoms"):
+        parts.append(f"убрано выдуманных фраз: {number('phantoms')}")
+    if number("errors"):
+        parts.append(f"не удалось проверить: {number('errors')}")
+    return " · ".join(parts) + "."
 
 
 def _diarization_note(meeting) -> dict | None:
@@ -990,6 +1024,56 @@ DIARIZATION_MESSAGES = {
     "empty": "Нет эталонов: сначала сохраните хотя бы одну исправленную расшифровку как эталон.",
     "applied": "Способ разметки сохранён: он сработает на следующих записях.",
 }
+
+
+@app.get("/speech-compare", response_class=HTMLResponse)
+def speech_compare_page(request: Request, msg: str = ""):
+    """«Сравнение движков распознавания»: the STT engines side by side on one of the company's recordings."""
+    guard_admin(request)
+    settings = settings_store.all_settings()
+    result = stt_compare.last()
+    return page(request, "speech_compare.html", result=result, run=stt_compare.status(),
+                meetings=stt_compare.candidates(), engines="\n".join(stt_compare.ENGINES),
+                main_model=settings.get("transcribe_model"), verify_model=settings.get("verify_model"),
+                msg=SPEECH_COMPARE_MESSAGES.get(msg, ""), when=_when, pct=diarization_eval.pct)
+
+
+SPEECH_COMPARE_MESSAGES = {
+    "started": "Сравнение запущено: движки по очереди слушают отрывки записи. Страница обновляется сама.",
+    "busy": "Сравнение уже идёт.",
+    "nomeeting": "Выберите совещание с записью.",
+    "noengines": "Укажите хотя бы один движок.",
+    "main": "Основной движок сохранён: он распознает следующие записи.",
+    "verify": "Второй движок сохранён: он будет дослушивать пропуски и сомнительные слова.",
+}
+
+
+@app.post("/speech-compare/run")
+async def speech_compare_run(request: Request):
+    guard_admin(request)
+    form = await request.form()
+    try:
+        meeting_id = int(str(form.get("meeting_id") or ""))
+    except ValueError:
+        return RedirectResponse("/speech-compare?msg=nomeeting", 303)
+    engines = stt_compare.engines_from(form.get("engines"))
+    if not engines:
+        return RedirectResponse("/speech-compare?msg=noengines", 303)
+    code = "started" if stt_compare.start(meeting_id, engines) else "busy"
+    return RedirectResponse(f"/speech-compare?msg={code}", 303)
+
+
+@app.post("/speech-compare/apply")
+async def speech_compare_apply(request: Request):
+    """«Сделать основным» / «Сделать вторым»: the engine the next recordings are recognised or checked by."""
+    guard_admin(request)
+    form = await request.form()
+    model = str(form.get("model") or "").strip()
+    role = str(form.get("role") or "main")
+    if not stt_compare.engines_from(model) or len(model) > 200 or role not in ("main", "verify"):
+        raise HTTPException(400, "Некорректный идентификатор модели")
+    settings_store.set_many({"transcribe_model" if role == "main" else "verify_model": model})
+    return RedirectResponse(f"/speech-compare?msg={role}#results", 303)
 
 
 @app.post("/diarization/compare")
@@ -2958,7 +3042,7 @@ async def settings_save(request: Request):
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
               "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode", "voice_memory",
-              "silence_working_hours"):
+              "silence_working_hours", "speech_detector", "speech_doubts", "stt_keyterms", "stt_diarize"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -2968,11 +3052,12 @@ async def settings_save(request: Request):
         if k in f:
             updates[k] = str(f[k]).strip()[:300]
     for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model", "conversation_tone",
-              "company_name", "accent_color", "glossary", "persona"):
+              "company_name", "accent_color", "glossary", "persona", "verify_model", "verify_judge_model"):
         if k in f:
             value = str(f[k]).strip()
             updates[k] = value if k == "glossary" else value or settings_store.DEFAULTS[k]
-    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model"):
+    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model",
+              "verify_model", "verify_judge_model"):
         if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"~?[A-Za-z0-9._:/-]+", updates[k])):
             raise HTTPException(400, "Некорректный идентификатор модели")
     if "conversation_tone" in updates:
