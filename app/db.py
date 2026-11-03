@@ -171,6 +171,14 @@ class Employee(Base):
     # all | department | self) and which skills the assistant carries out for them (None = all the level allows).
     order_scope = Column(String(12), default="")
     skills_allowed = Column(JSON, nullable=True)
+    # When the person does not answer the assistant (cases.silence_rule): whom to tell (an employee; None = the
+    # department's choice, then the reviewers), after how many hours and after how many reminders (None = inherited).
+    silence_contact_id = Column(Integer, nullable=True)
+    silence_hours = Column(Integer, nullable=True)
+    silence_reminders = Column(Integer, nullable=True)
+    # How the assistant addresses the person: the name to use («Анна Сергеевна») and «ты» or «вы» ("" = by the persona).
+    address_as = Column(String(120), default="")
+    address_form = Column(String(3), default="")
 
     def alias_list(self):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
@@ -183,6 +191,10 @@ class Department(Base):
     description = Column(Text, default="")
     regulations = Column(Text, default="")  # how the department works: rules, procedures, who signs what
     active = Column(Boolean, default=True)
+    # The silence rule of the department's people (see Employee): their own card wins
+    silence_contact_id = Column(Integer, nullable=True)
+    silence_hours = Column(Integer, nullable=True)
+    silence_reminders = Column(Integer, nullable=True)
     map_x = Column(Float, nullable=True)
     map_y = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now)
@@ -782,6 +794,7 @@ class CaseWait(Base):
     reminders_sent = Column(Integer, nullable=False, default=0)
     escalate_at = Column(DateTime(timezone=True), nullable=True)
     escalated = Column(Boolean, nullable=False, default=False)
+    escalated_to = Column(JSON, nullable=True)   # the chats told about the silence: their answer decides (silence_choice)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     answer = Column(Text, default="")
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
@@ -963,6 +976,13 @@ def init_db():
     _add_column_if_missing("employees", "voice_memory_consent_by", "voice_memory_consent_by VARCHAR(120) DEFAULT ''")
     _add_column_if_missing("employees", "order_scope", "order_scope VARCHAR(12) DEFAULT ''")
     _add_column_if_missing("employees", "skills_allowed", "skills_allowed JSON")
+    for table in ("employees", "departments"):
+        _add_column_if_missing(table, "silence_contact_id", "silence_contact_id INTEGER")
+        _add_column_if_missing(table, "silence_hours", "silence_hours INTEGER")
+        _add_column_if_missing(table, "silence_reminders", "silence_reminders INTEGER")
+    _add_column_if_missing("employees", "address_as", "address_as VARCHAR(120) DEFAULT ''")
+    _add_column_if_missing("employees", "address_form", "address_form VARCHAR(3) DEFAULT ''")
+    _add_column_if_missing("case_waits", "escalated_to", "escalated_to JSON")
     _ensure_voice_sample_constraints()
     _forget_pyannote()
 

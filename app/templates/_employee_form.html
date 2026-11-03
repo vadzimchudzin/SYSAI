@@ -84,6 +84,23 @@
         <small class="muted">Снимите галочку — ассистент не будет этого делать для этого человека. Уровень доступа всё равно ограничивает.</small>
       </div>
       {% endif %}
+      <input type="hidden" name="talk_form" value="1">
+      <label class="f">Как обращаться<input name="address_as" maxlength="120" value="{{ (e.address_as or '') if e else '' }}" placeholder="Анна Сергеевна, Боря" autocomplete="off"><small class="muted">Пусто — по имени.</small></label>
+      <label class="f">На «ты» или «вы»
+        <select name="address_form">
+          <option value="">как пишет сам человек</option>
+          {% for form_ in ('ты', 'вы') %}<option value="{{ form_ }}" {% if e and (e.address_form or '') == form_ %}selected{% endif %}>на «{{ form_ }}»</option>{% endfor %}
+        </select>
+      </label>
+      <label class="f">Если молчит — сообщать
+        <select name="silence_contact_id">
+          <option value="">как в подразделении, иначе проверяющим</option>
+          {% for p in silence_people %}{% if not e or p.id != e.id %}<option value="{{ p.id }}" {% if e and e.silence_contact_id == p.id %}selected{% endif %}>{{ p.name }}</option>{% endif %}{% endfor %}
+        </select>
+        <small class="muted">Только люди с Telegram. Ассистент напишет им, что ответа нет, и спросит, что делать.</small>
+      </label>
+      <label class="f">Через сколько часов молчания<input type="number" name="silence_hours" min="1" max="336" value="{{ e.silence_hours if e and e.silence_hours is not none else '' }}" placeholder="{{ silence_defaults.hours }}"><small class="muted">Пусто — как в подразделении или в настройках.</small></label>
+      <label class="f">Сколько раз напомнить до этого<input type="number" name="silence_reminders" min="0" max="10" value="{{ e.silence_reminders if e and e.silence_reminders is not none else '' }}" placeholder="{{ silence_defaults.reminders }}"><small class="muted">0 — сразу сообщать, без напоминаний.</small></label>
       <label class="f">ID в Bitrix24<input name="bitrix_user_id" maxlength="40" value="{{ (e.bitrix_user_id or '') if e else '' }}" placeholder="Если подключена интеграция" autocomplete="off"></label>
     </div>
   </section>
