@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% block title %}{{ skill.name if skill else 'Новый навык' }} — SYSAI_Hub{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>{{ ('Новая версия: ' ~ skill.name) if skill else 'Новый навык' }}</h1>
+  <p>SKILL.md: в заголовке name (латиница, дефисы), description (когда применять), version; дальше разделы «Когда применять», «Как делать», «Ошибки», «Проверка».{% if base %} Остальные файлы берутся из версии {{ base }}.{% endif %}</p></div>
+  <div class="actions"><a class="btn" href="{{ ('/hub/' ~ skill.name) if skill else '/hub' }}">← Назад</a></div></div>
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+<section class="card">
+  <form method="post" action="{{ ('/hub/' ~ skill.name ~ '/edit') if skill else '/hub/new' }}" class="net-form">
+    <input type="hidden" name="base" value="{{ base }}">
+    <label class="f wide">SKILL.md <textarea name="skill_md" class="net-editor" spellcheck="false" required>{{ text }}</textarea></label>
+    {% if not skill %}<label class="f">Отдел-владелец <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select></label>{% endif %}
+    <label class="f">Что изменилось <input name="changelog" maxlength="4000"></label>
+    <div class="net-checks wide"><label><input type="checkbox" name="review" value="1"> сразу на проверку</label></div>
+    <div class="wide"><button class="btn primary">Сохранить версию</button></div>
+  </form>
+</section>
+{% endblock %}

@@ -48,3 +48,32 @@ def client():
     with TestClient(app) as c:
         c.post("/login", data={"username": "sysai", "password": "pw"})
         yield c
+
+
+# ----------------------------------------------------------------------------- the agent network (app/net)
+@pytest.fixture
+def net_on():
+    from app import settings_store
+    settings_store.set_many({"agents_on": True, "openrouter_api_key": "test-openrouter-key"})
+    from app.net import mcp
+    mcp._calls.clear()
+    mcp._notes.clear()
+    return True
+
+
+@pytest.fixture
+def net_agent(client, net_on):
+    """A connected ОПО agent of the admin: {"id", "name", "token", "headers", "user_id", "department_id"}."""
+    from app.db import Department, SessionLocal, User
+    from app.net import agents
+    with SessionLocal() as s:
+        admin = s.query(User).filter(User.role == "superuser").first()
+        dept = Department(name="ОПО")
+        s.add(dept)
+        s.commit()
+        admin_id, dept_id = admin.id, dept.id
+    agent = agents.create(admin_id, "opo-sysai", dept_id, None, "hermes", "", by="test")
+    code = agents.issue_code(agent.id)
+    _, token = agents.exchange(code, host="PC-OPO-1", harness="hermes", versions={"hermes": "0.9"})
+    return {"id": agent.id, "name": agent.name, "token": token, "headers": {"Authorization": f"Bearer {token}"},
+            "user_id": admin_id, "department_id": dept_id}

@@ -1,0 +1,75 @@
+{% extends "base.html" %}{% block title %}{{ k.title }} — SYSAI_Hub{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>{{ k.title }}</h1>
+  <p><code>{{ k.name }}</code> · <span class="pill {{ k.status_ru[1] }}">{{ k.status_ru[0] }}</span>{% if k.current %} · действует {{ k.current }}{% endif %}{% if k.department %} · {{ k.department }}{% endif %}{% if k.owner %} · владелец {{ k.owner }}{% endif %}</p>
+  <p class="muted">{{ k.description }}</p></div>
+  <div class="actions"><a class="btn" href="/hub">← SYSAI_Hub</a>{% if chosen %}<a class="btn" href="/hub/{{ k.name }}?edit=1&v={{ chosen.version }}">{{ icon('edit') }} Новая версия</a>{% endif %}</div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+
+<div class="stats">
+  <div class="stat"><b>{{ k.versions|length }}</b><span>версий</span></div>
+  <div class="stat"><b>{{ k.using|length }}</b><span>агентов с навыком</span></div>
+  <div class="stat"><b>{{ k.uses }}</b><span>применений</span></div>
+</div>
+
+{% if chosen %}
+<section class="card"><h2>Версия {{ chosen.version }} <span class="pill {{ chosen.status_ru[1] }}">{{ chosen.status_ru[0] }}</span>{% if chosen.current %} <span class="pill green">действует</span>{% endif %}</h2>
+  <p class="small muted">{{ 'агент ' if chosen.by_agent }}{{ chosen.author or '—' }} · {{ net_when(chosen.created_at) }} · {{ chosen.size }} байт · sha256 <code>{{ chosen.sha256[:16] }}…</code>{% if chosen.decided_by %} · решение: {{ chosen.decided_by }}, {{ net_when(chosen.decided_at) }}{% endif %}</p>
+  {% if chosen.changelog %}<p><b>Что изменилось:</b> {{ chosen.changelog }}</p>{% endif %}
+  {% if chosen.why %}<p><b>Зачем (от агента):</b> {{ chosen.why }}</p>{% endif %}
+  {% if chosen.decision_note %}<p class="small"><b>Комментарий:</b> {{ chosen.decision_note }}</p>{% endif %}
+  {% if chosen.checks.errors %}<div class="net-err"><b>Проверка не пройдена:</b><ul>{% for e in chosen.checks.errors %}<li>{{ e.path }}{% if e.line %}:{{ e.line }}{% endif %} — {{ e.what }}</li>{% endfor %}</ul></div>
+  {% else %}<p class="small net-ok">Проверка пройдена: опасных команд, секретов и чужих адресов в скриптах нет.</p>{% endif %}
+  {% if chosen.checks.warnings %}<details><summary class="small muted">Замечания ({{ chosen.checks.warnings|length }})</summary><ul class="small">{% for e in chosen.checks.warnings %}<li>{{ e.path }}{% if e.line %}:{{ e.line }}{% endif %} — {{ e.what }}</li>{% endfor %}</ul></details>{% endif %}
+  <div class="actions" style="margin:10px 0">
+    {% if chosen.status == 'draft' %}<form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/review"><button class="btn">На проверку</button></form>{% endif %}
+    {% if approver and chosen.status in ('draft', 'review') %}
+      <form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/publish" class="row" style="gap:6px"><input name="note" placeholder="комментарий" style="width:200px"><button class="btn primary" {{ 'disabled' if chosen.checks.errors }}>Опубликовать</button></form>
+      <form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/reject" class="row" style="gap:6px"><input name="note" placeholder="почему" style="width:200px"><button class="btn danger">Отклонить</button></form>
+    {% endif %}
+    {% if approver and chosen.status == 'published' and not chosen.current %}<form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/rollback"><button class="btn">Откатиться на {{ chosen.version }}</button></form>{% endif %}
+    <a class="btn ghost" href="/hub/{{ k.name }}/{{ chosen.version }}.zip">{{ icon('download') }} Архив</a>
+  </div>
+  <p class="small muted">Файлы: {% for f in chosen.files %}{{ f.path }}{{ ', ' if not loop.last }}{% endfor %}</p>
+  <pre class="net-pre">{{ chosen.skill_md }}</pre>
+</section>
+{% endif %}
+
+<div class="grid2">
+<section class="card"><h2>Версии</h2>
+  <ul class="net-list">{% for v in k.versions %}
+    <li><a href="/hub/{{ k.name }}?v={{ v.version }}"><b>{{ v.version }}</b></a> <span class="pill {{ v.status_ru[1] }}">{{ v.status_ru[0] }}</span>{% if v.current %} <span class="pill green">действует</span>{% endif %}
+      <span class="small muted">· {{ 'агент ' if v.by_agent }}{{ v.author or '—' }} · {{ net_when(v.created_at) }}</span>
+      {% if not loop.last %}<a class="small" href="/hub/{{ k.name }}?v={{ v.version }}&a={{ k.versions[loop.index].version }}&b={{ v.version }}#diff">разница с {{ k.versions[loop.index].version }}</a>{% endif %}
+      {% if v.changelog %}<div class="small">{{ v.changelog|truncate(200) }}</div>{% endif %}</li>
+  {% endfor %}</ul>
+</section>
+<section class="card"><h2>Кому и у кого</h2>
+  <p class="small">Агентов с навыком: {% for u in k.using %}{{ u.agent }} ({{ u.version }}){{ ', ' if not loop.last }}{% else %}пока нет{% endfor %}</p>
+  {% if approver %}
+  <form method="post" action="/hub/{{ k.name }}/settings" class="net-form">
+    <label class="f">Отдел-владелец <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}" {{ 'selected' if d.id == k.department_id }}>{{ d.name }}</option>{% endfor %}</select></label>
+    <label class="f">Владелец <select name="owner_user_id">{% for u in users %}<option value="{{ u.id }}" {{ 'selected' if u.id == k.owner_user_id }}>{{ u.name }} ({{ u.username }})</option>{% endfor %}</select></label>
+    <label class="f">Кому доступен <select name="audience"><option value="all" {{ 'selected' if k.audience.get('all') }}>всем агентам сети</option><option value="departments" {{ 'selected' if not k.audience.get('all') }}>агентам отделов</option></select></label>
+    <div class="net-checks wide">{% for d in departments %}<label><input type="checkbox" name="audience_departments" value="{{ d.id }}" {{ 'checked' if d.id in (k.audience.get('departments') or []) }}> {{ d.name }}</label>{% endfor %}</div>
+    <div class="wide"><button class="btn">Сохранить</button></div>
+  </form>
+  {% if k.status == 'retired' %}
+  <form method="post" action="/hub/{{ k.name }}/restore" style="margin-top:10px"><button class="btn">Вернуть в хаб</button></form>
+  {% else %}
+  <form method="post" action="/hub/{{ k.name }}/retire" style="margin-top:10px" onsubmit="return confirm('Снять навык? Агенты уберут его при синхронизации.')"><button class="btn danger">Снять с хаба</button></form>
+  {% endif %}
+  {% endif %}
+</section>
+</div>
+
+{% if changes %}
+<section class="card net-diff" id="diff"><h2>Разница {{ a }} → {{ b }}</h2>
+  {% for c in changes %}<h3 class="small">{{ c.path }} · {{ {'added': 'добавлен', 'removed': 'удалён', 'changed': 'изменён'}[c.kind] }}</h3>
+  <pre class="net-pre">{% for line in c.diff.splitlines() %}<span class="{{ 'add' if line.startswith('+') and not line.startswith('+++') else 'del' if line.startswith('-') and not line.startswith('---') else 'hunk' if line.startswith('@@') else '' }}">{{ line }}</span>
+{% endfor %}</pre>{% endfor %}
+</section>
+{% endif %}
+{% endblock %}

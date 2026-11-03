@@ -86,6 +86,12 @@ DEFAULTS = {
     "gdrive_upload": True,           # the documents of SYSAI go to «Документы» by month (not the confidential ones)
     "gdrive_templates": True,        # «Шаблоны» ↔ «Документы по шаблону», both ways
     "gdrive_state": {},              # the folders, the last sync, errors; upload_blocked when Google gives no space
+    # the agent network (app/net, docs/opo): agents on the employees' computers, SYSAI_Hub, MCP and the model gateway
+    "agents_on": False,              # off: every address of the network answers 404, SYSAI works as before
+    "opo_on": False,                 # the ОПО section (PLC projects from the drawings of ТО), built on the network
+    "agents_models": {},             # tier → model behind sysai/cheap|mid|strong|vision ("" = the default of gateway.py)
+    "agents_hub_hosts": ["sysat.by", "se.com", "schneider-electric.com", "localhost", "127.0.0.1"],  # sites scripts of skills may call
+    "agents_mcp_per_minute": 120,    # MCP calls of one agent per minute
     # «Сервер» (server_watch.py, №29)
     "backup_copy": True,             # copy the newest nightly dump of the own server to the recordings storage
     "backup_state": {},              # the dumps copied there [{"name", "size", "at"}], the last error, when checked

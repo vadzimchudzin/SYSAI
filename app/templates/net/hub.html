@@ -1,0 +1,46 @@
+{% extends "base.html" %}{% block title %}SYSAI_Hub — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>SYSAI_Hub</h1>
+  <p>Один хаб навыков для всех агентов сети. Опубликованные навыки сами приходят агентам, кому разрешены; чему агент научился сам — приходит сюда предложением и после утверждения становится общим. Формат — открытый SKILL.md: Hermes, OpenClaw, Claude Code, Codex.</p></div>
+  <div class="actions"><a class="btn primary" href="/hub/new">{{ icon('plus') }} Новый навык</a></div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+
+{% if queue %}
+<section class="card"><h2>На проверке ({{ queue|length }})</h2>
+  <ul class="net-list">{% for item in queue %}
+    <li><a href="/hub/{{ item.name }}?v={{ item.version }}"><b>{{ item.name }}</b> {{ item.version }}</a>
+      <span class="small muted">· {{ 'агент ' if item.by_agent }}{{ item.author }} · {{ net_when(item.created_at) }}</span>
+      {% if item.errors %}<span class="pill red">ошибок: {{ item.errors }}</span>{% endif %}
+      {% if item.why %}<div class="small">{{ item.why|truncate(240) }}</div>{% elif item.changelog %}<div class="small">{{ item.changelog|truncate(240) }}</div>{% endif %}</li>
+  {% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="card"><h2>Навыки ({{ skills|length }})</h2>
+  <form method="get" action="/hub" class="row" style="gap:10px;margin-bottom:10px">
+    <input name="q" value="{{ q }}" placeholder="Поиск по имени и описанию" style="flex:2">
+    <select name="department" style="flex:1"><option value="">все отделы</option>{% for d in departments %}<option value="{{ d.id }}" {{ 'selected' if department == d.id }}>{{ d.name }}</option>{% endfor %}</select>
+    <button class="btn">{{ icon('search') }} Найти</button>
+  </form>
+  {% if not skills %}<p class="muted">Навыков пока нет. Загрузите папку навыка архивом или напишите SKILL.md в редакторе.</p>{% else %}
+  <div class="table-wrap"><table class="list"><thead><tr><th>Навык</th><th>Отдел</th><th>Версия</th><th>Статус</th><th>Владелец</th></tr></thead><tbody>
+  {% for k in skills %}
+    <tr onclick="location.href='/hub/{{ k.name }}'"><td><a href="/hub/{{ k.name }}"><b>{{ k.title }}</b></a><div class="small muted">{{ k.name }} · {{ k.description|truncate(160) }}</div></td>
+      <td>{{ k.department or '—' }}</td><td>{{ k.version or '—' }}</td>
+      <td><span class="pill {{ k.status_ru[1] }}">{{ k.status_ru[0] }}</span>{% if k.review %} <span class="pill amber">предложений: {{ k.review }}</span>{% endif %}</td>
+      <td>{{ k.owner or '—' }}</td></tr>
+  {% endfor %}</tbody></table></div>{% endif %}
+</section>
+
+<section class="card"><h2>Загрузить навык архивом</h2>
+  <form method="post" action="/hub/upload" enctype="multipart/form-data" class="net-form">
+    <label class="f">Папка навыка (.zip, до 2 МБ): SKILL.md + references/, scripts/, assets/ <input type="file" name="file" accept=".zip" required></label>
+    <label class="f">Отдел-владелец (для нового навыка) <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select></label>
+    <label class="f wide">Что изменилось <input name="changelog" maxlength="4000" placeholder="Первая версия: входы/выходы из Excel ТО"></label>
+    <div class="net-checks wide"><label><input type="checkbox" name="review" value="1"> сразу на проверку</label></div>
+    <div class="wide"><button class="btn primary">{{ icon('upload') }} Загрузить</button> <span class="small muted">Перед публикацией навык проверяется на опасные команды, секреты и внешние адреса.</span></div>
+  </form>
+</section>
+{% endblock %}

@@ -206,11 +206,13 @@ def page(request: Request, name: str, **ctx):
     boss = bool(me and me["role"] == "superuser")
     pending_users = accounts.pending_count() if boss else 0
     mail_on = bool(settings_store.get("mail_enabled")) if boss else False  # the dot of «Секретарь» at the bottom of the menu
+    net_on = bool(me and settings_store.get("agents_on"))  # «Агенты» and «SYSAI_Hub» in the menu (app/net)
     ai = userbot.ai_mode()
     return tpl.TemplateResponse(request, name, {"request": request, "llm": config.llm_enabled(), "ai": ai,
                                                 "tg": userbot.ready() if ai else config.telegram_enabled(),
                                                 "ephemeral": EPHEMERAL,
-                                                "me": me, "pending_users": pending_users, "mail_on": mail_on, **ctx})
+                                                "me": me, "pending_users": pending_users, "mail_on": mail_on,
+                                                "net_on": net_on, **ctx})
 
 
 EPHEMERAL = config.DATABASE_URL.startswith("sqlite") and bool(os.getenv("RENDER"))
@@ -2958,7 +2960,7 @@ async def settings_save(request: Request):
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
               "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode", "voice_memory",
-              "silence_working_hours"):
+              "silence_working_hours", "agents_on", "opo_on"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -4637,6 +4639,13 @@ async def telegram_webhook(request: Request):
     except Exception:  # never make Telegram retry forever
         log.exception("update failed")
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------- the agent network (app/net)
+from .net.routes import router as net_router, when as net_when  # noqa: E402  after the helpers it uses
+
+app.include_router(net_router)
+tpl.env.globals["net_when"] = net_when
 
 
 @app.exception_handler(HTTPException)

@@ -1199,6 +1199,7 @@ def init_db():
         engine.dispose()
     wait_for_db()
     log.info("Database ready: %s%s", engine.dialect.name, f" @ {engine.url.host}" if engine.url.host else "")
+    from .net import models as _net_models  # noqa: F401  the net_* tables of the agent network (app/net)
     Base.metadata.create_all(engine)
     _add_column_if_missing("meetings", "options", "options JSON")
     _add_column_if_missing("meetings", "waveform", "waveform JSON")

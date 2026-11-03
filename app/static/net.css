@@ -1,0 +1,17 @@
+/* The agent network: agents, access profiles, SYSAI_Hub (app/net) */
+.net-pre { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; max-height: 520px; overflow: auto; margin: 8px 0; }
+.net-code { font: 22px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .12em; padding: 10px 16px; border: 1px dashed var(--clay); border-radius: 10px; display: inline-block; background: var(--clay-bg); color: var(--text); }
+.net-kv { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 6px 14px; font-size: 14px; margin: 6px 0 0; }
+.net-kv dt { color: var(--muted); } .net-kv dd { margin: 0; }
+.net-rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+.net-rules > div { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13.5px; }
+.net-rules b { display: block; margin-bottom: 4px; font-weight: 600; }
+.net-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.net-form textarea { min-height: 84px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.net-form .wide { grid-column: 1 / -1; }
+.net-checks { display: flex; flex-wrap: wrap; gap: 10px 16px; font-size: 13.5px; }
+.net-checks label { display: inline-flex; gap: 6px; align-items: center; } .net-checks input { width: auto; }
+.net-editor { min-height: 460px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.net-diff .add { color: #7fc48a; } .net-diff .del { color: #e48b84; } .net-diff .hunk { color: var(--muted); }
+.net-list { list-style: none; padding: 0; margin: 6px 0 0; font-size: 13.5px; } .net-list li { padding: 4px 0; border-bottom: 1px solid var(--line); } .net-list li:last-child { border-bottom: 0; }
+.net-err { color: #e48b84; } .net-ok { color: #7fc48a; }

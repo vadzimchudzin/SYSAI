@@ -1,0 +1,102 @@
+{% extends "base.html" %}{% block title %}{{ a.name }} — агенты — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>{{ a.name }}</h1>
+  <p><span class="pill {{ a.status_ru[1] }}">{{ a.status_ru[0] }}</span> {{ a.harness }} · {{ a.user_name }} ({{ a.user }}){% if a.department %} · {{ a.department }}{% endif %}</p></div>
+  <div class="actions"><a class="btn" href="/agents">← Агенты</a></div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+
+{% if code %}
+<section class="card" id="connect-code"><h2>Подключение компьютера</h2>
+  <p>Код действует {{ ttl }} минут и только один раз. Установщик меняет его на токен агента; в SYSAI хранится только хэш токена, на ПК — защищённое хранилище Windows.</p>
+  <p><span class="net-code">{{ code }}</span></p>
+  <dl class="net-kv"><dt>Сервер</dt><dd>{{ server }}</dd>
+    <dt>Установщик</dt><dd><code>sysai-agent connect --server {{ server }} --code {{ code }}</code></dd></dl>
+  <p class="small muted">Пока установщика нет (следующий шаг), код можно обменять вручную:</p>
+  <pre class="net-pre">curl -X POST {{ server }}/agents/api/connect -H "Content-Type: application/json" -d "{\"code\":\"{{ code }}\",\"host\":\"%COMPUTERNAME%\",\"harness\":\"{{ agent.harness }}\"}"</pre>
+</section>
+{% endif %}
+
+<div class="stats">
+  <div class="stat"><b>{{ net_when(a.last_seen_at) if a.last_seen_at else '—' }}</b><span>на связи</span></div>
+  <div class="stat"><b>${{ '%.2f'|format(spend.today) }}</b><span>сегодня · бюджет ${{ '%.2f'|format(rules.models.budget_day_usd) }}{{ '' if rules.models.budget_day_usd else ' (без лимита)' }}</span></div>
+  <div class="stat"><b>${{ '%.2f'|format(spend.period) }}</b><span>за 7 дней · {{ spend.requests }} запросов</span></div>
+  <div class="stat"><b>{{ 'да' if a.applied_rev == a.rev else 'нет' }}</b><span>доступы применены{% if a.applied_at %} · {{ net_when(a.applied_at) }}{% endif %}</span></div>
+</div>
+
+<div class="grid2">
+<section class="card"><h2>Компьютер</h2>
+  <dl class="net-kv">
+    <dt>Компьютер</dt><dd>{{ a.host or '—' }}</dd>
+    <dt>Версии</dt><dd>{% for k, v in a.versions.items() %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
+    <dt>Навыки хаба на ПК</dt><dd>{% set hs = (agent.hub_state or {}).get('skills') or {} %}{{ hs|length }}{% set cf = (agent.hub_state or {}).get('conflicts') or [] %}{% if cf %} · <span class="net-err">конфликт имён: {{ cf|join(', ') }}</span>{% endif %}</dd>
+    <dt>Последняя ошибка</dt><dd class="{{ 'net-err' if a.last_error }}">{{ a.last_error or '—' }}</dd>
+  </dl>
+  <div class="actions" style="margin-top:14px">
+    {% if agent.status != 'disabled' %}
+    <form method="post" action="/agents/{{ a.id }}/connect"><button class="btn primary">{{ 'Подключить другой компьютер' if agent.status == 'active' else 'Получить код подключения' }}</button></form>
+    <form method="post" action="/agents/{{ a.id }}/disable" onsubmit="return confirm('Отключить {{ a.name }}? Токен будет отозван сразу.')"><button class="btn danger">Отключить</button></form>
+    {% else %}
+    <form method="post" action="/agents/{{ a.id }}/enable"><button class="btn primary">Включить</button></form>
+    {% endif %}
+    {% if boss %}<form method="post" action="/agents/{{ a.id }}/delete" onsubmit="return confirm('Удалить агента {{ a.name }} вместе с журналом?')"><button class="btn ghost">Удалить</button></form>{% endif %}
+  </div>
+  <h3 style="margin-top:16px">Токены</h3>
+  <ul class="net-list">{% for t in tokens %}
+    <li>{{ 'код' if t.kind == 'connect' else 'токен' }} …{{ t.hint }} · выдан {{ net_when(t.created_at) }}{% if t.last_used_at %} · использован {{ net_when(t.last_used_at) }}{% endif %}{% if t.used_from %} · {{ t.used_from }}{% endif %}
+      {% if t.revoked_at %}<span class="pill gray">{{ 'использован' if t.kind == 'connect' and t.last_used_at else 'отозван' }}</span>{% else %}<span class="pill green">действует</span>{% endif %}</li>
+  {% else %}<li class="muted">Токенов нет: получите код подключения.</li>{% endfor %}</ul>
+</section>
+
+<section class="card" id="access"><h2>Доступы</h2>
+  <p class="small muted">Профиль «{{ doc.profile.name }}» v{{ doc.profile.version }} · ревизия <code>{{ a.rev }}</code>{% if a.applied_rev %} · на ПК <code>{{ a.applied_rev }}</code>{% endif %}. Агент никогда не получает больше прав, чем у его человека.</p>
+  <div class="net-rules">
+    <div><b>{{ sections.commands }}</b>{% if rules.commands.run %}выполняются без вопросов; запрещено: {{ rules.commands.deny|length }} шаблонов{% else %}выключены{% endif %}</div>
+    <div><b>{{ sections.folders }}</b>чтение: {{ (rules.folders.read + rules.folders.write)|join(', ') or '—' }}<br>запись: {{ rules.folders.write|join(', ') or '—' }}{% if rules.folders.deny %}<br>нельзя: {{ rules.folders.deny|join(', ') }}{% endif %}</div>
+    <div><b>{{ sections.programs }}</b>{{ rules.programs|join(', ') or '—' }}</div>
+    <div><b>{{ sections.mcp }}</b>{% for srv, tools in rules.mcp.items() %}{{ srv }}: {{ 'все' if '*' in tools else tools|join(', ') }}{{ '; ' if not loop.last }}{% else %}—{% endfor %}</div>
+    <div><b>{{ sections.data }}</b>проекты: {{ scope_ru[rules.data.projects] }} · база ТО: {{ level_ru[rules.data.to_base] }} · теги: {{ level_ru[rules.data.tags] }}{{ ' · вопросы в ТО' if rules.data.questions }}{{ ' · справочник людей' if rules.data.people }}</div>
+    <div><b>{{ sections.internet }}</b>{{ internet_ru[rules.internet.mode] }}{% if rules.internet.mode == 'list' %}: {{ rules.internet.sites|join(', ') }}{% endif %}</div>
+    <div><b>{{ sections.models }}</b>{% for t in rules.models.tiers %}{{ tier_ru[t] }}{{ ', ' if not loop.last }}{% endfor %} · ${{ rules.models.budget_day_usd }} в день{% if rules.models.budget_project_usd %} · ${{ rules.models.budget_project_usd }} на проект{% endif %}</div>
+    <div><b>{{ sections.schedule }}</b>{% for item in rules.schedule %}{{ item.when }} — {{ item.task }}<br>{% else %}—{% endfor %}</div>
+    <div><b>{{ sections.chat }}</b>{{ 'его человек' if rules.chat.owner }}{% if rules.chat.others %}, {{ rules.chat.others|join(', ') }}{% endif %}</div>
+    <div><b>{{ sections.skills }}</b>отделы: {{ 'все' if '*' in rules.skills.departments else rules.skills.departments|join(', ') }} · {{ 'может предлагать свои' if rules.skills.propose else 'без предложений' }}</div>
+  </div>
+  {% if boss %}
+  <form method="post" action="/agents/{{ a.id }}/access" class="net-form" style="margin-top:14px">
+    <label class="f">Профиль <select name="profile_id">{% for p in profiles %}<option value="{{ p.id }}" {{ 'selected' if p.code == doc.profile.code }}>{{ p.name }} (v{{ p.version }})</option>{% endfor %}</select></label>
+    <label class="f">Отдел <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}" {{ 'selected' if d.id == agent.department_id }}>{{ d.name }}</option>{% endfor %}</select></label>
+    <label class="f">Сотрудник (Telegram) <select name="employee_id"><option value="">—</option>{% for e in employees %}<option value="{{ e.id }}" {{ 'selected' if e.id == agent.employee_id }}>{{ e.name }}{{ '' if e.telegram else ' (без Telegram)' }}</option>{% endfor %}</select></label>
+    <label class="f wide">Личные исключения (JSON по разделам профиля) <textarea name="overrides" spellcheck="false" placeholder='{"models": {"budget_day_usd": 5}, "folders": {"write": ["D:\\ОПО\\Проекты\\Линия 3"]}}'>{{ overrides if overrides != '{}' else '' }}</textarea></label>
+    <div class="wide"><button class="btn primary">Сохранить доступы</button> <a class="btn ghost" href="/agents/access">Профили доступа →</a></div>
+  </form>
+  {% endif %}
+</section>
+</div>
+
+{% if harness_yaml %}
+<section class="card"><h2>Настройки Hermes из доступов</h2>
+  <p class="small muted">SYSAI собирает их из профиля и подписывает (Ed25519); синхронизатор на ПК проверяет подпись, применяет и перезапускает агента. MCP-серверы сверяются с теми же подписанными правилами сами.</p>
+  <pre class="net-pre">{{ harness_yaml }}</pre>
+</section>
+{% endif %}
+
+<div class="grid2">
+<section class="card"><h2>Расход за 7 дней</h2>
+  {% if not spend.requests %}<p class="muted">Запросов к нейронкам ещё не было.</p>{% else %}
+  <dl class="net-kv">
+    <dt>По уровням</dt><dd>{% for k, v in spend.by_tier.items() %}{{ k }} ${{ '%.2f'|format(v) }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
+    <dt>По проектам</dt><dd>{% for k, v in spend.by_project.items() %}{{ k }} ${{ '%.2f'|format(v) }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
+    <dt>По навыкам</dt><dd>{% for k, v in spend.by_skill.items() %}{{ k }} ${{ '%.2f'|format(v) }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
+    <dt>Токенов</dt><dd>{{ spend.tokens }}</dd>
+  </dl>{% endif %}
+</section>
+<section class="card"><h2>Журнал</h2>
+  <ul class="net-list">{% for e in events %}
+    <li><span class="small muted">{{ net_when(e.at) }}</span> <b>{{ e.action }}</b> {{ e.target }} <span class="small muted">· {{ e.actor }}</span>
+      {% if e.summary %}<div class="small muted">{{ e.summary }}</div>{% endif %}</li>
+  {% else %}<li class="muted">Пока пусто.</li>{% endfor %}</ul>
+</section>
+</div>
+{% endblock %}

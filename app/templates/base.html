@@ -10,6 +10,10 @@
     <a class="nav {{ 'on' if path == '/app' }}" href="/app">{{ icon('home') }} Обзор</a>
     <a class="nav {{ 'on' if path.startswith('/meetings') }}" href="/meetings">{{ icon('list') }} Совещания</a>
     <a class="nav {{ 'on' if path.startswith('/progress') }}" href="/progress">{{ icon('home') }} Прогресс</a>
+    {% if net_on %}
+    <a class="nav {{ 'on' if path.startswith('/agents') }}" href="/agents">{{ icon('link') }} {{ 'Агенты' if me.role == 'superuser' else 'Мой агент' }}</a>
+    <a class="nav {{ 'on' if path.startswith('/hub') }}" href="/hub">{{ icon('list') }} SYSAI_Hub</a>
+    {% endif %}
     {% if me and me.role == 'superuser' %}
     <a class="nav {{ 'on' if path.startswith('/employees') }}" href="/employees">{{ icon('users') }} Сотрудники</a>
     <a class="nav {{ 'on' if path.startswith('/memory') }}" href="/memory">{{ icon('users') }} Память</a>
