@@ -2,6 +2,7 @@
 {% block body %}
 <div class="page-h"><div><h1>Telegram-аккаунт</h1><p>ИИ-сотрудник пишет людям с этого аккаунта, как обычный человек.</p></div></div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if not ai %}<div class="card note tg-mode-note">Сейчас людям пишет обычный бот. Аккаунт можно подключить заранее: писать с него ИИ-сотрудник начнёт, когда в <a href="/settings">Настройках</a> включите «ИИ-сотрудник» и сохраните.</div>{% endif %}
 <section class="card">
   {% if account.connected %}
   <h2>Подключён</h2>
@@ -28,7 +29,13 @@
   {% else %}
   <h2>Войти в аккаунт</h2>
   {% if account.configured %}<div class="warn small">{{ account.error or 'Аккаунт сохранён, но не подключён. Подождите минуту или войдите заново.' }}</div>{% endif %}
-  <p class="small muted">Нужны api_id и api_hash со страницы <a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a> (бесплатно), телефон аккаунта и доступ к приложению Telegram за кодом. Лучше отдельный аккаунт, а не основной.</p>
+  <p class="small muted">Нужны api_id и api_hash от Telegram (бесплатно), телефон аккаунта и доступ к приложению Telegram за кодом. Лучше отдельный аккаунт, а не основной.</p>
+  <ol class="small tg-steps">
+    <li>Откройте <a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a> и войдите номером этого аккаунта: код придёт в приложение Telegram.</li>
+    <li>В «API development tools» заполните App title и Short name (любые, латиницей, 5–32 знака, например sysai2026), Platform — Desktop, и нажмите «Create application».</li>
+    <li>Скопируйте сюда App api_id и App api_hash, укажите тот же номер и нажмите «Получить код».</li>
+    <li>Введите код из сообщения от «Telegram», а если на аккаунте включён облачный пароль — и его.</li>
+  </ol>
   <form method="post" action="/settings/telegram/start" class="emp-form">
     <label class="f">api_id <input name="api_id" inputmode="numeric" autocomplete="off" required></label>
     <label class="f">api_hash <input type="password" name="api_hash" autocomplete="off" required></label>

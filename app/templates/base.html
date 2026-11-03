@@ -35,7 +35,7 @@
     <div class="content {{ 'map-fullscreen-content' if is_org_map else '' }}">
       {% if not llm or not tg %}<div class="banner">
         {% if not llm %}<b>Ключ OpenRouter не задан.</b> Для настоящего аудио подключите модель. Тестовый пример доступен отдельно через «Демо без аудио». {% if me and me.role == 'superuser' %}<a href="/settings">Вставить ключ →</a>{% endif %}<br>{% endif %}
-        {% if not tg %}{% if ai %}<b>Telegram-аккаунт не подключён.</b> Сообщения не отправляются. {% if me and me.role == 'superuser' %}<a href="/settings/telegram">Подключить →</a>{% endif %}{% else %}<b>Telegram выключен.</b> Токен бота не задан — сообщения не отправляются.{% endif %}{% endif %}</div>{% endif %}
+        {% if not tg %}{% if ai %}<b>Telegram-аккаунт не подключён.</b> Сообщения не отправляются. {% if me and me.role == 'superuser' %}<a href="/settings/telegram">Подключить →</a>{% endif %}{% else %}<b>Telegram выключен.</b> Токен бота не задан — сообщения не отправляются. {% if me and me.role == 'superuser' %}<a href="/settings">Настроить →</a>{% endif %}{% endif %}{% endif %}</div>{% endif %}
       {% block body %}{% endblock %}
     </div>
   </div>
