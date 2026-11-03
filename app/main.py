@@ -1098,6 +1098,13 @@ async def progress_case_action(request: Request, case_id: int, action: str):
         ok = cases.hand_over(case_id, employee_id, who)
     elif action == "close":
         ok = cases.close_manually(case_id, who, str(form.get("note") or ""))
+    elif action == "remind":  # «Напомнить ещё»: one more reminder now
+        try:
+            ok = cases.remind_again(case_id, who)
+        except (cases.CaseError, cases.Retry, telegram.TelegramError) as exc:  # quiet hours and limits included
+            raise HTTPException(409, f"Напоминание не ушло: {exc}") from None
+    elif action == "take_over":  # «Займусь сам»: the assistant stops reminding
+        ok = cases.take_over(case_id, who)
     elif action == "link":
         try:
             ok = cases.link_document(case_id, int(str(form.get("document_id") or "")), who)
@@ -1946,7 +1953,8 @@ async def settings_save(request: Request):
     updates = {}
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
-              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode", "voice_memory"):
+              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode", "voice_memory",
+              "silence_working_hours"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -2027,6 +2035,19 @@ async def settings_save(request: Request):
             if not 0 <= value <= top:
                 raise HTTPException(400, f"Укажите {label}")
             updates[k] = value
+    if f.get("present_quiet_days") == "1":
+        days = sorted({int(x) for x in f.getlist("quiet_days") if str(x).isdigit() and 0 <= int(x) <= 6})
+        if len(days) == 7:
+            raise HTTPException(400, "Выходные: оставьте хотя бы один рабочий день")
+        updates["quiet_days"] = days
+    if "person_hourly_limit" in f:
+        try:
+            limit = int(str(f["person_hourly_limit"]).strip() or 0)
+        except ValueError:
+            raise HTTPException(400, "Лимит сообщений одному человеку: целое число") from None
+        if not 0 <= limit <= 30:
+            raise HTTPException(400, "Лимит сообщений одному человеку: от 0 до 30 в час")
+        updates["person_hourly_limit"] = limit
     for k in ("quiet_from_hour", "quiet_to_hour"):
         if k in f:
             try:
@@ -2430,7 +2451,43 @@ def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str
         voice_status_ru=VOICE_STATUS_RU, initials={e.id: _initials(e.name) for e in emps},
         search_text={e.id: _employee_search_text(e) for e in emps},
         employee_summary=_employee_summary(emps, voice_info),
+        silence_people=[e for e in emps if e.active and e.telegram_chat_id], silence_defaults=_silence_defaults(),
     )
+
+
+def _silence_defaults() -> dict:
+    """The settings used when neither the card nor the department says how long to wait (placeholders)."""
+    def number(key, default):
+        try:
+            return int(float(settings_store.get(key) or default))
+        except (TypeError, ValueError):
+            return default
+    return {"hours": number("case_escalate_hours", 24), "reminders": number("case_max_reminders", 2)}
+
+
+def _silence_fields(holder, form, own_id=None) -> None:
+    """Whom to tell and when, if the person (or the department's people) does not answer: from a card form."""
+    def number(key, low, high):
+        raw = str(form.get(key) or "").strip()
+        if not raw:
+            return None
+        try:
+            value = int(float(raw))
+        except ValueError:
+            raise HTTPException(400, "Часы и число напоминаний — целые числа") from None
+        return max(low, min(high, value))
+    raw = str(form.get("silence_contact_id") or "").strip()
+    contact_id = None
+    if raw:
+        try:
+            contact_id = int(raw)
+        except ValueError:
+            raise HTTPException(400, "Некорректный контакт на случай молчания") from None
+        if own_id is not None and contact_id == own_id:
+            raise HTTPException(400, "Нельзя сообщать о молчании самому молчащему")
+    holder.silence_contact_id = contact_id
+    holder.silence_hours = number("silence_hours", 1, 336)
+    holder.silence_reminders = number("silence_reminders", 0, 10)
 
 
 def _render_fragment(request, name: str, **ctx) -> str:
@@ -2488,6 +2545,15 @@ def _employee_store(form, id, name, aliases, position, department, competencies,
             on = {str(x) for x in form.getlist("skill_allowed")}
             names = [n for n in agent_skills.SKILLS if n not in agent_skills.PAIRED]
             e.skills_allowed = None if all(n in on for n in names) else [n for n in names if n in on]
+        if form.get("talk_form"):  # how to address the person, and whom to tell when they do not answer
+            e.address_as = str(form.get("address_as") or "").strip()[:120]
+            address_form = str(form.get("address_form") or "").strip()
+            e.address_form = address_form if address_form in voice.ADDRESS_FORMS else ""
+            _silence_fields(e, form, own_id=e.id if id else None)
+            if e.silence_contact_id is not None:
+                contact = s.get(Employee, e.silence_contact_id)
+                if contact is None or not contact.active or not contact.telegram_chat_id:
+                    raise HTTPException(400, "Сообщать о молчании можно только активному сотруднику с Telegram")
         s.add(e)
         s.flush()
         departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []
@@ -3010,6 +3076,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
         map_root_x=map_root_x, map_root_y=map_root_y, map_member_count=len(map_employees),
         available_employees_by_department=available_employees_by_department,
         department_heads=department_heads,
+        silence_people=[{"id": e.id, "name": e.name} for e in employees if e.telegram_chat_id],
+        silence_defaults=_silence_defaults(),
     )
 
 
@@ -3202,7 +3270,9 @@ def department_map_relation_delete(request: Request, relation_id: int):
 @app.post("/departments")
 def department_save(request: Request, id: int = Form(0), name: str = Form(...),
                     description: str = Form(""), active: str = Form(""), regulations: str = Form(None),
-                    return_view: str = Form("list")):
+                    return_view: str = Form("list"), silence_form: str = Form(""),
+                    silence_contact_id: str = Form(""), silence_hours: str = Form(""),
+                    silence_reminders: str = Form("")):
     guard_admin(request)
     clean_name = name.strip()[:100]
     if not clean_name:
@@ -3221,6 +3291,13 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         if regulations is not None:
             department.regulations = regulations.strip()[:10000]
         department.active = bool(active) if id else True
+        if silence_form:  # whom to tell when somebody of the department does not answer (their own card wins)
+            _silence_fields(department, {"silence_contact_id": silence_contact_id, "silence_hours": silence_hours,
+                                         "silence_reminders": silence_reminders})
+            if department.silence_contact_id is not None:
+                contact = s.get(Employee, department.silence_contact_id)
+                if contact is None or not contact.active or not contact.telegram_chat_id:
+                    raise HTTPException(400, "Сообщать о молчании можно только активному сотруднику с Telegram")
         s.add(department)
         s.commit()
     safe_view = "map" if return_view == "map" else "list"

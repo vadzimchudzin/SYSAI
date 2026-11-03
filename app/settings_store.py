@@ -32,6 +32,9 @@ DEFAULTS = {
     "daily_budget_usd": 5.0,         # OpenRouter spend per UTC day; 0 = no limit
     "quiet_from_hour": 21,           # no messages to people from this hour (service time zone) ...
     "quiet_to_hour": 9,              # ... until this hour; equal hours mean no quiet time
+    "quiet_days": [5, 6],            # days off (0 = Monday): nobody is written to first; answers still go
+    "person_hourly_limit": 4,        # messages the assistant may start with one person in an hour; 0 = no limit
+    "silence_working_hours": True,   # the hours of silence before a reminder or a report: the night and days off not counted
     "audio_cleanup": True,           # speech clean-up before recognition (rumble, steady noise, levels)
     "speech_fix": True,              # after recognition: names and terms corrected by the directory and the glossary
     "speaker_naming": True,          # «Спикер 1» becomes a name when the conversation proves who it is

@@ -495,6 +495,9 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                            if m.department is not None and m.department.active],
                            "tasks": [_task_view(t, True) for t in mine],
                            "done_recently": [t.title for t in tasks if t.status == "done"][:5]}
+        address = voice.address_of(employee)
+        if address:
+            ctx["employee"]["address"] = address  # how to address this person (the card)
         meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks if t.meeting_id))[:4]
         ctx["meetings"] = [_meeting_view(m) for m in (s.get(Meeting, i) for i in meeting_ids) if m]
         ctx["waiting_for_reviewer"] = [{"id": e.id, "question": e.reason} for e in
@@ -570,6 +573,10 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
     waiting_order = orders.pending_view(s, chat)
     if waiting_order:
         ctx["order_to_confirm"] = waiting_order
+    silences = cases.silence_view({"user_id": chat, "username": result.get("username") or "",
+                                   "phone": result.get("phone") or ""})
+    if silences:
+        ctx["silence_to_decide"] = silences  # you told this person that somebody is silent: their answer decides
     ctx["reminders_pending"] = reminders.pending_view(s, chat, full)
     if reviewer or director:
         ctx["cases_awaiting_decision"] = cases.decisions_view()
@@ -603,7 +610,9 @@ ORDER_RULES = (
     "передано. order_to_confirm — твой пересказ, который ждёт ответа: «да» — confirm_order с ok=true, «нет» — ok=false, "
     "поправка («нет, до среды», «лучше Ольге») — новый order с исправлением и снова «Делаю?». После confirm_order "
     "коротко скажи, кому передал и что сообщишь, когда будет готово. assistant_waiting_for_you с expects=done — "
-    "поручение, которое выполняет этот человек: когда он пишет, что сделал или что мешает, отметь task_status по task_id. ")
+    "поручение, которое выполняет этот человек: когда он пишет, что сделал или что мешает, отметь task_status по task_id. "
+    "silence_to_decide — дела, по которым ты сообщил этому человеку, что сотрудник молчит: «напомни ещё», «займусь "
+    "сам», «отмени» — это silence_choice с case_id этого дела. ")
 GENERAL_RULES = ORDER_RULES + (
     "Память разговора: history — последние сообщения целиком; dialog_memory — краткий пересказ более ранней части "
     "разговора; from_earlier — старые сообщения, которые код нашёл по словам этого сообщения; recalled — что нашлось, "
@@ -1010,6 +1019,10 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
                 "нужен ask_reviewer руководителю/проверяющему, узнай у него, не закрывай тему сам"
             )
         stiff = voice.officialese(decision["reply"]) if attempt == 1 else []
+        if attempt == 1 and voice.questions(decision["reply"]) > 1:
+            stiff.append("несколько вопросов сразу")
+        if attempt == 1 and len(decision["reply"]) > voice.LONG_REPLY:
+            stiff.append("слишком длинно")
         promises = unbacked_promises(decision["reply"], decision["actions"], ctx)
         unconfirmed = any(a.get("type") == "order" for a in decision["actions"]) and "?" not in decision["reply"]
         if not errors and not stiff and not promises and not unconfirmed:
@@ -1024,8 +1037,8 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
                 break
             feedback = ORDER_CONFIRM if unconfirmed else ""
             if stiff:  # the style: one rewrite, then the reply goes as it is
-                feedback += (f"\nОтвет звучит как служебное письмо ({', '.join(stiff)}). Перепиши reply проще, как "
-                             "коллега в мессенджере; actions и memory оставь.")
+                feedback += (f"\nОтвет написан тяжело ({', '.join(stiff)}). Перепиши reply проще и короче, как "
+                             "коллега в мессенджере, с одним вопросом за раз; actions и memory оставь.")
             if promises:
                 feedback += ("\nВ reply ты обещаешь сделать: «" + "»; «".join(promises) + "», но в actions нет действия, "
                              "которое это делает. Либо добавь нужное действие (deliver_files, remind, ask_reviewer, order, "
@@ -1081,7 +1094,7 @@ def _process(row_id: int) -> None:
         result["actions_done"] = True
         _store(row_id, result)
     if decision["reply"] and not result.get("reply_sent"):  # 4. answer
-        sent = userbot.send_message(chat, decision["reply"])
+        sent = userbot.send_message(chat, decision["reply"], answering=True)
         with SessionLocal() as s:
             s.add(ConversationMessage(chat_id=chat, message_id=sent["message_id"], role="assistant", status="agent_done",
                                       text=decision["reply"][:4000], result={}))

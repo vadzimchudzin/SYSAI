@@ -20,7 +20,7 @@ import threading
 import time
 import types
 
-from . import agent, agent_skills, config, deadlines, dialog_memory, llm, reminders, settings_store
+from . import agent, agent_skills, config, deadlines, dialog_memory, llm, reminders, settings_store, voice
 from .db import AgentCheckCase, AgentCheckResult, AgentCheckRun, ConversationMessage, Employee, SessionLocal, now
 
 log = logging.getLogger("sysai.checks")
@@ -251,6 +251,8 @@ class Scenario:
     reply_has: tuple = ()
     reply_not: tuple = ()
     short: bool = False          # a few words are enough («ок»)
+    max_questions: int | None = None  # no more questions than this in one reply (one question at a time)
+    max_len: int = 0             # the reply is no longer than this (characters; 0 = no limit beyond the generic one)
     history: tuple = ()
     talking: bool | None = None
     voice: bool = False
@@ -302,6 +304,10 @@ class Scenario:
             reasons.append("пустой ответ")
         if self.short and len(reply) > 220:
             reasons.append(f"слишком длинно для короткой реплики ({len(reply)} символов)")
+        if self.max_questions is not None and voice.questions(reply) > self.max_questions:
+            reasons.append(f"несколько вопросов сразу ({voice.questions(reply)}), а нужен один")
+        if self.max_len and len(reply) > self.max_len:
+            reasons.append(f"слишком длинно ({len(reply)} символов, нужно до {self.max_len})")
         for pattern in self.reply_has:
             if not re.search(pattern, reply, re.I):
                 reasons.append(f"в ответе нет нужного ({pattern})")
@@ -324,6 +330,18 @@ def generic(decision: dict, ctx: dict) -> list:
     promises = agent.unbacked_promises(reply, decision.get("actions") or [], ctx)
     if promises:
         reasons.append("обещание без действия: «" + promises[0][:120] + "»")
+    stiff = voice.officialese(reply)
+    if stiff:
+        reasons.append("канцелярит: «" + "», «".join(stiff[:3]) + "»")
+    if voice.questions(reply) >= 3:
+        reasons.append(f"слишком много вопросов сразу ({voice.questions(reply)})")
+    address = (ctx.get("employee") or {}).get("address") or {}
+    pronouns = {"вы": (r"\b(ты|тебе|тебя|тобой|твой|твоя|твоё|твое|твои|твоих|твоим)\b", "на «ты»"),
+                "ты": (r"\b(вы|вам|вас|вами|ваш|ваша|ваше|ваши|ваших|вашим)\b", "на «вы»")}.get(address.get("form"))
+    if pronouns:
+        found = re.search(pronouns[0], reply, re.I)
+        if found:
+            reasons.append(f"обратился {pronouns[1]} («{found.group(0)}»), а в карточке — на «{address['form']}»")
     return reasons
 
 
@@ -357,6 +375,10 @@ def scenarios() -> list:
     viktor_case = _case(52, "Спросить Виктора о сроках доставки арматуры", "Виктор Иванов", "ответ", "вчера 15:10",
                         [("вчера 15:10", "Спросил Виктора о сроках доставки"), ("сегодня 09:05", "Напомнил Виктору")],
                         "ты поручил это ассистенту")
+    silence_52 = [{"case_id": 52, "title": "Спросить Виктора о сроках доставки арматуры", "person": "Виктор Иванов",
+                   "expects": "ответа", "silent_hours": 26, "reminders": 2}]
+    silence_talk = (("ты", "Виктор Иванов не отвечает уже 26 часов: спрашивал про сроки доставки арматуры, напоминал "
+                           "дважды. Напомнить ещё, займётесь сами или отменить?"),)
     anna_case = _case(53, "Запросить у Анны акт сверки с «Монолитом»", "Анна Петрова", "файл", "позавчера 11:00",
                       [("позавчера 11:00", "Попросил у Анны акт сверки"), ("вчера 10:00", "Напомнил Анне"),
                        ("сегодня 10:00", "Напомнил ещё раз; сообщил руководителю, что ответа нет")],
@@ -627,6 +649,45 @@ def scenarios() -> list:
           "Как мы в прошлый раз договорились по оплате такси до объекта?", allowed=("note", "ask_reviewer"),
           reply_has=(r"не помню|не наш(ё|е)л|не вижу|не нахожу|нет (такой|этого|договор)|не было|напомни|уточн",),
           reply_not=(r"\d+\s*(руб|byn|тыс|%)",), history=talk, older=12),
+        # --- how it writes: one question at a time, the address from the card, short and plain
+        S("style-one-question", "Стиль общения", "Неясное поручение — один вопрос, а не анкета", "director",
+          "Надо бы разобраться с поставками на склад.", question=True, max_questions=1, allowed=("note",),
+          forbid=({"type": "order"},)),
+        S("style-vy", "Стиль общения", "В карточке «Анна Сергеевна, на вы» — так и обращаться", "accountant",
+          "привет, что у меня сейчас горит?", allowed=("note",), max_len=700,
+          extra={"employee": lambda ctx: {**ctx["employee"], "address": {"name": "Анна Сергеевна", "form": "вы"}}}),
+        S("style-ty", "Стиль общения", "В карточке «Боря, на ты» — на «ты», даже если он пишет на «вы»", "employee",
+          "Добрый день. Подскажите, пожалуйста, когда мне сдавать КС-2?", allowed=("note",),
+          extra={"employee": lambda ctx: {**ctx["employee"], "address": {"name": "Боря", "form": "ты"}}}),
+        S("style-plain", "Стиль общения", "Простой вопрос — короткий ответ без отчёта", "employee",
+          "Что мне сегодня делать в первую очередь?", allowed=("note",), max_len=500, max_questions=1),
+        # --- the person told about a silence decides: remind again, take it over, cancel
+        S("silence-remind", "Молчание", "«Напомни ещё» после сообщения о молчании", "director", "Напомни ему ещё раз.",
+          actions=({"type": "silence_choice", "case_id": 52, "choice": "remind"},), allowed=("note",),
+          history=silence_talk, extra={"silence_to_decide": silence_52, "recent_cases": [viktor_case]}),
+        S("silence-self", "Молчание", "«Займусь сам» — больше не напоминать", "director", "Не надо, я сам ему позвоню.",
+          actions=({"type": "silence_choice", "case_id": 52, "choice": "self"},), allowed=("note",),
+          history=silence_talk, extra={"silence_to_decide": silence_52, "recent_cases": [viktor_case]}),
+        S("silence-cancel", "Молчание", "«Отмени» — дело закрывается, Виктора больше не дёргать", "director",
+          "Отмени это, арматуру уже привезли.",
+          actions=({"type": "silence_choice", "case_id": 52, "choice": "cancel"},), allowed=("note",),
+          history=silence_talk, extra={"silence_to_decide": silence_52, "recent_cases": [viktor_case]}),
+        S("silence-which", "Молчание", "Два молчания и просто «напомни» — спросить, о ком речь", "director",
+          "Напомни ещё раз.", question=True, max_questions=1, allowed=("note",),
+          forbid=({"type": "silence_choice"},),
+          history=(("ты", "Не отвечают: Виктор Иванов (сроки доставки арматуры) и Анна Петрова (акт сверки с "
+                          "«Монолитом»). Что делаем?"),),
+          extra={"silence_to_decide": silence_52 + [{"case_id": 53, "title": "Запросить у Анны акт сверки с «Монолитом»",
+                                                     "person": "Анна Петрова", "expects": "документа",
+                                                     "silent_hours": 50, "reminders": 2}]}),
+        S("silence-head", "Молчание", "Руководитель отдела, которому сообщили о молчании, просит напомнить", "head",
+          "Сергей молчит? Напомни ему, пусть ответит сегодня.",
+          actions=({"type": "silence_choice", "case_id": 54, "choice": "remind"},), allowed=("note",),
+          history=(("ты", "Сергей Волков не отвечает уже 26 часов: спрашивал, когда заменят щит в бытовке. "
+                          "Напомнить ещё, займётесь сами или отменить?"),),
+          extra={"silence_to_decide": [{"case_id": 54, "title": "Спросить Сергея, когда заменят щит в бытовке",
+                                        "person": "Сергей Волков", "expects": "ответа", "silent_hours": 26,
+                                        "reminders": 2}]}),
     ]
 
 

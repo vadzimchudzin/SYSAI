@@ -108,7 +108,7 @@ def send(frequency: str | None = None, mark: bool = True) -> int:
     for ref in recipients():
         try:
             if userbot.ai_mode():
-                sent = userbot.send_message(ref, text)
+                sent = userbot.send_message(ref, text, urgent=True)  # the hour and the day the director chose
                 try:
                     from . import agent
                     agent.record_outgoing(ref, text, sent.get("message_id"), sent.get("user_id"))

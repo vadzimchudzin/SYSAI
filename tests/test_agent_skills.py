@@ -10,7 +10,7 @@ from app import agent, agent_checks, agent_skills, cases, config, llm, settings_
 from app.db import Case, Note, Reminder, SessionLocal, Task
 from test_ai_mode import FakeBackend, FakeModel, incoming, make_meeting, tgacc  # noqa: F401  (fixtures)
 
-ANYONE = {"task_status", "note", "remind", "cancel_reminder"}
+ANYONE = {"task_status", "note", "remind", "cancel_reminder", "silence_choice"}
 
 
 class SkillModel(FakeModel):
@@ -56,7 +56,7 @@ def test_every_action_is_a_skill_with_a_form_and_a_rule():
     assert set(agent_skills.SKILLS) == {
         "set_deadline", "task_status", "note", "ask_reviewer", "relay_answer", "approve_meeting", "reject_meeting",
         "assign_task", "deliver_files", "team_report", "remind", "cancel_reminder", "approve_case", "cancel_case",
-        "order", "confirm_order"}
+        "order", "confirm_order", "silence_choice"}
     for name, skill in agent_skills.SKILLS.items():
         assert skill.title and skill.hint and skill.when and skill.who in agent_skills.WHO_RU
         assert f'"type":"{name}"' in skill.template.replace(" ", "")

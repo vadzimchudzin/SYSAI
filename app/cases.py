@@ -335,8 +335,9 @@ def _write(purpose: str, facts: dict) -> str:
                   "(answers, documents), кому передал (forwarded, sent). Если ответ — передай его суть точно. Если в ответе "
                   "человек просит что-то прислать или сделать, предложи следующий шаг, который ты сделаешь сам: например, "
                   "«пришлите сюда файлы — упакую в ZIP и передам ему».",
-        "escalate": "Сообщи руководителю, что сотрудник (person) не отвечает по делу уже hours часов, несмотря на "
-                    "напоминания (reminders). Предложи вмешаться. Без упрёков в адрес сотрудника.",
+        "escalate": "Сообщи руководителю (или recipient, если он есть), что сотрудник (person) не отвечает по делу уже "
+                    "hours часов, несмотря на напоминания (reminders). Без упрёков в адрес сотрудника. В конце предложи "
+                    "ответить одним словом: «напомни ещё», «займусь сам» или «отмени».",
         "approval": "Сообщи руководителю план дела (plan) и попроси разрешения начать: он может ответить «да» в этом "
                     "чате или нажать «Одобрить» на странице совещания. Если autonomy=suggest, это только предложение.",
         "doc_approval": "Попроси руководителя разрешить пересылку документа: файл (filename) от from для to. Объясни "
@@ -354,7 +355,8 @@ def _write(purpose: str, facts: dict) -> str:
                         "(forwarded).",
         "order_silent": "Сообщи человеку, который дал поручение (requested_by), что сотрудник (person) не отписался по "
                         "нему (what_was_asked) уже hours часов, хотя ты напоминал (reminders); если есть deadline — что "
-                        "срок наступил. Предложи: напомнить ещё раз, поручить другому или связаться самому. Без упрёков.",
+                        "срок наступил. Без упрёков. В конце предложи ответить: «напомни ещё», «займусь сам» или «отмени» (или поручить "
+                        "другому).",
         "order_blocked": "Сообщи человеку, который дал поручение (requested_by), что исполнитель (person) пишет, что ему "
                          "мешает (note) по поручению (task). Предложи, как помочь, или спроси, как быть.",
     }[purpose]
@@ -488,8 +490,11 @@ def _attention(case_id: int, step_id, reason: str) -> None:
     _tell_leaders(case_id, "attention", {"reason": reason})
 
 
-def _quiet(case_id: int) -> bool:
+def _quiet(case_id: int, exc=None) -> bool:
+    """The quiet time is on (or `exc`, the hourly limit of the person, says wait): the case goes on later."""
     until = userbot.quiet_until()
+    if until is None and isinstance(exc, userbot.QuietHours):
+        until = now() + dt.timedelta(seconds=max(60, int(getattr(exc, "retry_after", 60) or 60)))
     if until is None:
         return False
     with SessionLocal() as s:
@@ -534,7 +539,8 @@ def _send_message(case_id: int, step_id: int) -> bool:
         person = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
         facts = _case_facts(s, case)
         facts["person"] = {"name": person.name, "position": person.position or None,
-                           "communication_style": getattr(person, "communication_style", "") or None}
+                           "communication_style": getattr(person, "communication_style", "") or None,
+                           "address": voice.address_of(person)}
         history = _history_with(s, person)
         if history:
             facts["history"] = history  # a short summary of earlier conversations with this person
@@ -551,11 +557,11 @@ def _send_message(case_id: int, step_id: int) -> bool:
         s.commit()
     try:
         sent = _send_text(ref, text)
-    except userbot.QuietHours:
+    except userbot.QuietHours as exc:
         with SessionLocal() as s:
             s.get(CaseStep, step_id).status = "pending"
             s.commit()
-        _quiet(case_id)
+        _quiet(case_id, exc)
         return False
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as s:
@@ -587,7 +593,8 @@ def _wait_reply(case_id: int, step_id: int) -> bool:
         wait.expects = step.args.get("expects", "answer")
         wait.asked_message_id = (asked.result or {}).get("message_id") if asked else None
         wait.started_at = start
-        wait.next_reminder_at, wait.escalate_at = _wait_times(start, wait.expects, case.task)
+        rule = silence_rule(s, person) if wait.expects != "done" else None
+        wait.next_reminder_at, wait.escalate_at = _wait_times(start, wait.expects, case.task, rule)
         s.add(wait)
         step.status, step.started_at = "waiting", start
         case.status = "waiting"
@@ -601,12 +608,45 @@ def _wait_reply(case_id: int, step_id: int) -> bool:
     return False
 
 
-def _wait_times(start, expects: str, task) -> tuple:
+SILENCE_CHOICES = {"remind": "напомнить ещё", "self": "займусь сам", "cancel": "отменить"}
+
+
+def silence_rule(s, employee) -> dict:
+    """When this person does not answer: whom to tell, after how many hours of silence, after how many reminders.
+    The employee card first, then their departments (in the order of the card), then the settings (the reviewers).
+    {"contact": Employee | None, "hours", "reminders", "source": where the contact comes from}."""
+    rule = {"contact": None, "hours": None, "reminders": None, "source": "настройки"}
+    layers = [(employee, "карточка сотрудника")] if employee is not None else []
+    for m in (employee.department_memberships if employee is not None else []):
+        if m.department is not None and m.department.active:
+            layers.append((m.department, f"подразделение «{m.department.name}»"))
+    for holder, label in layers:
+        contact_id = getattr(holder, "silence_contact_id", None)
+        if rule["contact"] is None and contact_id and contact_id != getattr(employee, "id", None):
+            contact = s.get(Employee, contact_id)
+            if contact is not None and contact.active and contact.telegram_chat_id:
+                rule["contact"], rule["source"] = contact, label
+        for key in ("hours", "reminders"):
+            value = getattr(holder, f"silence_{key}", None)
+            if rule[key] is None and isinstance(value, int) and value >= 0:
+                rule[key] = value
+    if rule["hours"] is None:
+        rule["hours"] = _hours("case_escalate_hours", 24)
+    if rule["reminders"] is None:
+        rule["reminders"] = int(_hours("case_max_reminders", 2))
+    rule["hours"] = max(1, rule["hours"])
+    return rule
+
+
+def _wait_times(start, expects: str, task, rule=None) -> tuple:
     """(first reminder, when the silence is reported). An order is followed up by its deadline: a reminder on the
-    morning of that day, the person who gave it hears in the evening; without a deadline a day and three days."""
-    if expects != "done":
-        return (start + dt.timedelta(hours=_hours("case_reminder_hours", 4)),
-                start + dt.timedelta(hours=_hours("case_escalate_hours", 24)))
+    morning of that day, the person who gave it hears in the evening; without a deadline a day and three days. Other
+    waits follow the silence rule of the person (silence_rule)."""
+    if expects != "done":  # counted in working time: the night and the days off are not silence (working_after)
+        escalate = userbot.working_after(start, (rule or {}).get("hours") or _hours("case_escalate_hours", 24))
+        if rule is not None and rule.get("reminders") == 0:
+            return escalate, escalate  # no reminders: the contact hears at once when the time is up
+        return min(userbot.working_after(start, _hours("case_reminder_hours", 4)), escalate), escalate
     deadline = task.deadline if task is not None else None
     if deadline is None:
         return (start + dt.timedelta(hours=_hours("order_reminder_hours", 24)),
@@ -649,6 +689,27 @@ def _tell_owner(case_id: int, purpose: str, extra: dict, document=None) -> int:
         return 0
     with SessionLocal() as s:
         _event(s, case_id, "told_requester", f"{purpose}: {text}")
+        s.commit()
+    return 1
+
+
+def _tell_contact(case_id: int, contact: dict, purpose: str, extra: dict) -> int:
+    """A text about the case for the person the silence rule names; failures are logged, never raised."""
+    if not userbot.ai_mode() or not contact.get("ref"):
+        return 0
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        employee = s.get(Employee, contact["id"]) if contact.get("id") else None
+        facts = {"case": {"id": case.id, "title": case.title, "kind": case.kind},
+                 "recipient": {"name": contact["name"], "address": voice.address_of(employee)}, **extra}
+    try:
+        text = _write(purpose, facts)
+        _send_text(contact["ref"], text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("case %s: %s not told to %s: %s", case_id, purpose, contact.get("name"), exc)
+        return 0
+    with SessionLocal() as s:
+        _event(s, case_id, "told_contact", f"{purpose} → {contact['name']}: {text}")
         s.commit()
     return 1
 
@@ -718,12 +779,12 @@ def _forward_document(case_id: int, step_id: int) -> bool:
         sent = userbot.send_document(ref, filename, data, caption[:1000])
         if not isinstance(sent, dict) or not sent.get("message_id"):
             raise CaseError("Telegram не подтвердил отправку файла")
-    except userbot.QuietHours:
+    except userbot.QuietHours as exc:
         with SessionLocal() as s:
             s.get(CaseStep, step_id).status = "pending"
             s.get(DocumentTransfer, transfer_id).status = "approved"
             s.commit()
-        _quiet(case_id)
+        _quiet(case_id, exc)
         return False
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as s:
@@ -1002,12 +1063,12 @@ def _send_files(case_id: int, step_id: int) -> bool:
             if not isinstance(sent, dict) or not sent.get("message_id"):
                 raise CaseError("Telegram не подтвердил отправку файла")
             message_ids.append(sent["message_id"])
-    except userbot.QuietHours:
+    except userbot.QuietHours as exc:
         if not message_ids:
             with SessionLocal() as s:
                 s.get(CaseStep, step_id).status = "pending"
                 s.commit()
-            _quiet(case_id)
+            _quiet(case_id, exc)
             return False
         raise CaseError("тихие часы начались посреди отправки; часть файлов ушла — проверьте чат") from None
     except Exception as exc:  # noqa: BLE001
@@ -1490,7 +1551,110 @@ def send_manual(case_id: int, text: str, by: str = "") -> bool:
     return True
 
 
-def hand_over(case_id: int, employee_id: int, by: str = "") -> bool:
+# ----------------------------------------------------------------------------- somebody was told about a silence
+def silence_view(sender: dict) -> list:
+    """Silences this chat was told about and may decide on: «напомни ещё», «займусь сам», «отмени» (the conversation
+    model sees them as silence_to_decide)."""
+    out = []
+    with SessionLocal() as s:
+        for wait in (s.query(CaseWait).filter(CaseWait.status == "open", CaseWait.escalated.is_(True))
+                     .order_by(CaseWait.id.desc()).limit(50)):
+            refs = wait.escalated_to or []
+            if not any(userbot.same_person(str(r), sender) for r in refs):
+                continue
+            case = s.get(Case, wait.case_id)
+            if case is None or case.status not in ("waiting", "attention"):
+                continue
+            person = s.get(Employee, wait.employee_id) if wait.employee_id else None
+            out.append({"case_id": case.id, "title": case.title, "person": person.name if person else "",
+                        "expects": WAIT_RU.get(wait.expects, "ответа"),
+                        "silent_hours": round((now() - _aware(wait.started_at)).total_seconds() / 3600, 1),
+                        "reminders": wait.reminders_sent})
+            if len(out) >= 5:
+                break
+    return out
+
+
+def remind_again(case_id: int, by: str = "") -> bool:
+    """«Напомнить ещё»: one more reminder now; if the silence goes on, the same person hears again after the hours of
+    the silence rule."""
+    moment = now()
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        wait = (s.query(CaseWait).filter_by(case_id=case_id, status="open").order_by(CaseWait.id).first()
+                if case is not None and case.status in ("waiting", "attention") else None)
+        if wait is None:
+            return False
+        person = _checked_contact(s, wait.employee_id, wait.chat_ref) if wait.employee_id else None
+        if person is None:
+            raise CaseError("некому напоминать: в деле нет сотрудника")
+        asked = s.query(CaseStep).filter(CaseStep.case_id == case.id, CaseStep.tool == "send_message",
+                                         CaseStep.status == "done").order_by(CaseStep.position.desc()).first()
+        facts = {**_case_facts(s, case), "person": {"name": person.name, "address": voice.address_of(person)},
+                 "what_was_asked": ((asked.result or {}).get("text") if asked else "") or case.title,
+                 "reminder_number": wait.reminders_sent + 1, "asked_by": by or None}
+        rule = silence_rule(s, person)
+        ref, wait_id = person.telegram_chat_id, wait.id
+    text = _write("remind", facts)
+    _send_text(ref, text)
+    with SessionLocal() as s:
+        wait = s.get(CaseWait, wait_id)
+        wait.reminders_sent += 1
+        wait.escalated, wait.escalated_to = False, None
+        if wait.expects == "done":
+            wait.escalate_at = moment + dt.timedelta(hours=_hours("order_reminder_hours", 24))
+        else:
+            wait.escalate_at = userbot.working_after(moment, rule["hours"])
+        wait.next_reminder_at = wait.escalate_at
+        case = s.get(Case, wait.case_id)
+        if case.status == "attention":
+            case.status = "waiting"
+        case.note = f"напомнил ещё раз по просьбе {by}" if by else "напомнил ещё раз"
+        _event(s, wait.case_id, "reminder", f"Напоминание №{wait.reminders_sent} (попросил{' ' + by if by else 'и'}): "
+                                            f"{text}", wait.step_id)
+        s.commit()
+    return True
+
+
+def take_over(case_id: int, by: str = "", employee_id=None) -> bool:
+    """«Займусь сам»: the person who was told about the silence takes the case; the assistant stops reminding.
+    A person of the directory gets the task; somebody else (a reviewer without a card) is only noted."""
+    if employee_id:
+        with SessionLocal() as s:
+            person = s.get(Employee, employee_id)
+            active = person is not None and person.active
+        if active:
+            return hand_over(case_id, employee_id, by, notify=False)
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        if case is None or case.status not in OPEN:
+            return False
+        for wait in s.query(CaseWait).filter_by(case_id=case_id, status="open"):
+            wait.status = "cancelled"
+        case.status, case.closed_at, case.note = "handed_over", now(), f"занялся сам: {by or 'руководитель'}"
+        _event(s, case_id, "handed_over", f"{by or 'Руководитель'}: «займусь сам» — ассистент больше не напоминает")
+        s.commit()
+    return True
+
+
+def silence_choice(case_id: int, choice: str, by: str = "", employee_id=None) -> str:
+    """The answer of the person told about a silence. Returns what was done, in words."""
+    if choice == "remind":
+        if not remind_again(case_id, by):
+            raise CaseError("дело уже не ждёт ответа")
+        return "напомнил ещё раз"
+    if choice == "self":
+        if not take_over(case_id, by, employee_id):
+            raise CaseError("дело уже закрыто")
+        return "дело передано: больше не напоминаю"
+    if choice == "cancel":
+        if not cancel(case_id, by):
+            raise CaseError("дело уже закрыто")
+        return "дело отменено"
+    raise CaseError("choice: remind, self или cancel")
+
+
+def hand_over(case_id: int, employee_id: int, by: str = "", notify: bool = True) -> bool:
     """The case goes to a person: the assistant stops, the task becomes theirs, they get a short handover note."""
     with SessionLocal() as s:
         case = s.get(Case, case_id)
@@ -1514,9 +1678,9 @@ def hand_over(case_id: int, employee_id: int, by: str = "") -> bool:
                    text=f"Дело «{case.title}» передано: {person.name}"[:800]))
         _event(s, case_id, "handed_over", f"{by or 'Руководитель'} передал дело: {person.name}")
         s.commit()
-        facts = {"task": {"title": case.title}, "person": {"name": person.name}, "done_so_far": done_so_far,
-                 "documents": documents}
-        ref = person.telegram_chat_id
+        facts = {"task": {"title": case.title}, "person": {"name": person.name, "address": voice.address_of(person)},
+                 "done_so_far": done_so_far, "documents": documents}
+        ref = person.telegram_chat_id if notify else ""
     if ref and userbot.ai_mode():
         try:
             _send_text(ref, _write("handover", facts))
@@ -1570,7 +1734,6 @@ def run_due(now_utc=None) -> None:
 
 
 def _nudge(wait_id: int, moment) -> None:
-    max_reminders = int(_hours("case_max_reminders", 2))
     with SessionLocal() as s:
         wait = s.get(CaseWait, wait_id)
         if wait is None or wait.status != "open":
@@ -1579,9 +1742,14 @@ def _nudge(wait_id: int, moment) -> None:
         if case.status != "waiting":
             return  # paused, stopped or closed: no reminders
         person = s.get(Employee, wait.employee_id) if wait.employee_id else None
+        rule = silence_rule(s, person)
+        max_reminders = int(_hours("case_max_reminders", 2)) if wait.expects == "done" else rule["reminders"]
+        contact = rule["contact"]
+        contact_view = {"id": contact.id, "name": contact.name, "ref": contact.telegram_chat_id} if contact else None
         asked = s.query(CaseStep).filter(CaseStep.case_id == case.id, CaseStep.tool == "send_message",
                                          CaseStep.status == "done").order_by(CaseStep.position.desc()).first()
-        facts = {**_case_facts(s, case), "person": {"name": person.name if person else ""},
+        facts = {**_case_facts(s, case), "person": {"name": person.name if person else "",
+                                                    "address": voice.address_of(person)},
                  "what_was_asked": ((asked.result or {}).get("text") if asked else "") or case.title,
                  "reminder_number": wait.reminders_sent + 1}
         hours = round((moment - _aware(wait.started_at)).total_seconds() / 3600, 1)
@@ -1611,6 +1779,10 @@ def _nudge(wait_id: int, moment) -> None:
             _send_text(ref, text)
         except (Retry, userbot.QuietHours) as exc:
             log.info("case wait %s: reminder later: %s", wait_id, exc)
+            if isinstance(exc, userbot.Busy):  # the hourly limit of this person: not again on every tick
+                with SessionLocal() as s:
+                    s.get(CaseWait, wait_id).next_reminder_at = moment + dt.timedelta(seconds=exc.retry_after)
+                    s.commit()
             return
         except Exception as exc:  # noqa: BLE001
             log.warning("case wait %s: reminder not sent: %s", wait_id, exc)
@@ -1618,8 +1790,8 @@ def _nudge(wait_id: int, moment) -> None:
         with SessionLocal() as s:
             wait = s.get(CaseWait, wait_id)
             wait.reminders_sent += 1
-            wait.next_reminder_at = moment + dt.timedelta(hours=_hours("order_reminder_hours", 24) if done_wait
-                                                          else _hours("case_reminder_hours", 4))
+            wait.next_reminder_at = (moment + dt.timedelta(hours=_hours("order_reminder_hours", 24)) if done_wait
+                                     else userbot.working_after(moment, _hours("case_reminder_hours", 4)))
             if done_wait and not wait.escalated and wait.escalate_at is not None:
                 wait.next_reminder_at = min(wait.next_reminder_at, _aware(wait.escalate_at))
             elif wait.reminders_sent >= max_reminders:
@@ -1631,16 +1803,20 @@ def _nudge(wait_id: int, moment) -> None:
                "what_was_asked": facts["what_was_asked"], **({"deadline": facts["deadline"]} if facts.get("deadline") else {})}
     if owner is not None:
         told = _tell_owner(case_id_, "order_silent", silence)
-        whom = owner["name"] or "тому, кто поручил"
+        whom, refs = owner["name"] or "тому, кто поручил", [owner["chat"]]
+    elif contact_view is not None:  # the person named in the card (or the department) for this silence
+        told = _tell_contact(case_id_, contact_view, "escalate", silence)
+        whom, refs = contact_view["name"], [contact_view["ref"]]
     else:
         told = _tell_leaders(case_id_, "escalate", silence)
-        whom = "руководителю"
+        whom, refs = "руководителю", _leaders()
     with SessionLocal() as s:
         wait = s.get(CaseWait, wait_id)
         wait.escalated, wait.next_reminder_at = True, None
+        wait.escalated_to = [str(r) for r in refs if r] if told else None
         s.get(Case, wait.case_id).note = (f"Не отписался(лась) {hours} ч, сообщил: {whom}" if done_wait
                                           else f"Нет ответа {hours} ч, руководитель уведомлён" if owner is None
-                                          else f"Нет ответа {hours} ч, сообщил: {whom}")
+                                          and contact_view is None else f"Нет ответа {hours} ч, сообщил: {whom}")
         _event(s, wait.case_id, "escalated", f"Нет ответа {hours} ч — сообщил {whom}" + ("" if told else
                                                                                        " (не доставлено)"),
                wait.step_id)

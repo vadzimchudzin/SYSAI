@@ -439,6 +439,6 @@ def team_report(scope="all") -> tuple:
 
 def send_team_report(chat, scope="all") -> None:
     filename, pdf = team_report(scope)
-    sent = userbot.send_document(chat, filename, pdf, "")
+    sent = userbot.send_document(chat, filename, pdf, "", answering=True)  # asked for in this chat
     from . import agent
     agent.record_outgoing(str(chat), f"[отправил PDF: {filename}]", sent.get("message_id"), sent.get("user_id") or chat)

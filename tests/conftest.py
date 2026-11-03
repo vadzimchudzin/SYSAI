@@ -20,6 +20,11 @@ def fresh_db():
     accounts._failures.clear()  # wrong-password counters are per process: one test must not lock out the next
     db.Base.metadata.drop_all(db.engine)
     db.init_db()
+    from app import settings_store, userbot
+    # the hourly limit of one person, the days off and the working-time count of silence are tested on their own
+    # (otherwise a test that gives a moment would depend on the day of the week it runs)
+    settings_store.set_many({"person_hourly_limit": 0, "silence_working_hours": False, "quiet_days": []})
+    userbot._sent_to.clear()
     yield
 
 

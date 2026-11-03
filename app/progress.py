@@ -124,7 +124,12 @@ def case_card(s, case, at=None) -> dict:
     waiting = None
     if wait is not None:
         person = s.get(Employee, wait.employee_id) if wait.employee_id else None
+        rule = cases.silence_rule(s, person) if wait.expects != "done" else None
+        owner = cases._owner(case)
+        tell = (owner["name"] or "тому, кто поручил") if owner else (rule["contact"].name if rule and rule["contact"]
+                                                                   else "руководителю")
         waiting = {"who": person.name if person else "?", "what": cases.WAIT_RU.get(wait.expects, "ответа"),
+                   "tell": tell, "told": tell if wait.escalated else "",
                    "expects": wait.expects, "for": _ago(wait.started_at, at),
                    "hours": round((at - _aware(wait.started_at)).total_seconds() / 3600, 1),
                    "reminders": wait.reminders_sent, "escalated": wait.escalated,
@@ -174,7 +179,10 @@ def case_card(s, case, at=None) -> dict:
                     "answer": bool(waiting and waiting["expects"] in ("answer", "done")),
                     "upload": bool(waiting and waiting["expects"] == "document"),
                     "message": case.status in cases.OPEN, "handover": case.status in cases.OPEN,
-                    "close": case.status in cases.OPEN},
+                    "close": case.status in cases.OPEN,
+                    "remind": bool(waiting) and case.status in ("waiting", "attention"),
+                    "take_over": bool(waiting) and case.status in cases.OPEN,
+                    "cancel": case.status in cases.OPEN},
             "unlinked": cases.unlinked_documents(s, wait.employee_id) if wait is not None and wait.expects == "document" else [],
             "updated": _ago(events[-1].created_at, at) if events else "",
             "events": [{"at": _local(e.created_at), "kind": e.kind, "text": e.text} for e in events[-30:]]}

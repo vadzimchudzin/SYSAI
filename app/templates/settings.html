@@ -144,6 +144,13 @@
     {% if ai %}
     <label class="f">Тихие часы: не писать с <input type="number" min="0" max="23" name="quiet_from_hour" value="{{ s.quiet_from_hour }}"> до <input type="number" min="0" max="23" name="quiet_to_hour" value="{{ s.quiet_to_hour }}"> часов</label>
     <p class="small muted">По времени сервиса (TIMEZONE). В это время сообщения людям и ответы ждут утра. Одинаковые часы означают, что тихих часов нет.</p>
+    <input type="hidden" name="present_quiet_days" value="1">
+    <div class="f">Выходные: первым не писать
+      <div class="chips">{% for d in range(7) %}<label class="chip"><input type="checkbox" name="quiet_days" value="{{ d }}" {{ 'checked' if d in (s.quiet_days or []) }}>{{ ('пн','вт','ср','чт','пт','сб','вс')[d] }}</label>{% endfor %}</div>
+    </div>
+    <p class="small muted">В выходные ассистент никому не пишет первым (задачи, напоминания по делам, сообщения о молчании ждут утра рабочего дня). На сообщения людей отвечает. Напоминания «на время», о которых попросили, уходят всегда.</p>
+    <label class="f sm">Не больше сообщений одному человеку в час <input type="number" min="0" max="30" name="person_hourly_limit" value="{{ s.person_hourly_limit }}"></label>
+    <p class="small muted">Сколько сообщений ассистент может сам начать с одним человеком за час (дела, задачи). Остальные подождут. Ответы на сообщения не считаются. 0 — без лимита.</p>
     {% endif %}
   </section>
   {% if ai %}
@@ -157,6 +164,8 @@
       <label class="f sm">Напоминаний <input type="number" min="0" max="10" name="case_max_reminders" value="{{ s.case_max_reminders }}"></label>
       <label class="f sm">Сообщить руководителю через, ч <input type="number" min="1" max="720" name="case_escalate_hours" value="{{ s.case_escalate_hours }}"></label>
     </div>
+    <p class="small muted">Кому сообщать о молчании и через сколько — можно задать в карточке сотрудника или подразделения; там, где не задано, действуют эти значения и сообщение получают проверяющие.</p>
+    {{ switch('silence_working_hours', 'Считать часы молчания только в рабочее время', 'Ночь (тихие часы) и выходные не считаются: просьба в пятницу вечером напомнится в понедельник, а не в субботу.') }}
     <label class="f">Слова конфиденциальных файлов <input name="sensitive_keywords" value="{{ s.sensitive_keywords }}"></label>
   {% endif %}
   </section>

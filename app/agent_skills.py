@@ -15,8 +15,8 @@ import json
 import logging
 
 from . import bitrix, cases, deadlines, meeting_alerts, orders, reminders, settings_store, userbot
-from .db import (ConversationEscalation, ConversationMessage, Employee, EmployeeDepartment, Meeting, Note, SessionLocal,
-                 Task, now)
+from .db import (Case, ConversationEscalation, ConversationMessage, Employee, EmployeeDepartment, Meeting, Note,
+                 SessionLocal, Task, now)
 
 log = logging.getLogger("sysai.agent")
 
@@ -258,6 +258,17 @@ SKILLS = {s.name: s for s in (
           {"order_id": _int("ID поручения из order_to_confirm"),
            "ok": {"type": "boolean", "description": "true — начать, false — отменить"}},
           ("order_id", "ok"), who="order", modes=True),
+    Skill("silence_choice", "Решение по молчанию", "Тот, кому сообщили о молчании, решил: напомнить ещё, займётся сам "
+                                                   "или отменить",
+          "этому человеку ты сообщил, что сотрудник молчит по делу (silence_to_decide), и он ответил: «напомни ещё» — "
+          "choice=remind (напомнишь сейчас и снова скажешь, если молчание продолжится); «займусь сам», «сам позвоню», "
+          "«разберусь» — choice=self (ты больше не напоминаешь, дело у него); «отмени», «не надо» — choice=cancel. "
+          "Если таких дел несколько и неясно, о каком речь, спроси",
+          '{"type":"silence_choice","case_id":ID,"choice":"remind|self|cancel"}',
+          {"case_id": _int("ID дела из silence_to_decide"),
+           "choice": _str("remind — напомнить ещё раз, self — займусь сам, cancel — отменить дело",
+                          ("remind", "self", "cancel"))},
+          ("case_id", "choice")),
 )}
 
 MEMORY_TOOL = {"type": "function", "function": {
@@ -586,6 +597,12 @@ def check(action: dict, ctx: dict, person: Person, approvers=None) -> str:
         return "" if scope == "all" or scope in {p["id"] for p in ctx.get("team", [])} else "team_report: scope all или ID сотрудника"
     if kind == "order":
         return _check_order(action, ctx, person)
+    if kind == "silence_choice":
+        if action.get("case_id") not in {x.get("case_id") for x in ctx.get("silence_to_decide") or []}:
+            return "silence_choice: дело не найдено среди тех, о молчании по которым ты сообщил (silence_to_decide)"
+        if action.get("choice") not in ("remind", "self", "cancel"):
+            return "silence_choice: choice это remind, self или cancel"
+        return ""
     if kind == "confirm_order":
         waiting = ctx.get("order_to_confirm")
         if not isinstance(waiting, dict) or action.get("order_id") != waiting.get("id"):
@@ -762,7 +779,7 @@ def execute(action: dict, chat: str, employee_id, author: str, sender: dict | No
             target = _employee_ref(s, question.chat_id)
             employee_chat = question.chat_id
             text = str(action["message"]).strip()
-            sent = userbot.send_message(target, text)
+            sent = userbot.send_message(target, text, answering=True)  # the answer the employee is waiting for
             s.add(ConversationMessage(chat_id=employee_chat, message_id=sent["message_id"], role="assistant",
                                       status="agent_done", text=text[:4000], result={}))
             question.status = "resolved"
@@ -855,6 +872,12 @@ def execute(action: dict, chat: str, employee_id, author: str, sender: dict | No
                 orders.decide(action["order_id"], chat, bool(action.get("ok")), author)
             except orders.OrderError as exc:
                 raise SkillError(f"confirm_order: {exc}") from exc
+        elif kind == "silence_choice":
+            s.commit()
+            try:
+                cases.silence_choice(action["case_id"], action["choice"], author, employee_id)
+            except (cases.CaseError, cases.Retry) as exc:
+                raise SkillError(f"silence_choice: {exc}") from exc
         else:
             raise SkillError(f"неизвестный навык {kind!r}")
 
@@ -901,6 +924,10 @@ def describe(action: dict) -> str:
                                    name(action.get("forward_to")) if action.get("forward_to") else "")
         if kind == "confirm_order":
             return orders.describe_order(s, action.get("order_id"), bool(action.get("ok", True)))
+        if kind == "silence_choice":
+            case = s.get(Case, action.get("case_id")) if isinstance(action.get("case_id"), int) else None
+            what = cases.SILENCE_CHOICES.get(action.get("choice"), str(action.get("choice")))
+            return f"{what}: дело «{case.title if case else action.get('case_id')}»"
     return title
 
 
