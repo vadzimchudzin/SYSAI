@@ -98,6 +98,12 @@ code { background: var(--card2); border: 1px solid var(--line); padding: 1px 6px
 .side a.nav.on svg { stroke: var(--clay); }
 .side .new { margin: 0 4px 14px; justify-content: center; }
 .side .sp { flex: 1; } .side .me { display: flex; align-items: center; gap: 10px; padding: 10px; border-top: 1px solid var(--line); margin-top: 8px; font-size: 13.5px; color: var(--soft); }
+.side a.nav.side-agent { margin-top: 10px; padding: 9px 12px; border: 1px solid var(--line); background: rgba(30,29,26,.55); }
+.side a.nav.side-agent:hover, .side a.nav.side-agent.on { border-color: var(--line2); background: var(--card2); }
+.side .side-agent-t { display: flex; flex-direction: column; line-height: 1.25; color: var(--text); font-weight: 600; }
+.side .side-agent-t small { font-size: 11.5px; font-weight: 400; color: var(--muted); }
+.side .side-dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--line2); flex: none; }
+.side .side-dot.on { background: var(--green); box-shadow: 0 0 0 3px rgba(127,183,126,.16); }
 .side .ava { width: 30px; height: 30px; border-radius: 50%; background: var(--clay-bg); color: var(--clay); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
 .main { min-width: 0; }
 .topbar { display: none; }

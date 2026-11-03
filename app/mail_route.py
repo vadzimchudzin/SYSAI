@@ -395,7 +395,7 @@ def after_sorting(mail_id: int) -> dict:
                 return dict(row.route or {}) if row is not None else {}
             route = {**plan(s, row), "planned_at": mail._iso(now())}
             if route["status"] == "planned" and not settings_store.get("mail_forward"):
-                route.update(status="off", why="пересылка писем выключена на странице «Почта»")
+                route.update(status="off", why="пересылка писем выключена в настройках «Секретаря»")
             elif route["status"] == "planned" and not _ai_mode():
                 route.update(status="off", why=NO_AI)
             row.route = route

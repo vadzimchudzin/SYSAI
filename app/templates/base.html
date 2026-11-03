@@ -16,7 +16,6 @@
     <a class="nav {{ 'on' if path.startswith('/skills') }}" href="/skills">{{ icon('gear') }} Навыки</a>
     <a class="nav {{ 'on' if path.startswith('/documents') }}" href="/documents">{{ icon('list') }} Документы</a>
     <a class="nav {{ 'on' if path.startswith('/entities') }}" href="/entities">{{ icon('home') }} Объекты и клиенты</a>
-    <a class="nav {{ 'on' if path.startswith('/mail') }}" href="/mail">{{ icon('list') }} Почта</a>
     <a class="nav {{ 'on' if path.startswith('/reminders') }}" href="/reminders">{{ icon('bell') }} Напоминания</a>
     <a class="nav {{ 'on' if path.startswith('/calendar') }}" href="/calendar">{{ icon('calendar') }} Календарь</a>
     <a class="nav {{ 'on' if path.startswith('/tables') }}" href="/tables">{{ icon('table') }} Таблицы</a>
@@ -25,6 +24,9 @@
     <a class="nav {{ 'on' if path.startswith('/settings') }}" href="/settings">{{ icon('gear') }} Настройки</a>
     {% endif %}
     <div class="sp"></div>
+    {% if me and me.role == 'superuser' %}
+    <a class="nav side-agent {{ 'on' if path.startswith('/mail') }}" href="/mail" title="Почта компании: письма, кто чем занимается, ответы и все настройки">{{ icon('mail') }}<span class="side-agent-t">Секретарь<small>почта компании</small></span><i class="side-dot {{ 'on' if mail_on }}" title="{{ 'читает почту' if mail_on else 'почта не подключена или чтение выключено' }}"></i></a>
+    {% endif %}
     <div class="me"><span class="ava">{{ (request.session.get('user') or 'S')[:2]|upper }}</span><span>{{ request.session.get('user') or 'SYSAI' }}</span>
       <a href="/logout" class="muted" title="Выйти" style="margin-left:auto">{{ icon('logout') }}</a></div>
   </aside>

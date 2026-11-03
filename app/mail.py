@@ -2,7 +2,7 @@
 the person who handles it and prepares the answers.
 
 №22 — the connection. IMAP over SSL (STARTTLS on port 143) with the address and an app password the administrator
-types on the «Почта» page (kept sealed, never shown again). Reading only: the folder is opened read-only (EXAMINE) and
+types on the «Секретарь» page (kept sealed, never shown again). Reading only: the folder is opened read-only (EXAMINE) and
 the letters are taken with BODY.PEEK, so nothing in the box changes — not even «прочитано». The background loop looks
 every few minutes (mail_poll_minutes) for letters with a UID above the last one seen; the very first look takes the
 letters of the last mail_history_days days. A letter is kept once (by its Message-ID): the sender, the recipients, the
@@ -380,7 +380,7 @@ def _int(value, low: int, high: int, label: str) -> int:
 
 
 def save_settings(form) -> None:
-    """The «Подключение» form of the «Почта» page. The password is sealed; an empty field keeps the one saved."""
+    """The «Подключение» form of the «Секретарь» page (its settings panel). The password is sealed; an empty field keeps the one saved."""
     updates = {}
     service = str(form.get("mail_service") or "").strip()
     if service and service not in PRESETS:

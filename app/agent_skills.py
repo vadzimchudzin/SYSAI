@@ -849,7 +849,7 @@ def _check_mail(action: dict, ctx: dict, person: Person) -> str:
         if mail_id not in letters and not (draft and mail_id == draft.get("mail_id")):
             return "mail_reply: письмо не найдено среди mail_letters"
         if not ctx.get("mail_can_reply"):
-            return ("mail_reply: отправка писем не настроена (на странице «Почта» нет сервера SMTP) — скажи, что ответить "
+            return ("mail_reply: отправка писем не настроена (в настройках «Секретаря» нет сервера SMTP) — скажи, что ответить "
                     "отсюда пока нельзя")
         if len(str(action.get("points") or "")) > 1500:
             return "mail_reply: points — коротко, до 1500 символов"
