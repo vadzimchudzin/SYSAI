@@ -230,6 +230,31 @@ def test_account_page_renders(client):
     assert r.status_code == 200 and "Получить код" in r.text and "my.telegram.org/apps" in r.text
 
 
+def test_account_page_explains_the_steps_and_the_mode(client):
+    page = client.get("/settings/telegram").text
+    assert "API development tools" in page and "Create application" in page and "App api_hash" in page
+    assert "Сейчас людям пишет обычный бот" in page and 'href="/settings"' in page  # bot mode is the default
+    settings_store.set_many({"ai_employee": True})
+    assert "Сейчас людям пишет обычный бот" not in client.get("/settings/telegram").text
+
+
+def test_bot_mode_still_shows_the_way_to_the_account(client):
+    page = client.get("/settings").text
+    assert "Токен Telegram-бота" in page and 'href="/settings/telegram"' in page
+    assert "включите «ИИ-сотрудник»" in page and "Сейчас пишет бот" in page and "нажмёт «Запустить»" in page and "он уже сохранён" not in page
+
+
+def test_bot_mode_names_an_account_saved_earlier(client, tgacc):
+    settings_store.set_many({"ai_employee": False})
+    page = client.get("/settings").text
+    assert "Токен Telegram-бота" in page and "он уже сохранён: Алексей Помощник" in page
+
+
+def test_the_banner_leads_the_superuser_to_the_settings(client):
+    page = client.get("/app").text
+    assert "Telegram выключен." in page and 'Настроить →' in page
+
+
 def test_account_routes_walk_the_login(client, monkeypatch):
     fake = FakeBackend()
     monkeypatch.setattr(userbot, "backend", fake)

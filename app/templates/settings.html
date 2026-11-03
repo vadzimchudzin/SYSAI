@@ -38,6 +38,7 @@
       <textarea name="persona" rows="3" maxlength="600" placeholder="{{ persona_default }}">{{ s.persona }}</textarea></label>
     <p class="small muted">Имя берётся из самого аккаунта. Пусто: используется манера по умолчанию. На прямой вопрос «ты человек?» он не станет утверждать, что человек.</p>
     {% else %}
+    <p class="small muted tg-mode-hint">Сейчас пишет бот: он может написать человеку только после того, как тот сам откроет бота и нажмёт «Запустить». Чтобы ИИ-сотрудник писал людям первым, как обычный человек, нужен аккаунт Telegram: включите «ИИ-сотрудник», сохраните настройки и подключите аккаунт{% if account and account.configured %} (он уже сохранён{% if account.me and account.me.name %}: {{ account.me.name }}{% endif %}){% endif %}. <a href="/settings/telegram">Telegram-аккаунт →</a></p>
     {{ credential('telegram_bot_token', 'Токен Telegram-бота', 'Токен от BotFather') }}
     {% endif %}
   </section>
