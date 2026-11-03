@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_folders, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel, gdrive,
                server_watch, storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
@@ -1757,14 +1757,18 @@ MAIL_MESSAGES = {"saved": "Сохранено.", "kinds": "Типы писем �
                  "rule": "Правило сохранено — новые письма передаются по нему.", "rule_done": "Готово.",
                  "route": "Пересылка писем настроена.", "reply": "Настройки ответов сохранены.",
                  "passed": "Письмо передано — получатель увидит его в Telegram.",
-                 "back": "Письмо ждёт решения, кому передать.", "route_ok": "Отмечено: передано верно."}
+                 "back": "Письмо ждёт решения, кому передать.", "route_ok": "Отмечено: передано верно.",
+                 "departments": "Отделы сохранены — новые письма передаются и раскладываются по ним.",
+                 "folders": "Сохранено.", "folder_rule": "Особая папка добавлена — она проверяется первой.",
+                 "folder_rule_done": "Готово.",
+                 "applying": "Раскладываю письма за 30 дней по папкам ящика — обновите страницу через минуту-другую."}
 MAIL_ROUTE_KEYS = ("mail_forward", "mail_hints_auto", "mail_drafts_auto")
 MAIL_REPLY_KEYS = ("mail_sender_name", "mail_signature", "mail_reply_examples")
 
 
 def _mail_msg(msg: str) -> str:
     """A known message key, or the text of a check of the connection («подключено…», «отправка работает…»)."""
-    return MAIL_MESSAGES.get(msg, msg[:300] if msg.startswith(("подключено", "отправка работает")) else "")
+    return MAIL_MESSAGES.get(msg, msg[:300] if msg.startswith(("подключено", "отправка работает", "папки в ящике")) else "")
 
 
 def _mail_cards(s) -> list:
@@ -1787,6 +1791,7 @@ def mail_view(request: Request, kind: str = "", q: str = "", only: str = "", msg
         rules, targets, hints = mail_route.rules_view(s), mail_route.targets(s), mail_route.suggestions(s)
         route_score, waiting = mail_route.accuracy(s), len(mail_route.waiting(s))
         drafts, cards = mail_reply.recent(s, 10), _mail_cards(s)
+        departments, staff, folders = mail_folders.departments(s), mail_folders.people(s), mail_folders.view(s)
     stored = settings_store.all_settings()
     form = {k: stored.get(k) for k in MAIL_FORM_KEYS}
     return page(request, "mail.html", rows=rows, score=score, st=mail.status(), kinds=kinds, kinds_text=mail.kinds_text(),
@@ -1794,7 +1799,8 @@ def mail_view(request: Request, kind: str = "", q: str = "", only: str = "", msg
                 only=only, limit=limit, msg=_mail_msg(msg), error=error[:300], rules=rules, targets=targets,
                 suggestions=hints, route_score=route_score, waiting=waiting, drafts=drafts, cards=cards,
                 route_form={k: stored.get(k) for k in MAIL_ROUTE_KEYS},
-                reply_form={k: stored.get(k) for k in MAIL_REPLY_KEYS}, smtp_ready=mail_reply.ready())
+                reply_form={k: stored.get(k) for k in MAIL_REPLY_KEYS}, smtp_ready=mail_reply.ready(),
+                departments=departments, staff=staff, folders=folders, dep_auto=bool(stored.get("mail_departments_auto")))
 
 
 @app.post("/mail/rules")
@@ -1821,6 +1827,68 @@ def mail_rule_action(request: Request, rule_id: int, action: str):
     except mail_route.RouteError as exc:
         return RedirectResponse("/mail?error=" + quote(str(exc)) + "#rules", 303)
     return RedirectResponse("/mail?msg=rule_done#rules", 303)
+
+
+@app.post("/mail/departments")
+async def mail_departments_save(request: Request):
+    """«Отделы»: who of each department gets its letters, its folder in the box, what letters it gets."""
+    guard_admin(request)
+    try:
+        mail_folders.save_departments(await request.form())
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#departments", 303)
+    return RedirectResponse("/mail?msg=departments#departments", 303)
+
+
+@app.post("/mail/folders")
+async def mail_folders_save(request: Request):
+    """«Папки в ящике»: on and where; switched on — the folders are made in the box right away."""
+    guard_admin(request)
+    try:
+        text = mail_folders.save_settings(await request.form())
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=" + quote(text or "folders") + "#folders", 303)
+
+
+@app.post("/mail/folders/create")
+def mail_folders_create(request: Request):
+    guard_admin(request)
+    try:
+        text = mail_folders.create_now()
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=" + quote(text) + "#folders", 303)
+
+
+@app.post("/mail/folders/apply")
+def mail_folders_apply(request: Request):
+    guard_admin(request)
+    if not settings_store.get("mail_folders_on") or not mail.configured():
+        return RedirectResponse("/mail?error=" + quote("включите «раскладывать письма по папкам» и подключите почту") +
+                                "#folders", 303)
+    mail_folders.apply_soon()
+    return RedirectResponse("/mail?msg=applying#folders", 303)
+
+
+@app.post("/mail/folder-rules")
+async def mail_folder_rule_save(request: Request):
+    guard_admin(request)
+    try:
+        mail_folders.save_folder_rule(await request.form())
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=folder_rule#folders", 303)
+
+
+@app.post("/mail/folder-rules/{index}/{action}")
+def mail_folder_rule_action(request: Request, index: int, action: str):
+    guard_admin(request)
+    try:
+        mail_folders.folder_rule_action(index, action)
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=folder_rule_done#folders", 303)
 
 
 @app.post("/mail/route-settings")

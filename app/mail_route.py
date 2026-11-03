@@ -29,7 +29,7 @@ STATUS_RU = {"planned": "передаётся", "sent": "передано", "unc
              "no_contact": "нет Telegram у получателя", "ignored": "не передаётся", "old": "пришло до подключения",
              "off": "пересылка выключена", "failed": "не передано"}
 HOW_RU = {"rule": "по правилу", "thread": "та же переписка", "task": "по задаче", "documents": "по правилу документов",
-          "hint": "по подсказке агента", "hand": "вручную"}
+          "department": "по смыслу письма", "hint": "по подсказке агента", "hand": "вручную"}
 WAITING = ("unclear", "no_contact", "failed")  # the letter waits for somebody to decide where it goes
 OLD_DAYS = 7          # an older letter (the box rebuilt, a long sleep) is not forwarded by itself
 MAX_TASKS = 5
@@ -129,17 +129,18 @@ def rule_label(s, rule) -> str:
 
 
 def _target(s, rule) -> tuple:
-    """(the person, the department) a rule names; the head of the department gets the letter."""
-    from . import doc_intake
+    """(the person, the department, its id) a rule names; of a department — the one responsible for its mail
+    («Отделы» of the «Секретарь» page; by default the head)."""
+    from . import mail_folders
     if rule.to_employee_id:
         person = s.get(Employee, rule.to_employee_id)
-        return (person if person is not None and person.active else None), ""
+        return (person if person is not None and person.active else None), "", None
     if rule.to_department_id:
         department = s.get(Department, rule.to_department_id)
         if department is None or not department.active:
-            return None, ""
-        return doc_intake._head_of(department), department.name
-    return None, ""
+            return None, "", None
+        return mail_folders.responsible(s, department), department.name, department.id
+    return None, "", None
 
 
 def rules_view(s) -> list:
@@ -154,8 +155,19 @@ def rules_view(s) -> list:
 
 
 def targets(s) -> list:
-    from . import doc_intake
-    return doc_intake.targets(s)
+    """Whom a rule can name: departments (the one responsible for their mail gets it) and people with Telegram."""
+    from . import doc_intake, mail_folders
+    out = []
+    for t in doc_intake.targets(s):
+        if t["value"].startswith("d:"):
+            department = s.get(Department, int(t["value"][2:]))
+            person = mail_folders.responsible(s, department) if department is not None else None
+            if person is not None and person.telegram_chat_id:
+                t = {**t, "label": f"Отдел «{department.name}» (ответственному за почту: {person.name})"}
+            else:
+                t = {**t, "label": f"Отдел «{department.name}» (нет ответственного за почту с Telegram)"}
+        out.append(t)
+    return out
 
 
 def _senders(value: str) -> str:
@@ -261,12 +273,14 @@ def _old(row) -> bool:
     return connected is not None and sent < connected - dt.timedelta(minutes=10)
 
 
-def _to(route: dict, person, department: str = "") -> dict:
+def _to(route: dict, person, department: str = "", department_id=None) -> dict:
     if department:
         route["department"] = department
+    if department_id:
+        route["department_id"] = department_id
     if person is None or not person.active:
-        route.update(status="no_contact", why=("в отделе «" + department + "» нет начальника с Telegram") if department
-                     else "получателя нет в справочнике")
+        route.update(status="no_contact", why=("в отделе «" + department + "» нет ответственного за почту с Telegram")
+                     if department else "получателя нет в справочнике")
     elif not person.telegram_chat_id:
         route.update(status="no_contact", to=person.name, to_id=person.id, why=f"у {person.name} нет Telegram-контакта")
     else:
@@ -276,7 +290,7 @@ def _to(route: dict, person, department: str = "") -> dict:
 
 def plan(s, row) -> dict:
     """Who gets the letter (not carried out yet): {"status", "how", "to", "to_id", "why", "rule", "tasks"}."""
-    from . import doc_intake
+    from . import doc_intake, mail_folders
     signals = set(row.signals or [])
     if row.direction != "in":
         return {"status": "ignored", "why": "наше письмо"}
@@ -289,9 +303,9 @@ def plan(s, row) -> dict:
     hay = _hay(row)
     for rule in s.query(MailRule).filter(MailRule.active.is_(True)).order_by(MailRule.position, MailRule.id):
         if fits(rule, row, hay):
-            person, department = _target(s, rule)
+            person, department, department_id = _target(s, rule)
             return _to({"how": "rule", "rule_id": rule.id, "rule": rule_label(s, rule), "rule_if": rule_condition(s, rule),
-                        "tasks": bool(rule.make_tasks)}, person, department)
+                        "tasks": bool(rule.make_tasks)}, person, department, department_id)
     for earlier in mail._earlier(s, row):
         before = earlier.route or {}
         if earlier.direction == "in" and before.get("status") == "sent" and before.get("to_id"):
@@ -313,6 +327,18 @@ def plan(s, row) -> dict:
             return _to({"how": "documents", "rule": found.get("rule") or "", "tasks": bool(found.get("tasks")),
                         "why": f"вложение «{doc.filename}» — по правилу «{found.get('rule') or ''}»"},
                        s.get(Employee, found["to_id"]))
+    found = mail_folders.named(s, row)
+    if found:  # the department the sorting named by the meaning of the letter («Отделы» of the page)
+        department, sure, why = found
+        person = mail_folders.responsible(s, department)
+        if sure and settings_store.get("mail_departments_auto"):
+            return _to({"how": "department", "why": why, "tasks": True}, person, department.name, department.id)
+        ready = person is not None and person.active and bool(person.telegram_chat_id)
+        return {"status": "unclear", "why": "нет правила для такого письма" + ("" if sure else
+                                                                               " (чей отдел — секретарь не уверен)"),
+                "hint": {"to_id": person.id if ready else None, "to": person.name if ready else "",
+                         "department": department.name, "department_id": department.id,
+                         "why": why or f"по смыслу письма — отдел «{department.name}»", "sure": sure}}
     return {"status": "unclear", "why": "нет правила для такого письма"}
 
 
@@ -402,7 +428,7 @@ def after_sorting(mail_id: int) -> dict:
             if route["status"] == "ignored" and row.status in ("new", "sorted"):
                 row.status = "ignored"
             s.commit()
-    if route["status"] == "unclear":
+    if route["status"] == "unclear" and not (route.get("hint") or {}).get("to_id"):
         found = hint(mail_id)
         if found:
             with _lock(mail_id):
@@ -441,6 +467,9 @@ def _reason(route: dict, ty: bool) -> str:
         return f"Передаёт {route.get('by') or 'руководитель'}" + (f": {route['why']}" if route.get("why") else "") + "."
     if how == "hint":
         return f"Передаю {you} по обязанностям: {route.get('why') or 'подсказка агента'}."
+    if how == "department":
+        return (f"Передаю {you} как ответственному за почту отдела «{route.get('department') or ''}»" +
+                (f": {route['why']}" if route.get("why") else "") + ".")
     return f"Передаю {you}: {route.get('why') or ''}."
 
 
@@ -699,7 +728,7 @@ def waiting(s, days: int = 7) -> list:
         route = row.route or {}
         if route.get("status") in WAITING:
             out.append({"id": row.id, "subject": row.subject or "без темы", "from": row.from_name or row.from_addr,
-                        "hint": (route.get("hint") or {}).get("to") or "", "why": route.get("why") or ""})
+                        "hint": hint_text(route.get("hint")), "why": route.get("why") or ""})
     return out
 
 
@@ -727,14 +756,23 @@ def _when(value) -> str:
     return f"{mail.local(moment):%d.%m %H:%M}" if moment else ""
 
 
+def hint_text(found) -> str:
+    """«Анна Орлова», «отдел «Бухгалтерия» → Анна Орлова» or «отдел «Бухгалтерия»» (no hint — "")."""
+    found = found if isinstance(found, dict) else {}
+    who, department = found.get("to") or "", found.get("department") or ""
+    if department:
+        return f"отдел «{department}»" + (f" → {who}" if who else "")
+    return who
+
+
 def short(row) -> str:
     """One word or two for the list of letters."""
     route = row.route or {}
     status = route.get("status")
     if status == "sent":
         return f"→ {route.get('to') or '?'}"
-    if status in WAITING and (route.get("hint") or {}).get("to"):
-        return f"кому? (подсказка: {route['hint']['to']})"
+    if status in WAITING and hint_text(route.get("hint")):
+        return f"кому? (подсказка: {hint_text(route['hint'])})"
     return STATUS_RU.get(status or "", "")
 
 
@@ -756,8 +794,8 @@ def _prompt_view(s, row) -> dict:
         out["routed_to"] = route.get("to")
     elif route.get("status") in WAITING:
         out["waits_for_decision"] = True
-        if (route.get("hint") or {}).get("to"):
-            out["hint"] = route["hint"]["to"]
+        if hint_text(route.get("hint")):
+            out["hint"] = hint_text(route["hint"])
     return out
 
 

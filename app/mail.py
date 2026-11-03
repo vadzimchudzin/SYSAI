@@ -49,9 +49,11 @@ PRESETS = {
     "gmail": {"name": "Gmail / Google Workspace", "imap": ("imap.gmail.com", 993), "smtp": ("smtp.gmail.com", 465),
               "hint": "Пароль приложения: myaccount.google.com → Безопасность → Пароли приложений (нужна двухэтапная "
                       "проверка). Обычный пароль Google не подойдёт."},
-    "yandex": {"name": "Яндекс Почта / Яндекс 360", "imap": ("imap.yandex.ru", 993), "smtp": ("smtp.yandex.ru", 465),
-               "hint": "Пароль приложения: id.yandex.ru → Безопасность → Пароли приложений → «Почта». В настройках почты "
-                       "включите «Доступ к почтовому ящику с помощью почтовых клиентов» (IMAP)."},
+    "yandex": {"name": "Яндекс 360 / Яндекс Почта", "imap": ("imap.yandex.ru", 993), "smtp": ("smtp.yandex.ru", 465),
+               "hint": "Пароль приложения: id.yandex.ru → Безопасность → Пароли приложений → «Почта» (если пункта нет — "
+                       "администратор организации разрешает пароли приложений в admin.yandex.ru). В почте: Все настройки → "
+                       "Почтовые программы → включите «С сервера imap.yandex.ru по протоколу IMAP» и «Пароли приложений "
+                       "и OAuth-токены». Метки (ключевые слова) Яндекс не показывает — нагляднее «Папки в ящике»."},
     "mailru": {"name": "Mail.ru", "imap": ("imap.mail.ru", 993), "smtp": ("smtp.mail.ru", 465),
                "hint": "Пароль для внешних приложений: Настройки → Безопасность → Пароли для внешних приложений."},
     "outlook": {"name": "Outlook / Microsoft 365", "imap": ("outlook.office365.com", 993), "smtp": ("smtp.office365.com", 587),
@@ -113,6 +115,12 @@ SORT_SYSTEM = (
     "письма. Не выдумывай: чего нет в письме, не пиши. JSON: {{\"kind\":\"…\",\"why\":\"…\",\"quote\":\"…\","
     "\"entity\":null,\"entity_why\":\"\",\"link\":null,\"link_why\":\"\",\"summary\":\"…\",\"ask\":\"\","
     "\"urgent\":false,\"needs_reply\":false,\"deadlines\":[{{\"what\":\"…\",\"date\":\"ГГГГ-ММ-ДД\",\"quote\":\"…\"}}]}}")
+SORT_DEPARTMENTS = (
+    " Отдел: department — id из списка departments, чьё это письмо по работе: по тому, о чём письмо и что от нас хотят, и "
+    "по тому, чем занимается отдел (letters — какие письма ему передавать, about — об отделе, people — кто в нём и чем "
+    "занимается); null — если ни один не подходит или письмо никому не нужно (рассылка, спам). department_why — почему "
+    "этот отдел (до 15 слов). department_sure — true, только если по письму ясно, что это дело именно этого отдела. "
+    "Добавь в JSON: \"department\":null,\"department_why\":\"\",\"department_sure\":false.")
 
 
 class MailError(RuntimeError):
@@ -225,8 +233,64 @@ def imap_utf7(name: str) -> str:
     return "".join(out)
 
 
+def imap_utf7_decode(name: str) -> str:
+    """Back from modified UTF-7: «&BBIERQQ+BDQETwRJBDgENQ-» → «Входящие» (a broken piece is kept as it is)."""
+    out, i, name = [], 0, str(name)
+    while i < len(name):
+        if name[i] != "&":
+            out.append(name[i])
+            i += 1
+            continue
+        end = name.find("-", i)
+        if end < 0:
+            out.append(name[i:])
+            break
+        chunk = name[i + 1:end]
+        if not chunk:
+            out.append("&")
+        else:
+            try:
+                raw = base64.b64decode(chunk.replace(",", "/") + "=" * (-len(chunk) % 4))
+                out.append(raw.decode("utf-16-be"))
+            except (ValueError, UnicodeDecodeError):
+                out.append(name[i:end + 1])
+        i = end + 1
+    return "".join(out)
+
+
 def _quoted(name: str) -> str:
     return '"' + imap_utf7(name).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _unquote(raw: bytes) -> str:
+    text = raw.decode("ascii", "replace").strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = re.sub(r'\\(.)', r"\1", text[1:-1])
+    return text
+
+
+_LIST_LINE = re.compile(rb'^\((?P<flags>[^)]*)\)\s+(?P<delim>"(?:[^"\\]|\\.)*"|NIL)\s*(?P<name>.*)$', re.I)
+
+
+def list_entries(data) -> list:
+    """The answer of LIST: [(flags, delimiter or "", name)] with the names decoded («Входящие», not «&BBIE…-»)."""
+    out = []
+    for item in data or []:
+        literal = None
+        if isinstance(item, tuple):
+            item, literal = item[0], item[1] if len(item) > 1 else b""
+        if not isinstance(item, (bytes, bytearray)):
+            continue
+        m = _LIST_LINE.match(bytes(item).strip())
+        if not m:
+            continue
+        delim = "" if m.group("delim").upper() == b"NIL" else _unquote(m.group("delim"))
+        name = bytes(literal) if literal is not None else m.group("name")
+        if literal is None and re.fullmatch(rb"\{\d+\}", name.strip()):
+            continue
+        out.append((m.group("flags").decode("ascii", "replace"), delim,
+                    imap_utf7_decode(name.decode("ascii", "replace").strip() if literal is not None else _unquote(name))))
+    return out
 
 
 def _imap_date(day: dt.date) -> str:
@@ -364,6 +428,108 @@ class ImapBox:
         finally:
             _logout(conn)
 
+    def place(self, moves: list, create: list) -> dict:
+        """The folders of the secretary (mail_folders.py). `create` — the folders to make when missing, each a list of
+        the parts of its path; `moves` — [{"id", "uid", "uidvalidity", "message_id", "source", "target"}], where
+        source and target are such lists too ([] — the folder the letters are read from). The letters keep their flags
+        (MOVE; or COPY, \\Deleted and UID EXPUNGE of this one letter only — with UIDPLUS). A letter not found where it was
+        is looked for in its target (moved already: by a mail filter or before a cut connection).
+        Returns {"delimiter", "created": ["A/B", …], "moved": {id: "ok" | "gone" | "error: …"}}."""
+        conn = self._open()
+        try:
+            caps = {str(c).upper() for c in (getattr(conn, "capabilities", ()) or ())}
+            try:  # the list before the login may be shorter (MOVE is told after it)
+                typ, data = conn.capability()
+                if typ == "OK" and data and data[-1]:
+                    caps |= set(bytes(data[-1]).decode("ascii", "replace").upper().split())
+            except Exception:  # noqa: BLE001
+                pass
+            typ, data = conn.list()
+            if typ != "OK":
+                raise MailError("сервер не дал список папок: " + _short(data))
+            entries = list_entries(data)
+            delim = next((d for _, d, _ in entries if d), "") or "/"
+            known = {name.casefold(): name for _, _, name in entries}
+            reading = self.cfg["folder"] or "INBOX"
+
+            def server(parts) -> str:
+                if not parts:
+                    return reading
+                name = delim.join(" ".join(str(p).replace(delim, "-").split()) for p in parts)
+                return known.get(name.casefold(), name)
+
+            def search(mid: str) -> list:
+                quoted = '"' + str(mid).replace("\\", "\\\\").replace('"', '\\"') + '"'
+                typ, data = conn.uid("SEARCH", None, "HEADER", "Message-ID", quoted)
+                return [int(x) for x in ((data or [b""])[0] or b"").split() if x.isdigit()] if typ == "OK" else []
+
+            created = []
+            for parts in [list(p) for p in create] + [list(m["target"]) for m in moves if m.get("target")]:
+                for k in range(1, len(parts) + 1):
+                    name = server(parts[:k])
+                    if name.casefold() in known:
+                        continue
+                    typ, data = conn.create(_quoted(name))
+                    if typ != "OK" and "exist" not in _short(data).lower():
+                        raise MailError(f"не удалось создать папку «{name}»: {_short(data)}")
+                    try:
+                        conn.subscribe(_quoted(name))
+                    except Exception:  # noqa: BLE001  some servers do not keep subscriptions — the folder is there anyway
+                        pass
+                    known[name.casefold()] = name
+                    created.append("/".join(parts[:k]))
+            if moves and not caps & {"MOVE", "UIDPLUS"}:
+                raise MailError("сервер не умеет перекладывать письма (нет команд MOVE и UIDPLUS)")
+            moved, groups, lost = {}, {}, []
+            for m in moves:
+                groups.setdefault(tuple(m.get("source") or ()), []).append(m)
+            try:
+                for source, items in groups.items():
+                    typ, data = conn.select(_quoted(server(list(source))), readonly=False)
+                    if typ != "OK":
+                        lost += items
+                        continue
+                    validity = (conn.untagged_responses.get("UIDVALIDITY") or [b""])[-1]
+                    validity = validity.decode() if isinstance(validity, bytes) else str(validity or "")
+                    for m in items:
+                        try:
+                            uid = None
+                            if not source and m.get("uid") and str(m.get("uidvalidity") or "") == validity:
+                                typ, data = conn.uid("SEARCH", None, "UID", str(int(m["uid"])))
+                                found = ((data or [b""])[0] or b"").split() if typ == "OK" else []
+                                uid = int(m["uid"]) if str(int(m["uid"])).encode() in found else None
+                            if uid is None and m.get("message_id"):
+                                found = search(m["message_id"])
+                                uid = found[-1] if found else None
+                            if uid is None:
+                                lost.append(m)
+                                continue
+                            target = _quoted(server(m.get("target") or []))
+                            if "MOVE" in caps:
+                                typ, data = conn.uid("MOVE", str(uid), target)
+                            else:
+                                typ, data = conn.uid("COPY", str(uid), target)
+                                if typ == "OK":
+                                    typ, data = conn.uid("STORE", str(uid), "+FLAGS.SILENT", "(\\Deleted)")
+                                if typ == "OK":
+                                    typ, data = conn.uid("EXPUNGE", str(uid))
+                            moved[m["id"]] = "ok" if typ == "OK" else "error: " + _short(data)
+                        except imaplib.IMAP4.abort:
+                            raise
+                        except imaplib.IMAP4.error as exc:
+                            moved[m["id"]] = "error: " + _short(exc)
+                for m in lost:
+                    moved[m["id"]] = "gone"
+                    if m.get("message_id") and m.get("target") is not None:
+                        typ, data = conn.select(_quoted(server(m.get("target") or [])), readonly=True)
+                        if typ == "OK" and search(m["message_id"]):
+                            moved[m["id"]] = "ok"
+            except (imaplib.IMAP4.abort, OSError) as exc:  # the connection was cut: the rest — next time
+                for m in moves:
+                    moved.setdefault(m["id"], "error: связь с сервером прервалась (" + _short(exc) + ")")
+            return {"delimiter": delim, "created": created, "moved": moved}
+        finally:
+            _logout(conn)
 
 _HOST = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 _ADDRESS = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -407,8 +573,8 @@ def save_settings(form) -> None:
     action = str(form.get("password_action") or "keep")
     if action == "replace":
         password = str(form.get("mail_password") or "").strip()
-        if service == "gmail":
-            password = "".join(password.split())  # Google shows the app password in groups of four
+        if service in ("gmail", "yandex", "mailru"):
+            password = "".join(password.split())  # Google shows the app password in groups of four, copies add spaces
         if not password:
             raise MailError("введите пароль приложения или выберите «Не менять»")
         updates["mail_password"] = seal(password)
@@ -796,7 +962,8 @@ def check_soon() -> None:
 
 
 def run_due() -> None:
-    """Background loop: look into the box every few minutes, sort what came, put the labels into the box."""
+    """Background loop: look into the box every few minutes, sort what came, put the labels into the box, pass the
+    letters on, move them into the folders of the box."""
     if not enabled():
         return
     state = settings_store.get("mail_state") or {}
@@ -811,8 +978,8 @@ def run_due() -> None:
         check_now()
     sort_pending()
     label_pending()
-    from . import mail_reply, mail_route
-    for step in (mail_route.run_pending, mail_reply.run_pending):
+    from . import mail_folders, mail_reply, mail_route
+    for step in (mail_route.run_pending, mail_reply.run_pending, mail_folders.place_pending):
         try:
             step()
         except Exception:  # noqa: BLE001  one stuck letter never stops the loop
@@ -988,9 +1155,11 @@ def _inputs(s, row) -> dict:
     work = _work_candidates(s, row, hay, [e["id"] for e in found], earlier)
     thread = next(({"kind": e.kind, "entity_id": e.entity_id, "case_id": e.case_id, "task_id": e.task_id}
                    for e in earlier if e.kind or e.entity_id or e.case_id or e.task_id), None)
+    from . import mail_folders
     return {"id": row.id, "subject": row.subject or "", "fresh": fresh, "quoted": quoted, "files": files,
             "from": who(row), "to": row.to_addrs or "", "date": (row.sent_at or row.created_at),
             "signals": list(row.signals or []), "entities": found, "work": work, "thread": thread,
+            "departments": mail_folders.for_sorting(s),
             "norm": doc_intake.norm("\n".join([row.subject or "", row.text or ""]))}
 
 
@@ -1005,10 +1174,14 @@ def _ask_sort(inputs: dict) -> dict:
             "entities": [{"id": e["id"], "name": e["name"], "kind": e["kind"], "why": e["why"]} for e in inputs["entities"]],
             "work": [{k: v for k, v in w.items() if k in ("id", "title", "what", "who", "deadline") and v}
                      for w in inputs["work"]]}
+    system = SORT_SYSTEM.format(company=company)
+    if inputs.get("departments"):
+        meta["departments"] = inputs["departments"]
+        system += SORT_DEPARTMENTS
     text = inputs["fresh"][:MAX_PROMPT_TEXT]
     if inputs["quoted"]:
         text += "\n\n[ранее в переписке]\n" + inputs["quoted"][:1500]
-    raw = llm.chat(voice.model(), [{"role": "system", "content": SORT_SYSTEM.format(company=company)},
+    raw = llm.chat(voice.model(), [{"role": "system", "content": system},
                                    {"role": "user", "content": "<data>" + json.dumps(meta, ensure_ascii=False) +
                                     "</data>\nТекст письма:\n<data>" + text + "</data>"}],
                    json_mode=True, temperature=0.0, max_tokens=1200, timeout=120)
@@ -1054,6 +1227,17 @@ def _deadlines(raw, inputs: dict) -> list:
     return out[:5]
 
 
+def _department_of(raw: dict, inputs: dict) -> dict:
+    offered = {d["id"] for d in inputs.get("departments") or []}
+    value = raw.get("department")
+    value = value.get("id") if isinstance(value, dict) else value
+    text = str(value if value is not None else "").strip().lstrip("dD#")
+    department_id = int(text) if text.isdigit() and int(text) in offered else None
+    return {"department_id": department_id,
+            "department_why": " ".join(str(raw.get("department_why") or "").split())[:200] if department_id else "",
+            "department_sure": bool(department_id) and raw.get("department_sure") is True}
+
+
 def clean(raw: dict, inputs: dict) -> dict:
     """What the model said, kept only where the letter and the offered lists back it."""
     from . import doc_intake
@@ -1082,7 +1266,8 @@ def clean(raw: dict, inputs: dict) -> dict:
             "summary": " ".join(str(raw.get("summary") or "").split())[:500],
             "ask": " ".join(str(raw.get("ask") or "").split())[:200],
             "urgent": raw.get("urgent") is True, "needs_reply": raw.get("needs_reply") is True,
-            "deadlines": _deadlines(raw.get("deadlines"), inputs), "inherited": inherited, "by": "model"}
+            "deadlines": _deadlines(raw.get("deadlines"), inputs), "inherited": inherited,
+            **_department_of(raw, inputs), "by": "model"}
 
 
 def by_rules(inputs: dict) -> dict:
@@ -1105,7 +1290,8 @@ def by_rules(inputs: dict) -> dict:
             "entity_quote": entity.get("quote", "") if entity else "",
             "case_id": thread.get("case_id"), "task_id": None if thread.get("case_id") else thread.get("task_id"),
             "link_why": "та же переписка" if thread.get("case_id") or thread.get("task_id") else "",
-            "summary": "", "ask": "", "urgent": False, "needs_reply": False, "deadlines": [], "inherited": [], "by": "rules"}
+            "summary": "", "ask": "", "urgent": False, "needs_reply": False, "deadlines": [], "inherited": [],
+            "department_id": None, "department_why": "", "department_sure": False, "by": "rules"}
 
 
 def _labels(result: dict, row) -> list:
@@ -1159,7 +1345,8 @@ def sort_letter(mail_id: int, force: bool = False) -> str:
         except Exception as exc:  # noqa: BLE001  the model down: again later, then by the rules
             raw, error = None, _short(exc)
             log.info("letter %s not sorted: %s", mail_id, error)
-        offered = {"entities": [e["id"] for e in inputs["entities"]], "work": [w["id"] for w in inputs["work"]]}
+        offered = {"entities": [e["id"] for e in inputs["entities"]], "work": [w["id"] for w in inputs["work"]],
+                   "departments": [d["id"] for d in inputs.get("departments") or []]}
         with SessionLocal() as s:
             row = s.get(MailMessage, mail_id)
             if row is None:
@@ -1215,7 +1402,8 @@ def label_pending(limit: int = 20) -> int:
         rows = [r for r in s.query(MailMessage).filter(
             MailMessage.direction == "in", MailMessage.sort_status == "done", MailMessage.uid > 0,
             MailMessage.mailbox == cfg["address"].lower(), MailMessage.folder == cfg["folder"],
-            MailMessage.created_at >= since).order_by(MailMessage.id).limit(200) if not (r.sort or {}).get("box")][:limit]
+            MailMessage.created_at >= since).order_by(MailMessage.id).limit(200)
+            if not (r.sort or {}).get("box") and not (r.place or {}).get("folder")][:limit]
         if not rows:
             return 0
         validity = rows[-1].uidvalidity
@@ -1321,7 +1509,8 @@ def _row_view(s, row, names: dict) -> dict:
             "attachments": [a for a in row.attachments or [] if a.get("document_id")],
             "checked": None if not row.checked else ("ok" if row.checked.get("ok") else "fixed"),
             "status": row.status, "status_ru": STATUS_RU.get(row.status, row.status),
-            "route": mail_route.short(row), "route_status": (row.route or {}).get("status") or ""}
+            "route": mail_route.short(row), "route_status": (row.route or {}).get("status") or "",
+            "place": (row.place or {}).get("folder") or "" if (row.place or {}).get("status") == "ok" else ""}
 
 
 def listing(s, kind: str = "", q: str = "", only: str = "", limit: int = 100) -> list:
@@ -1348,6 +1537,14 @@ def listing(s, kind: str = "", q: str = "", only: str = "", limit: int = 100) ->
     return out
 
 
+def _place_view(row) -> dict | None:
+    place = row.place or {}
+    if not place:
+        return None
+    return {"folder": place.get("folder") or "", "status": place.get("status") or "", "why": place.get("why") or "",
+            "error": place.get("error") or "", "want": place.get("want") or "", "at": local(_from_iso(place.get("at")))}
+
+
 def letter(s, mail_id: int) -> dict:
     from . import doc_intake, entities, mail_reply, mail_route
     row = s.get(MailMessage, mail_id)
@@ -1369,6 +1566,6 @@ def letter(s, mail_id: int) -> dict:
                 was_kind=kind_name((row.checked or {}).get("was", {}).get("kind")) if (row.checked or {}).get("was") else "",
                 thread=[{"id": e.id, "subject": e.subject, "from": e.from_name or e.from_addr, "at": local(e.sent_at or e.created_at),
                          "direction": e.direction} for e in _earlier(s, row)],
-                mailbox=row.mailbox, folder=row.folder, route_info=mail_route.view(s, row),
+                mailbox=row.mailbox, folder=row.folder, route_info=mail_route.view(s, row), place=_place_view(row),
                 drafts=mail_reply.for_letter(s, row.id))
     return view

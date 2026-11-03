@@ -11,6 +11,7 @@
     {% if m.to %}<tr><td class="muted">Кому</td><td>{{ m.to }}</td></tr>{% endif %}
     {% if m.cc %}<tr><td class="muted">Копия</td><td>{{ m.cc }}</td></tr>{% endif %}
     <tr><td class="muted">Когда</td><td>{{ m.at.strftime('%d.%m.%Y %H:%M') if m.at }} · ящик {{ m.mailbox }}, папка «{{ m.folder }}»</td></tr>
+    {% if m.place %}{% set p = m.place %}<tr><td class="muted">Папка</td><td>{% if p.status == 'ok' %}📁 {{ (p.folder or 'Входящие')|replace('INBOX/', 'Входящие/')|replace('/', ' / ') }}{% if p.why %} <span class="muted">— {{ p.why }}</span>{% endif %}{% elif p.status == 'gone' %}<span class="muted">{{ p.error }}</span>{% else %}<span class="mail-bad">не переложено{% if p.want %} в «{{ p.want|replace('INBOX/', 'Входящие/') }}»{% endif %}: {{ p.error }}</span>{% endif %}{% if p.at and p.status == 'ok' and p.folder %} <span class="muted">({{ p.at.strftime('%d.%m %H:%M') }})</span>{% endif %}</td></tr>{% endif %}
     {% if m.signals %}<tr><td class="muted">Признаки</td><td>{{ m.signals|join(', ') }}</td></tr>{% endif %}
     {% if m.files %}<tr><td class="muted">Вложения</td><td>{% for f in m.files %}<div>{% if f.document_id %}<a href="/documents/{{ f.document_id }}/view">📎 {{ f.filename }}</a>{% else %}📎 {{ f.filename }}{% endif %} <span class="muted">{{ (f.size / 1024)|round(1) }} КБ{% if f.what %} · {{ f.what }}{% elif f.skipped %} · {{ f.skipped }}{% elif f.read == 'pending' %} · читается…{% endif %}</span></div>{% endfor %}</td></tr>{% endif %}
   </tbody></table>
@@ -43,7 +44,7 @@
   <p>{% if r.status == 'sent' %}<b>→ {{ r.to }}</b>{% if r.how %} · {{ r.how }}{% endif %}{% else %}<span class="pill {{ 'amber' if r.status in ('unclear', 'no_contact', 'failed') else 'gray' }}">{{ r.status_ru }}</span>{% if r.to %} {{ r.to }}{% endif %}{% endif %}
     {% if r.rule %} <span class="muted small">(правило: {{ r.rule }})</span>{% endif %}{% if r.by %} <span class="muted small">— {{ r.by }}</span>{% endif %}</p>
   {% if r.why %}<p class="small">{{ r.why }}</p>{% endif %}
-  {% if r.hint and r.status != 'sent' %}<p class="small">Подсказка ИИ-сотрудника: <b>{{ r.hint.to }}</b>{% if r.hint.why %} — {{ r.hint.why }}{% endif %}{% if not r.hint.sure %} <span class="muted">(не уверен)</span>{% endif %}</p>{% endif %}
+  {% if r.hint and r.status != 'sent' %}<p class="small">Подсказка ИИ-сотрудника: {% if r.hint.department %}отдел «{{ r.hint.department }}»{% if r.hint.to %} → {% endif %}{% endif %}<b>{{ r.hint.to }}</b>{% if r.hint.why %} — {{ r.hint.why }}{% endif %}{% if not r.hint.sure %} <span class="muted">(не уверен)</span>{% endif %}</p>{% endif %}
   {% if r.case %}<p class="small">Дело: <a href="/progress?scope=open#case-{{ r.case.id }}">{{ r.case.status }}</a>{% if r.case.note %} — {{ r.case.note }}{% endif %}{% if r.files %} · вложений отправлено: {{ r.files }}{% endif %}</p>{% endif %}
   {% if r.tasks %}<p class="small">Задачи: {% for t in r.tasks %}«{{ t.title }}» до {{ t.deadline.strftime('%d.%m') if t.deadline }} <span class="muted">({{ t.status }})</span>{{ '; ' if not loop.last }}{% endfor %}</p>{% endif %}
   {% if r.errors %}<p class="small mail-bad">Ошибка маршрута: письмо попало не тому{% if r.errors > 1 %} ({{ r.errors }} раза){% endif %}.</p>{% endif %}

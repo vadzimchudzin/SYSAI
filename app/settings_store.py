@@ -59,6 +59,13 @@ DEFAULTS = {
     "mail_forward": True,            # the sorted letters go to the people who handle them (mail_route.py, №24)
     "mail_hints_auto": False,        # no rule fits: forward by the agent's hint when it is sure (otherwise it waits)
     "mail_drafts_auto": True,        # a letter that waits for an answer comes with a draft of the answer (№25)
+    # Отделы и папки секретаря (mail_folders.py): who of a department gets its letters, the folders of the box
+    "mail_departments": {},          # {department id: {"on", "to" (employee id; None = the head), "folder", "letters"}}
+    "mail_departments_auto": True,   # no rule fits: the letter goes to the department the sorting named, when it is sure
+    "mail_folders_on": False,        # the sorted letters are moved into the folders of the box (needs writing to the box)
+    "mail_folders_root": "",         # the folder the folders of the secretary are made in; "" = the top level
+    "mail_folder_rules": [{"kind": "newsletter", "senders": "", "keywords": "", "folder": "Рассылки"}],
+    "mail_folders_state": {},        # the last work with the folders: when, ok, error, the delimiter, made, moved
     "mail_sender_name": "",          # the name in «From» of the answers; "" = the company name
     "mail_signature": "",            # added under every answer
     "mail_reply_examples": "",       # good answers of the company (the style of the drafts), separated by «---»
