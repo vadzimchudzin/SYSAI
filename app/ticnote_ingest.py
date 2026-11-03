@@ -264,19 +264,29 @@ def retry(record_id: str) -> bool:
     return pipeline.retry_processing(mid)
 
 
-def restore_audio(meeting_id: int) -> str:
-    """Download the WAV of a TicNote meeting again (the server disk is wiped on restart). Returns the new path."""
+def record_of(meeting_id: int) -> str:
+    """The TicNote recordId a meeting was imported from ("" when it was not imported from TicNote)."""
     with SessionLocal() as s:
-        row = s.query(TicnoteImport).filter_by(meeting_id=meeting_id).first()
-        record_id = row.record_id if row else None
-    if not record_id:
-        return ""
+        row = s.query(TicnoteImport.record_id).filter_by(meeting_id=meeting_id).first()
+    return row[0] if row else ""
+
+
+def download_again(record_id: str, dst) -> int:
+    """The WAV of a device recording downloaded from the TicNote cloud once more. Returns its size."""
     appkey = config.ticnote_appkey()
     if not appkey:
         raise ticnote.TicNoteError("Нет ключа TicNote: не могу скачать запись заново")
+    return ticnote.download_wav(ticnote.audio_url(ticnote.file_detail(appkey, record_id)), dst)
+
+
+def restore_audio(meeting_id: int) -> str:
+    """Download the WAV of a TicNote meeting again (the server disk is wiped on restart). Returns the new path."""
+    record_id = record_of(meeting_id)
+    if not record_id:
+        return ""
     dst = config.DATA_DIR / "uploads" / f"ticnote_{record_id}.wav"
     dst.parent.mkdir(parents=True, exist_ok=True)
-    ticnote.download_wav(ticnote.audio_url(ticnote.file_detail(appkey, record_id)), dst)
+    download_again(record_id, dst)
     pipeline._set(meeting_id, audio_path=str(dst))
     log.info("TicNote recording %s downloaded again for meeting %s", record_id, meeting_id)
     return str(dst)

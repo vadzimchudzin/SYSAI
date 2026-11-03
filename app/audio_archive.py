@@ -1,11 +1,13 @@
 """Meeting recordings kept in the private storage (storage.py) for the player on the meeting page.
 
-Once the transcript is saved the original is hard-linked into DATA_DIR/archive (so the pipeline still deletes it as
+When the transcription starts the original is hard-linked into DATA_DIR/archive (so the pipeline still deletes it as
 before), compressed to a speech MP3 (mono, 16 kHz, 32 kbit/s: ~14 MB per hour, what the speech model hears) and
-uploaded; then the local copies are removed. A failed upload is retried by the background loop while the compressed
-file is on disk. A restart of a free instance wipes that disk: the recording is then reported as not kept, never as
-silently missing. Copies are deleted after RECORDING_RETENTION_DAYS (a lifecycle rule of the bucket does the same on
-the storage side), together with their meeting or on request, always through the StorageCleanup outbox.
+uploaded next to the transcription; then the local copies are removed. A failed upload is retried by the background
+loop while the compressed file is on disk. A restart of a free instance wipes that disk: a TicNote recording is then
+taken from the TicNote cloud again (by itself, a few times, or with «Скачать из TicNote заново»), any other one is
+reported as not kept, never as silently missing. Copies are deleted after RECORDING_RETENTION_DAYS (a lifecycle rule
+of the bucket does the same on the storage side), together with their meeting or on request, always through the
+StorageCleanup outbox.
 """
 from __future__ import annotations
 
@@ -32,6 +34,11 @@ CLEANUP_BACKOFF = (60, 300, 1800, 7200, 21600)
 CLEANUP_GIVE_UP = 40                         # the bucket's lifecycle rule removes what could not be deleted
 PLAY_SECONDS = 3 * 3600                      # a player link: long enough for one listening session
 STALE = dt.timedelta(minutes=30)             # a copy without a local file is lost after this (a restart)
+LOST = "сервер перезапустился раньше, чем она загрузилась в хранилище"
+RESTORE_PAUSE = (0, 900, 7200)               # seconds after a failure before the 1st…3rd download from TicNote by itself
+MAX_RESTORES = len(RESTORE_PAUSE)
+BUSY = ("queued", "transcribing", "analyzing")
+_OLD_PREFIX = re.compile(r"^\s*запись не сохранилась:\s*", re.IGNORECASE)  # stored by earlier versions: said twice
 _ACTIVE: set[int] = set()                    # meetings whose copy is being compressed or uploaded by this process
 _LOCK = threading.Lock()
 _last_purge = [0.0]
@@ -109,8 +116,9 @@ def _fail(meeting_id: int, reason: str) -> None:
 
 # ---- keeping a new recording ---------------------------------------------------------------------------------------
 def start(meeting_id: int, audio_path: str, source: str = "") -> threading.Thread | None:
-    """Called when the transcript is saved. The original is linked at once; compression and upload run in the background
-    (synchronously under tests). Returns the job, or None when there is nothing to keep."""
+    """Called when the transcription starts (and again once the transcript is saved: then it is usually kept already).
+    The original is linked at once; compression and upload run in the background (synchronously under tests).
+    Returns the job, or None when there is nothing to keep."""
     if source == "demo" or not audio_path or not enabled():
         return None
     original = pathlib.Path(audio_path)
@@ -159,12 +167,23 @@ def compress(source: pathlib.Path, target: pathlib.Path, timeout: float) -> floa
     return audio.duration(str(target))
 
 
+def _length(path: pathlib.Path) -> float:
+    """Seconds of audio by the file's header (cheap: nothing is decoded), 0 when it does not say."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                             capture_output=True, text=True, timeout=60).stdout.strip()
+        return max(float(out), 0.0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
 def _compress_and_upload(meeting_id: int, link: pathlib.Path) -> None:
     target = link.with_name(link.name.split(".src")[0] + ".mp3")
     try:
         with SessionLocal() as s:
             m = s.get(Meeting, meeting_id)
             hint = float((m.duration_sec if m else 0) or 0)
+        hint = hint or _length(link)  # before the transcription the length is not known yet: a long one needs time
         try:
             seconds = compress(link, target, timeout=600 + hint)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -196,7 +215,7 @@ def _upload(meeting_id: int) -> bool:
         rec = dict(m.recording or {})
     local, key = _own_file(rec.get("local")), str(rec.get("key") or "")
     if local is None or not local.is_file() or not key.startswith(PREFIX):
-        _fail(meeting_id, "запись не сохранилась: сервер перезапустился до загрузки в хранилище")
+        _fail(meeting_id, LOST)
         return False
     try:
         size = storage.put_file(key, local, MIME)
@@ -231,6 +250,95 @@ def _upload(meeting_id: int) -> bool:
     return True
 
 
+# ---- taking a TicNote recording again ------------------------------------------------------------------------------
+def restorable(meeting: Meeting) -> bool:
+    """A TicNote meeting whose recording is not kept can take it from the TicNote cloud again: TicNote keeps the WAV."""
+    if meeting.source != "ticnote" or not enabled() or (meeting.recording_status or "") not in ("", "failed"):
+        return False
+    if meeting.status in BUSY:
+        return False  # the processing keeps the recording itself
+    created = meeting.created_at
+    if created is not None:
+        created = created if created.tzinfo else created.replace(tzinfo=dt.timezone.utc)
+        if now() - created > dt.timedelta(days=config.RECORDING_RETENTION_DAYS):
+            return False  # a copy must not outlive the retention period
+    return bool(config.ticnote_appkey())
+
+
+def restore(meeting_id: int) -> bool:
+    """«Скачать из TicNote заново»: the WAV is downloaded from TicNote again, compressed and kept like a new recording
+    (in the background; synchronously under tests). False when this meeting cannot take it now."""
+    from . import ticnote_ingest  # it imports the pipeline, which imports this module
+    with SessionLocal() as s:
+        m = s.get(Meeting, meeting_id)
+        if m is None or not restorable(m):
+            return False
+    record_id = ticnote_ingest.record_of(meeting_id)
+    if not record_id or not _claim(meeting_id):
+        return False
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if m is None or (m.recording_status or "") not in ("", "failed"):
+                _release(meeting_id)
+                return False
+            m.recording_status = "pending"
+            m.recording = {"attempts": 0, "since": _iso(now()), "from": "ticnote",
+                           "restores": int((m.recording or {}).get("restores") or 0) + 1}
+            s.commit()
+    except Exception:
+        _release(meeting_id)
+        raise
+    if config.TESTING:
+        _take_from_ticnote(meeting_id, record_id)
+        return True
+    threading.Thread(target=_take_from_ticnote, args=(meeting_id, record_id), daemon=True,
+                     name=f"archive-{meeting_id}").start()
+    return True
+
+
+def _take_from_ticnote(meeting_id: int, record_id: str) -> None:
+    from . import ticnote_ingest
+    folder = archive_dir()
+    link = folder / f"m{meeting_id}-{secrets.token_hex(4)}.src.wav"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        ticnote_ingest.download_again(record_id, link)
+    except Exception as exc:  # noqa: BLE001 - TicNote is down, the recording was deleted there or the key is gone
+        link.unlink(missing_ok=True)
+        log.warning("meeting %s: TicNote recording %s not downloaded again: %s", meeting_id, record_id, exc)
+        _fail(meeting_id, f"не удалось скачать её из TicNote заново ({str(exc).strip().rstrip('.')[:200] or 'ошибка'})")
+        _release(meeting_id)
+        return
+    _compress_and_upload(meeting_id, link)  # releases the meeting
+
+
+def _recover_lost() -> None:
+    """A TicNote meeting whose copy did not make it (a restart, the storage was down) takes its recording from TicNote
+    again by itself, MAX_RESTORES times with growing pauses; one recording at a time on a tenth of a CPU."""
+    with _LOCK:
+        if _ACTIVE:
+            return
+    if not config.ticnote_appkey():
+        return
+    moment = now()
+    with SessionLocal() as s:
+        rows = (s.query(Meeting.id, Meeting.recording)
+                .filter(Meeting.recording_status == "failed", Meeting.source == "ticnote",
+                        Meeting.created_at >= moment - dt.timedelta(days=config.RECORDING_RETENTION_DAYS))
+                .order_by(Meeting.id.desc()).limit(100).all())
+    for meeting_id, rec in rows:
+        rec = rec or {}
+        done = int(rec.get("restores") or 0)
+        if done >= MAX_RESTORES:
+            continue
+        failed = _parse(rec.get("failed_at")) if rec.get("failed_at") else None
+        if failed is not None and moment - failed < dt.timedelta(seconds=RESTORE_PAUSE[done]):
+            continue
+        if restore(meeting_id):
+            return
+
+
 # ---- removing ------------------------------------------------------------------------------------------------------
 def forget(session, meeting: Meeting, reason: str) -> None:
     """Queues the kept copy for deletion in the caller's transaction (a deleted meeting, a removed recording)."""
@@ -257,10 +365,12 @@ def remove(meeting_id: int) -> bool:
 
 # ---- background loop -----------------------------------------------------------------------------------------------
 def run_due() -> None:
-    """Retries uploads, performs queued deletions and, once an hour, removes copies past their retention period."""
+    """Retries uploads, takes lost TicNote recordings again, performs queued deletions and, once an hour, removes
+    copies past their retention period."""
     if not enabled():
         return
     _retry_uploads()
+    _recover_lost()
     _clean_up()
     if time.monotonic() - _last_purge[0] >= 3600:
         purge_expired()
@@ -286,7 +396,7 @@ def _retry_uploads() -> None:
             started = _parse(rec.get("since")) if rec.get("since") else None
             if started and now() - started < STALE:
                 continue  # during a deploy the previous instance may still be compressing it on its own disk
-            _fail(meeting_id, "запись не сохранилась: сервер перезапустился, не успев загрузить её в хранилище")
+            _fail(meeting_id, LOST)  # a TicNote recording is taken again right after (_recover_lost)
         finally:
             _release(meeting_id)
 
@@ -381,20 +491,29 @@ def view(meeting: Meeting) -> dict:
     if status == "deleted":
         return {"state": "deleted", "text": "Запись этого совещания удалена."}
     if status == "pending":
-        text = ("Запись пока не загрузилась в хранилище, попробуем ещё раз автоматически." if rec.get("attempts")
-                else "Запись сохраняется в хранилище, обычно это занимает пару минут.")
+        if rec.get("attempts"):
+            text = "Запись пока не загрузилась в хранилище, попробуем ещё раз автоматически."
+        elif rec.get("from") == "ticnote":
+            text = "Скачиваем запись из TicNote заново и сохраняем в хранилище, это займёт несколько минут."
+        else:
+            text = "Запись сохраняется в хранилище, обычно это занимает пару минут."
         return {"state": "pending", "text": text}
+    again = {"restorable": True} if restorable(meeting) else {}
     if status == "failed":
-        return {"state": "failed", "text": f"Запись не сохранилась: {rec.get('error') or 'ошибка'}."}
+        reason = _OLD_PREFIX.sub("", str(rec.get("error") or "")).strip().rstrip(".") or "ошибка"
+        text = f"Запись не сохранилась: {reason}."
+        if again and int(rec.get("restores") or 0) < MAX_RESTORES:
+            text += " Скачаем её из TicNote заново автоматически."
+        return {"state": "failed", "text": text, **again}
     if meeting.source == "demo":
         return {"state": "none", "text": "У демо нет записи, слушать нечего."}
     if meeting.source == "notion":
         return {"state": "none", "text": "Совещание импортировано текстом, записи нет."}
     if not enabled():
         return {"state": "none", "text": "Чтобы слушать записи, подключите хранилище: Настройки → Хранилище записей."}
-    if meeting.status in ("queued", "transcribing"):
-        return {"state": "none", "text": "Запись сохранится в хранилище после расшифровки."}
-    return {"state": "none", "text": "Запись этого совещания не сохранялась: оно обработано до подключения хранилища."}
+    if meeting.status in BUSY:
+        return {"state": "none", "text": "Запись сохранится в хранилище во время обработки."}
+    return {"state": "none", "text": "Запись этого совещания не сохранялась: оно обработано до подключения хранилища.", **again}
 
 
 def link(meeting: Meeting, download: bool = False) -> str | None:
