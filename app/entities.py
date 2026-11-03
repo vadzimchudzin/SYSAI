@@ -569,7 +569,7 @@ def card(s, entity_id: int) -> dict:
 def for_prompt(s, text: str, full: bool, limit: int = 3) -> list:
     """The cards of the clients and objects the message speaks about, for the conversation model: facts with their
     source; meetings, open tasks and documents only for people who see the whole team."""
-    from . import doc_intake
+    from . import doc_intake, memory
     found = mentions(s, text)
     out = []
     for entity_id in list(found)[:limit]:
@@ -578,12 +578,19 @@ def for_prompt(s, text: str, full: bool, limit: int = 3) -> list:
             continue
         view = {"name": e.name, "kind": KINDS.get(e.kind, e.kind), "also_called": list(e.aliases or [])[:6] or None,
                 "unp": e.unp or None, "address": e.address or None, "contacts": e.contacts or None,
-                "description": e.description or None}
+                "description": e.description or None, "url": f"/entities/{e.id}"}
         facts = []
         for n in (s.query(Note).filter(Note.entity_id == e.id, Note.archived.is_(False)).order_by(Note.id.desc()).limit(8)):
             m = s.get(Meeting, n.meeting_id) if n.meeting_id else None
-            facts.append({"text": n.text, "source": (f"совещание «{m.title}»" + (f" {m.meeting_date.isoformat()}" if m.meeting_date else "")
-                                                     if m else ("вручную" if n.source == "manual" else n.source))})
+            day = (m.meeting_date or (m.created_at.date() if m.created_at else None)) if m else None
+            if m is not None:  # the source of the answer (№20): the meeting with its day, or the card itself
+                facts.append({"text": n.text, "cite": f"совещание {memory.quoted(m.title)}" + (f" от {day.strftime('%d.%m.%Y')}" if day else ""),
+                              "url": f"/meetings/{m.id}"})
+            elif n.source == "conversation" and n.created_at:
+                facts.append({"text": n.text, "cite": f"переписка от {n.created_at.strftime('%d.%m.%Y')}",
+                              "url": f"/entities/{e.id}"})
+            else:
+                facts.append({"text": n.text, "cite": f"карточка {memory.quoted(e.name)}", "url": f"/entities/{e.id}"})
         view["facts"] = facts
         if full:
             links = s.query(EntityLink).filter_by(entity_id=e.id).order_by(EntityLink.id.desc()).limit(200).all()

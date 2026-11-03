@@ -1354,7 +1354,22 @@ CHECK_MESSAGES = {"started": "Прогон начался: модели отве
                   "stopped": "Прогон останавливается: начатые ответы допишутся.",
                   "picked": "Модель и способ выбраны: ИИ-сотрудник отвечает так со следующего сообщения.",
                   "budget": "Бюджет сохранён.", "marked": "Ответ добавлен в проверочные диалоги — он войдёт в следующий прогон.",
-                  "deleted": "Случай удалён.", "toggled": "Готово."}
+                  "deleted": "Случай удалён.", "toggled": "Готово.",
+                  "questions": "Вопросы добавлены — они войдут в следующий прогон (тема «Вопросы по компании»)."}
+
+
+def _telegram_people() -> list:
+    """People who can get a message from the assistant (they have Telegram)."""
+    with SessionLocal() as s:
+        return [{"id": e.id, "name": e.name, "position": e.position or ""} for e in
+                s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name)
+                if (e.telegram_chat_id or "").strip()]
+
+
+def _active_people() -> list:
+    with SessionLocal() as s:
+        return [{"id": e.id, "name": e.name} for e in
+                s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name)]
 
 
 @app.get("/skills/checks", response_class=HTMLResponse)
@@ -1367,6 +1382,7 @@ def skill_checks_view(request: Request, run: int = 0, msg: str = "", error: str 
     defaults = list(dict.fromkeys([voice.model(), *agent_checks.DEFAULT_MODELS]))
     return page(request, "skill_checks.html", data=data, history=history, running=agent_checks.running_id(),
                 scenarios=agent_checks.scenarios(), cases=agent_checks.custom_cases(),
+                questions=agent_checks.questions(), people=_active_people(),
                 answers=agent_checks.recent_answers(), defaults=defaults, budget=agent_checks.budget(),
                 month=agent_checks.monthly_messages(), model=voice.model(), transport=agent_skills.transport(),
                 transports=agent_skills.TRANSPORT_RU, skills=agent_skills.SKILLS, role_ru=agent_checks.ROLE_RU,
@@ -1406,6 +1422,9 @@ async def skill_checks_action(request: Request):
             agent_checks.add_case(int(str(f.get("message_id") or "0")), str(f.get("expected") or ""),
                                   [str(f.get("must") or "")], [str(f.get("must_not") or "")], _who(request))
             return RedirectResponse("/skills/checks?msg=marked#own", 303)
+        if do == "questions":
+            agent_checks.add_questions(str(f.get("lines") or ""), str(f.get("who") or "director"), _who(request))
+            return RedirectResponse("/skills/checks?msg=questions#questions", 303)
         if do in ("delete", "toggle"):
             with SessionLocal() as s:
                 case = s.get(AgentCheckCase, int(str(f.get("case_id") or "0")))
@@ -1416,7 +1435,8 @@ async def skill_checks_action(request: Request):
                 else:
                     case.active = not case.active
                 s.commit()
-            return RedirectResponse(f"/skills/checks?msg={'deleted' if do == 'delete' else 'toggled'}#own", 303)
+            back = "questions" if str(f.get("back") or "") == "questions" else "own"
+            return RedirectResponse(f"/skills/checks?msg={'deleted' if do == 'delete' else 'toggled'}#{back}", 303)
     except (agent_checks.CheckError, ValueError) as exc:
         return RedirectResponse("/skills/checks?error=" + quote(str(exc)[:300]), 303)
     raise HTTPException(404, "Неизвестное действие")
@@ -2146,7 +2166,7 @@ def settings_view(request: Request, msg: str = ""):
     ai = bool(st.get("ai_employee"))
     from . import digest
     return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
-                digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU,
+                digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU, digest_people=_telegram_people(),
                 account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
                 notion=notion.connection_status(), storage=storage.describe(), storage_usage=audio_archive.usage(),
                 retention_days=config.RECORDING_RETENTION_DAYS, diarization_methods=diarize.METHODS,
@@ -2350,6 +2370,13 @@ async def settings_save(request: Request):
         if f["digest_frequency"] not in digest.FREQUENCIES:
             raise HTTPException(400, "Сводка: выберите «каждый день», «раз в неделю» или «не присылать»")
         updates["digest_frequency"] = f["digest_frequency"]
+    if "digest_time" in f:  # «09:30» of the time field
+        found = re.fullmatch(r"\s*(\d{1,2})[:.](\d{2})\s*", str(f["digest_time"]))
+        if not found or int(found.group(1)) > 23 or int(found.group(2)) > 59:
+            raise HTTPException(400, "Время сводки — часы и минуты, например 09:00")
+        updates["digest_hour"], updates["digest_minute"] = int(found.group(1)), int(found.group(2))
+    if f.get("present_digest_recipients") == "1":
+        updates["digest_recipients"] = sorted({int(x) for x in f.getlist("digest_recipients") if str(x).isdigit()})
     for k, top, label in (("digest_hour", 23, "час сводки от 0 до 23"), ("digest_weekday", 6, "день недели сводки")):
         if k in f:
             try:
@@ -2449,9 +2476,10 @@ def test_digest(request: Request):
     guard_admin(request)
     from . import digest
     if not digest.recipients():
-        return RedirectResponse("/settings?msg=" + quote("Сводка: нет проверяющих — назначьте их в карточке сотрудника"), 303)
+        return RedirectResponse("/settings?msg=" + quote("Сводка: некому — выберите получателей или назначьте проверяющих "
+                                                         "в карточке сотрудника"), 303)
     got = digest.send(mark=False)
-    return RedirectResponse("/settings?msg=" + quote(f"Сводка отправлена проверяющим: {got} из {len(digest.recipients())}"), 303)
+    return RedirectResponse("/settings?msg=" + quote(f"Сводка отправлена: {got} из {len(digest.recipients())}"), 303)
 
 
 @app.post("/settings/test-ticnote")

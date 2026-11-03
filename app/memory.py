@@ -110,17 +110,25 @@ def items(s) -> list:
     from . import entities
     cards = entities.names(s)
     out += entities.memory_items(s)
-    for n in (s.query(Note).filter(Note.archived.is_(False), Note.kind.in_(NOTE_KINDS))
-              .order_by(Note.id.desc()).limit(3000)):
+    notes = (s.query(Note).filter(Note.archived.is_(False), Note.kind.in_(NOTE_KINDS))
+             .order_by(Note.id.desc()).limit(3000).all())
+    said_at = {m.id: m for m in s.query(Meeting.id, Meeting.title, Meeting.meeting_date, Meeting.created_at)
+               .filter(Meeting.id.in_({n.meeting_id for n in notes if n.meeting_id}))} if notes else {}
+    for n in notes:
         subject = (people[n.employee_id].name if n.employee_id in people else
                    (f"отдел {departments[n.department_id]}" if n.department_id in departments else
                     cards.get(n.entity_id) or "компания"))
         url = (f"/memory/people/{n.employee_id}" if n.employee_id else
                f"/entities/{n.entity_id}" if n.entity_id in cards else "/memory")
+        meta = {"source": SOURCE_RU.get(n.source, n.source), "date": n.created_at,
+                "confidence": CONFIDENCE_RU.get(n.confidence or "medium", n.confidence)}
+        m = said_at.get(n.meeting_id)
+        if m is not None:  # the meeting it was said at: its name and day are the source of the answer (№20)
+            meta.update(meeting=m.title or f"Совещание №{m.id}",
+                        meeting_date=m.meeting_date or (m.created_at.date() if m.created_at else None),
+                        link=f"/meetings/{m.id}")
         out.append({"key": f"note:{n.id}", "type": "note", "title": subject, "text": f"{subject}: {n.text}",
-                    "owner": n.employee_id, "url": url,
-                    "meta": {"source": SOURCE_RU.get(n.source, n.source), "date": n.created_at,
-                             "confidence": CONFIDENCE_RU.get(n.confidence or "medium", n.confidence)}})
+                    "owner": n.employee_id, "url": url, "meta": meta})
     for k in s.query(Skill).filter(Skill.active.is_(True)).all():
         out.append({"key": f"skill:{k.id}", "type": "skill", "title": k.title,
                     "text": f"навык «{k.title}»; когда: {k.when_to_use}; {k.body}", "owner": None, "url": "/skills"})
@@ -225,25 +233,220 @@ def search(query: str, k: int = 8, viewer=None, types=None, s=None, pool=None) -
             s.close()
 
 
+def _day_ru(day) -> str:
+    return day.strftime("%d.%m.%Y") if day else ""
+
+
+def quoted(name: str) -> str:
+    """«Планёрка», but ОАО «Криница» as it is (no quotes inside quotes)."""
+    name = str(name or "").strip()
+    return name if ("«" in name or '"' in name) else f"«{name}»"
+
+
+def cite_of(item: dict) -> str:
+    """Where a memory item comes from, in the words of an answer: «совещание «Планёрка» от 12.11.2025»,
+    «документ «счёт_15.pdf»», «профиль компании», «карточка сотрудника Анна Петрова»."""
+    meta = item.get("meta") or {}
+    kind, title = item["type"], item.get("title") or ""
+    if kind == "company":
+        return "профиль компании"
+    if kind == "department":
+        return f"карточка отдела {quoted(title)}"
+    if kind == "person":
+        return f"карточка сотрудника {title}"
+    if kind == "entity":
+        return f"карточка {quoted(title)}"
+    if kind == "skill":
+        return f"навык {quoted(title)}"
+    if kind == "document":
+        return f"документ {quoted(title)}"
+    day = meta.get("date")
+    day = day.date() if hasattr(day, "date") else day
+    if meta.get("meeting"):
+        when = _day_ru(meta.get("meeting_date"))
+        return f"совещание {quoted(meta['meeting'])}" + (f" от {when}" if when else "")
+    word = "переписка" if meta.get("source") == SOURCE_RU["conversation"] else "заметка"
+    return word + (f" от {_day_ru(day)}" if day else "")
+
+
 def for_prompt(query: str, viewer=None, k: int = 8) -> list:
-    """Memory items for a model prompt: short, with the source, never failing the caller."""
+    """Memory items for a model prompt: short, each with a ref and its source (cite), never failing the caller.
+    `url` (the panel page of the source) is taken out by number_sources before the model sees the prompt."""
     try:
         hits = search(query, k=k, viewer=viewer)
     except Exception:  # noqa: BLE001
         log.exception("memory search failed")
         return []
     out = []
-    for h in hits:
+    for i, h in enumerate(hits, 1):
         meta = h.get("meta") or {}
-        entry = {"type": TYPE_RU[h["type"]], "about": h["title"], "text": h["text"][:700]}
-        if meta.get("source"):
-            entry["source"] = meta["source"]
+        entry = {"ref": f"m{i}", "type": TYPE_RU[h["type"]], "about": h["title"], "text": h["text"][:700],
+                 "cite": cite_of(h)}
         if meta.get("confidence"):
             entry["confidence"] = meta["confidence"]
         if meta.get("date"):
             entry["date"] = meta["date"].strftime("%d.%m.%Y")
+        if meta.get("link") or h.get("url"):
+            entry["url"] = meta.get("link") or h["url"]
         out.append(entry)
     return out
+
+
+# ----------------------------------------------------------------------------- sources in the answers (№20)
+FALLBACK_CITE = {"Компания": "профиль компании", "Отдел": "карточка отдела {}", "Сотрудник": "карточка сотрудника {}",
+                 "Документ": "документ {}", "Объект или клиент": "карточка {}", "Навык": "навык {}"}
+_MARK = re.compile(r"[ \t]*[\[【]\s*([mkмк]\d+(?:\.\d+)?(?:\s*[,;]\s*[mkмк]?\d+(?:\.\d+)?)*)\s*[\]】]", re.I)
+_OWN_LINE = re.compile(r"(^|\n)\s*источники?\s*:", re.I)
+_NAMED = re.compile(r"совещани|планёрк|планерк|протокол|по документу|в документе|в заметк|в переписк|в карточк|"
+                    r"по карточк|в профил|по профил|источник", re.I)
+_DONT_KNOW = re.compile(r"не знаю|нет (данных|информац|сведений)|не наш(ё|е)л|не нашлось|не могу сказать|не помню|"
+                        r"нет в памяти|не указан", re.I)
+_QUESTION = re.compile(r"\?|^\W*(кто|что|чем|когда|где|куда|откуда|сколько|как|какой|какая|какое|какие|каков|почему|"
+                       r"зачем|чей|чья|чьё|чье|есть ли|правда ли|подскажи|напомни|скажи|расскажи|уточни)\b", re.I)
+_NUM = re.compile(r"\d+(?:[.,:/-]\d+)*")
+MAX_CITES = 3
+
+
+def _plain(text: str) -> str:
+    return (text or "").lower().replace("ё", "е")
+
+
+def _entity_cite(source, card: dict) -> str:
+    """The source of a fact of a card: a meeting with its day, otherwise the card itself."""
+    source = str(source or "")
+    found = re.match(r"(совещание «[^»]*»)\s*(?:от\s*)?(\d{4})-(\d{2})-(\d{2})", source)
+    if found:
+        return f"{found.group(1)} от {found.group(4)}.{found.group(3)}.{found.group(2)}"
+    if source.startswith("совещание"):
+        return source
+    return f"карточка {quoted(card.get('name') or '')}"
+
+
+def number_sources(ctx: dict) -> dict:
+    """Every record the model may answer from gets a short ref and the words of its source (cite): known_facts m1,
+    m2…, the cards of about_entities k1, k2… and their facts k1.1… The panel pages go to ctx["_links"] (never shown
+    to the model). Safe to call again. Returns {ref: {"cite", "text"}}."""
+    links = ctx.setdefault("_links", {})
+    known = {}
+    for i, f in enumerate([f for f in ctx.get("known_facts") or [] if isinstance(f, dict)], 1):
+        ref = f.setdefault("ref", f"m{i}")
+        if not f.get("cite"):
+            kind = f.get("type")
+            about = f.get("about") or ""
+            f["cite"] = f.get("source") or FALLBACK_CITE.get(kind, "заметка").format(
+                about if kind in ("Компания", "Сотрудник") else quoted(about))
+        if f.get("url"):
+            links[ref] = f.pop("url")
+        known[ref] = {"cite": f["cite"], "text": f"{f.get('about') or ''}: {f.get('text') or ''}"}
+    for i, card in enumerate([c for c in ctx.get("about_entities") or [] if isinstance(c, dict)], 1):
+        ref = card.setdefault("ref", f"k{i}")
+        card.setdefault("cite", f"карточка {quoted(card.get('name') or '')}")
+        if card.get("url"):
+            links[ref] = card.pop("url")
+        fields = [card.get(k) for k in ("name", "unp", "address", "contacts", "description")]
+        known[ref] = {"cite": card["cite"],
+                      "text": " ".join(str(x) for x in fields + list(card.get("also_called") or []) if x)}
+        for j, fact in enumerate([x for x in card.get("facts") or [] if isinstance(x, dict)], 1):
+            fact_ref = fact.setdefault("ref", f"{ref}.{j}")
+            if not fact.get("cite"):
+                fact["cite"] = _entity_cite(fact.pop("source", ""), card)
+            if fact.get("url"):
+                links[fact_ref] = fact.pop("url")
+            known[fact_ref] = {"cite": fact["cite"], "text": f"{card.get('name') or ''}: {fact.get('text') or ''}"}
+    return known
+
+
+def _named(cite: str, text: str) -> bool:
+    """Does the answer already name this source in its own words?"""
+    low, c = _plain(text), _plain(cite)
+    title = re.search(r"«([^»]+)»", c)
+    if c.startswith(("совещание", "документ")) and title and title.group(1) in low:
+        return True
+    if c.startswith("совещание") and re.search(r"совещ|планерк|встреч|протокол", low):
+        day = re.search(r"(\d{2})\.(\d{2})\.\d{4}", c)
+        if day and (f"{day.group(1)}.{day.group(2)}" in low or f"{int(day.group(1))}.{day.group(2)}" in low):
+            return True
+    if c == "профиль компании":
+        return "профил" in low
+    if c.startswith("карточка"):
+        return "карточк" in low
+    if c.startswith(("заметка", "переписка")):
+        return bool(re.search(r"заметк|переписк", low))
+    return False
+
+
+def _numbers(text: str) -> set:
+    return {n.strip(".,:/-") for n in _NUM.findall(text or "") if len(re.sub(r"\D", "", n)) >= 2}
+
+
+def _guess(reply: str, message: str, known: dict) -> list:
+    """Without the marks: the record whose numbers or several words the answer repeats (and the question did not
+    have). At most two, the best first."""
+    asked_nums, asked_terms = _numbers(message), set(terms(message))
+    nums = _numbers(reply) - asked_nums
+    words = set(terms(reply)) - asked_terms
+    scored = []
+    for ref, k in known.items():
+        hit_nums = nums & _numbers(k["text"])
+        hit_words = words & set(terms(k["text"]))
+        if hit_nums or len(hit_words) >= 3:
+            scored.append((3 * len(hit_nums) + len(hit_words), bool(hit_nums), ref))
+    scored.sort(key=lambda x: (-x[0], x[2]))
+    if not scored:
+        return []
+    best = [scored[0][2]]
+    if len(scored) > 1 and scored[1][1] and scored[1][0] >= 0.8 * scored[0][0]:
+        best.append(scored[1][2])
+    return best
+
+
+def cite(reply: str, ctx: dict, message: str = "", acting: bool = False, panel: bool = False) -> tuple:
+    """The answer with its sources (№20). The model marks the facts it used with their refs («… 20 ноября [m2].»);
+    the marks become one line «Источник: совещание «Планёрка» от 12.11.2025» with the exact names and days (and the
+    panel page for those who use the panel). A source the answer already names is not repeated. When a question was
+    answered without marks, the record whose numbers or words the answer repeats is named anyway. Returns
+    (reply, [refs used])."""
+    reply = reply or ""
+    if not reply.strip():
+        return reply, []
+    known = number_sources(ctx)
+    used = []
+
+    def take(found):
+        refs = []
+        for ref in re.split(r"\s*[,;]\s*", found.group(1)):
+            ref = ref.lower().replace("м", "m").replace("к", "k")
+            if ref and ref[0].isdigit() and refs:  # «[m1, 3]»: the letter of the one before
+                ref = refs[-1][0] + ref
+            refs.append(ref)
+        hits = [r for r in refs if r in known]
+        if not hits and re.search(r"[мк]", found.group(1).lower()):
+            return found.group(0)  # «[м2]» unknown: square metres, not a mark
+        for r in hits:
+            if r not in used:
+                used.append(r)
+        return ""
+
+    text = _MARK.sub(take, reply)
+    text = re.sub(r"[ \t]+([.,;:!?)])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+    if not used and not acting and known and _QUESTION.search(message or "") and not _NAMED.search(text) \
+            and not _DONT_KNOW.search(text):
+        used = _guess(text, message, known)
+    if not used or _OWN_LINE.search(text):
+        return text, used
+    links = ctx.get("_links") or {}
+    named, seen = [], set()
+    for ref in used:
+        source = known[ref]["cite"]
+        if not source or source in seen or _named(source, text):
+            continue
+        seen.add(source)
+        url = links.get(ref) if panel and config.PUBLIC_URL else None
+        named.append(source + (f" — {config.PUBLIC_URL}{url}" if url else ""))
+    if named:
+        text += ("\n\nИсточник: " if len(named) == 1 else "\n\nИсточники: ") + "; ".join(named[:MAX_CITES])
+    return text, used
 
 
 def skills_for(query: str, k: int = 2) -> list:

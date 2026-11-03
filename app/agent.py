@@ -511,6 +511,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
     about = entities.for_prompt(s, query, full)
     if about:
         ctx["about_entities"] = about
+    company_memory.number_sources(ctx)  # refs and sources of what may be answered from (№20); the pages kept aside
     found_skills = company_memory.skills_for(getattr(row, "text", "") or "")
     if found_skills:
         ctx["skills"] = found_skills
@@ -654,13 +655,16 @@ GENERAL_RULES = ORDER_RULES + DOC_RULES + (
     "кого; если дел нет — так и скажи и спроси, о чём речь. Не выдумывай дел и событий, которых нет в данных. "
     "assistant_waiting_for_you — чего ты ждёшь от этого человека. file_received — человек прислал файл; он сохранён "
     "в библиотеке документов. files_received — человек прислал сразу несколько файлов (альбом): ответь один раз на "
-    "все вместе. known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки с "
-    "источником и уверенностью, фрагменты документов). На вопросы о компании, людях и документах отвечай по "
-    "known_facts и данным выше; при низкой уверенности так и скажи; если ответа нет — честно скажи, что не знаешь, "
-    "и предложи уточнить у руководителя, не выдумывай. about_entities — карточки объектов и клиентов, о которых "
-    "говорит сообщение: другие написания, УНП, адрес, контакты, facts (у каждого источник), а для тех, кто видит "
-    "команду, — совещания, открытые задачи и документы по ним. Отвечай в контексте этого объекта или клиента и называй "
-    "источник («по совещанию 12.11», «в счёте № 15»); чего в карточке нет, не выдумывай. "
+    "все вместе. known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки, "
+    "фрагменты документов, карточки): у каждой записи ref, cite — откуда она (совещание, документ, заметка, карточка) "
+    "и confidence — уверенность. about_entities — карточки объектов и клиентов, о которых говорит сообщение: другие "
+    "написания, УНП, адрес, контакты, facts, а для тех, кто видит команду, — совещания, открытые задачи и документы по "
+    "ним; у карточки и у каждого факта тоже есть ref и cite. На вопросы о компании, людях, объектах и документах "
+    "отвечай по этим данным, в контексте того объекта или клиента, о котором спросили. ИСТОЧНИК: после каждой фразы, "
+    "взятой из known_facts или about_entities, ставь ref этой записи в квадратных скобках: «Сдачу кровли перенесли на "
+    "20 ноября [m2].» Код заменит метки строкой «Источник: …» с точным названием и датой, поэтому сам источник "
+    "словами не пересказывай. При низкой уверенности так и скажи. Если ответа в данных нет — честно скажи, что не "
+    "знаешь, и предложи уточнить у руководителя; не выдумывай и не додумывай. "
     "skills — навыки компании для таких ситуаций: следуй им. "
     "Новое устойчивое знание о человеке или работе сохраняй действием note (только факты, без оценок людей). "
     "skills_with_approval — действия, которые для этого человека выполняются только после одобрения руководителя "
@@ -739,7 +743,8 @@ def _system(transport: str = "json") -> str:
 
 
 def _user_message(ctx: dict, text: str, feedback: str) -> str:
-    return "<data>" + json.dumps(ctx, ensure_ascii=False) + "</data>\nСообщение человека:\n<data>" + text + "</data>" + feedback
+    shown = {k: v for k, v in ctx.items() if not k.startswith("_")}  # "_links" and the like are for the code only
+    return "<data>" + json.dumps(shown, ensure_ascii=False) + "</data>\nСообщение человека:\n<data>" + text + "</data>" + feedback
 
 
 def _decision(data) -> dict:
@@ -1035,6 +1040,7 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
     if transport == "tools" and model in _NO_TOOLS:
         transport = "json"
     employee, reviewer, full = person.employee, person.reviewer, person.full
+    company_memory.number_sources(ctx)  # the refs the reply marks its facts with (already there for a real chat)
     feedback = ""
     for attempt in (1, 2):
         try:
@@ -1087,6 +1093,9 @@ def decide(ctx: dict, text: str, person, *, model: str | None = None, transport:
         feedback = "\nПрошлый ответ нельзя выполнить: " + "; ".join(errors) + ". Исправь ответ."
         if any(agent_skills.denied(a, person) for a in decision["actions"]):
             feedback += DECLINE_GENTLY
+    acting = any(a.get("type") not in ("note", "ask_reviewer") for a in decision["actions"])
+    decision["reply"], decision["sources"] = company_memory.cite(  # the marks become «Источник: …» (№20)
+        decision["reply"], ctx, text, acting=acting, panel=bool(person.reviewer or person.director or person.full))
     decision["transport"] = transport
     return decision
 

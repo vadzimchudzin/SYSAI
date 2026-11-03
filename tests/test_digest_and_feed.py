@@ -65,7 +65,7 @@ def test_send_goes_to_reviewers_only_and_marks_the_period(team, tgacc, cmodel):
                              "digest_frequency": "daily", "digest_last_sent": ""})
     tgacc.users.update({"@obs": 70, "@boss": 7})
     assert digest.send() == 1
-    targets = [r for r, t in tgacc.sent if t.startswith("Сводка по делам")]
+    targets = [r for r, t in tgacc.sent if t.startswith("Утренняя сводка")]
     assert targets == ["@omg"]
     assert settings_store.get("digest_last_sent") == now().astimezone(MINSK).date().isoformat()
 
@@ -74,7 +74,7 @@ def test_run_due_sends_once(team, tgacc, cmodel, monkeypatch):
     settings_store.set_many({"digest_frequency": "daily", "digest_hour": 0, "digest_last_sent": ""})
     digest.run_due()
     digest.run_due()
-    assert sum(t.startswith("Сводка по делам") for _, t in tgacc.sent) == 1
+    assert sum(t.startswith("Утренняя сводка") for _, t in tgacc.sent) == 1
 
 
 def test_settings_page_and_send_now(client, team, tgacc, cmodel):
@@ -86,7 +86,7 @@ def test_settings_page_and_send_now(client, team, tgacc, cmodel):
     assert client.post("/settings", data={"digest_frequency": "hourly"}).status_code == 400
     assert client.post("/settings", data={"digest_hour": "25"}).status_code == 400
     page = client.post("/settings/test-digest").text
-    assert "Сводка отправлена проверяющим: 1 из 1" in page
+    assert "Сводка отправлена: 1 из 1" in page
     assert settings_store.get("digest_last_sent") == ""  # «прислать сейчас» does not move the schedule
 
 

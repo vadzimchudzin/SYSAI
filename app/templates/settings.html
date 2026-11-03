@@ -89,16 +89,21 @@
     {% endif %}
   </section>
   <section class="card setup-step" id="digest">
-    <h2>Сводка по делам</h2>
-    <p class="small muted">Короткий отчёт проверяющим в Telegram: что ассистент закрыл, что ждёт решения, что в работе и кого ждём, что висит без движения. Директор и наблюдатели её не получают.</p>
+    <h2>Утренняя сводка</h2>
+    <p class="small muted">Каждое утро в Telegram — один экран по важности: что горит (просроченные задачи, срок сегодня и завтра, «мешает»), кто молчит (ассистент ждёт ответа дольше, чем положено по карточке; срок так и не назвали) и что ждёт решения (протоколы на утверждение, остановленные дела и дела на одобрение, вопросы сотрудников, задачи без получателя). У каждого пункта — ссылка на его страницу в кабинете. «Раз в неделю» — сводка по делам ассистента за неделю.</p>
     <div class="row">
       <label class="f">Как часто
         <select name="digest_frequency">{% for k, label in digest_frequencies.items() %}<option value="{{ k }}" {{ 'selected' if s.digest_frequency == k }}>{{ label }}</option>{% endfor %}</select></label>
-      <label class="f sm">Во сколько <input type="number" min="0" max="23" name="digest_hour" value="{{ s.digest_hour }}"></label>
+      <label class="f sm">Во сколько <input type="time" name="digest_time" value="{{ '%02d:%02d'|format(s.digest_hour|int, (s.digest_minute or 0)|int) }}"></label>
       <label class="f">День недели (для «раз в неделю»)
         <select name="digest_weekday">{% for d in weekdays %}<option value="{{ loop.index0 }}" {{ 'selected' if s.digest_weekday == loop.index0 }}>{{ d }}</option>{% endfor %}</select></label>
     </div>
-    <p class="small muted">Время — по часовому поясу сервиса. В тихие часы сводка ждёт утра.</p>
+    <input type="hidden" name="present_digest_recipients" value="1">
+    <div class="f">Кому
+      <div class="chips">{% for p in digest_people %}<label class="chip" title="{{ p.position }}"><input type="checkbox" name="digest_recipients" value="{{ p.id }}" {{ 'checked' if p.id in (s.digest_recipients or []) }}>{{ p.name }}</label>{% else %}<span class="small muted">Нет сотрудников с Telegram.</span>{% endfor %}</div>
+    </div>
+    <p class="small muted">Никого не выбрано — получают проверяющие.</p>
+    <p class="small muted">Время — по часовому поясу сервиса. В тихие часы и выходные сводка ждёт следующего рабочего утра.</p>
     <button type="submit" class="btn sm" formaction="/settings/test-digest" formnovalidate>Прислать сводку сейчас</button>
   </section>
   <section class="card setup-step" id="ticnote">

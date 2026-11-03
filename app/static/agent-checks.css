@@ -117,3 +117,6 @@
   .ck-budget .f { flex: 1 1 150px; }
   .ck-miss { margin-left: 0; }
 }
+.ck-questions { margin: 8px 0 12px; padding-left: 22px; display: grid; gap: 10px; }
+.ck-questions li { display: grid; gap: 4px; }
+.ck-questions li.off { opacity: .55; }
