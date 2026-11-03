@@ -118,11 +118,32 @@ def _validate(data, offset, length):
             item["end"] = min(round(end + offset, 1), offset + length)
         if s.get("overlap") is True:
             item["overlap"] = True
+        for key in TRACE_KEYS:
+            shifted = _shift(s.get(key), offset)
+            if shifted:
+                item[key] = shifted
         result.append(item)
     truncated = data.get("truncated", False) if isinstance(data, dict) else False
     if not isinstance(truncated, bool):
         raise llm.IncompleteResponse("Некорректный признак завершённости расшифровки")
     return sorted(result, key=lambda s: s["start"]), truncated
+
+
+def _shift(entries, offset):
+    """Word-time traces ([[start, end, …]] in seconds of a part) moved to seconds of the recording."""
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        try:
+            start, end = float(entry[0]), float(entry[1])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(start) and math.isfinite(end) and end >= start:
+            out.append([round(start + offset, 2), round(end + offset, 2), *entry[2:]])
+    return out
 
 
 def _end(value, start, length):
@@ -266,6 +287,7 @@ def _sentences(text, length):
 
 
 JOIN_GAP = 1.5              # seconds of silence inside one person's replica
+TRACE_KEYS = ("heard", "doubts")  # word-time traces a replica carries until the checks (verify.py) are done
 PAUSE_SECONDS = 0.6         # a pause this long between words may be another person starting
 SENTENCE_PAUSE = 0.25       # …and a shorter one after the end of a sentence
 WORDS_MIN_SHARE = 0.6       # the STT word times must cover at least this share of its text
@@ -284,13 +306,24 @@ def _join(items):
                 last["end"] = item["end"]
             else:
                 last.pop("end", None)
+            for key in TRACE_KEYS:
+                if item.get(key):
+                    last[key] = list(last.get(key) or []) + list(item[key])
         else:
             joined.append(dict(item))
     return joined
 
 
+def _confidence(value):
+    """A word's confidence 0…1 from the STT, or None when the provider gives none."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value) if 0 <= value <= 1 else None
+
+
 def _timed_words(result, length):
-    """[(word, start, end, speaker or None)] of the STT's word timestamps, or [] when there are none to trust."""
+    """[(word, start, end, speaker or None, confidence or None)] of the STT's word timestamps, or [] when there are
+    none to trust."""
     raw = result.get("words") if isinstance(result, dict) else None
     if not isinstance(raw, list) or not raw:
         return []
@@ -308,15 +341,18 @@ def _timed_words(result, length):
                 or end < start or start < last - 1.0 or start > length + 1.0:
             return []
         speaker = item.get("speaker", item.get("speaker_id"))
+        confidence = _confidence(item.get("confidence"))
         for token in _word_tokens(item.get("word") or item.get("text") or ""):
-            out.append((token, max(0.0, start), max(0.0, min(end, length)), None if speaker is None else str(speaker)))
+            out.append((token, max(0.0, start), max(0.0, min(end, length)), None if speaker is None else str(speaker),
+                        confidence))
         last = max(last, start)
     return out
 
 
 def _timed_text(text, words):
-    """[(start char, end char, start, end, speaker)] of every word of the STT text with its time from the word list;
-    a word the list does not have takes the time between its neighbours. None when too few words match."""
+    """[(start char, end char, start, end, speaker, confidence)] of every word of the STT text with its time from the
+    word list; a word the list does not have takes the time between its neighbours (and no confidence). None when too
+    few words match."""
     spans = _spans(text)
     if not spans or not words:
         return None
@@ -336,15 +372,38 @@ def _timed_text(text, words):
             after = next((times[j] for j in range(k + 1, len(spans)) if times[j] is not None), None)
             moment = before[1] if before else after[0]
             times[k] = (moment, after[0] if after and after[0] >= moment else moment,
-                        (before or after)[2])
+                        (before or after)[2], None)
         out.append((begin, end) + tuple(times[k]))
     return out
+
+
+DOUBT_CONFIDENCE = 0.4  # a word the STT is less sure of is heard again (verify.py)
+HEARD_JOIN = 0.5        # words closer than this are one stretch of heard speech
+
+
+def _heard(timed):
+    """[[start, end]] of the stretches the words of a replica cover: the voice detector compares them with the voice."""
+    runs = []
+    for item in timed:
+        start, end = item[2], max(item[2], item[3])
+        if runs and start - runs[-1][1] <= HEARD_JOIN:
+            runs[-1][1] = max(runs[-1][1], end)
+        else:
+            runs.append([start, end])
+    return [[round(start, 2), round(end, 2)] for start, end in runs]
+
+
+def _doubts(text, timed):
+    """[[start, end, word, confidence]] of the words of a replica the STT itself was unsure of."""
+    return [[round(item[2], 2), round(max(item[2], item[3]), 2), text[item[0]:item[1]], round(item[5], 2)]
+            for item in timed if len(item) > 5 and item[5] is not None and item[5] < DOUBT_CONFIDENCE]
 
 
 def _utterances(text, timed):
     """The STT text cut where the word times show a pause or the STT names another speaker.
 
-    Each cut is made before a word, so punctuation stays with the words it follows."""
+    Each cut is made before a word, so punctuation stays with the words it follows. Every piece keeps the stretches
+    its words cover («heard») and the words the STT was unsure of («doubts»)."""
     pieces, first = [], 0
     for k in range(1, len(timed) + 1):
         if k < len(timed):
@@ -358,7 +417,10 @@ def _utterances(text, timed):
         piece = text[begin:end].strip()
         if piece:
             item = {"start": round(timed[first][2], 1), "end": round(max(timed[k - 1][3], timed[first][2]), 1),
-                    "text": piece}
+                    "text": piece, "heard": _heard(timed[first:k])}
+            doubts = _doubts(text, timed[first:k])
+            if doubts:
+                item["doubts"] = doubts
             if timed[first][4] is not None:
                 item["speaker"] = timed[first][4]
             pieces.append(item)
@@ -460,10 +522,21 @@ def _align_plain_transcript(path, text, settings, length, context):
     return {"segments": [{"speaker": "Спикер 1", "start": 0.0, "text": text}], "truncated": False}
 
 
+def stt_extras(settings) -> dict:
+    """The optional STT request fields a run uses: the names and terms to hear right (``keyterms``) and the speakers
+    of the words (``diarize``). A provider that cannot take one gets the request without it (llm.transcribe_audio)."""
+    extras = {}
+    if settings.get("_keyterms"):
+        extras["keyterms"] = list(settings["_keyterms"])
+    if settings.get("stt_diarize"):
+        extras["diarize"] = True
+    return extras
+
+
 def _transcribe_stt_chunk(path, settings, length, context):
     result = llm.transcribe_audio(path.read_bytes(), settings["transcribe_model"],
                                   path.suffix.lstrip(".") or "mp3", settings.get("language", "ru"),
-                                  prompt=settings.get("_stt_prompt", ""))
+                                  prompt=settings.get("_stt_prompt", ""), **stt_extras(settings))
     by_words = _by_words(path, result, settings, length, context)
     if by_words is not None:
         return by_words
@@ -653,9 +726,20 @@ def _merge(segments, new, boundary):
             segments.append(current)
     segments.sort(key=lambda item: item["start"])
 
-def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=None) -> tuple[float, list]:
+def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=None,
+               info: dict | None = None) -> tuple[float, list]:
+    """(duration, replicas) of a recording.
+
+    1. The voice detector (vad.py) finds where someone speaks; the recording is cut into parts in pauses.
+    2. Each part is recognised (an STT engine with the names and terms as ``keyterms``, or an audio model).
+    3. The parts are stitched; names and terms are corrected by the vocabulary (speech_fix.py).
+    4. Checks against the audio (verify.py, meaning.py): voice without words is heard again by the second engine,
+       doubtful words are heard again, phrases invented over silence are dropped.
+    ``info`` (when given) receives what the checks found, for the meeting page."""
     if not config.llm_enabled():
         raise llm.LLMError("Для настоящего аудио нужен ключ OpenRouter. Демо запускается отдельно.")
+    from . import meaning, vad, verify
+    info = info if info is not None else {}
     digest = hashlib.sha256()
     with open(path, "rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
@@ -666,8 +750,16 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
             maximum_minutes = min(float(maximum_minutes or 5), 5)
         except (TypeError, ValueError):
             maximum_minutes = 5
-    total, plan = audio.plan_chunks(path, None, overlap_seconds=OVERLAP_SECONDS, max_chunk_minutes=maximum_minutes)
+    speech = None
+    if settings.get("speech_detector"):
+        progress("Детектор речи: ищу, где говорят")
+        speech = vad.speech(path, checkpoint, digest.hexdigest(), progress)
+    total, plan = audio.plan_chunks(path, None, overlap_seconds=OVERLAP_SECONDS, max_chunk_minutes=maximum_minutes,
+                                    speech=speech)
     step = audio.chunk_seconds(total, maximum_minutes)
+    info.update(engine=settings.get("transcribe_model"), parts=len(plan), detector=speech is not None)
+    if speech is not None:
+        info["speech_seconds"] = round(vad.total_speech(speech), 1)
     workdir: list = []  # made on the first cut: a run where every part is already saved cuts nothing and makes no folder
 
     def cut(offset, seconds, name):
@@ -685,12 +777,15 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         allowed = set(settings["_participants"])
         voiceprints = [profile for profile in voiceprints if profile.get("employee_id") in allowed]
     segments: list = []
-    settings = dict(settings, _stt_prompt=speech_fix.prompt_text(settings))  # names and terms to hear right
-    base = {"version": 11, "stt_prompt": settings["_stt_prompt"], "cleanup": audio.cleanup_enabled(), "audio": digest.hexdigest(), "model": settings["transcribe_model"],
+    keyterms = speech_fix.keyterms(settings) if settings.get("stt_keyterms") else []
+    settings = dict(settings, _stt_prompt=speech_fix.prompt_text(settings), _keyterms=keyterms)  # names and terms
+    info["keyterms"] = len(keyterms)
+    base = {"version": 12, "stt_prompt": settings["_stt_prompt"], "cleanup": audio.cleanup_enabled(), "audio": digest.hexdigest(), "model": settings["transcribe_model"],
             "diarization_model": settings.get("diarization_model", LEGACY_CHAT_MODEL),
             "language": settings.get("language", "ru"), "glossary": settings.get("glossary", ""),
             "speaker_profiles": speaker_id.profiles_fingerprint(voiceprints),
-            "step": step, "short_audio_seconds": SHORT_AUDIO_SECONDS}
+            "step": step, "short_audio_seconds": SHORT_AUDIO_SECONDS, "extras": stt_extras(settings),
+            "detector": speech is not None}
 
     def part(get_chunk, offset, length, index, context):
         key = checkpoints.fingerprint(dict(base, offset=offset, length=length, context=context))
@@ -771,14 +866,25 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
         for i, (offset, seconds) in enumerate(plan):
             progress(f"Расшифровка {i + 1} из {len(plan)}")
             result = part(lambda offset=offset, seconds=seconds, i=i: cut(offset, seconds, f"chunk_{i:03d}.mp3"),
-                          offset, min(step + OVERLAP_SECONDS, total - offset), str(i), _context(segments))
+                          offset, seconds, str(i), _context(segments))
             _merge(segments, result, offset)
     finally:
         if workdir:
             shutil.rmtree(workdir[0], ignore_errors=True)
     segments = [s for s in segments if s["text"]]
+    checks = checkpoints.fingerprint(base)
+    if speech is not None:  # even an empty transcript: the detector may prove there was speech to hear again
+        segments = verify.recover(path, segments, speech, settings, total, checkpoint=checkpoint, key=checks,
+                                  progress=progress, info=info)
     if segments:
         segments, _ = speech_fix.fix_segments(segments, settings)  # «винсунаба» → «ВентСнаба» by the vocabulary
+    if segments and settings.get("speech_doubts"):
+        proposals = meaning.review(segments, settings, checkpoint=checkpoint, key=checks, progress=progress, info=info)
+        segments = verify.resolve(path, segments, settings, total, proposals, checkpoint=checkpoint, key=checks,
+                                  progress=progress, info=info)
+    if segments and speech is not None:
+        segments = verify.drop_phantoms(segments, speech, info)
+    segments = [{k: v for k, v in item.items() if k not in TRACE_KEYS} for item in segments]
     if not segments:
         raise llm.LLMError("Речь в записи не распознана. Проверьте аудио; рассылка не запускалась.")
     return total, _ends(segments, total)
@@ -816,8 +922,10 @@ def voice_text(data: bytes, mime: str = "", seconds: float = 0.0) -> str:
         total = seconds if seconds and seconds > 0 else audio.duration(str(source))
         audio.extract(source, target, 0, max(1.0, total + 1.0))
         if not chat_model(settings.get("transcribe_model")):
+            extras = {"keyterms": speech_fix.keyterms(settings)} if settings.get("stt_keyterms") else {}
             parsed = llm.transcribe_audio(target.read_bytes(), settings["transcribe_model"], "mp3",
-                                         settings.get("language", "ru"), prompt=speech_fix.prompt_text(settings))
+                                         settings.get("language", "ru"), prompt=speech_fix.prompt_text(settings),
+                                         **{k: v for k, v in extras.items() if v})
             text = parsed.get("text")
             if not isinstance(text, str) or not text.strip():
                 parts = parsed.get("segments") or []

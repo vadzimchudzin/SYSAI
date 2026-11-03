@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>SYSAI — как распознаётся речь</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; }
+  body { font-family: "Noto Sans", Arial, sans-serif; background: #f6f4ef; color: #1f2328; padding: 56px 64px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 36px; }
+  h1 { font-size: 50px; font-weight: 800; letter-spacing: -0.5px; }
+  h1 span { color: #c2410c; }
+  .sub { font-size: 23px; color: #57606a; margin-top: 8px; }
+  .flow { display: grid; grid-template-columns: 1fr 56px 1.05fr 56px 1.38fr 56px 1.04fr; align-items: stretch; height: 742px; }
+  .arrow { display: flex; align-items: center; justify-content: center; }
+  .arrow svg { width: 44px; height: 44px; }
+  .col { display: flex; flex-direction: column; }
+  .stage { font-size: 19px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.4px; margin-bottom: 12px; }
+  .card { background: #fff; border-radius: 22px; padding: 26px 26px 22px; box-shadow: 0 2px 0 rgba(0,0,0,.04), 0 10px 30px rgba(31,35,40,.07); border-top: 8px solid; flex: 1; display: flex; flex-direction: column; }
+  .card h2 { font-size: 30px; font-weight: 800; line-height: 1.15; margin-bottom: 6px; }
+  .card .who { font-size: 18px; color: #57606a; margin-bottom: 16px; }
+  ul { list-style: none; }
+  li { font-size: 21px; line-height: 1.32; padding-left: 26px; position: relative; margin-bottom: 12px; }
+  li::before { content: ""; position: absolute; left: 4px; top: 11px; width: 9px; height: 9px; border-radius: 50%; background: currentColor; opacity: .35; }
+  .tag { display: inline-block; font-size: 17px; font-weight: 700; padding: 6px 13px; border-radius: 999px; margin-top: auto; align-self: flex-start; }
+  .c1 { color: #1d4ed8; } .c1 .card { border-color: #2563eb; } .c1 .tag { background: #dbeafe; color: #1d4ed8; }
+  .c2 { color: #047857; } .c2 .card { border-color: #059669; } .c2 .tag { background: #d1fae5; color: #047857; }
+  .c3 { color: #c2410c; } .c4 { color: #6d28d9; } .c4 .card { border-color: #7c3aed; } .c4 .tag { background: #ede9fe; color: #6d28d9; }
+  .card, .check { color: #1f2328; }
+  .checks { display: flex; flex-direction: column; gap: 16px; flex: 1; }
+  .check { flex: 1; display: flex; flex-direction: column; justify-content: center; background: #fff; border-radius: 20px; padding: 18px 22px 16px; border-left: 8px solid #ea580c; box-shadow: 0 2px 0 rgba(0,0,0,.04), 0 10px 30px rgba(31,35,40,.07); }
+  .check h3 { font-size: 24px; font-weight: 800; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .check h3 b { display: inline-flex; width: 32px; height: 32px; border-radius: 50%; background: #ffedd5; color: #c2410c; font-size: 18px; align-items: center; justify-content: center; }
+  .check p { font-size: 20px; line-height: 1.33; }
+  .check p + p { margin-top: 6px; }
+  .mark { display: inline-block; font-size: 16px; font-weight: 700; padding: 2px 10px; border-radius: 999px; background: #fef3c7; color: #92400e; white-space: nowrap; }
+  .model { font-weight: 700; color: #9a3412; }
+  .c2 .model { color: #047857; }
+  footer { margin-top: 30px; background: #1f2328; color: #f6f4ef; border-radius: 22px; padding: 22px 30px; display: flex; align-items: center; gap: 26px; }
+  footer .t { font-size: 24px; font-weight: 800; white-space: nowrap; color: #fdba74; }
+  footer .d { font-size: 20px; line-height: 1.35; color: #e5e7eb; }
+  .illus { margin-top: auto; background: #f6f8fa; border-radius: 16px; padding: 14px 16px 12px; color: #1f2328; }
+  .c1 .illus { background: #eff6ff; } .c2 .illus { background: #ecfdf5; } .c4 .illus { background: #f5f3ff; }
+  .wave { display: block; width: 100%; height: auto; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 16px; color: #57606a; margin-top: 8px; align-items: center; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+  .dot.blue { background: #2563eb; } .dot.light { background: #93c5fd; height: 3px; }
+  .dash { display: inline-block; width: 3px; height: 16px; border-left: 3px dashed #ea580c; }
+  .words { display: flex; flex-wrap: wrap; gap: 8px; }
+  .w { font-size: 19px; font-weight: 600; background: #fff; border: 2px solid #a7f3d0; border-radius: 10px; padding: 5px 10px; display: inline-flex; gap: 7px; align-items: baseline; }
+  .w i { font-style: normal; font-size: 14px; color: #047857; font-weight: 700; }
+  .w.bad { border-color: #fdba74; background: #fff7ed; } .w.bad i { color: #c2410c; }
+  .mini { font-size: 18px; line-height: 1.35; background: #fff; border-radius: 10px; padding: 8px 11px; }
+  .mini + .mini { margin-top: 8px; }
+  .mini b { color: #6d28d9; margin-right: 6px; }
+  .card .tag { margin-top: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>SYSAI · <span>как распознаётся речь</span></h1>
+    <div class="sub">Запись совещания → точный текст: детектор речи, лучший движок OpenRouter и три проверки по звуку и смыслу</div>
+  </div>
+</header>
+
+<div class="flow">
+  <div class="col c1">
+    <div class="stage">1 · Где говорят</div>
+    <div class="card">
+      <h2>Детектор речи</h2>
+      <div class="who">Silero VAD, работает на нашем сервере</div>
+      <ul>
+        <li>Отмечает, где голос, а где паузы</li>
+        <li>Режет запись на куски по 45–90 с <b>только в паузах</b> — слова не рвутся на стыках</li>
+        <li>Знает, где был голос, — это основа проверок на шаге 3</li>
+      </ul>
+      <div class="illus">
+        <svg class="wave" viewBox="0 0 330 96" width="330" height="96"><rect x="2" y="39.6" width="3.4" height="16.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="8" y="32.2" width="3.4" height="31.5" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="14" y="18.1" width="3.4" height="59.8" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="20" y="25.9" width="3.4" height="44.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="26" y="19.3" width="3.4" height="57.4" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="32" y="28.7" width="3.4" height="38.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="38" y="39.3" width="3.4" height="17.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="44" y="36.9" width="3.4" height="22.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="50" y="32.3" width="3.4" height="31.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="56" y="20.8" width="3.4" height="54.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="62" y="25.9" width="3.4" height="44.1" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="68" y="27.8" width="3.4" height="40.4" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="74" y="29.7" width="3.4" height="36.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="80" y="38.9" width="3.4" height="18.2" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="86" y="37.1" width="3.4" height="21.8" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="92" y="28.7" width="3.4" height="38.6" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="134" y="21.5" width="3.4" height="53.0" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="140" y="9.9" width="3.4" height="76.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="146" y="16.9" width="3.4" height="62.2" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="152" y="25.1" width="3.4" height="45.9" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="158" y="29.2" width="3.4" height="37.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="164" y="42.2" width="3.4" height="11.6" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="170" y="27.2" width="3.4" height="41.5" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="176" y="25.4" width="3.4" height="45.2" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="182" y="24.6" width="3.4" height="46.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="188" y="25.9" width="3.4" height="44.2" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="194" y="27.7" width="3.4" height="40.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="200" y="33.0" width="3.4" height="30.0" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="206" y="40.4" width="3.4" height="15.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="212" y="27.8" width="3.4" height="40.4" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="248" y="36.7" width="3.4" height="22.6" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="254" y="28.4" width="3.4" height="39.1" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="260" y="19.0" width="3.4" height="58.0" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="266" y="26.1" width="3.4" height="43.9" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="272" y="28.2" width="3.4" height="39.6" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="278" y="31.8" width="3.4" height="32.5" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="284" y="38.8" width="3.4" height="18.3" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="290" y="35.5" width="3.4" height="24.9" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="296" y="27.7" width="3.4" height="40.6" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="302" y="17.4" width="3.4" height="61.1" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="308" y="18.7" width="3.4" height="58.5" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="314" y="25.1" width="3.4" height="45.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="320" y="27.6" width="3.4" height="40.7" rx="1.7" fill="#2563eb" opacity="0.85"/><rect x="326" y="41.4" width="3.4" height="13.3" rx="1.7" fill="#2563eb" opacity="0.85"/><line x1="113.0" y1="4" x2="113.0" y2="92" stroke="#ea580c" stroke-width="2.4" stroke-dasharray="5 4"/><line x1="98" y1="48" x2="128" y2="48" stroke="#93c5fd" stroke-width="2"/><line x1="232.0" y1="4" x2="232.0" y2="92" stroke="#ea580c" stroke-width="2.4" stroke-dasharray="5 4"/><line x1="218" y1="48" x2="246" y2="48" stroke="#93c5fd" stroke-width="2"/></svg>
+        <div class="legend"><span><i class="dot blue"></i>голос</span><span><i class="dot light"></i>пауза</span><span><i class="dash"></i>разрез</span></div>
+      </div>
+      <span class="tag">≈ 10 с на час записи · бесплатно</span>
+    </div>
+  </div>
+  <div class="arrow"><svg viewBox="0 0 24 24"><path d="M5 12h12m-5-6 6 6-6 6" fill="none" stroke="#8c959f" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+  <div class="col c2">
+    <div class="stage">2 · Что сказали</div>
+    <div class="card">
+      <h2>Основной движок</h2>
+      <div class="who"><span class="model">ElevenLabs Scribe v2</span> через OpenRouter</div>
+      <ul>
+        <li>Получает до 100 имён и терминов компании — пишет их правильно</li>
+        <li>Даёт время и уверенность каждого слова</li>
+        <li>Куски склеиваются по общим словам</li>
+        <li>Справочник поправляет имена и падежи: «винсунаба» → «ВентСнаба»</li>
+      </ul>
+      <div class="illus">
+        <div class="words"><span class="w">подпиши<i>0,99</i></span><span class="w">акт<i>0,97</i></span><span class="w bad">сверхи<i>0,31</i></span><span class="w">сегодня<i>0,96</i></span></div>
+        <div class="legend">уверенность ниже 0,4 — слово идёт на проверку</div>
+      </div>
+      <span class="tag">≈ $0,22 за час записи</span>
+    </div>
+  </div>
+  <div class="arrow"><svg viewBox="0 0 24 24"><path d="M5 12h12m-5-6 6 6-6 6" fill="none" stroke="#8c959f" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+  <div class="col c3">
+    <div class="stage">3 · Проверка по звуку и смыслу</div>
+    <div class="checks">
+      <div class="check">
+        <h3><b>1</b>Пропущенная речь</h3>
+        <p>Голос есть, а слов нет → это место дослушивает второй движок <span class="model">Gemini 3.5 Transcribe</span>.</p>
+        <p>В тексте: <span class="mark">дослышано</span> или «[неразборчиво]»; повтор соседней фразы не добавляется.</p>
+      </div>
+      <div class="check">
+        <h3><b>2</b>Сомнительные слова</h3>
+        <p>Движок не уверен в слове или слово не вяжется со смыслом (ИИ читает текст: «акт сверхи»).</p>
+        <p>Несколько секунд вокруг слова слушают второй движок и судья <span class="model">Gemini 2.5 Pro</span>. Слово меняется, только если <b>оба слушания согласны</b>: <span class="mark">уточнено</span></p>
+      </div>
+      <div class="check">
+        <h3><b>3</b>Выдуманные фразы</h3>
+        <p>«Продолжение следует…», «Спасибо за просмотр» там, где детектор не слышал голоса, — удаляются.</p>
+      </div>
+    </div>
+  </div>
+  <div class="arrow"><svg viewBox="0 0 24 24"><path d="M5 12h12m-5-6 6 6-6 6" fill="none" stroke="#8c959f" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+
+  <div class="col c4">
+    <div class="stage">4 · Итог</div>
+    <div class="card">
+      <h2>Расшифровка и протокол</h2>
+      <div class="who">дальше — как раньше</div>
+      <ul>
+        <li>Кто говорит: разметка голосов и имена</li>
+        <li>Протокол, задачи, рассылка</li>
+        <li>На странице совещания видно, сколько мест дослышано и слов уточнено</li>
+      </ul>
+      <div class="illus">
+        <div class="mini"><b>Анна</b> Подпиши акт сверки сегодня <span class="mark">уточнено</span></div>
+        <div class="mini"><b>Олег</b> Договор уже подписан <span class="mark">дослышано</span></div>
+      </div>
+      <span class="tag">сбой не оплачивается дважды</span>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="t">Выбор движка</div>
+  <div class="d">«Сравнение движков» в Настройках: 8 движков OpenRouter слушают одни и те же 4 минуты вашей записи. Есть эталон — считается WER, нет — согласие с остальными, пропуски речи, имена и цена. «Сделать основным» — в один клик.</div>
+</footer>
+</body>
+</html>

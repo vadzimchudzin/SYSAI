@@ -19,7 +19,7 @@ def test_wiped_disk_redownloads_ticnote_audio_and_goes_on(monkeypatch, tmp_path)
     monkeypatch.setattr(ticnote, "download_wav", lambda url, dest, timeout=180: dest.write_bytes(b"RIFF") or 4)
     heard = []
 
-    def fake_transcribe(path, settings, progress=None, checkpoint=None):
+    def fake_transcribe(path, settings, progress=None, checkpoint=None, **kwargs):
         heard.append(path)
         raise RuntimeError("stop after transcription start")  # enough: we only check the audio came back
     monkeypatch.setattr(transcribe, "transcribe", fake_transcribe)

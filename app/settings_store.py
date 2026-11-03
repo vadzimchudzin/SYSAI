@@ -41,6 +41,11 @@ DEFAULTS = {
     "silence_working_hours": True,   # the hours of silence before a reminder or a report: the night and days off not counted
     "audio_cleanup": True,           # speech clean-up before recognition (rumble, steady noise, levels)
     "speech_fix": True,              # after recognition: names and terms corrected by the directory and the glossary
+    "speech_detector": True,         # voice detector (vad.py): cut in pauses, hear again voice with no words, drop
+                                     # phrases invented over silence (verify.py)
+    "speech_doubts": True,           # doubtful words (low engine confidence, out of place by sense) heard again
+    "stt_keyterms": True,            # names and terms sent to the engine as a list (STT «keyterms»)
+    "stt_diarize": True,             # the engine labels the speaker of every word (STT «diarize»)
     "speaker_naming": True,          # «Спикер 1» becomes a name when the conversation proves who it is
     "speaker_name_threshold": 0.75,  # …surely enough (speakers.py); below it «Кто это?» asks with candidates
     "company_profile": "",           # what the company does, clients, products, rules everyone should know (memory)
@@ -117,7 +122,10 @@ DEFAULTS = {
     "default_deadline_days": 3,      # business days
     "ask_timeout_hours": 24,         # if nobody answers, fall back to the default
     # models (OpenRouter)
-    "transcribe_model": "openai/gpt-4o-transcribe",
+    "transcribe_model": "elevenlabs/scribe-v2",           # see README «Как распознаётся речь» and /speech-compare
+    "verify_model": "google/gemini-3.5-transcribe",       # second engine: hears again what the first missed or doubted
+    "verify_judge_model": "google/gemini-2.5-pro",        # listens to a doubtful word and chooses between the engines
+    "stt_compare": {},                                    # the last comparison of the engines (stt_compare.py)
     "diarization_model": "google/gemini-2.5-flash",
     "diarization_method": "chunks",      # chunks | voice | gemini — who speaks across the whole recording, see diarize.py
     "diarization_voice_threshold": 0.5,  # voice prints at least this alike are one person (method «voice»)

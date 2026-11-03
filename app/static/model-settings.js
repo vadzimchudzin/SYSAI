@@ -5,6 +5,8 @@
   const refresh = document.getElementById('model-catalog-refresh');
   const ids = {
     transcribe: 'transcribe-model',
+    verify: 'verify-model',
+    judge: 'judge-model',
     diarization: 'diarization-model',
     report: 'report-model',
     agent: 'agent-model',
@@ -28,6 +30,7 @@
   const short = value => value.toLocaleString('ru-RU', { maximumSignificantDigits: 3 });
   const vendor = id => String(id || '').replace(/^~/, '').split('/')[0];
   const gemini = id => String(id || '').replace(/^~/, '').startsWith('google/gemini');
+  const stt = key => key === 'transcribe' || key === 'verify';
   const byName = (a, b) => String(a.name).localeCompare(String(b.name), 'ru') || a.id.localeCompare(b.id);
   const plural = (count, forms) => {
     const tens = count % 100;
@@ -73,7 +76,10 @@
         { label: 'Gemini: текст и говорящие за один проход', models: catalog.stt.filter(model => model.kind !== 'stt').sort(byName) }
       ];
     }
-    if (key === 'diarization') {
+    if (key === 'verify') {
+      return [{ label: 'Распознавание речи (STT)', models: catalog.stt.filter(model => model.kind === 'stt').sort(byName) }];
+    }
+    if (key === 'diarization' || key === 'judge') {
       const audio = live.filter(model => model.audio_input && model.text_output && amount(model.prompt_price) !== null);
       return [
         { label: 'Gemini: рекомендуется', models: audio.filter(model => gemini(model.id)).sort(byName) },
@@ -101,7 +107,7 @@
     const query = (filters[key]?.value || '').trim().toLocaleLowerCase('ru');
     const groups = groupsFor(key);
     const known = groups.flatMap(group => group.models).find(model => model.id === current)
-      || (key === 'transcribe' ? catalog.stt : catalog.models).find(model => model.id === current);
+      || (stt(key) ? catalog.stt : catalog.models).find(model => model.id === current);
     select.replaceChildren();
     // The chosen model always stays selected: never switch a saved model silently.
     if (current) {
@@ -136,7 +142,7 @@
     const hint = document.getElementById(`${ids[key]}-hint`);
     if (!select || !hint) return;
     const id = select.value;
-    const model = (key === 'transcribe' ? catalog.stt : catalog.models).find(item => item.id === id);
+    const model = (stt(key) ? catalog.stt : catalog.models).find(item => item.id === id);
     const parts = [id];
     let warning = false;
     if (model) {
