@@ -497,6 +497,8 @@ def _source_ru(src: dict) -> str:
         return f"документ «{src.get('title') or src.get('id')}»"
     if src.get("type") == "meeting":
         return f"совещание «{src.get('title') or src.get('id')}»"
+    if src.get("type") == "bitrix":  # the CRM of Bitrix24 (bitrix_sync.py)
+        return f"Битрикс24 (компания {src.get('id')})" if src.get("id") else "Битрикс24"
     return "вручную" + (f" ({src['by']})" if src.get("by") else "")
 
 

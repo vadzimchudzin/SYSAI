@@ -1103,6 +1103,46 @@ class CalendarEvent(Base):
     fetched_at = Column(DateTime(timezone=True), default=now)
 
 
+class BitrixLink(Base):
+    """One task or client card of SYSAI and its twin in Bitrix24 (bitrix_sync.py, №28). `base` keeps the values both
+    sides had at the last sync: a field that differs from it changed on that side, so neither side's change is lost
+    to the other side's old value. kind: task (local_id: Task) | company | contact (local_id: Entity)."""
+    __tablename__ = "bitrix_links"
+    __table_args__ = (UniqueConstraint("kind", "remote_id"),)
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(10), nullable=False)
+    local_id = Column(Integer, nullable=False, index=True)
+    remote_id = Column(String(40), nullable=False)
+    base = Column(JSON, nullable=False, default=dict)   # task: title, deadline, status, responsible; card: name, unp, kind
+    data = Column(JSON, nullable=True)                  # card: phones, e-mails, site, contact persons of the CRM
+    state = Column(String(10), nullable=False, default="ok")  # ok | gone (deleted in Bitrix24)
+    error = Column(String(300), default="")
+    synced_at = Column(DateTime(timezone=True), default=now)
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
+class DriveFile(Base):
+    """A file of the company folder in Google Drive and what it is here (gdrive.py, №28): an incoming file that became
+    a document, a document of SYSAI put there, or a template (kept the same both ways). sig: md5 (or version) of the
+    Drive file at the last sync; local_sha: the template's bytes at the last sync."""
+    __tablename__ = "drive_files"
+    id = Column(Integer, primary_key=True)
+    file_id = Column(String(120), nullable=True, unique=True)
+    kind = Column(String(10), nullable=False)            # inbox | upload | template
+    origin = Column(String(6), nullable=False, default="drive")  # drive | panel: where the file appeared first
+    name = Column(String(300), default="")
+    sig = Column(String(80), default="")
+    local_sha = Column(String(64), default="")
+    version = Column(Integer, nullable=False, default=0)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)
+    template_id = Column(Integer, ForeignKey("doc_templates.id", ondelete="SET NULL"), nullable=True, index=True)
+    status = Column(String(10), nullable=False, default="ok")  # ok | failed | skipped | gone
+    error = Column(String(300), default="")
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+
+
 class MemoryVector(Base):
     """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
     __tablename__ = "memory_vectors"

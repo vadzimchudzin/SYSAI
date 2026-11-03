@@ -1,0 +1,90 @@
+{% extends "base.html" %}{% block title %}Интеграции — SYSAI{% endblock %}
+{% block head %}<style>.int-st{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 10px}.int-ok{color:#2e7d32}.int-bad{color:#c62828}.int-form .row{gap:8px;flex-wrap:wrap}.int-log li{margin:2px 0}.int-checks label{display:block;margin:4px 0}.int-key{width:100%;min-height:90px;font-family:monospace;font-size:12px}</style>{% endblock %}
+{% block body %}
+<h1>Интеграции</h1>
+<p class="muted small">Чтобы не вести одно и то же в двух местах: задачи и клиенты — вместе с Битрикс24, документы и шаблоны — вместе с Google Drive. Изменения сверяются каждые 10 минут и по кнопке.</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сделано: {{ error }}</div>{% endif %}
+
+<section class="card" id="bitrix">
+  <h2>Битрикс24</h2>
+  <div class="int-st small">
+    {% if bx.configured %}<span><b>вебхук задан</b></span>
+      {% if bx.checked_local %}<span>сверено {{ bx.checked_local }}{% if bx.ok %} <span class="int-ok">✓</span> · {{ bx.summary or 'изменений нет' }}{% endif %}</span>{% endif %}
+      {% if bx.ok == false %}<span class="int-bad">ошибка: {{ bx.error }}</span>{% endif %}
+      <span>связано задач: {{ bx.linked_tasks }} · компаний: {{ bx.linked_cards }}</span>
+      <form method="post" action="/integrations/bitrix/check"><button class="btn sm">Проверить</button></form>
+      <form method="post" action="/integrations/bitrix/sync"><button class="btn sm">Синхронизировать сейчас</button></form>
+      <form method="post" action="/integrations/bitrix/forget" onsubmit="return confirm('Отключить Битрикс24? Связи задач и компаний забудутся.')"><button class="btn sm ghost">Отключить</button></form>
+    {% else %}<span class="muted">не подключён</span>{% endif %}
+  </div>
+  <form method="post" action="/integrations/bitrix" class="int-form">
+    <label class="f">Адрес входящего вебхука<input name="webhook" type="password" autocomplete="off" placeholder="{{ 'вебхук сохранён — вставьте новый, чтобы заменить' if bx.configured else 'https://портал.bitrix24.by/rest/1/xxxxxxxx/' }}"></label>
+    <p class="small muted">В Битрикс24: «Разработчикам» → «Другое» → «Входящий вебхук», права: <b>задачи (task)</b>, <b>пользователи (user)</b>, <b>CRM (crm)</b>. Работает на платных тарифах (на бесплатном Битрикс24 отвечает «REST is available only by subscription»). Адрес хранится в приложении и на страницу не выводится.</p>
+    <div class="int-checks">
+      <input type="hidden" name="present" value="1">
+      <label class="check"><input type="checkbox" name="bitrix_enabled" {{ 'checked' if s.bitrix_enabled }}> Ставить задачи в Битрикс24 — из совещаний, поручений в чате, документов и писем (исполнителю с «ID в Bitrix24»)</label>
+      <label class="check"><input type="checkbox" name="bitrix_sync_tasks" {{ 'checked' if s.bitrix_sync_tasks }}> Статус, срок, название и исполнитель — в обе стороны (выполнили в Битрикс24 — выполнено и здесь, и наоборот)</label>
+      <label class="check"><input type="checkbox" name="bitrix_import_tasks" {{ 'checked' if s.bitrix_import_tasks }}> Новые задачи из Битрикс24 — сюда (для наших сотрудников; ассистент учитывает их в сводках и сроках)</label>
+      <label class="check"><input type="checkbox" name="bitrix_sync_contacts" {{ 'checked' if s.bitrix_sync_contacts }}> Компании CRM ↔ «Объекты и клиенты»: название, УНП и тип в обе стороны; телефоны, почта и контактные лица — в карточку; новые клиенты и подрядчики отсюда — в CRM</label>
+    </div>
+    <div class="row"><button class="btn primary">Сохранить</button></div>
+  </form>
+  <p class="small muted">Если одно и то же изменили и здесь, и в Битрикс24 — берётся из Битрикс24 (это видно в журнале). Включённое начинает работать с этой минуты: старые задачи не переносятся, а компании CRM читаются все.</p>
+
+  {% if bx.configured %}
+  <h3>Сотрудники ↔ пользователи Битрикс24</h3>
+  <p class="small muted">Задача ставится и сверяется, только если у исполнителя есть «ID в Bitrix24». Кнопка «Подобрать» берёт пользователей портала и подставляет ID по рабочей почте или по имени и фамилии.</p>
+  <form method="post" action="/integrations/bitrix/match" class="row" style="margin-bottom:8px"><button class="btn sm">Подобрать по почте и имени</button>{% if bx.users %}<span class="small muted">пользователей портала: {{ bx.users|length }}</span>{% endif %}</form>
+  {% if bx.people %}
+  <form method="post" action="/integrations/bitrix/people">
+    <div class="table-wrap"><table class="small">
+      <thead><tr><th>Сотрудник</th><th>Рабочая почта</th><th>Пользователь Битрикс24</th></tr></thead>
+      <tbody>{% for p in bx.people %}<tr>
+        <td>{{ p.name }}</td><td>{{ p.email or '—' }}</td>
+        <td>{% if bx.users %}<select name="emp_{{ p.id }}"><option value="">— нет —</option>{% for u in bx.users %}<option value="{{ u.id }}" {{ 'selected' if u.id == p.bitrix }}>{{ u.name }}{% if u.email %} · {{ u.email }}{% endif %} (ID {{ u.id }})</option>{% endfor %}{% if p.bitrix and not (bx.users|selectattr('id', 'equalto', p.bitrix)|list) %}<option value="{{ p.bitrix }}" selected>ID {{ p.bitrix }} (нет среди активных)</option>{% endif %}</select>
+        {% else %}<input name="emp_{{ p.id }}" value="{{ p.bitrix }}" maxlength="40" placeholder="ID" style="width:90px">{% endif %}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    <div class="row" style="margin-top:6px"><button class="btn">Сохранить сопоставление</button></div>
+  </form>{% endif %}
+  {% if bx.log %}<h3>Журнал</h3><ul class="small int-log">{% for l in bx.log %}<li><span class="muted">{{ l.at }}</span> {{ l.text }}</li>{% endfor %}</ul>{% endif %}
+  {% endif %}
+</section>
+
+<section class="card" id="drive">
+  <h2>Google Drive</h2>
+  <div class="int-st small">
+    {% if gd.configured %}<span><b>подключён</b>{% if gd.root_name %}: папка «{{ gd.root_name }}»{% endif %}{% if gd.shared %} (общий диск){% endif %}</span>
+      {% if gd.checked_local %}<span>сверено {{ gd.checked_local }}{% if gd.ok %} <span class="int-ok">✓</span>{% if gd.summary %} · {{ gd.summary }}{% endif %}{% endif %}</span>{% endif %}
+      {% if gd.ok == false %}<span class="int-bad">ошибка: {{ gd.error }}</span>{% endif %}
+      <form method="post" action="/integrations/drive/check"><button class="btn sm">Проверить</button></form>
+      <form method="post" action="/integrations/drive/sync"><button class="btn sm">Синхронизировать сейчас</button></form>
+      <form method="post" action="/integrations/drive/forget" onsubmit="return confirm('Отключить Google Drive? Ключ удалится, файлы в Drive и документы здесь останутся.')"><button class="btn sm ghost">Отключить</button></form>
+    {% else %}<span class="muted">не подключён</span>{% endif %}
+  </div>
+  {% if gd.upload_blocked %}<p class="small"><span class="pill amber">класть файлы нельзя</span> {{ gd.upload_blocked }}</p>{% endif %}
+  <form method="post" action="/integrations/drive" class="int-form">
+    <label class="f">JSON-ключ сервисного аккаунта<textarea class="int-key" name="key" autocomplete="off" placeholder="{{ 'ключ сохранён' + (' (' + gd.email + ')' if gd.email else '') + ' — вставьте новый, чтобы заменить' if gd.has_key else '{ "type": "service_account", "client_email": …, "private_key": … }' }}"></textarea></label>
+    <label class="f">Ссылка на папку компании<input name="folder" value="{{ ('https://drive.google.com/drive/folders/' + gd.folder) if gd.folder }}" placeholder="https://drive.google.com/drive/folders/…"></label>
+    <p class="small muted">Как подключить: в <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud</a> создайте проект, включите «Google Drive API», создайте сервисный аккаунт и скачайте его ключ (JSON). Откройте папку компании для адреса сервисного аккаунта{% if gd.email %} (<b>{{ gd.email }}</b>){% endif %} с правом «Редактор». В ней появятся папки «Входящие», «Документы», «Шаблоны». Класть файлы сервисный аккаунт может только в общий диск Google Workspace; на обычном «Моём диске» работает чтение — «Входящие» и шаблоны.</p>
+    <div class="int-checks">
+      <input type="hidden" name="present" value="1">
+      <label class="check"><input type="checkbox" name="gdrive_inbox" {{ 'checked' if s.gdrive_inbox }}> «Входящие» → «Документы»: файлы читаются, разбираются и передаются по правилам «Что кому», как присланные в Telegram</label>
+      <label class="check"><input type="checkbox" name="gdrive_upload" {{ 'checked' if s.gdrive_upload }}> Документы SYSAI → «Документы» в Drive по месяцам (из Telegram, почты и сделанные по шаблону; конфиденциальные — нет)</label>
+      <label class="check"><input type="checkbox" name="gdrive_templates" {{ 'checked' if s.gdrive_templates }}> «Шаблоны» ↔ «Документы по шаблону»: DOCX с полями {{ '{{…}}' }} в обе стороны, удалённый из Drive шаблон выключается</label>
+    </div>
+    <div class="row"><button class="btn primary">Сохранить и проверить</button></div>
+  </form>
+  {% if gd.files %}<h3>Последние файлы</h3>
+  <div class="table-wrap"><table class="small">
+    <thead><tr><th>Когда</th><th>Что</th><th>Файл</th><th>Итог</th></tr></thead>
+    <tbody>{% for f in gd.files %}<tr>
+      <td>{{ f.at }}</td><td>{{ f.kind }}</td>
+      <td>{% if f.document_id %}<a href="/documents/{{ f.document_id }}/view">{{ f.name }}</a>{% elif f.template_id %}<a href="/documents#templates">{{ f.name }}</a>{% else %}{{ f.name }}{% endif %}</td>
+      <td>{% if f.status == 'ok' %}<span class="int-ok">✓</span>{% elif f.status == 'gone' %}<span class="muted">убран из Drive</span>{% else %}<span class="int-bad">{{ f.error or f.status }}</span>{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>{% endif %}
+  {% if gd.log %}<h3>Журнал</h3><ul class="small int-log">{% for l in gd.log %}<li><span class="muted">{{ l.at }}</span> {{ l.text }}</li>{% endfor %}</ul>{% endif %}
+</section>
+{% endblock %}
