@@ -39,3 +39,12 @@ def stats(days: int = 30) -> dict:
                         .order_by(SkillRun.id.desc()).first())
                 item["last_error"] = (last[0] if last else "") or ""
     return out
+
+
+def last_used(days: int = 30) -> dict:
+    """{skill: when it was last used} within the last days."""
+    since = now() - dt.timedelta(days=days)
+    with SessionLocal() as s:
+        rows = (s.query(SkillRun.name, func.max(SkillRun.created_at)).filter(SkillRun.created_at >= since)
+                .group_by(SkillRun.name).all())
+    return {name: moment for name, moment in rows if moment is not None}

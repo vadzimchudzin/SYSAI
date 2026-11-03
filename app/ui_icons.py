@@ -3,3 +3,4 @@ ICONS.update({'calendar': '<rect x="3" y="5" width="18" height="16" rx="2"/><pat
               'table': '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 4v16"/>'})
 ICONS.update({'link': '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>'})
 ICONS.update({'mail': '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 6.5l8.5 6.5 8.5-6.5"/>'})
+ICONS.update({'search': '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>', 'check': '<path d="M5 12.5l4.5 4.5L19 7.5"/>'})

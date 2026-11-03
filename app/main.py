@@ -1305,31 +1305,89 @@ def memory_person_forget(request: Request, eid: int):
     return RedirectResponse(f"/memory/people/{eid}", 303)
 
 
+def _ago(moment) -> str:
+    """«сегодня», «вчера», «5 дней назад» in the company's time zone (when a skill was last used)."""
+    if moment is None:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(config.TIMEZONE)
+    except Exception:  # noqa: BLE001 - an unknown zone name must not break the page
+        zone = dt.timezone.utc
+    days = (dt.datetime.now(zone).date() - moment.astimezone(zone).date()).days
+    if days <= 0:
+        return "сегодня"
+    if days == 1:
+        return "вчера"
+    return f"{days} {plural(days, 'день', 'дня', 'дней')} назад"
+
+
 def _builtin_skills() -> list:
     """The built-in skills with their switches and the uses of the last 30 days (companion skills follow their main one)."""
     from . import skill_stats
     modes, off, limits = agent_skills.modes(), agent_skills.switched_off(), agent_skills.limits()
-    used = skill_stats.stats(30)
+    used, last = skill_stats.stats(30), skill_stats.last_used(30)
+    director_set = bool(settings_store.get("director_chat_ids"))
     rows = []
     for k in agent_skills.SKILLS.values():
         if k.name in agent_skills.PAIRED:
             continue
         counts = dict(used.get(k.name) or {})
-        for companion, main in agent_skills.PAIRED.items():
-            if main == k.name:
-                for key, value in (used.get(companion) or {}).items():
-                    if key != "last_error":
-                        counts[key] = counts.get(key, 0) + value
-                    elif value and not counts.get("last_error"):
-                        counts["last_error"] = value
+        moments = [last.get(k.name)]
+        companions = [c for c, m in agent_skills.PAIRED.items() if m == k.name]
+        for companion in companions:
+            moments.append(last.get(companion))
+            for key, value in (used.get(companion) or {}).items():
+                if key != "last_error":
+                    counts[key] = counts.get(key, 0) + value
+                elif value and not counts.get("last_error"):
+                    counts["last_error"] = value
         limit_options = [x for x in agent_skills.LIMITS if not (x == "leaders" and k.who in ("reviewer", "assign"))]
         # the mode of a pair is the mode of the step that does the work (an order starts after «да»: confirm_order)
-        mode_name = k.name if k.modes else next((c for c, m in agent_skills.PAIRED.items()
-                                                 if m == k.name and agent_skills.SKILLS[c].modes), "")
+        mode_name = k.name if k.modes else next((c for c in companions if agent_skills.SKILLS[c].modes), "")
+        done, cancelled, errors = counts.get("done", 0), counts.get("cancelled", 0), counts.get("error", 0)
+        waiting = counts.get("approval", 0) + counts.get("suggested", 0)
+        moments = [m if m.tzinfo else m.replace(tzinfo=dt.timezone.utc) for m in moments if m is not None]
         rows.append({"name": k.name, "title": k.title, "hint": k.hint, "who": agent_skills.WHO_RU[k.who],
+                     "who_short": agent_skills.WHO_SHORT.get(k.who, agent_skills.WHO_RU[k.who]),
+                     "who_note": agent_skills.WHO_NOTE.get(k.who, ""),
                      "modes": bool(mode_name), "mode_name": mode_name, "mode": modes.get(mode_name, "auto"),
-                     "on": k.name not in off, "limit": limits.get(k.name, ""), "limits": limit_options, "stats": counts})
+                     "on": k.name not in off, "limit": limits.get(k.name, ""), "limits": limit_options, "stats": counts,
+                     "companions": [agent_skills.SKILLS[c].title for c in companions],
+                     "total": done + waiting + cancelled + errors, "done": done, "waiting": waiting,
+                     "cancelled": cancelled, "errors": errors, "last_error": counts.get("last_error") or "",
+                     "last": _ago(max(moments)) if moments else "",
+                     "no_director": limits.get(k.name) == "director" and not director_set})
     return rows
+
+
+def _skill_groups(rows: list) -> list:
+    """The built-in skills by the groups of the Skills page; a skill missing from agent_skills.GROUPS goes to «Другое»."""
+    by_name, groups, seen = {r["name"]: r for r in rows}, [], set()
+    for title, names in agent_skills.GROUPS:
+        items = [by_name[n] for n in names if n in by_name]
+        seen.update(r["name"] for r in items)
+        if items:
+            groups.append({"title": title, "skills": items})
+    rest = [r for r in rows if r["name"] not in seen]
+    if rest:
+        groups.append({"title": "Другое", "skills": rest})
+    for g in groups:
+        g["on"] = sum(1 for r in g["skills"] if r["on"])
+    return groups
+
+
+def _skills_summary(rows: list) -> dict:
+    """The tiles above the built-in skills: how many are on, worked, waited for an approval and failed in 30 days."""
+    busiest = max(rows, key=lambda r: r["total"], default=None)
+    return {"count": len(rows), "on": sum(1 for r in rows if r["on"]), "off": sum(1 for r in rows if not r["on"]),
+            "done": sum(r["done"] for r in rows), "waiting": sum(r["waiting"] for r in rows),
+            "cancelled": sum(r["cancelled"] for r in rows), "errors": sum(r["errors"] for r in rows),
+            "failing": sum(1 for r in rows if r["errors"]), "unused": sum(1 for r in rows if not r["total"]),
+            "guarded": sum(1 for r in rows if r["modes"] and r["mode"] != "auto"),
+            "busiest": busiest["title"] if busiest and busiest["total"] else ""}
 
 
 @app.get("/skills", response_class=HTMLResponse)
@@ -1339,9 +1397,12 @@ def skills_view(request: Request, edit: int = 0, saved: int = 0):
         rows = [{"id": k.id, "title": k.title, "kind": k.kind, "when": k.when_to_use or "", "body": k.body, "active": k.active,
                  "uses": k.uses, "updated": k.updated_at, "by": k.updated_by or ""}
                 for k in s.query(Skill).order_by(Skill.active.desc(), Skill.title)]
-    return page(request, "skills.html", skills=rows, edit=edit, builtin=_builtin_skills(), saved=saved,
-                modes_ru=agent_skills.MODE_RU, mode_hints=agent_skills.MODE_HINT, transport=agent_skills.transport(),
-                transports=agent_skills.TRANSPORT_RU, agent_model=voice.model(), limit_ru=agent_skills.LIMIT_RU,
+    builtin = _builtin_skills()
+    return page(request, "skills.html", skills=rows, edit=edit, builtin=builtin, saved=saved,
+                groups=_skill_groups(builtin), summary=_skills_summary(builtin),
+                modes_ru=agent_skills.MODE_RU, modes_short=agent_skills.MODE_SHORT, mode_hints=agent_skills.MODE_HINT,
+                transport=agent_skills.transport(), transports=agent_skills.TRANSPORT_RU, agent_model=voice.model(),
+                limit_ru=agent_skills.LIMIT_RU, limit_short=agent_skills.LIMIT_SHORT,
                 director_set=bool(settings_store.get("director_chat_ids")))
 
 
@@ -1489,9 +1550,11 @@ async def skill_save(request: Request):
             s.add(k)
         k.title, k.body, k.kind = title, body, kind
         k.when_to_use = str(f.get("when_to_use") or "").strip()[:2000]
-        k.active, k.updated_by = f.get("active", "on") == "on", _who(request)
+        # the page sends active_shown with its switch: unticked means off (a form without it keeps the old default «on»)
+        k.active = f.get("active") == "on" if f.get("active_shown") else f.get("active", "on") == "on"
+        k.updated_by = _who(request)
         s.commit()
-    return RedirectResponse("/skills", 303)
+    return RedirectResponse("/skills#company-skills", 303)
 
 
 @app.post("/skills/{sid}/{action}")
@@ -1508,7 +1571,7 @@ def skill_action(request: Request, sid: int, action: str):
         else:
             raise HTTPException(404, "Неизвестное действие")
         s.commit()
-    return RedirectResponse("/skills", 303)
+    return RedirectResponse("/skills#company-skills", 303)
 
 
 @app.get("/documents/{doc_id}/view", response_class=HTMLResponse)
