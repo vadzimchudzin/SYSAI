@@ -1,8 +1,50 @@
 {% extends "base.html" %}{% block title %}Документы — SYSAI{% endblock %}
+{% block head %}<style>.doc-tpl{border-top:1px solid rgba(127,127,127,.25);padding:8px 0}.doc-tpl summary{cursor:pointer}.doc-tpl-form{margin-top:8px}.doc-tpl-form input[name^=hint_]{width:100%}</style>{% endblock %}
 {% block body %}
 <div class="row between"><h1>Документы</h1>
   <form method="get" action="/documents" class="row"><input name="q" value="{{ q }}" placeholder="Поиск по имени файла или подписи"> <button class="btn sm">Найти</button></form></div>
-<p class="muted small">Файлы, которые сотрудники прислали ИИ-сотруднику в Telegram: к какому делу привязаны и кому переданы. Содержимое проверяется по SHA-256 перед каждой пересылкой.</p>
+<p class="muted small">Файлы, которые сотрудники прислали ИИ-сотруднику в Telegram, и документы, которые он сделал по шаблонам: к какому делу привязаны и кому переданы. Содержимое проверяется по SHA-256 перед каждой пересылкой.</p>
+{% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn" role="alert">Не сохранено: {{ error }}</div>{% endif %}
+<section class="card" id="templates">
+  <h2>Шаблоны документов</h2>
+  <p class="small muted">Письма, акты, служебки компании в формате Word (.docx) с полями в двойных фигурных скобках: <code>{{ '{{Дата}}' }}</code>, <code>{{ '{{Получатель}}' }}</code>, <code>{{ '{{Сумма}}' }}</code>. По просьбе в чате ИИ-сотрудник заполняет поля из поручения и памяти компании (недостающее спрашивает), присылает черновик тому, кто просил, и после «ок» сохраняет документ здесь и отправляет, кому сказали. Поля заполняются внутри самого шаблона — шрифты, таблицы и бланк остаются как в Word; PDF делается из заполненного документа.</p>
+  {% for t in templates %}<details class="doc-tpl {{ '' if t.active else 'muted' }}"><summary><b>{{ t.title }}</b> <span class="pill gray">{{ t.output_ru }}</span>{% if not t.active %} <span class="pill gray">выключен</span>{% endif %}
+      <span class="muted small">· полей {{ t.fields|length }} · применён {{ t.uses }} раз{% if t.by %} · {{ t.by }}{% endif %}</span></summary>
+    <form method="post" action="/documents/templates" enctype="multipart/form-data" class="doc-tpl-form">
+      <input type="hidden" name="template_id" value="{{ t.id }}">
+      <div class="row"><label class="f" style="flex:2">Название <input name="title" required maxlength="200" value="{{ t.title }}"></label>
+        <label class="f">Результат <select name="output">{% for k, v in outputs.items() %}<option value="{{ k }}" {{ 'selected' if t.output == k }}>{{ v }}</option>{% endfor %}</select></label></div>
+      <label class="f">Когда применять <input name="description" maxlength="2000" value="{{ t.description }}" placeholder="Гарантийное письмо заказчику об оплате"></label>
+      <div class="table-wrap"><table class="small"><thead><tr><th>Поле</th><th>Подсказка ассистенту: что в нём и откуда взять</th></tr></thead><tbody>
+        {% for f in t.fields %}<tr><td><code>{{ '{{' }}{{ f.name }}{{ '}}' }}</code><input type="hidden" name="field_{{ loop.index0 }}" value="{{ f.name }}"></td>
+          <td><input name="hint_{{ loop.index0 }}" maxlength="300" value="{{ f.hint }}" aria-label="Подсказка для поля {{ f.name }}" placeholder="например: полное название организации из карточки клиента"></td></tr>{% endfor %}
+      </tbody></table></div>
+      <label class="f">Заменить файл шаблона (необязательно) <input type="file" name="file" accept=".docx"></label>
+      <div class="row small" style="gap:8px;margin-top:8px"><button class="btn sm primary">Сохранить</button>
+        <a href="/documents/templates/{{ t.id }}/sample">пример заполнения</a> <a href="/documents/templates/{{ t.id }}/file">файл шаблона{% if t.filename %} ({{ t.filename }}){% endif %}</a></div>
+    </form>
+    <div class="row small" style="gap:8px;margin-top:6px">
+      <form method="post" action="/documents/templates/{{ t.id }}/toggle"><button class="btn sm ghost">{{ 'выключить' if t.active else 'включить' }}</button></form>
+      <form method="post" action="/documents/templates/{{ t.id }}/delete" onsubmit="return confirm('Удалить шаблон?')"><button class="btn sm ghost">удалить</button></form></div>
+  </details>{% else %}<p class="muted small">Шаблонов пока нет.</p>{% endfor %}
+  <form method="post" action="/documents/templates" enctype="multipart/form-data" class="doc-tpl-form" style="margin-top:10px">
+    <h3>Новый шаблон</h3>
+    <div class="row"><label class="f" style="flex:2">Название <input name="title" required maxlength="200" placeholder="Гарантийное письмо"></label>
+      <label class="f">Результат <select name="output">{% for k, v in outputs.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label></div>
+    <label class="f">Когда применять <input name="description" maxlength="2000" placeholder="Письмо заказчику с гарантией оплаты до даты"></label>
+    <label class="f">Файл шаблона (.docx) <input type="file" name="file" accept=".docx" required></label>
+    <button class="btn sm primary" style="margin-top:8px">Загрузить</button>
+  </form>
+  {% if made %}<h3>Сделано по шаблонам</h3>
+  <div class="table-wrap"><table class="small"><thead><tr><th>Документ</th><th>Кто просил</th><th>Статус</th><th>Файлы</th></tr></thead><tbody>
+    {% for d in made %}<tr><td><b>{{ d.title }}</b><div class="muted">{{ d.template }} · {{ d.at.strftime('%d.%m %H:%M') if d.at }}</div>{% if d.error %}<div class="warn">{{ d.error }}</div>{% endif %}</td>
+      <td>{{ d.by or '—' }}</td>
+      <td>{{ draft_ru.get(d.status, d.status) }}{% if d.send_to %} · кому: {{ d.send_to }}{% endif %}</td>
+      <td>{% if d.has_docx %}<a href="/documents/drafts/{{ d.id }}/docx">DOCX</a>{% endif %} {% if d.has_pdf %}<a href="/documents/drafts/{{ d.id }}/pdf">PDF</a>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>{% endif %}
+</section>
+<h2>Библиотека</h2>
 {% if not docs %}<div class="card muted">Документов пока нет.</div>{% else %}
 <div class="table-wrap"><table>
   <thead><tr><th>Файл</th><th>От кого</th><th>Дело</th><th>Передан</th></tr></thead>

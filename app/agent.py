@@ -23,8 +23,8 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import (access, agent_skills, cases, deadlines, dialog_memory, memory as company_memory, llm, orders, reminders,
-               settings_store, transcribe, userbot, voice)
+from . import (access, agent_skills, cases, deadlines, dialog_memory, doc_templates, memory as company_memory, llm, orders,
+               reminders, settings_store, transcribe, userbot, voice)
 from .db import (ConversationEscalation, ConversationMessage, Document, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
@@ -565,14 +565,20 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
         hint = _refer_to(s, employee)
         if hint:
             ctx["refer_to"] = hint
-    if person.skills is not None:
-        off = [agent_skills.SKILLS[n].title for n in agent_skills.SKILLS
-               if n not in agent_skills.PAIRED and not agent_skills.allowed_skill(n, person)]
-        if off:
-            ctx["skills_off"] = off
+    off = [agent_skills.SKILLS[n].title for n in agent_skills.SKILLS  # the card and the Skills page
+           if n not in agent_skills.PAIRED and not agent_skills.allowed_skill(n, person)]
+    if off:
+        ctx["skills_off"] = off
     waiting_order = orders.pending_view(s, chat)
     if waiting_order:
         ctx["order_to_confirm"] = waiting_order
+    if agent_skills.allowed_skill("make_document", person):  # the templates of the panel and the draft waiting for «ок»
+        templates = doc_templates.view(s)
+        if templates:
+            ctx["document_templates"] = templates
+        draft = doc_templates.pending_view(s, chat)
+        if draft:
+            ctx["document_draft"] = draft
     silences = cases.silence_view({"user_id": chat, "username": result.get("username") or "",
                                    "phone": result.get("phone") or ""})
     if silences:
@@ -613,7 +619,15 @@ ORDER_RULES = (
     "поручение, которое выполняет этот человек: когда он пишет, что сделал или что мешает, отметь task_status по task_id. "
     "silence_to_decide — дела, по которым ты сообщил этому человеку, что сотрудник молчит: «напомни ещё», «займусь "
     "сам», «отмени» — это silence_choice с case_id этого дела. ")
-GENERAL_RULES = ORDER_RULES + (
+DOC_RULES = (
+    "Документы по шаблону: document_templates — шаблоны компании (письма, акты, служебки) с полями fields. Просьбу "
+    "подготовить такой документ выполняй действием make_document: значения всех полей бери из сообщения, разговора, "
+    "known_facts и team (hint подсказывает, что в поле), не выдумывай; если чего-то нет — задай один короткий вопрос о "
+    "недостающем без действия. С make_document в reply коротко скажи, что ниже черновик, и попроси проверить: «ок» — "
+    "сохранишь (и отправишь, если назвали кому), или пусть напишет, что поправить. document_draft — черновик, который "
+    "ждёт ответа: «ок» — confirm_document с ok=true, «не надо» — ok=false, поправка — новый make_document с "
+    "исправленными values. Если подходящего шаблона нет, так и скажи и не обещай документ. ")
+GENERAL_RULES = ORDER_RULES + DOC_RULES + (
     "Память разговора: history — последние сообщения целиком; dialog_memory — краткий пересказ более ранней части "
     "разговора; from_earlier — старые сообщения, которые код нашёл по словам этого сообщения; recalled — что нашлось, "
     "когда ты сам попросил вспомнить. На «как договаривались», «тот акт», «как в прошлый раз» отвечай по ним и "
@@ -886,11 +900,13 @@ def _denied(action: dict, employee, reviewer: bool, full: bool) -> bool:
 _W = r"(?<![а-яёa-z])({})(?![а-яёa-z])"
 PROMISES = (  # (words in the reply, actions that keep the promise, does a running case keep it)
     (_W.format("перешлю|передам|отправлю|скину|пришлю|упакую|запакую|заархивирую"),
-     {"deliver_files", "relay_answer", "assign_task", "team_report", "order", "confirm_order"}, True),
+     {"deliver_files", "relay_answer", "assign_task", "team_report", "order", "confirm_order", "make_document",
+      "confirm_document"}, True),
     (_W.format("напомню"), {"remind", "order", "confirm_order"}, False),
     (_W.format("уточню|спрошу|узнаю|запрошу"), {"ask_reviewer", "assign_task", "relay_answer", "order", "confirm_order"},
      False),
-    (_W.format("подготовлю|соберу|сделаю"), {"team_report", "assign_task", "deliver_files", "remind"}, False),
+    (_W.format("подготовлю|соберу|сделаю|составлю"), {"team_report", "assign_task", "deliver_files", "remind",
+                                                      "make_document"}, False),
     (_W.format("поручу|назначу|поставлю задачу"), {"order", "confirm_order", "assign_task"}, False),
 )
 _CONDITIONAL = re.compile(r"(?<![а-яё])(если|как только|когда|после того как|могу|можно|хочешь|нужно ли)(?![а-яё])")
@@ -1110,6 +1126,10 @@ def _process(row_id: int) -> None:
         if action["type"] == "team_report" and done and not result.get("sent_team_report"):
             assistant.send_team_report(chat, action["scope"])
             result["sent_team_report"] = True
+            _store(row_id, result)
+        if action["type"] == "make_document" and done and not result.get("sent_document_draft"):
+            doc_templates.show_pending(chat)  # the draft file follows the reply that asks to check it
+            result["sent_document_draft"] = True
             _store(row_id, result)
     with SessionLocal() as s:
         row = s.get(ConversationMessage, row_id)

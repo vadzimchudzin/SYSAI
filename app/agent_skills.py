@@ -14,9 +14,10 @@ import datetime as dt
 import json
 import logging
 
-from . import bitrix, cases, deadlines, meeting_alerts, orders, reminders, settings_store, userbot
-from .db import (Case, ConversationEscalation, ConversationMessage, Employee, EmployeeDepartment, Meeting, Note,
-                 SessionLocal, Task, now)
+from . import (bitrix, cases, deadlines, doc_templates, meeting_alerts, orders, reminders, settings_store, skill_stats,
+               userbot)
+from .db import (Case, ConversationEscalation, ConversationMessage, DocDraft, DocTemplate, Employee, EmployeeDepartment,
+                 Meeting, Note, SessionLocal, Task, now)
 
 log = logging.getLogger("sysai.agent")
 
@@ -34,7 +35,10 @@ SCOPE_RU = {"": "по уровню доступа", "all": "всем", "departme
 SCOPE_HINT = {"all": "любому сотруднику", "department": "людям своих подразделений",
               "self": "только себе: свои задачи и напоминания"}
 ORDER_KINDS = ("task", "ask", "request")
-PAIRED = {"confirm_order": "order"}  # turned on and off together with the skill it belongs to
+PAIRED = {"confirm_order": "order", "confirm_document": "make_document"}  # on and off with the skill they belong to
+# Who may use a skill can be narrowed on the Skills page (never widened): only the leaders, only the director.
+LIMITS = ("leaders", "director")
+LIMIT_RU = {"": "как задумано", "leaders": "только руководители (проверяющие и директор)", "director": "только директор"}
 TRANSPORTS = ("json", "tools")
 TRANSPORT_RU = {"json": "ответ в JSON", "tools": "вызов функций"}
 WALL = r"нет доступа|недостаточно прав|нет прав|запрещено|не уполномочен"
@@ -54,6 +58,7 @@ class Person:
     scope: str = ""                   # to whom they may give orders: "" by the level | all | department | self
     team: frozenset = frozenset()     # the department scope: ids of the people of their departments
     skills: frozenset | None = None   # None: every skill the level allows; otherwise only these (the card)
+    switches: bool = True             # the Skills page switches apply (off for the checking dialogs: a clean company)
 
     @property
     def leader(self) -> bool:
@@ -269,6 +274,35 @@ SKILLS = {s.name: s for s in (
            "choice": _str("remind — напомнить ещё раз, self — займусь сам, cancel — отменить дело",
                           ("remind", "self", "cancel"))},
           ("case_id", "choice")),
+    Skill("make_document", "Документ по шаблону", "Заполнить шаблон из панели (письмо, акт, служебку): черновик — на "
+                                                   "проверку, после «ок» — сохранить или отправить",
+          "человек просит подготовить документ (письмо, акт, служебку, заявление…), а в document_templates есть "
+          "подходящий шаблон (смотри title и when). В values дай значение для КАЖДОГО поля из fields шаблона (ключ — "
+          "имя поля в точности как в шаблоне, hint — что в нём): бери из сообщения, разговора, known_facts и team, "
+          "даты пиши как в документах (14.11.2025), ничего не выдумывай. Если какого-то поля нет в данных — не делай "
+          "make_document, а задай один короткий вопрос о недостающем. send_to — ID сотрудника из team, если человек "
+          "просит отправить документ ему (иначе null: документ сохранится в библиотеке). Код соберёт черновик и пришлёт "
+          "файл после твоего ответа; в reply коротко скажи, что ниже черновик, и попроси проверить: «ок» — сохранишь "
+          "(и отправишь send_to), или пусть напишет, что поправить. Если подходящего шаблона нет — так и скажи",
+          '{"type":"make_document","template_id":ID из document_templates,"values":{"Поле":"значение",...},'
+          '"title":"название документа","send_to":ID сотрудника или null}',
+          {"template_id": _int("ID шаблона из document_templates"),
+           "values": {"type": "object", "additionalProperties": {"type": "string"},
+                      "description": "значение каждого поля шаблона: ключ — имя поля из fields"},
+           "title": _str("название документа для имени файла, коротко (например, «Письмо ООО Монолит»)"),
+           "send_to": _int("ID сотрудника из team, кому отправить документ после «ок»; не указывай, чтобы только "
+                           "сохранить")},
+          ("template_id", "values"), modes=True, after_reply=True),
+    Skill("confirm_document", "Сохранить документ", "Человек ответил «ок» на черновик документа — он сохраняется и "
+                                                    "отправляется",
+          "человек ответил на черновик из document_draft: «ок», «да», «всё верно», «отправляй» — ok=true (код сохранит "
+          "документ в библиотеке и отправит его send_to, если он указан); «не надо», «отмена» — ok=false. Если человек "
+          "просит поправить (другая сумма, дата, получатель, текст), это не confirm_document: дай новый make_document "
+          "с тем же template_id и исправленными values и снова попроси проверить",
+          '{"type":"confirm_document","draft_id":ID,"ok":true|false}',
+          {"draft_id": _int("ID черновика из document_draft"),
+           "ok": {"type": "boolean", "description": "true — сохранить (и отправить), false — отменить"}},
+          ("draft_id", "ok")),
 )}
 
 MEMORY_TOOL = {"type": "function", "function": {
@@ -287,9 +321,38 @@ RECALL_TOOL = {"type": "function", "function": {
 
 
 # ----------------------------------------------------------------------------- who and how
+def switched_off() -> set:
+    """The skills turned off on the Skills page: nobody gets them, the director included."""
+    stored = settings_store.get("agent_skills_off") or []
+    return {str(x) for x in stored if str(x) in SKILLS} if isinstance(stored, (list, tuple)) else set()
+
+
+def limits() -> dict:
+    """Skill -> leaders | director: who may use it, narrowed on the Skills page."""
+    stored = settings_store.get("agent_skill_who") or {}
+    stored = stored if isinstance(stored, dict) else {}
+    return {name: value for name, value in stored.items() if name in SKILLS and value in LIMITS}
+
+
+def why_not(name: str, person: Person) -> str:
+    """Why this person may not use the skill now ("" = they may): the Skills page, then the employee card."""
+    main = PAIRED.get(name, name)
+    if person.switches:
+        if main in switched_off():
+            return "этот навык выключен на странице «Навыки»"
+        limit = limits().get(main)
+        if limit == "director" and not person.director:
+            return "этот навык на странице «Навыки» оставлен только директору"
+        if limit == "leaders" and not person.leader:
+            return "этот навык на странице «Навыки» оставлен только руководителям"
+    if person.skills is None or person.director or main in person.skills:
+        return ""
+    return "этот навык для этого человека выключен в его карточке"
+
+
 def allowed_skill(name: str, person: Person) -> bool:
-    """The employee card may turn skills off for the person (None: everything the level allows)."""
-    return person.skills is None or person.director or PAIRED.get(name, name) in person.skills
+    """The Skills page and the employee card may turn skills off (None in the card: everything the level allows)."""
+    return not why_not(name, person)
 
 
 def available(skill: Skill, person: Person) -> bool:
@@ -355,7 +418,8 @@ def tools(person: Person) -> list:
     return out
 
 
-_INT_FIELDS = ("task_id", "employee_id", "question_id", "meeting_id", "reminder_id", "case_id", "order_id")
+_INT_FIELDS = ("task_id", "employee_id", "question_id", "meeting_id", "reminder_id", "case_id", "order_id",
+               "template_id", "draft_id")
 
 
 def _as_int(value):
@@ -392,10 +456,23 @@ def normalize(action: dict) -> dict:
             out["forward_to"] = None if out["forward_to"] in (None, "", 0, "null") else _as_int(out["forward_to"])
         if out.get("deadline") in ("", "null"):
             out["deadline"] = None
-    elif kind == "confirm_order":
+    elif kind in ("confirm_order", "confirm_document"):
         ok = out.get("ok")
         if isinstance(ok, str):
             out["ok"] = {"true": True, "false": False, "да": True, "нет": False}.get(ok.strip().lower(), ok)
+    elif kind == "make_document":
+        values = out.get("values")
+        if isinstance(values, str):
+            try:
+                values = json.loads(values)
+            except json.JSONDecodeError:
+                pass
+        if isinstance(values, dict):
+            out["values"] = {" ".join(str(k).split()): ("" if v is None else str(v).strip()) for k, v in values.items()}
+        else:
+            out["values"] = values
+        to = out.get("send_to")
+        out["send_to"] = None if to in (None, "", 0, "null", "none") else _as_int(to)
     elif kind == "remind":
         people = out.pop("people", None)
         if out.get("to") == "people":
@@ -453,8 +530,8 @@ def check(action: dict, ctx: dict, person: Person, approvers=None) -> str:
     kind = action.get("type")
     if action.get("_error"):
         return f"{kind}: {action['_error']}"
-    if kind in SKILLS and not allowed_skill(kind, person):
-        return f"{kind}: этот навык для этого человека выключен в его карточке"
+    if kind in SKILLS and why_not(kind, person):
+        return f"{kind}: {why_not(kind, person)}"
     if kind == "set_deadline":
         if employee is None:
             return "set_deadline доступно только сотруднику"
@@ -603,6 +680,15 @@ def check(action: dict, ctx: dict, person: Person, approvers=None) -> str:
         if action.get("choice") not in ("remind", "self", "cancel"):
             return "silence_choice: choice это remind, self или cancel"
         return ""
+    if kind == "make_document":
+        return _check_document(action, ctx, person)
+    if kind == "confirm_document":
+        waiting = ctx.get("document_draft")
+        if not isinstance(waiting, dict) or action.get("draft_id") != waiting.get("id"):
+            return "confirm_document: черновик не найден среди ждущих ответа (document_draft)"
+        if action.get("ok") not in (True, False):
+            return "confirm_document: ok это true или false"
+        return ""
     if kind == "confirm_order":
         waiting = ctx.get("order_to_confirm")
         if not isinstance(waiting, dict) or action.get("order_id") != waiting.get("id"):
@@ -669,6 +755,34 @@ def _check_order(action: dict, ctx: dict, person: Person) -> str:
     return ""
 
 
+def _check_document(action: dict, ctx: dict, person: Person) -> str:
+    templates = {t.get("id"): t for t in ctx.get("document_templates") or [] if isinstance(t, dict)}
+    template = templates.get(action.get("template_id"))
+    if template is None:
+        return "make_document: шаблон не найден среди document_templates"
+    values = action.get("values")
+    if not isinstance(values, dict):
+        return "make_document: values — объект {имя поля: значение}"
+    missing = [f["name"] for f in template.get("fields") or [] if not str(values.get(f["name"]) or "").strip()]
+    if missing:
+        return ("make_document: не хватает полей " + ", ".join(f"«{x}»" for x in missing) + ". Возьми их из сообщения, "
+                "разговора или known_facts, а если их там нет — не делай make_document и спроси у человека одним "
+                "коротким вопросом")
+    to = action.get("send_to")
+    if to is None:
+        return ""
+    team = {p["id"]: p for p in ctx.get("team", []) if isinstance(p, dict)}
+    if not team:
+        return "make_document: этот человек не отправляет документы коллегам — send_to null, документ сохранится"
+    if not _is_id(to) or to not in team:
+        return "make_document: send_to должен быть ID сотрудника из team или null"
+    if person.order_scope == "department" and to not in person.team:
+        return f"make_document: {team[to]['name']} не из отдела этого человека"
+    if not team[to].get("reachable"):
+        return f"make_document: у {team[to]['name']} нет Telegram-контакта в справочнике"
+    return ""
+
+
 def denied(action: dict, person: Person) -> bool:
     """The action needs more than this person is allowed (as opposed to a mistake in the action itself)."""
     kind = action.get("type")
@@ -691,6 +805,13 @@ def denied(action: dict, person: Person) -> bool:
         if person.order_scope == "department":
             return to not in person.team or (action.get("forward_to") is not None
                                              and action.get("forward_to") not in person.team)
+        return person.order_scope == "self"
+    if kind == "make_document":
+        to = action.get("send_to")
+        if to is None or to == person.employee_id:
+            return False
+        if person.order_scope == "department":
+            return to not in person.team
         return person.order_scope == "self"
     if kind in ("relay_answer", "approve_meeting", "reject_meeting", "approve_case", "cancel_case"):
         return not person.reviewer
@@ -878,6 +999,20 @@ def execute(action: dict, chat: str, employee_id, author: str, sender: dict | No
                 cases.silence_choice(action["case_id"], action["choice"], author, employee_id)
             except (cases.CaseError, cases.Retry) as exc:
                 raise SkillError(f"silence_choice: {exc}") from exc
+        elif kind == "make_document":  # the draft goes to the person after the reply (agent._process, cases._run_skill)
+            s.commit()
+            try:
+                doc_templates.make_draft(action["template_id"], action.get("values") or {}, chat=chat,
+                                         requested_by=author, employee_id=employee_id,
+                                         title=str(action.get("title") or ""), send_to=action.get("send_to"))
+            except doc_templates.TemplateError as exc:
+                raise SkillError(f"make_document: {exc}") from exc
+        elif kind == "confirm_document":
+            s.commit()
+            try:
+                doc_templates.decide(action["draft_id"], chat, bool(action.get("ok")), author)
+            except doc_templates.TemplateError as exc:
+                raise SkillError(f"confirm_document: {exc}") from exc
         else:
             raise SkillError(f"неизвестный навык {kind!r}")
 
@@ -924,6 +1059,15 @@ def describe(action: dict) -> str:
                                    name(action.get("forward_to")) if action.get("forward_to") else "")
         if kind == "confirm_order":
             return orders.describe_order(s, action.get("order_id"), bool(action.get("ok", True)))
+        if kind == "make_document":
+            template = s.get(DocTemplate, action.get("template_id")) if isinstance(action.get("template_id"), int) else None
+            what = str(action.get("title") or "").strip() or (template.title if template else "документ")
+            to = f", после «ок» отправить {name(action.get('send_to'))}" if action.get("send_to") else ""
+            return f"подготовить по шаблону «{template.title if template else '?'}»: {what[:150]}{to}"
+        if kind == "confirm_document":
+            draft = s.get(DocDraft, action.get("draft_id")) if isinstance(action.get("draft_id"), int) else None
+            what = f"«{draft.title}»" if draft else f"#{action.get('draft_id')}"
+            return f"{'сохранить' if action.get('ok', True) else 'отменить'} документ {what}"
         if kind == "silence_choice":
             case = s.get(Case, action.get("case_id")) if isinstance(action.get("case_id"), int) else None
             what = cases.SILENCE_CHOICES.get(action.get("choice"), str(action.get("choice")))
@@ -938,6 +1082,12 @@ def run(action: dict, chat: str, person: Person, author: str, sender: dict | Non
     if mode != "auto":
         case_id = cases.start_skill(action, describe(action), mode, chat=chat, requested_by=author,
                                     employee_id=person.employee_id, sender=sender, full=person.full)
+        skill_stats.record(action["type"], "approval" if mode == "approve" else "suggested", chat=chat)
         return {"case_id": case_id, "mode": mode}
-    execute(action, chat, person.employee_id, author, sender, full=person.full)
+    try:
+        execute(action, chat, person.employee_id, author, sender, full=person.full)
+    except Exception as exc:
+        skill_stats.record(action["type"], "error", str(exc), chat)
+        raise
+    skill_stats.record(action["type"], "done", chat=chat)
     return {"done": True}

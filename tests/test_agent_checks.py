@@ -57,7 +57,8 @@ def openrouter(monkeypatch):
 
 def ideal(spec: dict) -> dict:
     """The action a perfect model would take for an expected spec (callables become a fitting text)."""
-    action = {k: ("до 12 тысяч, прораб не дал объёмы" if callable(v) else v) for k, v in spec.items()}
+    action = {k: (getattr(v, "example", "до 12 тысяч, прораб не дал объёмы") if callable(v) else v)
+              for k, v in spec.items()}
     for name in agent_skills.SKILLS[spec["type"]].required:
         action.setdefault(name, "Уточнить у руководителя по задаче")
     return action

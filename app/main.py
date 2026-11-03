@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_templates, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, voice_memory, voice_relabel,
                storage, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
@@ -1284,9 +1284,30 @@ def memory_person_forget(request: Request, eid: int):
 
 
 def _builtin_skills() -> list:
-    modes = agent_skills.modes()
-    return [{"name": k.name, "title": k.title, "hint": k.hint, "who": agent_skills.WHO_RU[k.who], "modes": k.modes,
-             "mode": modes.get(k.name, "auto")} for k in agent_skills.SKILLS.values()]
+    """The built-in skills with their switches and the uses of the last 30 days (companion skills follow their main one)."""
+    from . import skill_stats
+    modes, off, limits = agent_skills.modes(), agent_skills.switched_off(), agent_skills.limits()
+    used = skill_stats.stats(30)
+    rows = []
+    for k in agent_skills.SKILLS.values():
+        if k.name in agent_skills.PAIRED:
+            continue
+        counts = dict(used.get(k.name) or {})
+        for companion, main in agent_skills.PAIRED.items():
+            if main == k.name:
+                for key, value in (used.get(companion) or {}).items():
+                    if key != "last_error":
+                        counts[key] = counts.get(key, 0) + value
+                    elif value and not counts.get("last_error"):
+                        counts["last_error"] = value
+        limit_options = [x for x in agent_skills.LIMITS if not (x == "leaders" and k.who in ("reviewer", "assign"))]
+        # the mode of a pair is the mode of the step that does the work (an order starts after «да»: confirm_order)
+        mode_name = k.name if k.modes else next((c for c, m in agent_skills.PAIRED.items()
+                                                 if m == k.name and agent_skills.SKILLS[c].modes), "")
+        rows.append({"name": k.name, "title": k.title, "hint": k.hint, "who": agent_skills.WHO_RU[k.who],
+                     "modes": bool(mode_name), "mode_name": mode_name, "mode": modes.get(mode_name, "auto"),
+                     "on": k.name not in off, "limit": limits.get(k.name, ""), "limits": limit_options, "stats": counts})
+    return rows
 
 
 @app.get("/skills", response_class=HTMLResponse)
@@ -1298,7 +1319,8 @@ def skills_view(request: Request, edit: int = 0, saved: int = 0):
                 for k in s.query(Skill).order_by(Skill.active.desc(), Skill.title)]
     return page(request, "skills.html", skills=rows, edit=edit, builtin=_builtin_skills(), saved=saved,
                 modes_ru=agent_skills.MODE_RU, mode_hints=agent_skills.MODE_HINT, transport=agent_skills.transport(),
-                transports=agent_skills.TRANSPORT_RU, agent_model=voice.model())
+                transports=agent_skills.TRANSPORT_RU, agent_model=voice.model(), limit_ru=agent_skills.LIMIT_RU,
+                director_set=bool(settings_store.get("director_chat_ids")))
 
 
 @app.post("/skills/agent")
@@ -1307,14 +1329,24 @@ async def skills_agent_save(request: Request):
     model asks for them."""
     guard_admin(request)
     f = await request.form()
-    chosen = {}
+    chosen, off, limits = {}, [], {}
     for name, skill in agent_skills.SKILLS.items():
         value = str(f.get(f"mode_{name}") or "auto")
         if skill.modes and value in agent_skills.MODES and value != "auto":
             chosen[name] = value
+        if name in agent_skills.PAIRED:
+            continue  # a companion skill follows the one it belongs to
+        if f.get("present_switches") == "1" and not f.get(f"on_{name}"):
+            off.append(name)
+        limit = str(f.get(f"who_{name}") or "")
+        if limit in agent_skills.LIMITS:
+            limits[name] = limit
     way = str(f.get("transport") or "")
-    settings_store.set_many({"agent_skill_modes": chosen,
-                             "agent_transport": way if way in agent_skills.TRANSPORTS else agent_skills.transport()})
+    updates = {"agent_skill_modes": chosen,
+               "agent_transport": way if way in agent_skills.TRANSPORTS else agent_skills.transport()}
+    if f.get("present_switches") == "1":  # an older form without the switches leaves them as they are
+        updates.update({"agent_skills_off": off, "agent_skill_who": limits})
+    settings_store.set_many(updates)
     return RedirectResponse("/skills?saved=1#agent-skills", 303)
 
 
@@ -1476,8 +1508,18 @@ def document_reread(request: Request, doc_id: int):
     return RedirectResponse(f"/documents/{doc_id}/view", 303)
 
 
+def _document_sender(d) -> str:
+    if d.chat_id == "generated":  # made from a template for the person who asked
+        return f"{d.employee.name} (по шаблону)" if d.employee else "по шаблону"
+    return d.employee.name if d.employee else d.chat_id
+
+
+DOC_TEMPLATE_MESSAGES = {"saved": "Шаблон сохранён: ИИ-сотрудник видит его со следующего сообщения.",
+                         "toggled": "Готово.", "deleted": "Шаблон удалён."}
+
+
 @app.get("/documents", response_class=HTMLResponse)
-def documents_view(request: Request, q: str = ""):
+def documents_view(request: Request, q: str = "", msg: str = "", error: str = ""):
     """The library of files people sent to the AI employee, with the case and where each file was passed on."""
     guard_admin(request)
     with SessionLocal() as s:
@@ -1494,12 +1536,88 @@ def documents_view(request: Request, q: str = ""):
             rows.append({"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256[:12],
                          "sensitive": d.sensitive, "caption": d.caption, "at": d.created_at,
                          "summary": d.summary or "", "status": d.text_status or "pending",
-                         "sender": d.employee.name if d.employee else d.chat_id,
+                         "sender": _document_sender(d),
                          "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None,
                          "transfers": [{"to": (s.get(Employee, t.to_employee_id).name if t.to_employee_id and
                                                s.get(Employee, t.to_employee_id) else t.to_ref), "status": t.status,
                                         "at": t.sent_at} for t in transfers]})
-    return page(request, "documents.html", docs=rows, q=q)
+        templates, made = doc_templates.panel_list(s), doc_templates.recent(s, 15)
+    return page(request, "documents.html", docs=rows, q=q, templates=templates, made=made,
+                outputs=doc_templates.OUTPUTS, msg=DOC_TEMPLATE_MESSAGES.get(msg, ""), error=error[:300],
+                draft_ru=DRAFT_RU)
+
+
+DRAFT_RU = {"draft": "ждёт «ок»", "replaced": "заменён исправленным", "cancelled": "отменён", "approved": "сохранён, отправляется",
+            "sent": "сохранён и отправлен", "kept": "сохранён"}
+
+
+@app.post("/documents/templates")
+async def doc_template_save(request: Request):
+    """A DOCX template with fields {{…}}: a new one, or the title, the hints and the file of an existing one."""
+    guard_admin(request)
+    me = current_user(request) or {}
+    f = await request.form()
+    upload = f.get("file")
+    data = await upload.read() if upload is not None and hasattr(upload, "read") else b""
+    raw_id = str(f.get("template_id") or "").strip()
+    template_id = int(raw_id) if raw_id.isdigit() else 0
+    hints = {}
+    for key, value in f.multi_items():
+        if key.startswith("field_"):
+            hints[str(value)] = str(f.get("hint_" + key[len("field_"):]) or "")
+    try:
+        doc_templates.save_template(template_id=template_id or None, title=str(f.get("title") or ""),
+                                    description=str(f.get("description") or ""),
+                                    filename=getattr(upload, "filename", "") or "", data=data,
+                                    output=str(f.get("output") or "docx"), hints=hints,
+                                    by=me.get("name") or me.get("username") or "")
+    except doc_templates.TemplateError as exc:
+        return RedirectResponse("/documents?error=" + quote(str(exc)) + "#templates", 303)
+    return RedirectResponse("/documents?msg=saved#templates", 303)
+
+
+@app.post("/documents/templates/{template_id}/{action}")
+def doc_template_action(request: Request, template_id: int, action: str):
+    guard_admin(request)
+    try:
+        if action == "toggle":
+            doc_templates.toggle(template_id)
+        elif action == "delete":
+            doc_templates.delete(template_id)
+        else:
+            raise HTTPException(404, "Неизвестное действие")
+    except doc_templates.TemplateError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return RedirectResponse(f"/documents?msg={'deleted' if action == 'delete' else 'toggled'}#templates", 303)
+
+
+@app.get("/documents/templates/{template_id}/{what}")
+def doc_template_file(request: Request, template_id: int, what: str):
+    """The uploaded template (file) or the template with the names of its fields filled in (sample)."""
+    guard_admin(request)
+    try:
+        if what == "sample":
+            name, data = doc_templates.sample(template_id)
+        elif what == "file":
+            name, data = doc_templates.original(template_id)
+        else:
+            raise HTTPException(404, "Неизвестный файл")
+    except doc_templates.TemplateError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return Response(data, media_type=doc_templates.DOCX_MIME,
+                    headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name)})
+
+
+@app.get("/documents/drafts/{draft_id}/{kind}")
+def doc_draft_file(request: Request, draft_id: int, kind: str):
+    guard_admin(request)
+    if kind not in ("docx", "pdf"):
+        raise HTTPException(404, "Неизвестный файл")
+    try:
+        name, mime, data = doc_templates.draft_file(draft_id, kind)
+    except doc_templates.TemplateError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return Response(data, media_type=mime, headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name)})
 
 
 @app.get("/documents/{doc_id}")
@@ -2442,7 +2560,7 @@ def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str
         rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
         order_scopes=("",) + agent_skills.ORDER_SCOPES, scope_ru=agent_skills.SCOPE_RU, scope_hint=agent_skills.SCOPE_HINT,
         chat_skills=[x for x in agent_skills.SKILLS.values() if x.name not in agent_skills.PAIRED],
-        strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS,
+        skills_off_everywhere=agent_skills.switched_off(), strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS,
         edit=panel_employee.id if panel_employee else 0, add=bool(add) and panel_employee is None,
         panel_employee=panel_employee, panel_tab=tab, saved_name=saved[:200], voice_msg=voice_msg,
         voice_service_enabled=config.voice_service_enabled(),

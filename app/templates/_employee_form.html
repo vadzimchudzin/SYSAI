@@ -78,7 +78,7 @@
         {% set off = chat_skills|rejectattr('name', 'in', (e.skills_allowed if e and e.skills_allowed is not none else chat_skills|map(attribute='name')|list))|list %}
         <details class="more"><summary>{{ 'все, что позволяет уровень доступа' if not off else ('выключено: ' ~ off|map(attribute='title')|join(', ')) }}</summary>
           <div class="chips">
-            {% for sk in chat_skills %}<label class="chip" title="{{ sk.hint }}"><input type="checkbox" name="skill_allowed" value="{{ sk.name }}" {% if sk not in off %}checked{% endif %}>{{ sk.title }}</label>{% endfor %}
+            {% for sk in chat_skills %}<label class="chip" title="{{ sk.hint }}"><input type="checkbox" name="skill_allowed" value="{{ sk.name }}" {% if sk not in off %}checked{% endif %}>{{ sk.title }}{% if sk.name in skills_off_everywhere %} <span class="muted">(выключен для всех на странице «Навыки»)</span>{% endif %}</label>{% endfor %}
           </div>
         </details>
         <small class="muted">Снимите галочку — ассистент не будет этого делать для этого человека. Уровень доступа всё равно ограничивает.</small>
