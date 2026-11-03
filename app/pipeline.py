@@ -198,8 +198,11 @@ def _process(meeting_id: int):
                 # Kept next to the transcription, not after it: a restart of a free instance (a deploy, its sleep) then
                 # finds the copy already in the storage much more often. Called again below once the transcript is saved.
                 _keep_recording(meeting_id, audio_path, source)
+                recognition = {}
                 total, segments = transcribe.transcribe(audio_path, dict(settings, _participants=allowed),
-                                                        progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
+                                                        progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint,
+                                                        info=recognition)
+                _note_recognition(meeting_id, recognition)
                 segments, how = diarize.relabel(audio_path, segments, total, settings, people=people,
                                                 progress=lambda p: _set(meeting_id, progress=p),
                                                 meeting_id=meeting_id, allowed=allowed)
@@ -299,6 +302,19 @@ def _participants(meeting_id: int):
     except Exception:  # noqa: BLE001  the list is a hint: without it the meeting is processed as before
         log.exception("participants of meeting %s are unavailable", meeting_id)
         return None, 0, ""
+
+
+def _note_recognition(meeting_id: int, info: dict) -> None:
+    """Keep what the checks of the recognition found (shown on the meeting page): the engine, missed speech heard
+    again, doubtful words checked by ear, invented phrases dropped (transcribe.py, verify.py)."""
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if m is not None:
+                m.options = dict(m.options or {}, recognition=dict(info, at=now().isoformat(timespec="seconds")))
+                s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("recognition note of meeting %s was not saved", meeting_id, exc_info=True)
 
 
 def _note_diarization(meeting_id: int, how: dict) -> None:

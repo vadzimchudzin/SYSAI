@@ -220,11 +220,29 @@ def embed(texts: list, model: str, timeout: float = 60) -> list:
 PLAIN_JSON_STT_MODELS = frozenset({"openai/gpt-4o-transcribe", "openai/gpt-4o-mini-transcribe",
                                    "microsoft/mai-transcribe-1.5"})
 _STT_FORMAT: dict = {}  # model -> the first response format variant its provider accepted (this process)
+_STT_UNSUPPORTED: dict = {}  # model -> optional fields its provider rejected («keyterms», «diarize») in this process
+STT_MAX_KEYTERMS = 100
+
+
+def _rejected(features: dict, text: str) -> list:
+    """The optional fields an HTTP 400 is about: the one it names, all of them when it names no field at all."""
+    text = str(text or "").lower()
+    named = [name for name in features if (name == "keyterms" and "keyterm" in text)
+             or (name == "diarize" and "diariz" in text)]
+    if named:
+        return named
+    if any(word in text for word in ("response_format", "verbose", "timestamp", "granularit")):
+        return []  # the format is the problem: a simpler one is tried next
+    return list(features)
 
 
 def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", language: str = "ru",
-                    timeout: float = 60, prompt: str = "") -> dict:
-    """Call OpenRouter's dedicated speech-to-text endpoint and preserve provider timestamps when available."""
+                    timeout: float = 60, prompt: str = "", keyterms: list | None = None,
+                    diarize: bool = False) -> dict:
+    """Call OpenRouter's dedicated speech-to-text endpoint and preserve provider timestamps when available.
+
+    ``keyterms`` (names and terms to hear right) and ``diarize`` (a speaker on every word) are optional: a provider
+    that cannot take one answers HTTP 400, and the request goes again without it (remembered for the model)."""
     key = config.openrouter_key()
     if not key:
         raise LLMError("Ключ OpenRouter не задан")
@@ -241,6 +259,13 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
                                              "format": audio_format}, "language": language}
     if prompt:  # names and terms the model should spell right (OpenAI-style STT "prompt")
         base["prompt"] = prompt[:900]
+    features = {}
+    terms = [str(term).strip()[:100] for term in (keyterms or []) if str(term or "").strip()][:STT_MAX_KEYTERMS]
+    if terms:
+        features["keyterms"] = terms
+    if diarize:
+        features["diarize"] = True
+    unsupported = _STT_UNSUPPORTED.setdefault(model, set())
     variants = [
         # word times let the transcript be cut where the voice changes, not where the provider ends its phrase
         {**base, "response_format": "verbose_json", "timestamp_granularities": ["word", "segment"]},
@@ -252,20 +277,35 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
         variants = variants[-1:]  # verbose_json is always rejected: skip two failing requests per chunk
     first = min(_STT_FORMAT.get(model, 0), len(variants) - 1)  # a format the provider rejected is not asked again
     last_error = "неизвестная ошибка"
-    for index, body in enumerate(variants):
+    for index, variant in enumerate(variants):
         if index < first:
             continue
+        # speakers come only with verbose_json: a plain «json» request with «diarize» is rejected
+        wanted = {name: value for name, value in features.items() if name not in unsupported
+                  and (name != "diarize" or variant["response_format"] == "verbose_json")}
         retryable_error = None
-        for attempt in range(2):
+        attempt = 0
+        while attempt < 2:
+            body = {**variant, **wanted}
             try:
                 response = httpx.post(f"{config.OPENROUTER_BASE_URL}/audio/transcriptions", json=body,
                                       headers=headers, timeout=timeout)
+                if response.status_code == 400 and wanted:
+                    dropped = _rejected(wanted, response.text)
+                    if dropped:
+                        for name in dropped:
+                            wanted.pop(name, None)
+                            unsupported.add(name)
+                        log.info("STT %s does not take %s; asking without", model, ", ".join(dropped))
+                        last_error = f"HTTP 400: {response.text[:300]}"
+                        continue  # the same format without the optional fields
                 if response.status_code == 400 and index < len(variants) - 1:
                     last_error = f"HTTP 400: {response.text[:300]}"
                     break  # try a less provider-specific response format
                 if response.status_code in (408, 429, 500, 502, 503, 504):
                     retryable_error = f"HTTP {response.status_code}: {response.text[:300]}"
                     if attempt == 0:
+                        attempt += 1
                         time.sleep(2)
                         continue
                     raise LLMError(f"OpenRouter STT недоступен: {retryable_error}")
@@ -286,11 +326,13 @@ def transcribe_audio(audio_bytes: bytes, model: str, audio_format: str = "mp3", 
             except httpx.TimeoutException as exc:
                 last_error = str(exc) or "timeout"
                 if attempt == 0:
+                    attempt += 1
                     continue
                 raise IncompleteResponse("STT не успел обработать фрагмент; нужно разделить аудио на меньшие части") from exc
             except httpx.HTTPError as exc:
                 last_error = str(exc)
                 if attempt == 0:
+                    attempt += 1
                     continue
                 raise LLMError(f"OpenRouter STT недоступен: {last_error}") from exc
         else:

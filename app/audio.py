@@ -48,12 +48,43 @@ def chunk_seconds(total: float, maximum_minutes: float | None = None) -> float:
     return step
 
 
+# Cutting in pauses (speech known from the voice detector, vad.py): a part may end this share of its length earlier or
+# later than planned, so that the cut falls into a pause instead of a word.
+CUT_EARLIER, CUT_LATER = 0.35, 0.15
+CUT_MIN_PAUSE = 0.3       # the shortest pause to cut in (s)
+CUT_MARGIN = 0.5          # the cut keeps at most this far from the speech on both sides of the pause
+CUT_DISTANCE_COST = 0.03  # a longer pause is preferred, but each second away from the planned end costs this much
+
+
+def _pause_cut(nominal: float, step: float, pauses: list, limit: float):
+    """The moment to cut at near ``nominal``: inside a pause of the window, preferring long pauses and a cut close to
+    the plan; None when the window has no pause."""
+    low, high = nominal - CUT_EARLIER * step, min(nominal + CUT_LATER * step, limit)
+    best = None
+    for begin, end in pauses:
+        if end - begin < CUT_MIN_PAUSE or end <= low or begin >= high:
+            continue
+        margin = min(CUT_MARGIN, (end - begin) / 2)
+        first, last = max(begin + margin, low), min(end - margin, high)
+        if first > last:
+            continue
+        point = min(max(nominal, first), last)
+        score = min(end - begin, 2.0) - CUT_DISTANCE_COST * abs(point - nominal)
+        if best is None or score > best[0]:
+            best = (score, point)
+    return None if best is None else best[1]
+
+
 def plan_chunks(path: str, chunk_minutes: float | None = 30, overlap_seconds: float = 0,
-                max_chunk_minutes: float | None = None) -> tuple[float, list[tuple[float, float]]]:
+                max_chunk_minutes: float | None = None, speech: list | None = None) -> tuple[float, list[tuple[float, float]]]:
     """Measured duration and the cut plan [(start, seconds)], without cutting anything.
 
     Cutting a part costs an ffmpeg run (minutes for a long recording on a small server) and a part whose text is already
     saved does not need its audio at all, so the caller cuts only the parts it still has to recognise.
+
+    With ``speech`` (the voice detector's [[start, end, …]]) every cut is moved into a pause near the planned one and
+    the parts do not overlap: no word is cut in two, so nothing has to be stitched. Where the detector hears speech for
+    the whole window, the cut stays where planned, with the usual overlap.
     """
     total = duration(path)
     if not math.isfinite(overlap_seconds) or overlap_seconds < 0:
@@ -66,9 +97,24 @@ def plan_chunks(path: str, chunk_minutes: float | None = 30, overlap_seconds: fl
         step = max(15, chunk_minutes * 60)
     plan = []
     start = 0.0
+    if speech is None:
+        while start < total:
+            plan.append((start, min(step + overlap_seconds, total - start)))
+            start += step
+        return total, plan
+    from .vad import pauses as find_pauses
+    silent = find_pauses(speech, total, CUT_MIN_PAUSE)
     while start < total:
-        plan.append((start, min(step + overlap_seconds, total - start)))
-        start += step
+        if total - start <= step * (1 + CUT_LATER):  # the rest is one part: no short tail part
+            plan.append((start, total - start))
+            break
+        point = _pause_cut(start + step, step, silent, total)
+        if point is None or point <= start + 1.0:
+            plan.append((start, min(step + overlap_seconds, total - start)))
+            start += step
+        else:
+            plan.append((start, round(point - start, 3)))
+            start = round(point, 3)
     return total, plan
 
 

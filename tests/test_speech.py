@@ -75,7 +75,7 @@ def test_stt_gets_the_vocabulary_and_the_transcript_is_corrected(monkeypatch, tm
     settings_store.set_many({"glossary": "ВентСнаб"})
     seen = {}
 
-    def fake_stt(data, model, fmt, language, timeout=60, prompt=""):
+    def fake_stt(data, model, fmt, language, timeout=60, prompt="", **extras):
         seen["prompt"] = prompt
         return {"text": "Вадем подписал акт для винсунаба", "segments": [
             {"start": 0.0, "end": 3.0, "text": "Вадем подписал акт для винсунаба", "speaker": "A"}]}
@@ -106,7 +106,7 @@ def test_telegram_voice_goes_through_the_same_improvements(monkeypatch):
     monkeypatch.setattr(audio, "duration", lambda p: 4.0)
     monkeypatch.setattr(audio, "extract", lambda src, dst, start, sec, cleanup=None: open(dst, "wb").write(b"x"))
 
-    def fake_stt(data, model, fmt, language, timeout=60, prompt=""):
+    def fake_stt(data, model, fmt, language, timeout=60, prompt="", **extras):
         seen["prompt"] = prompt
         return {"text": "Передай Игарю что Строймантаж заплатил"}
     monkeypatch.setattr(llm, "transcribe_audio", fake_stt)
