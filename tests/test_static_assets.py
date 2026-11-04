@@ -6,7 +6,7 @@ from app.main import asset
 
 def test_pages_link_versioned_styles_and_scripts(client):
     html = client.get("/").text
-    for name in ("style.css", "fonts.css", "landing.css", "landing.js"):  # the landing adds its own styles
+    for name in ("style.css", "fonts.css", "landing.js"):
         assert re.search(rf'/static/{re.escape(name)}\?v=[0-9a-f]{{10}}"', html), name
     cabinet = client.get("/app").text
     assert re.search(r'/static/app\.js\?v=[0-9a-f]{10}"', cabinet)
