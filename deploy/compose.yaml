@@ -27,11 +27,15 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://sysai:${POSTGRES_PASSWORD:?Задайте POSTGRES_PASSWORD в файле .env}@db:5432/sysai
       DATA_DIR: /srv/data
+      # Ночные дампы видны приложению только для чтения: страница «Сервер» показывает свежесть бэкапа,
+      # а свежий дамп копируется в хранилище записей (если оно подключено), чтобы поломка диска не унесла базу.
+      BACKUP_DIR: /srv/backups
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - ./data:/srv/data
+      - ./backups:/srv/backups:ro
     expose:
       - "8000"
     healthcheck:

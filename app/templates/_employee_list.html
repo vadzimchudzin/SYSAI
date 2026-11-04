@@ -1,0 +1,36 @@
+{% from "_employee_form.html" import voice_label %}
+{% from "_icons.html" import icon %}
+<div id="employee-list-region" class="emp-list">
+{% if not employees %}
+  <div class="empty-state"><div class="empty-state-icon" aria-hidden="true">{{ icon('users') }}</div><h3>Справочник пока пуст</h3><p class="muted">Создайте карточку первого сотрудника.</p><a class="btn primary" href="/employees?add=1#employee-create" data-emp-open>＋ Добавить сотрудника</a></div>
+{% else %}
+  {% for g in employee_groups %}
+  <section class="emp-group" data-group="{{ g.key }}">
+    <h3 class="emp-group-head"><span>{{ g.name }}</span> · <span class="emp-group-count">{{ g['items']|length }}</span></h3>
+    {% for e in g['items'] %}{% set v = voice_info[e.id] %}{% set level = rights.get(e.id) %}
+    <article class="employee-card emp-row{{ ' off' if not e.active }}{{ ' full-rights' if level in strong_rights }}{{ ' selected' if edit == e.id }}" id="employee-{{ e.id }}" data-id="{{ e.id }}" data-active="{{ 1 if e.active else 0 }}" data-telegram="{{ 1 if e.telegram_chat_id else 0 }}" data-voice="{{ v.state }}" data-departments="{{ e.department_memberships|map(attribute='department_id')|join(',') }}" data-search="{{ search_text[e.id] }}">
+      <a class="emp-row-link" href="/employees?edit={{ e.id }}#employee-card" data-emp-open{% if edit == e.id %} aria-current="true"{% endif %}>
+        <span class="emp-ava" style="--ava-h: {{ (e.id * 47) % 360 }}" aria-hidden="true">{{ initials[e.id] }}</span>
+        <span class="emp-row-main">
+          <span class="employee-name-line"><b>{{ e.name }}</b>{% if level in strong_rights %}<span class="pill red" title="Решения этого человека ИИ-сотрудник выполняет без согласований">{{ rights_ru[level] }}</span>{% elif level %}<span class="pill blue" title="Видит всё, ассистент его не тревожит">{{ rights_ru[level] }}</span>{% endif %}{% if not e.active %}<span class="pill gray">Неактивен</span>{% endif %}</span>
+          {% set sub = (e.position or 'Должность не указана') ~ ((' · ' ~ e.aliases) if e.aliases else '') %}<span class="emp-row-sub" title="{{ sub }}">{{ sub }}</span>
+        </span>
+        <span class="department-badges">
+          {% if e.department_memberships %}
+            {% for membership in e.department_memberships %}<span class="pill blue">{% if membership.is_primary %}<span class="manager-star" title="Начальник подразделения">★</span> {% endif %}{{ membership.department.name }}</span>{% endfor %}
+          {% elif e.department %}<span class="pill blue">{{ e.department }}</span>
+          {% else %}<span class="pill gray">Без подразделения</span>{% endif %}
+        </span>
+        <span class="emp-row-tg">{% if e.telegram_chat_id %}<span class="pill green" title="Telegram подключён: {{ e.telegram_chat_id }}">TG</span>{% else %}<span class="pill gray" title="Telegram не привязан">нет TG</span>{% endif %}</span>
+        <span class="emp-voice employee-details" data-state="{{ v.state }}" title="Голосовой профиль: {{ v.count }} из {{ v.need }} независимых записей, {{ v.seconds }} с речи">
+          <span class="emp-voice-top"><span>голос</span><b>{{ voice_label(v, true) }}</b></span>
+          <span class="emp-meter"><i style="width: {{ v.pct }}%"></i></span>
+        </span>
+      </a>
+    </article>
+    {% endfor %}
+  </section>
+  {% endfor %}
+  <p class="emp-no-results muted" id="employee-no-results" hidden>Никого не нашли. Измените поиск или фильтр.</p>
+{% endif %}
+</div>

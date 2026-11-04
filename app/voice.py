@@ -6,6 +6,7 @@ When the model is unavailable or keeps returning something unusable, `VoiceError
 import datetime as dt
 import json
 import logging
+import re
 
 from . import deadlines, llm, settings_store, userbot
 
@@ -34,12 +35,33 @@ STYLE = ("Стиль: пиши, как пишет живой коллега в �
          "глаголы вместо отглагольных существительных («проверю», а не «осуществлю проверку»), конкретика: кто, что, "
          "когда, сколько. Без канцелярита и штампов: никаких «в целях», «в рамках», «осуществить», «данный», "
          "«вышеуказанный», «доводим до вашего сведения», «обращаем ваше внимание», «просим вас», «в кратчайшие сроки», "
-         "«в установленном порядке», «с уважением». Не повторяй то, что человек уже знает из переписки (history). ")
+         "«в установленном порядке», «с уважением». Не повторяй то, что человек уже знает из переписки (history). "
+         "Один вопрос за раз: если не хватает нескольких вещей, спроси самое важное. Обычно хватает двух-четырёх "
+         "коротких предложений; длиннее — только когда просят подробно. Если у человека есть address, обращайся к нему "
+         "так: по имени из address.name и на address.form («ты» или «вы») — это важнее манеры по умолчанию. ")
+ADDRESS_FORMS = ("ты", "вы")
+LONG_REPLY = 900  # characters: a chat reply longer than this is asked to be shorter once
 _OFFICIALESE = ("в целях ", "в рамках ", "осуществ", "данный ", "данного ", "данной ", "данному ", "вышеуказанн",
                 "вышеизложенн", "нижеследующ", "доводим до вашего сведения", "довожу до вашего сведения",
                 "обращаем ваше внимание", "обращаю ваше внимание", "просим вас", "настоящим сообща", "уведомляем",
                 "в кратчайшие сроки", "в установленном порядке", "на постоянной основе", "с уважением",
                 "заранее благодар", "имеет место", "в адрес ")
+
+
+def address_of(employee):
+    """How to address the person, from the employee card: {"name": "Анна Сергеевна", "form": "вы"}; None = not set."""
+    if employee is None:
+        return None
+    name = str(getattr(employee, "address_as", "") or "").strip()
+    form = str(getattr(employee, "address_form", "") or "").strip()
+    if not name and form not in ADDRESS_FORMS:
+        return None
+    return {"name": name or None, "form": form if form in ADDRESS_FORMS else None}
+
+
+def questions(text: str) -> int:
+    """How many questions a text asks («Какой срок? И кому?» — two)."""
+    return len(re.findall(r"[^?.!\n]*[а-яёa-z0-9»)][^?.!\n]*\?+", str(text or ""), re.I))
 
 
 def officialese(text: str) -> list:

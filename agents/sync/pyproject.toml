@@ -1,0 +1,21 @@
+# For development only: pip install -e agents/sync. Computers get the wheel SYSAI builds from this folder
+# (GET /agents/api/sync/sysai_agent-<version>-py3-none-any.whl, app/net/installer.py) — keep both in step.
+[project]
+name = "sysai-agent"
+dynamic = ["version"]
+description = "SYSAI agent synchronizer: rules, SOUL.md and SYSAI_Hub on the employee's computer"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=41", "PyYAML>=6", "keyring>=24; sys_platform == 'win32'"]
+
+[project.scripts]
+sysai-agent = "sysai_agent.cli:main"
+
+[project.gui-scripts]
+sysai-agentw = "sysai_agent.cli:main_windowless"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "sysai_agent.__version__"}

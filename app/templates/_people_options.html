@@ -1,0 +1,10 @@
+{# Employees for «кто говорит»: the meeting's participants first (participants.py), then everybody else. #}
+{% macro employee_options(employees, ids, prefix='') %}
+{%- set ids = ids or [] %}
+{%- if ids %}
+<optgroup label="Участники встречи">{% for e in employees if e.id in ids %}<option value="{{ prefix }}{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}</optgroup>
+<optgroup label="Другие сотрудники">{% for e in employees if e.id not in ids %}<option value="{{ prefix }}{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}</optgroup>
+{%- else %}
+{% for e in employees %}<option value="{{ prefix }}{{ e.id }}">{{ e.name }}{% if e.position %} · {{ e.position }}{% endif %}</option>{% endfor %}
+{%- endif %}
+{% endmacro %}

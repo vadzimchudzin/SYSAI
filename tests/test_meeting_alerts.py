@@ -3,7 +3,7 @@ import datetime as dt
 
 import pytest
 
-from app import agent, meeting_alerts, reminders, settings_store, userbot
+from app import agent, agent_skills, meeting_alerts, reminders, settings_store, userbot
 from app.db import Employee, MeetingAlert, Reminder, SessionLocal
 from test_ai_mode import incoming, make_meeting, tgacc  # noqa: F401  (fixture)
 from test_voice_reminders import director, everyone, model, reminder_rows, remind  # noqa: F401  (fixture)
@@ -24,7 +24,7 @@ class Clock:
         today = dt.datetime.now(zone).date()
         self.base = dt.datetime.combine(today, dt.time(hour, minute), tzinfo=zone).astimezone(dt.timezone.utc)
         self.shift = dt.timedelta(0)
-        for module in (meeting_alerts, reminders, agent):
+        for module in (meeting_alerts, reminders, agent, agent_skills):
             monkeypatch.setattr(module, "now", self)
 
     def __call__(self):

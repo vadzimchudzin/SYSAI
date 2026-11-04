@@ -1,0 +1,89 @@
+{% extends "base.html" %}{% block title %}Точность разметки голосов — SYSAI{% endblock %}
+{% block head %}{% if run.running %}<meta http-equiv="refresh" content="15">{% endif %}{% endblock %}
+{% macro num(value) %}{{ ('%.2f' % (value|float))|replace('.', ',') }}{% endmacro %}
+{% macro cells(t) %}{% if t %}<td><b>{{ pct(t.accuracy) }}</b></td><td>{{ ('%g' % t.extra_per_meeting)|replace('.', ',') }}</td><td>{{ t.merges }}</td>
+  <td>{% if t.short.total %}{{ pct(t.short.accuracy) }}{% else %}—{% endif %}</td><td>{{ pct(t.names.precision) }}</td>
+  {%- else %}<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>{% endif %}{% endmacro %}
+{% block body %}
+<link rel="stylesheet" href="{{ asset('voice-diagram.css') }}">
+<h1>Точность разметки голосов</h1>
+<p class="muted">Эталон — расшифровка совещания, исправленная человеком до правильной. По эталонам видно, как часто автоматическая разметка ошибается, и можно сравнивать способы разметки на одних и тех же записях. Точность самих слов по эталонам — в <a href="/speech-compare">сравнении движков распознавания →</a></p>
+{% if total %}
+<section class="card">
+  <h2>В среднем по {{ total.references }} {{ 'эталону' if total.references == 1 else 'эталонам' }} · {{ mmss(total.speech_seconds) }} речи</h2>
+  <div class="ref-totals">
+    <div><b>{{ pct(total.accuracy) }}</b><span class="small muted">времени говорящий верный</span></div>
+    <div><b>{{ ('%g' % total.extra_per_meeting)|replace('.', ',') }}</b><span class="small muted">лишних голосов в среднем на запись</span></div>
+    <div><b>{{ total.merges }}</b><span class="small muted">склеек всего</span></div>
+    <div><b>{{ pct(total.names.precision) }}</b><span class="small muted">подписанного времени с верным именем</span></div>
+    <div><b>{{ pct(total.short.accuracy) }}</b><span class="small muted">коротких реплик верно ({{ total.short.right }} из {{ total.short.total }})</span></div>
+  </div>
+</section>
+<section class="card">
+  <h2>Эталоны</h2>
+  <div class="table-wrap"><table class="ref-table small">
+    <thead><tr><th>Совещание</th><th>Речь</th><th>Людей / голосов</th><th>Говорящий верный</th><th>Лишние</th><th>Склейки</th><th>Имена верны</th><th>Короткие</th></tr></thead>
+    <tbody>{% for row in rows %}{% set r = row.metrics %}
+      <tr><td><a href="/meetings/{{ row.id }}#diarization-reference">{{ row.title }}</a>{% if row.date %} <span class="muted">· {{ row.date.strftime('%d.%m.%Y') }}</span>{% endif %}{% if row.stale %} <span class="pill amber" title="Расшифровка изменилась после сохранения эталона">изменена</span>{% endif %}</td>
+        <td>{{ mmss(r.speech_seconds) }}</td><td>{{ r.ref_speakers }} / {{ r.hyp_speakers }}</td><td><b>{{ pct(r.accuracy) }}</b></td>
+        <td>{{ r.extra }}</td><td>{{ r.merges|length }}</td><td>{{ pct(r.names.precision) }}</td>
+        <td>{% if r.short.total %}{{ r.short.right }}/{{ r.short.total }}{% else %}—{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+<section class="card" id="compare">
+  <div class="row between"><h2>Сравнение способов</h2>
+    <form method="post" action="/diarization/compare"><button class="btn primary"{{ ' disabled' if run.running }}>{{ 'Сравнение идёт…' if run.running else 'Сравнить способы' }}</button></form></div>
+  {% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+  <p class="small muted">Сейчас на новых записях: <b>{{ methods[method] }}</b>{% if method == 'voice' %}, порог сходства {{ num(threshold) }}{% endif %}. Сравнение берёт автоматическую расшифровку каждого эталона без говорящих, размечает её каждым способом по записи совещания и сверяет с эталоном. Имена даются одинаково для всех способов — только по представлениям и обращениям, без модели.</p>
+  {% if run.running %}<p class="small" role="status"><span class="pill blue">Идёт</span> эталон {{ [run.done + 1, run.total]|min }} из {{ run.total }}{% if run.current %} · {{ run.current }}{% endif %}{% if run.step %} · {{ run.step }}{% endif %}. Страница обновляется сама.</p>
+  {% elif run.finished %}<p class="small muted">Сравнение закончено {{ when(run.finished) }}.{% for e in run.errors[:3] %}<br><span class="warn">{{ e }}</span>{% endfor %}</p>{% endif %}
+  <div class="table-wrap"><table class="ref-table small method-table">
+    <thead><tr><th>Способ</th><th>Эталонов</th><th>Говорящий верный</th><th>Лишних на запись</th><th>Склейки</th><th>Короткие</th><th>Имена верны</th><th></th></tr></thead>
+    <tbody>{% for w in compare.ways %}
+      <tr{% if w.current %} class="is-current"{% endif %}><td><b>{{ w.title }}</b>{% if w.current %} <span class="pill clay">сейчас</span>{% endif %}{% if w.best %} <span class="pill green">лучший</span>{% endif %}
+          {% if w.name == 'voice' and w.threshold %}<br><span class="muted">порог {{ num(w.threshold) }}</span>{% endif %}
+          {% for e in (w.errors|unique|list)[:2] %}<br><span class="muted">{{ e }}</span>{% endfor %}</td>
+        <td>{{ w.count or '—' }}</td>{{ cells(w.total) }}
+        <td>{% if not (w.current and (w.name != 'voice' or not w.threshold or (w.threshold|float - threshold)|abs < 0.001)) and not unavailable[w.name] %}<form method="post" action="/diarization/method">
+          <input type="hidden" name="method" value="{{ w.name }}">{% if w.name == 'voice' and w.threshold %}<input type="hidden" name="threshold" value="{{ w.threshold }}">{% endif %}
+          <button class="btn sm">Применить</button></form>{% elif unavailable[w.name] and not w.current %}<span class="muted" title="{{ unavailable[w.name] }}">недоступен</span>{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  {% if compare.sweep|selectattr('total')|list %}
+  <details class="more"><summary>Пороги сходства для «{{ methods.voice }}»{% if compare.best_threshold %} · лучший {{ num(compare.best_threshold) }}{% endif %}</summary>
+    <div class="table-wrap"><table class="ref-table small method-table">
+      <thead><tr><th>Порог</th><th>Эталонов</th><th>Говорящий верный</th><th>Лишних на запись</th><th>Склейки</th><th>Короткие</th><th>Имена верны</th><th></th></tr></thead>
+      <tbody>{% for row in compare.sweep if row.total %}
+        <tr{% if row.best %} class="is-best"{% endif %}><td><b>{{ num(row.value) }}</b>{% if row.best %} <span class="pill green">лучший</span>{% endif %}{% if row.current and method == 'voice' %} <span class="pill clay">сейчас</span>{% endif %}</td>
+          <td>{{ row.count }}</td>{{ cells(row.total) }}
+          <td>{% if not (row.current and method == 'voice') and not unavailable.voice %}<form method="post" action="/diarization/method"><input type="hidden" name="method" value="voice"><input type="hidden" name="threshold" value="{{ row.key }}"><button class="btn sm">Применить</button></form>{% endif %}</td></tr>
+      {% endfor %}</tbody>
+    </table></div>
+    <p class="small muted">Выше порог — голоса реже объединяются в одного человека: больше лишних голосов, меньше склеек. Ниже — наоборот.</p>
+  </details>
+  {% endif %}
+  <p class="small muted">Нужна запись совещания: на сервере, в хранилище записей или в TicNote. Сервис голосов вызывается по разу на каждую минуту записи, Gemini слушает запись по полчаса — это платные запросы OpenRouter. Лучший способ отмечается, когда все способы замерены на одинаковом числе эталонов.</p>
+</section>
+{% else %}
+<section class="card">
+  <h2>Эталонов пока нет</h2>
+  <ol class="small">
+    <li>Откройте совещание с записью TicNote и раскройте «Расшифровку по подразделам».</li>
+    <li>Исправьте говорящих: «Кто это?» меняет человека во всех его репликах, ✎ у реплики — только в ней; там же реплику можно разделить или объединить с соседней.</li>
+    <li>Когда всё верно, нажмите «Сохранить как эталон» под расшифровкой.</li>
+  </ol>
+  <p class="small muted">Хватит трёх разных записей: на 2–3 человека, на 5 и больше и длинной — больше часа.</p>
+</section>
+{% endif %}
+<section class="card">
+  <h2>Что значат цифры</h2>
+  <ul class="small">
+    <li><b>Говорящий верный</b> — доля времени речи, где автоматическая разметка указала того же человека, что и эталон (метки «Спикер N» сопоставляются с людьми один к одному так, чтобы совпало больше всего).</li>
+    <li><b>Лишние голоса</b> — один человек разбит на несколько меток «Спикер N».</li>
+    <li><b>Склейки</b> — в одной метке двое людей: второй говорит в ней не меньше 5 секунд и 15% её времени.</li>
+    <li><b>Имена верны</b> — из времени, где разметка подставила имя, доля с правильным именем.</li>
+    <li><b>Короткие реплики</b> — реплики эталона до 2 секунд или до трёх слов, у которых говорящий верный.</li>
+  </ul>
+</section>
+{% endblock %}

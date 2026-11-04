@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func
 
-from . import (analyze, assistant, bitrix, checkpoints, config, deadlines, delivery, llm, render, report_archive, settings_store, telegram,
-               transcribe, userbot, voice)
+from . import (analyze, assistant, audio_archive, bitrix, checkpoints, config, deadlines, delivery, diarize, llm, render,
+               report_archive, settings_store, telegram, transcribe, userbot, voice, waveform)
 from .db import (ConversationMessage, DeadlineRequest, Delivery, Employee, Meeting, SessionLocal, Task, TelegramChat,
                  now)
 
@@ -172,11 +172,16 @@ def _process(meeting_id: int):
         if saved_report is not None:
             # Crash after _save_report committed: tasks and their IDs are already durable.
             _set(meeting_id, status="analyzing", error="")
+            _ensure_waveform(meeting_id, audio_path, source, saved or [], total)
+            _keep_recording(meeting_id, audio_path, source)
             _finish_processing(meeting_id, audio_path, settings)
             return
         if source != "demo" and not config.llm_enabled():
             raise llm.LLMError("Для обработки настоящей записи нужен ключ OpenRouter. Демо запускается отдельно.")
         checkpoint = checkpoints.Store(meeting_id)
+        allowed, people, attendees = _participants(meeting_id)
+        if attendees:
+            settings = dict(settings, attendees=attendees)
         if saved is not None:
             segments = saved
         else:
@@ -190,11 +195,28 @@ def _process(meeting_id: int):
                     audio_path = ticnote_ingest.restore_audio(meeting_id)
                 if not audio_path or not pathlib.Path(audio_path).is_file():
                     raise llm.LLMError("Исходное аудио не найдено; загрузите запись заново")
-                total, segments = transcribe.transcribe(audio_path, settings,
-                                                        progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
-                segments = _name_speakers(segments)
+                # Kept next to the transcription, not after it: a restart of a free instance (a deploy, its sleep) then
+                # finds the copy already in the storage much more often. Called again below once the transcript is saved.
+                _keep_recording(meeting_id, audio_path, source)
+                recognition = {}
+                total, segments = transcribe.transcribe(audio_path, dict(settings, _participants=allowed),
+                                                        progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint,
+                                                        info=recognition)
+                _note_recognition(meeting_id, recognition)
+                segments, how = diarize.relabel(audio_path, segments, total, settings, people=people,
+                                                progress=lambda p: _set(meeting_id, progress=p),
+                                                meeting_id=meeting_id, allowed=allowed)
+                _note_diarization(meeting_id, how)
+                segments = _name_speakers(segments, allowed, meeting_id)
+        # A transcript made by this run replaces any earlier one: corrections made to that one do not apply to it.
+        fresh = {} if saved is not None else {"transcript_auto": None, "transcript_edits": None}
         _set(meeting_id, transcript=segments, duration_sec=total, status="analyzing",
-             progress="Составление отчёта и задач")
+             progress="Составление отчёта и задач", **fresh)
+        outline_job = _start_waveform(meeting_id, audio_path, source, segments, total)
+        _keep_recording(meeting_id, audio_path, source)
+        if saved is None and source != "demo":  # voices the conversation proves surely, for the next meetings
+            from . import voice_memory
+            voice_memory.remember_safely(meeting_id, by="обработка", path=audio_path)
         with SessionLocal() as s:
             employees = s.query(Employee).filter(Employee.active.is_(True)).all()
             for employee in employees:
@@ -204,6 +226,8 @@ def _process(meeting_id: int):
         report = analyze.mock_report(employees, mdate) if source == "demo" else analyze.analyze(
             segments, employees, settings, mdate, progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint)
         _save_report(meeting_id, report, settings)
+        if outline_job is not None:
+            outline_job.join(WAVEFORM_WAIT)  # the original is deleted next (see WAVEFORM_WAIT)
         _finish_processing(meeting_id, audio_path, settings)
     except Cancelled:
         raise
@@ -212,13 +236,117 @@ def _process(meeting_id: int):
         _set(meeting_id, status="error", progress="Ошибка", error=str(e)[:2000])
 
 
-def _name_speakers(segments: list) -> list:
-    """«Спикер 2» becomes «Ольга Кузнецова» when the conversation proves it (see speakers.py)."""
-    from . import speakers
+# Seconds to let the outline decode finish before the original is deleted. A decoder that has the file open keeps
+# reading it after the unlink (POSIX), so this only covers a decoder that has not started yet; the report never waits long.
+WAVEFORM_WAIT = 120
+
+
+def _ensure_waveform(meeting_id, audio_path, source, segments, total):
+    """Store the loudness outline for the voice diagram once, while the original is still on disk.
+
+    The diagram is decoration: any failure here is logged and never stops the meeting."""
     try:
         with SessionLocal() as s:
-            people = s.query(Employee).filter(Employee.active.is_(True)).all()
-            named, mapping = speakers.name_speakers(segments, people)
+            m = s.get(Meeting, meeting_id)
+            if m is None or m.waveform:
+                return
+        if source == "demo":
+            outline = waveform.synthetic(segments, total)  # the demo has a transcript but no recording
+        elif audio_path and pathlib.Path(audio_path).is_file():
+            outline = waveform.compute(audio_path, duration_hint=total)
+        else:
+            return
+        if outline:
+            with SessionLocal() as s:
+                m = s.get(Meeting, meeting_id)
+                if m is not None and not m.waveform:
+                    m.waveform = outline
+                    s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("waveform for meeting %s was not saved", meeting_id, exc_info=True)
+
+
+def _start_waveform(meeting_id, audio_path, source, segments, total):
+    """Decode the outline next to the report analysis (network-bound), so it adds no waiting; None when not needed."""
+    if config.TESTING or source == "demo" or not audio_path or not pathlib.Path(audio_path).is_file():
+        _ensure_waveform(meeting_id, audio_path, source, segments, total)
+        return None
+    job = threading.Thread(target=_ensure_waveform, args=(meeting_id, audio_path, source, segments, total),
+                           name=f"waveform-{meeting_id}", daemon=True)
+    job.start()
+    return job
+
+
+def _keep_recording(meeting_id, audio_path, source):
+    """Hand the original to the recordings storage (audio_archive.py) before it is deleted. It links the file at once and
+    compresses and uploads it in the background; like the outline, it never stops the meeting."""
+    try:
+        audio_archive.start(meeting_id, audio_path, source)
+    except Exception:  # noqa: BLE001
+        log.warning("recording of meeting %s was not handed to the storage", meeting_id, exc_info=True)
+
+
+def _participants(meeting_id: int):
+    """(employee ids whose names voices may get or None for anybody, number of participants, «Присутствовали» line).
+
+    A meeting without a list takes the people of its regular meeting from «Напоминания» first (participants.py)."""
+    from . import participants
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if participants.ensure(s, m):
+                s.commit()
+            if not participants.is_set(m):
+                return None, 0, ""
+            return participants.employee_ids(m), participants.count(m), ", ".join(participants.present(s, m))
+    except Exception:  # noqa: BLE001  the list is a hint: without it the meeting is processed as before
+        log.exception("participants of meeting %s are unavailable", meeting_id)
+        return None, 0, ""
+
+
+def _note_recognition(meeting_id: int, info: dict) -> None:
+    """Keep what the checks of the recognition found (shown on the meeting page): the engine, missed speech heard
+    again, doubtful words checked by ear, invented phrases dropped (transcribe.py, verify.py)."""
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if m is not None:
+                m.options = dict(m.options or {}, recognition=dict(info, at=now().isoformat(timespec="seconds")))
+                s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("recognition note of meeting %s was not saved", meeting_id, exc_info=True)
+
+
+def _note_diarization(meeting_id: int, how: dict) -> None:
+    """Keep how the voices were labelled (shown on the meeting page): the way, the number of voices, a failure."""
+    try:
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if m is not None:
+                m.options = dict(m.options or {}, diarization=dict(how, at=now().isoformat(timespec="seconds")))
+                s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("diarization note of meeting %s was not saved", meeting_id, exc_info=True)
+
+
+def _name_speakers(segments: list, allowed=None, meeting_id: int | None = None) -> list:
+    """«Спикер 2» becomes «Ольга Кузнецова» when the conversation proves it surely enough (see speakers.py); the
+    candidates of the voices left unnamed are kept for «Кто это?» on the meeting page (speaker_hints.py).
+
+    allowed: the employee ids of the meeting's participants; names of other people are never given to its voices."""
+    from . import speaker_hints, speakers
+    try:
+        with SessionLocal() as s:
+            query = s.query(Employee).filter(Employee.active.is_(True))
+            if allowed is not None:
+                query = query.filter(Employee.id.in_(list(allowed) or [-1]))
+            people = query.all()
+            found = {}
+            named, mapping = speakers.name_speakers(segments, people, found=found)
+            m = s.get(Meeting, meeting_id) if meeting_id is not None else None
+            if m is not None and (found.get("named") or found.get("ask") or (m.options or {}).get("speaker_hints")):
+                speaker_hints.save(m, found)
+                s.commit()
         return named
     except Exception:  # noqa: BLE001  naming must never lose a transcript
         log.exception("speaker naming failed")
@@ -847,7 +975,8 @@ def poke():
 
 
 def start_background():
-    from . import agent, cases, conversations, digest, doctext, meeting_alerts, memory, reminders, ticnote_ingest, speaker_id
+    from . import (agent, bitrix_sync, calendars, cases, conversations, digest, doc_intake, doctext, entities, gdrive, keep_awake, mail, meeting_alerts,
+                   memory, reminders, ticnote_ingest, speaker_id)
     resume_jobs()
     conversations.recover()
     assistant.recover()
@@ -857,7 +986,8 @@ def start_background():
         time.sleep(config.STARTUP_DELAY)  # let the web server answer the platform's checks first
         while True:
             for fn in (speaker_id.purge_due_voice_samples, mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
-                       assistant.run_pending, cases.run_due, doctext.run_pending, memory.refresh_vectors, meeting_alerts.run_due, reminders.run_due, userbot.watchdog, ticnote_ingest.scan, digest.run_due):
+                       assistant.run_pending, cases.run_due, mail.run_due, doctext.run_pending, doc_intake.run_pending, entities.run_pending, memory.refresh_vectors, meeting_alerts.run_due, reminders.run_due, userbot.watchdog, ticnote_ingest.scan, digest.run_due,
+                       audio_archive.run_due, calendars.run_due, bitrix_sync.run_due, gdrive.run_due, keep_awake.run_due):
                 try:
                     fn()
                 except Exception:

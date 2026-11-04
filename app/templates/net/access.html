@@ -1,0 +1,104 @@
+{% extends "base.html" %}{% block title %}Доступы агентов — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>Доступы агентов</h1>
+  <p>Что агенту можно — задаётся только здесь. Подтверждений в Telegram нет: разрешённое агент делает сам, остальное запрещено. SYSAI собирает из профиля настройки агента и подписывает их; MCP-серверы проверяют те же правила у себя.</p></div>
+  <div class="actions"><a class="btn" href="/agents">← Агенты</a></div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+
+{% for p in profiles %}{% set r = p.rules %}
+<section class="card" id="p{{ p.id }}">
+  <details {{ 'open' if edit == p.id|string }}>
+  <summary class="row between"><span><b>{{ p.name }}</b> <span class="small muted">v{{ p.version }} · {{ p.code }}{{ ' · встроенный' if p.builtin }} · агентов: {{ p.agents }}</span></span><span class="small muted">{{ p.description }}</span></summary>
+  <form method="post" action="/agents/access/{{ p.id }}" class="net-form" style="margin-top:12px">
+    <label class="f">Название <input name="name" value="{{ p.name }}" required maxlength="120"></label>
+    <label class="f">Описание <input name="description" value="{{ p.description }}" maxlength="500"></label>
+
+    <h3 class="wide">{{ sections.commands }}</h3>
+    <div class="net-checks wide"><label><input type="checkbox" name="commands_run" {{ 'checked' if r.commands.run }}> выполнять команды на ПК без вопросов</label></div>
+    <label class="f wide">Запрещённые команды (шаблоны, «*» — любой текст; по строке) <textarea name="commands_deny" spellcheck="false">{{ r.commands.deny|join('\n') }}</textarea>
+      <small class="muted">Всегда запрещено, что бы ни было в профиле: {{ always_deny|join(' · ') }}</small></label>
+
+    <h3 class="wide">{{ sections.folders }}</h3>
+    <label class="f">Читать <textarea name="folders_read" spellcheck="false">{{ r.folders.read|join('\n') }}</textarea></label>
+    <label class="f">Писать <textarea name="folders_write" spellcheck="false">{{ r.folders.write|join('\n') }}</textarea></label>
+    <label class="f">Нельзя <textarea name="folders_deny" spellcheck="false">{{ r.folders.deny|join('\n') }}</textarea></label>
+
+    <label class="f">{{ sections.programs }} (по строке) <textarea name="programs">{{ r.programs|join('\n') }}</textarea></label>
+    <label class="f">{{ sections.mcp }} («сервер: инструмент, инструмент» или «сервер: *») <textarea name="mcp" spellcheck="false">{% for srv, tools in r.mcp.items() %}{{ srv }}: {{ tools|join(', ') }}
+{% endfor %}</textarea><small class="muted">sysai: {{ sysai_tools|join(', ') }} · plc-kit, machine-expert, cad · MCP-серверы из хаба — по их имени</small></label>
+
+    <h3 class="wide">{{ sections.data }}</h3>
+    <label class="f">Проекты <select name="data_projects">{% for s in scopes %}<option value="{{ s }}" {{ 'selected' if r.data.projects == s }}>{{ scope_ru[s] }}</option>{% endfor %}</select></label>
+    <label class="f">База ТО <select name="data_to_base">{% for s in levels %}<option value="{{ s }}" {{ 'selected' if r.data.to_base == s }}>{{ level_ru[s] }}</option>{% endfor %}</select></label>
+    <label class="f">Теги <select name="data_tags">{% for s in levels %}<option value="{{ s }}" {{ 'selected' if r.data.tags == s }}>{{ level_ru[s] }}</option>{% endfor %}</select></label>
+    <div class="net-checks wide"><label><input type="checkbox" name="data_questions" {{ 'checked' if r.data.questions }}> вопросы в ТО</label>
+      <label><input type="checkbox" name="data_people" {{ 'checked' if r.data.people }}> справочник людей</label></div>
+
+    <h3 class="wide">{{ sections.internet }}</h3>
+    <label class="f">Режим <select name="internet_mode">{% for s in internet %}<option value="{{ s }}" {{ 'selected' if r.internet.mode == s }}>{{ internet_ru[s] }}</option>{% endfor %}</select></label>
+    <label class="f">Сайты (для «только список») <textarea name="internet_sites" spellcheck="false">{{ r.internet.sites|join('\n') }}</textarea></label>
+
+    <h3 class="wide">{{ sections.models }}</h3>
+    <div class="net-checks wide">{% for t in tiers %}<label><input type="checkbox" name="tier_{{ t }}" {{ 'checked' if t in r.models.tiers }}> sysai/{{ t }} — {{ tier_ru[t] }}</label>{% endfor %}</div>
+    <label class="f">Главная модель — думает, планирует, раздаёт подзадачи <select name="model_main">{% for t in tiers if t != 'vision' %}<option value="{{ t }}" {{ 'selected' if r.models.main == t }}>sysai/{{ t }} — {{ tier_ru[t] }}</option>{% endfor %}</select></label>
+    <label class="f">Для подзадач (delegate_task в Hermes) <select name="model_workers">{% for t in tiers if t != 'vision' %}<option value="{{ t }}" {{ 'selected' if r.models.workers == t }}>sysai/{{ t }} — {{ tier_ru[t] }}</option>{% endfor %}</select><small class="muted">Только из отмеченных уровней; иначе SYSAI возьмёт ближайший разрешённый.</small></label>
+    <label class="f">sysai/auto — как выбирать <select name="auto_cost">{% for c in cost_tiers %}<option value="{{ c }}" {{ 'selected' if r.models.auto_cost == c }}>{{ cost_ru[c] }}</option>{% endfor %}</select><small class="muted">Jev (OpenRouter) берёт под каждый запрос модель из отмеченных уровней — не дороже самой дорогой из них; недоступен — средняя.</small></label>
+    <label class="f">Бюджет агента в день, $ (0 — без лимита) <input name="budget_day_usd" type="number" min="0" step="0.5" value="{{ r.models.budget_day_usd }}"></label>
+    <label class="f">Бюджет проекта, $ (0 — без лимита) <input name="budget_project_usd" type="number" min="0" step="1" value="{{ r.models.budget_project_usd }}"></label>
+
+    <label class="f wide">{{ sections.schedule }} («когда | что», по строке) <textarea name="schedule">{% for item in r.schedule %}{{ item.when }} | {{ item.task }}
+{% endfor %}</textarea></label>
+    <div class="net-checks"><label><input type="checkbox" name="chat_owner" {{ 'checked' if r.chat.owner }}> агенту пишет его человек</label></div>
+    <label class="f">Ещё могут писать (логины, по строке) <textarea name="chat_others">{{ r.chat.others|join('\n') }}</textarea></label>
+    <label class="f">{{ sections.skills }}: отделы хаба («*» — все) <textarea name="skills_departments">{{ r.skills.departments|join('\n') }}</textarea><small class="muted">Навыки — по отделам; MCP-серверы и программы хаба — ещё и только те, что есть выше в «MCP-инструментах» и «Программах».</small></label>
+    <div class="net-checks"><label><input type="checkbox" name="skills_propose" {{ 'checked' if r.skills.propose }}> может предлагать свои навыки и инструменты</label></div>
+
+    <h3 class="wide">{{ sections.files }}</h3>
+    <label class="f">Читать разделы (по строке: «{{ files_common }}», «{{ files_own }}», название отдела или «*» — все) <textarea name="files_read" spellcheck="false">{{ r.files.read|join('\n') }}</textarea></label>
+    <label class="f">Писать в разделы <textarea name="files_write" spellcheck="false">{{ r.files.write|join('\n') }}</textarea><small class="muted">Пусто — хранилище агенту закрыто. Не больше своего человека: агент сотрудника открывает только «{{ files_common }}» и свой отдел, агент руководителя — любые разделы.</small></label>
+    <div class="wide actions"><button class="btn primary">Сохранить профиль</button>
+      {% if not p.builtin %}<button class="btn danger" name="delete" value="1" onclick="return confirm('Удалить профиль {{ p.name }}?')">Удалить</button>{% endif %}</div>
+  </form>
+  </details>
+</section>
+{% endfor %}
+
+<div class="grid2">
+<section class="card"><h2>Новый профиль</h2>
+  <form method="post" action="/agents/access/new" class="net-form">
+    <label class="f">Название <input name="name" required placeholder="Инженер ОПО — пусконаладка"></label>
+    <label class="f">Код <input name="code" placeholder="opo-commissioning" pattern="[a-z0-9-]+"></label>
+    <label class="f">На основе <select name="copy"><option value="">пустой</option>{% for p in profiles %}<option value="{{ p.code }}">{{ p.name }}</option>{% endfor %}</select></label>
+    <div class="wide"><button class="btn">Создать</button></div>
+  </form>
+</section>
+<section class="card" id="models"><h2>Модели и ограничения сети</h2>
+  <form method="post" action="/agents/access/settings" class="net-form">
+    {% for t in model_tiers %}<label class="f">sysai/{{ t }} — {{ tier_ru[t] }} <input name="model_{{ t }}" value="{{ models[t] }}" placeholder="{{ vision_default if t == 'vision' else '' }}"></label>
+    <label class="f">запасная для sysai/{{ t }} <input name="fallback_{{ t }}" value="{{ fallbacks[t] }}" placeholder="нет запасной"></label>{% endfor %}
+    <p class="small muted wide">sysai/auto своей модели не имеет: под каждый запрос её выбирает Jev Router среди моделей уровней, разрешённых агенту.
+      Запасная — лучше другого поставщика: сбой у поставщика модели — OpenRouter сам переключается на запасную; OpenRouter всё равно ответил ошибкой (модели нет, перегружена) — шлюз спрашивает запасную ещё раз. В трассе видно: «ответила запасная», «mid→запасная: HTTP 503 …». Пусто — без запасной.</p>
+    <p class="small muted wide">Кэш подсказок: Gemini, OpenAI и DeepSeek кэшируют сами; Claude и Kimi — по меткам Hermes: стоит такая модель за уровнем — SYSAI сам объявляет Hermes кэш для этого уровня, шлюз пропускает метки как есть. Сколько пришло из кэша — в трассе и в расходах.</p>
+    <label class="f">Вызовов MCP в минуту на агента <input name="mcp_per_minute" type="number" min="1" value="{{ mcp_per_minute }}"></label>
+    <label class="f">Сайты, к которым могут обращаться скрипты навыков <textarea name="hub_hosts" spellcheck="false">{{ hub_hosts }}</textarea></label>
+    <div class="wide"><button class="btn primary">Сохранить</button> <span class="small muted">Сменили модель уровня — сменилась у всех агентов сразу.</span></div>
+  </form>
+</section>
+</div>
+<section class="card" id="soul"><h2>Характер агентов (SOUL.md)</h2>
+  <p class="small muted">Кто агент, как говорит и чего не делает никогда. Hermes читает SOUL.md в начале каждого нового разговора; синхронизатор кладёт его в профиль агента. Агент получает: «кто ты и чей» (имя, человек, отдел — SYSAI подставит сам) + общий текст + добавку своего отдела.</p>
+  <form method="post" action="/agents/access/soul" class="net-form">
+    <label class="f wide">Общий для сети <textarea name="common" rows="16" maxlength="{{ soul_max }}" spellcheck="false">{{ soul.common }}</textarea></label>
+    {% for name in soul_departments %}
+    <input type="hidden" name="dept_name_{{ loop.index0 }}" value="{{ name }}">
+    <label class="f wide">Добавка отдела «{{ name }}» <textarea name="dept_{{ loop.index0 }}" rows="{{ 10 if (soul.departments.get(name) or '') else 3 }}" maxlength="{{ soul_max }}" spellcheck="false" placeholder="Пусто — только общий текст">{{ soul.departments.get(name) or '' }}</textarea></label>
+    {% endfor %}
+    <div class="wide"><button class="btn primary">Сохранить характер</button> <span class="small muted">Изменения — в журнале; у агентов — при следующей синхронизации (до 5 минут), в новом разговоре.</span></div>
+  </form>
+</section>
+<section class="card"><h2>Изменения профилей</h2>
+  <ul class="net-list">{% for e in events %}<li><span class="small muted">{{ net_when(e.at) }}</span> <b>{{ e.target }}</b> · {{ e.actor }}{% if e.summary %} <span class="small muted">{{ e.summary }}</span>{% endif %}</li>{% else %}<li class="muted">Пока пусто.</li>{% endfor %}</ul>
+</section>
+{% endblock %}

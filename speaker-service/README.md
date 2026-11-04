@@ -6,7 +6,7 @@ A separate Vercel Python API that computes voice embeddings for SYSAI. It does n
 
 - `GET /health` — public health check; does not load the model.
 - `POST /v1/embed` — returns a 192-dimensional normalized embedding for one profile sample or one short speaker segment. For `purpose=profile`, stores the original uploaded audio in **private** Vercel Blob and returns its pathname plus a 96-bin waveform.
-- `POST /v1/identify` — accepts one diarized audio chunk and relative `start`, `end`, and `speaker` values; combines fragments per local speaker and returns one embedding per speaker.
+- `POST /v1/identify` — accepts one diarized audio chunk and relative `start`, `end`, and `speaker` values; combines fragments per local speaker and returns one embedding per speaker. Optional form field `min_seconds` (0.3–1.0, default 1.0) also embeds shorter speakers — SYSAI sends every short reply («да», «нет, не так») as a speaker of its own to check who said it.
 - `DELETE /v1/sample` — deletes a private reference sample. It only accepts paths under the supplied employee's profile prefix.
 
 All endpoints except health require `X-SYSAI-Voice-Token`. Do not expose the token to browser JavaScript.

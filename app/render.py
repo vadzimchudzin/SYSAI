@@ -21,9 +21,19 @@ def e(s) -> str:
     return html.escape(str(s or ""), quote=False)
 
 
+def present(meeting) -> list:
+    """«Присутствовали» of the protocol: the meeting's participants (participants.py), empty when nobody set them."""
+    from sqlalchemy.orm import object_session
+    from . import participants
+    session = object_session(meeting)
+    if session is None or not participants.is_set(meeting):
+        return []
+    return participants.present(session, meeting)
+
+
 def context(meeting, settings: dict) -> dict:
     r = meeting.report or {}
-    return dict(m=meeting, r=r, tasks=meeting.tasks, s=settings, mmss=mmss, fmt=deadlines.fmt,
+    return dict(m=meeting, r=r, tasks=meeting.tasks, s=settings, mmss=mmss, fmt=deadlines.fmt, present=present(meeting),
                 priority=PRIORITY, generated=dt.datetime.now(zoneinfo.ZoneInfo(config.TIMEZONE)).strftime("%d.%m.%Y %H:%M"),
                 include_transcript=settings.get("include_transcript_in_pdf"), segments=meeting.transcript or [],
                 transcript_sections=group_transcript(meeting.transcript or [], r.get("topics") or []))

@@ -1,0 +1,72 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}{{ (item.name ~ ' — ') if item else ((found.crumbs[-1].name ~ ' — ') if found.crumbs else '') }}Хранилище — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+{% macro row(i) %}
+{% if i.is_folder and not found.trash %}
+<article class="nx-row" data-nx-row data-key="{{ i.path }}" data-tags="folder" data-search="{{ (i.path ~ ' ' ~ (i.note or ''))|lower }}">
+  <a class="nx-row-link" href="{{ files_url(i.path) }}">
+    <span class="nx-ic" data-kind="{{ i.kind }}">{{ icon(i.icon) }}</span>
+    <span class="nx-main"><span class="nx-title"><b>{{ i.name }}</b>{% if i.kind == 'section' %}{% if i.can_write %}<span class="pill green">можно писать</span>{% else %}<span class="pill gray">только чтение</span>{% endif %}{% endif %}</span>
+      <span class="nx-sub">{% if i.kind == 'section' %}{{ 'Общие файлы всей компании' if i.common else 'Раздел отдела' }}{% else %}{% if found.q %}{{ i.folder }} · {% endif %}{{ i.note or 'папка' }}{% endif %}</span></span>
+    <span class="nx-meta">{% if i.kind == 'section' %}{{ i.files }} {{ plural(i.files, 'файл', 'файла', 'файлов') }} · {{ i.size_ru }}{% else %}{{ i.updated_by }} · {{ net_when(i.updated_at) }}{% endif %}</span>
+  </a>
+</article>
+{% else %}
+<article class="nx-row{{ ' selected' if selected == i.path }}" data-nx-row data-key="{{ i.path }}" data-tags="{{ i.kind }}" data-search="{{ (i.path ~ ' ' ~ (i.note or '') ~ ' ' ~ i.updated_by)|lower }}">
+  <a class="nx-row-link" href="{{ files_url(found.path, i.path, q=found.q, trash='1' if found.trash else '') }}" data-nx-open{% if selected == i.path %} aria-current="true"{% endif %}>
+    <span class="nx-ic" data-kind="{{ i.kind }}">{{ icon(i.icon) }}</span>
+    <span class="nx-main"><span class="nx-title"><b>{{ i.name }}</b>{% if i.version > 1 %}<span class="pill gray" title="Версий у файла">v{{ i.version }}</span>{% endif %}{% if i.by_agent %}<span class="pill blue" title="Последним менял агент">агент</span>{% endif %}</span>
+      <span class="nx-sub">{% if found.q or found.trash %}{{ i.folder }} · {% endif %}{{ i.note or i.kind_ru }}</span></span>
+    <span class="nx-meta">{% if not i.is_folder %}<span>{{ i.size_ru }}</span>{% endif %}<span>{{ i.deleted_by if found.trash else i.updated_by }} · {{ net_when(i.deleted_at if found.trash else i.updated_at) }}</span></span>
+  </a>
+</article>
+{% endif %}
+{% endmacro %}
+<div class="page-h">
+  <div><h1>Хранилище</h1>
+    <p class="nx-sum"><b>{{ summary.files }}</b> {{ plural(summary.files, 'файл', 'файла', 'файлов') }} · <b>{{ summary.size_ru }}</b> · <b>{{ summary.sections }}</b> {{ plural(summary.sections, 'раздел', 'раздела', 'разделов') }}{% if not summary.s3 %} · <span title="S3 не настроено (Интеграции): файлы лежат на диске сервера">на диске сервера</span>{% endif %}</p></div>
+  <div class="actions">
+    {% if found.can_write and not found.trash %}<a class="btn primary" href="{{ files_url(found.path, p='1') }}" data-nx-open>{{ icon('upload') }} Загрузить</a>{% endif %}
+    {% if found.trash %}<a class="btn" href="/files">← Из корзины</a>{% else %}<a class="btn" href="{{ files_url(trash='1') }}">{{ icon('trash') }} Корзина{% if summary.trash %} <span class="pill gray">{{ summary.trash }}</span>{% endif %}</a>{% endif %}
+  </div>
+</div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+{% if not found.path and not found.q and not found.trash %}<div class="card note nx-hint">Общие файлы людей и агентов: раздел «Общее» и раздел каждого отдела, внутри — любые папки. У файла хранятся все версии, удалённое лежит в корзине. Агенту хранилище открывают в «Доступах» (раздел «Хранилище»): пока не открыли, агент его не видит.</div>{% endif %}
+
+<div class="nx-layout{{ ' panel-open' if panel_open }}" data-nx-root>
+  <section class="card nx-list-card" aria-label="Файлы"{% if found.can_write and not found.trash %} data-nx-drop{% endif %}>
+    <div class="nx-toolbar">
+      <nav class="nx-crumbs" aria-label="Путь"><a href="/files">Хранилище</a>{% for c in found.crumbs %}<span class="sep">/</span>{% if loop.last and not found.q and not found.trash %}<b>{{ c.name }}</b>{% else %}<a href="{{ files_url(c.path) }}">{{ c.name }}</a>{% endif %}{% endfor %}{% if found.trash %}<span class="sep">/</span><b>Корзина</b>{% endif %}{% if found.q %}<span class="sep">/</span><b>поиск «{{ found.q }}»</b>{% endif %}</nav>
+      <form method="get" action="/files" role="search">
+        {% if found.path %}<input type="hidden" name="path" value="{{ found.path }}">{% endif %}
+        <label class="nx-search"><span class="sr-only">Поиск</span><input type="search" name="q" data-nx-search value="{{ found.q }}" placeholder="Поиск: имя, описание — Enter ищет {{ 'в этой папке' if found.path else 'во всех разделах' }}" autocomplete="off"></label>
+      </form>
+      {% if found['items'] and found.path or found.q or found.trash %}<div class="nx-chips" role="group" aria-label="Тип">
+        {% for key, label in chips %}<button type="button" class="nx-chip{{ ' on' if key == 'all' }}" data-nx-chip="{{ key }}">{{ label }} <span class="nx-chip-count"></span></button>{% endfor %}
+      </div>{% endif %}
+    </div>
+    <div class="nx-list">
+      {% for g in groups if g['items'] %}
+      <section class="nx-group" data-nx-group="{{ g.key }}">
+        <h3 class="nx-group-head" data-nx-label="{{ g.name }}">{{ g.name }} ({{ g['items']|length }})</h3>
+        {% for i in g['items'] %}{{ row(i) }}{% endfor %}
+      </section>
+      {% endfor %}
+      {% if not found['items'] %}
+      <div class="nx-empty"><div class="empty-state-icon" aria-hidden="true">{{ icon('trash' if found.trash else 'folder') }}</div>
+        <h3>{{ 'Корзина пуста' if found.trash else ('Ничего не нашли' if found.q else ('Нет доступных разделов' if not found.path else 'Папка пуста')) }}</h3>
+        <p class="muted">{% if found.can_write and not found.trash and not found.q %}Перетащите файлы сюда или загрузите их кнопкой «Загрузить».{% elif found.q %}Проверьте написание или ищите на уровень выше.{% endif %}</p></div>
+      {% endif %}
+      <p class="nx-no-results muted" data-nx-none hidden>Среди показанного нет. Enter — искать {{ 'в этой папке и вложенных' if found.path else 'во всех разделах' }}.</p>
+    </div>
+  </section>
+  <a class="nx-backdrop" href="{{ files_url(found.path, q=found.q, trash='1' if found.trash else '') }}" data-nx-open tabindex="-1" aria-hidden="true"></a>
+  <aside class="card nx-panel" id="nx-panel" data-open="{{ '1' if panel_open else '0' }}" data-selected="{{ selected }}" aria-label="Карточка" aria-live="polite">
+    {% include "net/_files_panel.html" %}
+  </aside>
+</div>
+{% if found.can_write and not found.trash %}<form id="nx-upload-form" method="post" action="/files/upload" enctype="multipart/form-data" hidden><input type="hidden" name="folder" value="{{ found.path }}"><input type="file" name="files" multiple></form>{% endif %}
+<script src="{{ asset('net.js') }}" defer></script>
+{% endblock %}

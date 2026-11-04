@@ -38,6 +38,7 @@
       <textarea name="persona" rows="3" maxlength="600" placeholder="{{ persona_default }}">{{ s.persona }}</textarea></label>
     <p class="small muted">Имя берётся из самого аккаунта. Пусто: используется манера по умолчанию. На прямой вопрос «ты человек?» он не станет утверждать, что человек.</p>
     {% else %}
+    <p class="small muted tg-mode-hint">Сейчас пишет бот: он может написать человеку только после того, как тот сам откроет бота и нажмёт «Запустить». Чтобы ИИ-сотрудник писал людям первым, как обычный человек, нужен аккаунт Telegram: включите «ИИ-сотрудник», сохраните настройки и подключите аккаунт{% if account and account.configured %} (он уже сохранён{% if account.me and account.me.name %}: {{ account.me.name }}{% endif %}){% endif %}. <a href="/settings/telegram">Telegram-аккаунт →</a></p>
     {{ credential('telegram_bot_token', 'Токен Telegram-бота', 'Токен от BotFather') }}
     {% endif %}
   </section>
@@ -50,23 +51,79 @@
     {% endif %}
   </section>
   <section class="card setup-step" id="speaker-identification">
-    <h2>Идентификация по голосу</h2>
-    <p class="small muted">Опциональное распознавание зарегистрированных сотрудников по образцам речи. Задайте ключ pyannoteAI, затем откройте карточку сотрудника, загрузите чистый образец 5–30 секунд и подтвердите согласие. При обработке новых записей аудиофрагменты будут передаваться pyannoteAI для сопоставления; без ключа и образцов обычная диаризация работает как раньше.</p>
-    {{ credential('pyannoteai_api_key', 'Ключ pyannoteAI', 'Ключ из кабинета pyannote.ai') }}
+    <h2>Разметка голосов</h2>
+    <p class="small muted">Как узнавать одного и того же человека по всей записи. Запись расшифровывается кусками по 45–90 секунд, и каждый кусок размечает голоса заново — «Спикер 2» одного куска надо узнать в следующем. Образцы голосов сотрудников для этого не нужны: голоса сравниваются внутри одной записи. Способы сравниваются на эталонах — <a href="/diarization#compare">Точность разметки голосов</a>.</p>
+    <label class="f">Способ
+      <select name="diarization_method">{% for key, title in diarization_methods.items() %}<option value="{{ key }}"{{ ' selected' if s.diarization_method == key }}>{{ title }}{% if diarization_unavailable[key] %} — сейчас недоступен{% endif %}</option>{% endfor %}</select></label>
+    <ul class="small muted method-hints">{% for key, hint in diarization_hints.items() %}<li><b>{{ diarization_methods[key] }}</b> — {{ hint }}{% if diarization_unavailable[key] %}<span class="why">{{ diarization_unavailable[key] }}</span>{% endif %}</li>{% endfor %}</ul>
+    <label class="f">Порог сходства голосов для «{{ diarization_methods.voice }}»
+      <input name="diarization_voice_threshold" value="{{ ('%.2f' % s.diarization_voice_threshold)|replace('.', ',') }}" inputmode="decimal" pattern="0[,.][0-9]{1,2}" title="От 0,2 до 0,95"></label>
+    <p class="small muted">От 0,2 до 0,95. Выше — голоса реже объединяются в одного человека (больше лишних голосов), ниже — чаще (больше склеек). Лучший порог показывает сравнение на эталонах.</p>
+    <p class="small">{% if voice_service %}<span class="pill green">Сервис голосов подключён</span>{% else %}<span class="pill amber">Сервис голосов не подключён</span> задайте на сервере (Render → Environment) <code>SYSAI_VOICE_SERVICE_URL</code> и <code>SYSAI_VOICE_SERVICE_TOKEN</code>.{% endif %}</p>
+    <p class="small muted">Если выбранный способ не сработал на записи (сервис недоступен, ошибка модели), остаются метки кусков — расшифровка не теряется, а на странице совещания написано, что случилось.</p>
+    <label class="f">Уверенность для имени из разговора, %
+      <input name="speaker_name_threshold" value="{{ (s.speaker_name_threshold * 100)|round|int }}" inputmode="numeric" pattern="[5-8][0-9]|9[0-5]" title="От 50 до 95"></label>
+    <p class="small muted">Имя ставится, только если разговор доказывает его не меньше чем на столько: человек представился (85%), ответил, когда его назвали по имени (60% за раз), это подтвердил ИИ. Ниже — «Спикер N» остаётся, а «Кто это?» на странице совещания предлагает 2–3 кандидата с причинами и фрагментами, чтобы прослушать.</p>
+    <h3 id="voice-memory">Голоса между встречами</h3>
+    {{ switch('voice_memory', 'Запоминать голоса между встречами', 'Голос сотрудника, подтверждённый на совещании («Кто это?», правка реплики, уверенное представление), запоминается — и на следующих встречах его реплики подписываются сами, с пометкой «голос совпал». Только для сотрудников, отметивших согласие в карточке (вкладка «Голос»), и только со способом «' ~ diarization_methods.voice ~ '». Аудио не хранится — только зашифрованный отпечаток голоса на ' ~ voice_memory_days ~ ' дней; «Забыть голос» в карточке и удаление совещания стирают его.') }}
+    <label class="f">Порог узнавания по прошлым встречам
+      <input name="voice_memory_threshold" value="{{ ('%.2f' % s.voice_memory_threshold)|replace('.', ',') }}" inputmode="decimal" pattern="0[,.][0-9]{1,2}" title="От 0,4 до 0,95"></label>
+    <p class="small muted">От 0,4 до 0,95. Человек узнаётся, когда голос похож на его отпечатки минимум с {{ voice_memory_meetings }} прошлых встреч не меньше порога и заметно больше, чем на голос любого другого сотрудника; иначе остаётся «Спикер N». Выше — подписывает реже, но точнее. «Сравнить способы» на эталонах учитывает запомненные голоса.</p>
     {{ switch('voice_debug_mode', 'Отладочный режим', 'Включено: предлагать кандидаты после встречи, пока известным голосам не хватает независимых образцов. Неизвестные голоса не скрываются. Выключено: никаких автоматических запросов, ручной выбор остаётся. Количество и сходство не являются вероятностью или обещанием точности.') }}
   </section>
+  <section class="card setup-step" id="recording-storage">
+    <h2>Хранилище записей</h2>
+    <p class="small muted">Записи совещаний хранятся в приватном S3-совместимом хранилище (Cloudflare R2, Yandex Object Storage, Selectel…): на диаграмме «Кто и когда говорил» их можно слушать с любого места и скачать. В хранилище уходит сжатая копия для речи — MP3, моно, 32 кбит/с, около 14 МБ на час. Копия удаляется через {{ retention_days }} дней, а вместе с совещанием или по кнопке «Удалить запись» — сразу.</p>
+    {% if storage.configured %}
+    <p class="small">{% if storage.problem %}<span class="pill red">Ошибка настройки</span> {{ storage.problem }}
+      {%- else %}<span class="pill green">Подключено</span> бакет <b>{{ storage.bucket }}</b> · {{ storage.host }}{% endif %}</p>
+    <p class="small muted">Хранится записей: {{ storage_usage.count }} · {{ ('%.1f' % storage_usage.megabytes).replace('.', ',') }} МБ
+      {%- if storage_usage.pending %} · сохраняются сейчас: {{ storage_usage.pending }}{% endif %}
+      {%- if storage_usage.failed %} · не сохранились: {{ storage_usage.failed }} (причина — на странице совещания){% endif %}.
+      Записи совещаний, обработанных до подключения, не сохранялись.</p>
+    <button type="submit" class="btn sm" formaction="/settings/test-storage" formnovalidate>Проверить хранилище</button>
+    <p class="small muted">Проверка записывает маленький файл, читает его по временной ссылке, как плеер, и удаляет.</p>
+    {% else %}
+    <p class="small">{% if storage.missing %}<span class="pill amber">Не хватает настроек</span> не заданы: {{ storage.missing|join(', ') }}.
+      {%- else %}Пока не подключено: запись удаляется после обработки, слушать совещания нельзя.{% endif %}</p>
+    <p class="small muted">Чтобы подключить, задайте на сервере (Render → Environment) четыре переменные: <code>S3_ENDPOINT</code> — адрес хранилища, <code>S3_BUCKET</code> — приватный бакет, <code>S3_ACCESS_KEY_ID</code> и <code>S3_SECRET_ACCESS_KEY</code> — ключ с доступом только к этому бакету. Ключи хранятся только на сервере и здесь не показываются.</p>
+    {% endif %}
+  </section>
   <section class="card setup-step" id="digest">
-    <h2>Сводка по делам</h2>
-    <p class="small muted">Короткий отчёт проверяющим в Telegram: что ассистент закрыл, что ждёт решения, что в работе и кого ждём, что висит без движения. Директор и наблюдатели её не получают.</p>
+    <h2>Утренняя сводка</h2>
+    <p class="small muted">Каждое утро в Telegram — один экран по важности: что горит (просроченные задачи, срок сегодня и завтра, «мешает»), кто молчит (ассистент ждёт ответа дольше, чем положено по карточке; срок так и не назвали) и что ждёт решения (протоколы на утверждение, остановленные дела и дела на одобрение, вопросы сотрудников, задачи без получателя). У каждого пункта — ссылка на его страницу в кабинете. «Раз в неделю» — сводка по делам ассистента за неделю.</p>
     <div class="row">
       <label class="f">Как часто
         <select name="digest_frequency">{% for k, label in digest_frequencies.items() %}<option value="{{ k }}" {{ 'selected' if s.digest_frequency == k }}>{{ label }}</option>{% endfor %}</select></label>
-      <label class="f sm">Во сколько <input type="number" min="0" max="23" name="digest_hour" value="{{ s.digest_hour }}"></label>
+      <label class="f sm">Во сколько <input type="time" name="digest_time" value="{{ '%02d:%02d'|format(s.digest_hour|int, (s.digest_minute or 0)|int) }}"></label>
       <label class="f">День недели (для «раз в неделю»)
         <select name="digest_weekday">{% for d in weekdays %}<option value="{{ loop.index0 }}" {{ 'selected' if s.digest_weekday == loop.index0 }}>{{ d }}</option>{% endfor %}</select></label>
     </div>
-    <p class="small muted">Время — по часовому поясу сервиса. В тихие часы сводка ждёт утра.</p>
+    <input type="hidden" name="present_digest_recipients" value="1">
+    <div class="f">Кому
+      <div class="chips">{% for p in digest_people %}<label class="chip" title="{{ p.position }}"><input type="checkbox" name="digest_recipients" value="{{ p.id }}" {{ 'checked' if p.id in (s.digest_recipients or []) }}>{{ p.name }}</label>{% else %}<span class="small muted">Нет сотрудников с Telegram.</span>{% endfor %}</div>
+    </div>
+    <p class="small muted">Никого не выбрано — получают проверяющие.</p>
+    <p class="small muted">Время — по часовому поясу сервиса. В тихие часы и выходные сводка ждёт следующего рабочего утра.</p>
     <button type="submit" class="btn sm" formaction="/settings/test-digest" formnovalidate>Прислать сводку сейчас</button>
+  </section>
+  <section class="card setup-step" id="mail">
+    <h2>Секретарь</h2>
+    <p class="small muted">Почта компании: ящик и пароль приложения, кто чем занимается, ответы на письма и типы писем — на странице <a href="/mail">«Секретарь»</a> (внизу меню), все настройки — на её панели справа.</p>
+  </section>
+  <section class="card setup-step" id="integrations">
+    <h2>Битрикс24 и Google Drive</h2>
+    <p class="small muted">Задачи и клиенты вместе с Битрикс24, документы и шаблоны вместе с Google Drive — на странице <a href="/integrations">«Интеграции»</a>.</p>
+  </section>
+  <section class="card setup-step" id="server">
+    <h2>Сервер</h2>
+    <p class="small muted">Перерывы в работе, сбои, память, место в базе и ночные бэкапы — на странице <a href="/server">«Сервер»</a>. По ней видно, хватает ли нынешнего хостинга и что дал переезд.</p>
+  </section>
+  <section class="card setup-step" id="agents">
+    <h2>Сеть агентов</h2>
+    <p class="small muted">Агенты на ПК сотрудников (Hermes): подключение по коду, доступы без подтверждений, общий хаб навыков SYSAI_Hub, MCP-сервер и шлюз моделей. После включения — страницы <a href="/agents">«Агенты»</a> и <a href="/hub">«SYSAI_Hub»</a>.</p>
+    {{ switch('agents_on', 'Сеть агентов', 'Включено: агенты подключаются к SYSAI, получают доступы и навыки, ходят к нейронкам через SYSAI.') }}
+    {{ switch('opo_on', 'ОПО: проекты ПЛК', 'От чертежей ТО до проекта Machine Expert. В разработке.') }}
   </section>
   <section class="card setup-step" id="ticnote">
     <h2>TicNote</h2>
@@ -96,8 +153,15 @@
     {% endmacro %}
     {{ model_field('transcribe_model', 'transcribe-model', 'Распознавание речи (STT)', 'Поиск: scribe, whisper, gemini, voxtral…') }}
     <p class="small muted">Отдельные STT-модели распознают текст, а говорящих расставляет модель из следующего поля. Gemini слышит и текст, и голоса за один проход. Цена указана за час аудио или за 1 млн токенов. Перед сменой сравните качество на одних и тех же русскоязычных записях.</p>
+    {{ model_field('verify_model', 'verify-model', 'Второй движок: дослушивает пропуски и сомнительные слова', 'Поиск: gemini, scribe, mai…') }}
+    {{ model_field('verify_judge_model', 'judge-model', 'Судья: слушает спорное слово и выбирает вариант', 'Поиск модели со звуком…') }}
+    <p class="small muted">Слово меняется, только когда судья уверен и согласен со вторым движком или со словарём: нужны два независимых «прослушивания». Какой движок точнее на ваших записях, покажет <a href="/speech-compare">сравнение движков →</a></p>
+    {{ switch('speech_detector', 'Детектор речи', 'Режет запись по паузам, а не посреди слова. Где голос есть, а слов в расшифровке нет, второй движок слушает это место ещё раз; ничего не услышал — ставится «[неразборчиво]». Фразы, которые движок «придумал» в тишине («Продолжение следует…»), убираются.') }}
+    {{ switch('speech_doubts', 'Перепроверять сомнительные слова', 'Слова, в которых движок не уверен, и слова, которые не подходят по смыслу, второй движок и судья слушают ещё раз.') }}
+    {{ switch('stt_keyterms', 'Передавать движку имена и термины', 'До 100 имён сотрудников, клиентов, объектов и слов словаря; первыми — участники совещания.') }}
+    {{ switch('stt_diarize', 'Просить движок разметить говорящих', 'Движок сам отмечает, кто сказал каждое слово, — реплики режутся по смене голоса. Если движок так не умеет, говорящих расставит модель из следующего поля.') }}
     {{ model_field('diarization_model', 'diarization-model', 'Разделение говорящих и временная привязка', 'Поиск модели со звуком…') }}
-    <p class="small muted">Используется, если выбранная STT-модель не вернула метки говорящих. Текст остаётся за STT-моделью; эта модель только распределяет реплики по голосам.</p>
+    <p class="small muted">Используется, если выбранная STT-модель не вернула метки говорящих. Текст остаётся за STT-моделью; эта модель только распределяет реплики по голосам. Насколько точно размечены голоса, видно по эталонам: <a href="/diarization">Точность разметки голосов →</a></p>
     {{ model_field('report_model', 'report-model', 'Анализ расшифровки и отчёт', 'Поиск: gemini, claude, gpt…') }}
     {{ model_field('agent_model', 'agent-model', 'ИИ-сотрудник', 'Поиск: gemini, claude, gpt…') }}
     {{ model_field('conversation_model', 'conversation-model', 'Модель переписки (бесплатная)', '') }}
@@ -111,6 +175,13 @@
     {% if ai %}
     <label class="f">Тихие часы: не писать с <input type="number" min="0" max="23" name="quiet_from_hour" value="{{ s.quiet_from_hour }}"> до <input type="number" min="0" max="23" name="quiet_to_hour" value="{{ s.quiet_to_hour }}"> часов</label>
     <p class="small muted">По времени сервиса (TIMEZONE). В это время сообщения людям и ответы ждут утра. Одинаковые часы означают, что тихих часов нет.</p>
+    <input type="hidden" name="present_quiet_days" value="1">
+    <div class="f">Выходные: первым не писать
+      <div class="chips">{% for d in range(7) %}<label class="chip"><input type="checkbox" name="quiet_days" value="{{ d }}" {{ 'checked' if d in (s.quiet_days or []) }}>{{ ('пн','вт','ср','чт','пт','сб','вс')[d] }}</label>{% endfor %}</div>
+    </div>
+    <p class="small muted">В выходные ассистент никому не пишет первым (задачи, напоминания по делам, сообщения о молчании ждут утра рабочего дня). На сообщения людей отвечает. Напоминания «на время», о которых попросили, уходят всегда.</p>
+    <label class="f sm">Не больше сообщений одному человеку в час <input type="number" min="0" max="30" name="person_hourly_limit" value="{{ s.person_hourly_limit }}"></label>
+    <p class="small muted">Сколько сообщений ассистент может сам начать с одним человеком за час (дела, задачи). Остальные подождут. Ответы на сообщения не считаются. 0 — без лимита.</p>
     {% endif %}
   </section>
   {% if ai %}
@@ -124,6 +195,8 @@
       <label class="f sm">Напоминаний <input type="number" min="0" max="10" name="case_max_reminders" value="{{ s.case_max_reminders }}"></label>
       <label class="f sm">Сообщить руководителю через, ч <input type="number" min="1" max="720" name="case_escalate_hours" value="{{ s.case_escalate_hours }}"></label>
     </div>
+    <p class="small muted">Кому сообщать о молчании и через сколько — можно задать в карточке сотрудника или подразделения; там, где не задано, действуют эти значения и сообщение получают проверяющие.</p>
+    {{ switch('silence_working_hours', 'Считать часы молчания только в рабочее время', 'Ночь (тихие часы) и выходные не считаются: просьба в пятницу вечером напомнится в понедельник, а не в субботу.') }}
     <label class="f">Слова конфиденциальных файлов <input name="sensitive_keywords" value="{{ s.sensitive_keywords }}"></label>
   {% endif %}
   </section>

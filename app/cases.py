@@ -27,7 +27,7 @@ import zipfile
 
 from sqlalchemy.exc import IntegrityError
 
-from . import config, llm, settings_store, task_routing, userbot, voice
+from . import config, llm, settings_store, skill_stats, task_routing, userbot, voice
 from .db import (Artifact, Case, CaseEvent, CaseStep, CaseWait, Document, DocumentTransfer, Employee, Note, SessionLocal, Task,
                  now)
 
@@ -49,6 +49,9 @@ STATUS_RU = {"awaiting_approval": "ждёт одобрения плана", "sug
              "waiting": "ждёт ответа", "attention": "нужно решение человека", "done": "завершено",
              "failed": "не удалось", "cancelled": "отменено", "paused": "на паузе",
              "handed_over": "передано человеку"}
+
+WAIT_RU = {"answer": "ответа", "document": "документа", "done": "выполнения"}
+EXPECT_RU = {"answer": "ответ", "document": "файл", "done": "выполнение"}
 
 _locks = collections.defaultdict(threading.Lock)
 
@@ -246,9 +249,11 @@ def describe_plan(s, case) -> str:
                 e = s.get(Employee, a[key])
                 names[a[key]] = e.name if e else f"#{a[key]}"
         if step.tool == "send_message":
-            lines.append(("спросить " if a.get("purpose") == "ask" else "попросить документ у ") + names[a["to"]])
+            lines.append({"ask": "спросить ", "order": "поручить "}.get(a.get("purpose"), "попросить документ у ")
+                         + names[a["to"]])
         elif step.tool == "wait_reply":
-            lines.append(f"дождаться {'ответа' if a.get('expects') == 'answer' else 'документа'} от {names[a['from']]}")
+            lines.append(f"дождаться, когда сделает {names[a['from']]}" if a.get("expects") == "done" else
+                         f"дождаться {WAIT_RU.get(a.get('expects'), 'ответа')} от {names[a['from']]}")
         elif step.tool == "forward_document":
             lines.append(f"передать документ {names[a['to']]}")
         elif step.tool == "zip_pack":
@@ -256,7 +261,13 @@ def describe_plan(s, case) -> str:
         elif step.tool == "send_files":
             lines.append(f"отправить {'архив' if a.get('from_step') is not None else 'файлы'} {names[a['to']]}")
         elif step.tool == "report":
-            lines.append("доложить результат")
+            lines.append(f"доложить {a['requested_by']}" if a.get("to_chat") and a.get("requested_by") else "доложить результат")
+        elif step.tool == "run_skill":
+            lines.append(a.get("summary") or "выполнить просьбу")
+        elif step.tool == "mail_notice":
+            lines.append(f"переслать письмо {names[a['to']]}")
+        elif step.tool == "mail_draft":
+            lines.append(f"прислать {names[a['to']]} черновик ответа на письмо")
     return "; ".join(lines)
 
 
@@ -313,18 +324,24 @@ def start_for_task(task_id: int):
 def _write(purpose: str, facts: dict) -> str:
     instructions = {
         "ask": "Напиши сотруднику короткое сообщение: тебе нужно узнать у него то, что сказано в task. Задай вопрос прямо "
-               "и попроси ответить в этом чате. Не пиши так, будто задача поручена ему.",
+               "и попроси ответить в этом чате. Если есть requested_by, скажи, что спрашиваешь по его просьбе. Не пиши "
+               "так, будто задача поручена ему.",
         "request": "Напиши сотруднику короткое сообщение: попроси прислать в этот чат документ или данные из task. Если "
-                   "есть forward_to, скажи, что передашь документ им. Не пиши так, будто задача поручена ему.",
+                   "есть forward_to, скажи, что передашь документ им; если есть requested_by — что это его просьба. Не "
+                   "пиши так, будто задача поручена ему.",
+        "order": "Напиши сотруднику короткое сообщение: requested_by поручил ему задачу (task) — что сделать и к какому "
+                 "сроку (deadline, если есть). Попроси написать в этот чат, когда будет готово или если что-то мешает.",
         "remind": "Вежливо и коротко напомни сотруднику о своей просьбе (what_was_asked). reminder_number — какое это "
-                  "напоминание по счёту; не дави и не упрекай.",
+                  "напоминание по счёту; не дави и не упрекай. Если это поручение со сроком (deadline), спроси, как идёт "
+                  "и успевает ли к сроку.",
         "deliver": "Напиши короткую подпись к документу для получателя: от кого документ (from) и по какому поручению (task).",
         "report": "Коротко сообщи руководителю, чем закончилось дело: что спросил или попросил, у кого, что получил "
                   "(answers, documents), кому передал (forwarded, sent). Если ответ — передай его суть точно. Если в ответе "
                   "человек просит что-то прислать или сделать, предложи следующий шаг, который ты сделаешь сам: например, "
                   "«пришлите сюда файлы — упакую в ZIP и передам ему».",
-        "escalate": "Сообщи руководителю, что сотрудник (person) не отвечает по делу уже hours часов, несмотря на "
-                    "напоминания (reminders). Предложи вмешаться. Без упрёков в адрес сотрудника.",
+        "escalate": "Сообщи руководителю (или recipient, если он есть), что сотрудник (person) не отвечает по делу уже "
+                    "hours часов, несмотря на напоминания (reminders). Без упрёков в адрес сотрудника. В конце предложи "
+                    "ответить одним словом: «напомни ещё», «займусь сам» или «отмени».",
         "approval": "Сообщи руководителю план дела (plan) и попроси разрешения начать: он может ответить «да» в этом "
                     "чате или нажать «Одобрить» на странице совещания. Если autonomy=suggest, это только предложение.",
         "doc_approval": "Попроси руководителя разрешить пересылку документа: файл (filename) от from для to. Объясни "
@@ -333,10 +350,24 @@ def _write(purpose: str, facts: dict) -> str:
         "failure": "Сообщи руководителю, что дело не удалось начать или выполнить: reason. Предложи, что можно сделать.",
         "handover": "Напиши сотруднику (person), что руководитель передаёт ему поручение (task), которое вёл ты. Коротко "
                     "перечисли, что уже сделано (done_so_far) и что получено (documents), и что осталось сделать.",
+        "skill_done": "Коротко сообщи человеку, что руководитель одобрил его просьбу и ты её выполнил: done — что "
+                      "сделано. Без лишних слов.",
+        "skill_declined": "Коротко и по-доброму сообщи человеку, что руководитель не одобрил его просьбу (asked). "
+                          "Не спорь и не объясняй, как устроено одобрение; предложи, чем можешь помочь сам.",
+        "order_report": "Коротко сообщи человеку, который дал поручение (requested_by), чем оно закончилось: кто и что "
+                        "сделал или ответил (answers — передай суть точно), что получено (documents) и кому передано "
+                        "(forwarded).",
+        "order_silent": "Сообщи человеку, который дал поручение (requested_by), что сотрудник (person) не отписался по "
+                        "нему (what_was_asked) уже hours часов, хотя ты напоминал (reminders); если есть deadline — что "
+                        "срок наступил. Без упрёков. В конце предложи ответить: «напомни ещё», «займусь сам» или «отмени» (или поручить "
+                        "другому).",
+        "order_blocked": "Сообщи человеку, который дал поручение (requested_by), что исполнитель (person) пишет, что ему "
+                         "мешает (note) по поручению (task). Предложи, как помочь, или спроси, как быть.",
     }[purpose]
-    system = voice.system_prompt("Ты ведёшь дело по поручению с совещания. " + instructions + ' JSON: {"text":"..."}')
+    system = voice.system_prompt("Ты ведёшь дело по поручению (с совещания или из чата). " + instructions +
+                                 ' JSON: {"text":"..."}')
     facts = {"purpose": purpose, **facts}
-    if purpose in ("ask", "request", "remind", "deliver", "handover"):
+    if purpose in ("ask", "request", "order", "remind", "deliver", "handover"):
         from . import memory
         found = memory.skills_for(f"{purpose} {json.dumps(facts.get('task') or {}, ensure_ascii=False)}")
         if found:
@@ -463,8 +494,11 @@ def _attention(case_id: int, step_id, reason: str) -> None:
     _tell_leaders(case_id, "attention", {"reason": reason})
 
 
-def _quiet(case_id: int) -> bool:
+def _quiet(case_id: int, exc=None) -> bool:
+    """The quiet time is on (or `exc`, the hourly limit of the person, says wait): the case goes on later."""
     until = userbot.quiet_until()
+    if until is None and isinstance(exc, userbot.QuietHours):
+        until = now() + dt.timedelta(seconds=max(60, int(getattr(exc, "retry_after", 60) or 60)))
     if until is None:
         return False
     with SessionLocal() as s:
@@ -490,6 +524,8 @@ def _case_facts(s, case) -> dict:
     facts = {"task": {"title": case.title, "description": (task.description if task else "") or "",
                       "quote": (task.source_quote if task else "") or ""},
              "plan": describe_plan(s, case)}
+    if task is not None and task.deadline:
+        facts["deadline"] = task.deadline.isoformat()
     return facts
 
 
@@ -507,13 +543,16 @@ def _send_message(case_id: int, step_id: int) -> bool:
         person = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
         facts = _case_facts(s, case)
         facts["person"] = {"name": person.name, "position": person.position or None,
-                           "communication_style": getattr(person, "communication_style", "") or None}
+                           "communication_style": getattr(person, "communication_style", "") or None,
+                           "address": voice.address_of(person)}
         history = _history_with(s, person)
         if history:
             facts["history"] = history  # a short summary of earlier conversations with this person
         if step.args.get("purpose") == "request":
             dests = [s.get(Employee, x.args["to"]) for x in case.steps if x.tool == "forward_document"]
             facts["forward_to"] = [e.name for e in dests if e is not None]
+        if step.args.get("requested_by"):  # an order from the chat: on whose behalf
+            facts["requested_by"] = step.args["requested_by"]
         ref, name = person.telegram_chat_id, person.name
     text = _write(step.args.get("purpose", "ask"), facts)
     with SessionLocal() as s:  # persisted before the side effect: a crash now never sends twice
@@ -522,11 +561,11 @@ def _send_message(case_id: int, step_id: int) -> bool:
         s.commit()
     try:
         sent = _send_text(ref, text)
-    except userbot.QuietHours:
+    except userbot.QuietHours as exc:
         with SessionLocal() as s:
             s.get(CaseStep, step_id).status = "pending"
             s.commit()
-        _quiet(case_id)
+        _quiet(case_id, exc)
         return False
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as s:
@@ -552,21 +591,131 @@ def _wait_reply(case_id: int, step_id: int) -> bool:
         asked = next((x for x in reversed(case.steps) if x.position < step.position and x.tool == "send_message"
                       and x.args.get("to") == step.args["from"] and x.status == "done"), None)
         start = now()
-        reminder = dt.timedelta(hours=_hours("case_reminder_hours", 4))
         wait = s.query(CaseWait).filter_by(step_id=step_id).first() or CaseWait(case_id=case_id, step_id=step_id)
         wait.employee_id = person.id if person else None
         wait.chat_ref = person.telegram_chat_id if person else ""
         wait.expects = step.args.get("expects", "answer")
         wait.asked_message_id = (asked.result or {}).get("message_id") if asked else None
-        wait.started_at, wait.next_reminder_at = start, start + reminder
-        wait.escalate_at = start + dt.timedelta(hours=_hours("case_escalate_hours", 24))
+        wait.started_at = start
+        rule = silence_rule(s, person) if wait.expects != "done" else None
+        wait.next_reminder_at, wait.escalate_at = _wait_times(start, wait.expects, case.task, rule)
         s.add(wait)
         step.status, step.started_at = "waiting", start
         case.status = "waiting"
-        _event(s, case_id, "waiting", f"Жду {'ответа' if wait.expects == 'answer' else 'документа'} от "
-                                      f"{person.name if person else '?'}", step_id)
+        _event(s, case_id, "waiting", (f"Жду, когда {person.name if person else '?'} сделает" +
+                                       (f" (срок {case.task.deadline.strftime('%d.%m')})"
+                                        if case.task is not None and case.task.deadline else "")
+                                       if wait.expects == "done" else
+                                       f"Жду {WAIT_RU.get(wait.expects, 'ответа')} от {person.name if person else '?'}"),
+               step_id)
         s.commit()
     return False
+
+
+SILENCE_CHOICES = {"remind": "напомнить ещё", "self": "займусь сам", "cancel": "отменить"}
+
+
+def silence_rule(s, employee) -> dict:
+    """When this person does not answer: whom to tell, after how many hours of silence, after how many reminders.
+    The employee card first, then their departments (in the order of the card), then the settings (the reviewers).
+    {"contact": Employee | None, "hours", "reminders", "source": where the contact comes from}."""
+    rule = {"contact": None, "hours": None, "reminders": None, "source": "настройки"}
+    layers = [(employee, "карточка сотрудника")] if employee is not None else []
+    for m in (employee.department_memberships if employee is not None else []):
+        if m.department is not None and m.department.active:
+            layers.append((m.department, f"подразделение «{m.department.name}»"))
+    for holder, label in layers:
+        contact_id = getattr(holder, "silence_contact_id", None)
+        if rule["contact"] is None and contact_id and contact_id != getattr(employee, "id", None):
+            contact = s.get(Employee, contact_id)
+            if contact is not None and contact.active and contact.telegram_chat_id:
+                rule["contact"], rule["source"] = contact, label
+        for key in ("hours", "reminders"):
+            value = getattr(holder, f"silence_{key}", None)
+            if rule[key] is None and isinstance(value, int) and value >= 0:
+                rule[key] = value
+    if rule["hours"] is None:
+        rule["hours"] = _hours("case_escalate_hours", 24)
+    if rule["reminders"] is None:
+        rule["reminders"] = int(_hours("case_max_reminders", 2))
+    rule["hours"] = max(1, rule["hours"])
+    return rule
+
+
+def _wait_times(start, expects: str, task, rule=None) -> tuple:
+    """(first reminder, when the silence is reported). An order is followed up by its deadline: a reminder on the
+    morning of that day, the person who gave it hears in the evening; without a deadline a day and three days. Other
+    waits follow the silence rule of the person (silence_rule)."""
+    if expects != "done":  # counted in working time: the night and the days off are not silence (working_after)
+        escalate = userbot.working_after(start, (rule or {}).get("hours") or _hours("case_escalate_hours", 24))
+        if rule is not None and rule.get("reminders") == 0:
+            return escalate, escalate  # no reminders: the contact hears at once when the time is up
+        return min(userbot.working_after(start, _hours("case_reminder_hours", 4)), escalate), escalate
+    deadline = task.deadline if task is not None else None
+    if deadline is None:
+        return (start + dt.timedelta(hours=_hours("order_reminder_hours", 24)),
+                start + dt.timedelta(hours=_hours("order_escalate_hours", 72)))
+    from zoneinfo import ZoneInfo
+    zone = ZoneInfo(config.TIMEZONE)
+    morning = dt.datetime.combine(deadline, dt.time(10, 0), zone).astimezone(dt.timezone.utc)
+    evening = dt.datetime.combine(deadline, dt.time(18, 0), zone).astimezone(dt.timezone.utc)
+    first = morning if morning > start + dt.timedelta(hours=2) else start + dt.timedelta(hours=_hours("case_reminder_hours", 4))
+    return first, max(evening, first + dt.timedelta(hours=1))
+
+
+def _owner(case):
+    """The person who gave this order in the chat: {"chat", "name"} — they hear how it goes (not the leaders)."""
+    for step in case.steps:
+        a = step.args or {}
+        if a.get("to_chat"):
+            return {"chat": str(a["to_chat"]), "name": a.get("requested_by") or ""}
+    return None
+
+
+def _tell_owner(case_id: int, purpose: str, extra: dict, document=None) -> int:
+    """A text about the order for the person who gave it; failures are logged, never raised."""
+    if not userbot.ai_mode():
+        return 0
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        owner = _owner(case)
+        facts = {"case": {"id": case.id, "title": case.title, "kind": case.kind},
+                 "requested_by": owner["name"] if owner else "", **extra}
+    if owner is None:
+        return 0
+    try:
+        text = _write(purpose, facts)
+        _send_text(owner["chat"], text)
+        if document is not None:
+            userbot.send_document(owner["chat"], document["filename"], document["data"], "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("case %s: %s not told to the person who gave the order: %s", case_id, purpose, exc)
+        return 0
+    with SessionLocal() as s:
+        _event(s, case_id, "told_requester", f"{purpose}: {text}")
+        s.commit()
+    return 1
+
+
+def _tell_contact(case_id: int, contact: dict, purpose: str, extra: dict) -> int:
+    """A text about the case for the person the silence rule names; failures are logged, never raised."""
+    if not userbot.ai_mode() or not contact.get("ref"):
+        return 0
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        employee = s.get(Employee, contact["id"]) if contact.get("id") else None
+        facts = {"case": {"id": case.id, "title": case.title, "kind": case.kind},
+                 "recipient": {"name": contact["name"], "address": voice.address_of(employee)}, **extra}
+    try:
+        text = _write(purpose, facts)
+        _send_text(contact["ref"], text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("case %s: %s not told to %s: %s", case_id, purpose, contact.get("name"), exc)
+        return 0
+    with SessionLocal() as s:
+        _event(s, case_id, "told_contact", f"{purpose} → {contact['name']}: {text}")
+        s.commit()
+    return 1
 
 
 def _sha(data: bytes) -> str:
@@ -634,12 +783,12 @@ def _forward_document(case_id: int, step_id: int) -> bool:
         sent = userbot.send_document(ref, filename, data, caption[:1000])
         if not isinstance(sent, dict) or not sent.get("message_id"):
             raise CaseError("Telegram не подтвердил отправку файла")
-    except userbot.QuietHours:
+    except userbot.QuietHours as exc:
         with SessionLocal() as s:
             s.get(CaseStep, step_id).status = "pending"
             s.get(DocumentTransfer, transfer_id).status = "approved"
             s.commit()
-        _quiet(case_id)
+        _quiet(case_id, exc)
         return False
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as s:
@@ -692,7 +841,11 @@ def _report(case_id: int, step_id: int) -> bool:
             attach = {"filename": doc.filename, "data": bytes(doc.data)} if doc and doc.data else None
         facts = {**_case_facts(s, case), "answers": answers, "documents": documents, "forwarded": forwarded,
                  "sent": sent}
-    _tell_leaders(case_id, "report", facts, document=attach)
+        owner = _owner(case)
+    if owner is not None:  # an order from the chat: the person who gave it hears the result
+        _tell_owner(case_id, "order_report", facts, document=attach)
+    else:
+        _tell_leaders(case_id, "report", facts, document=attach)
     with SessionLocal() as s:
         step = s.get(CaseStep, step_id)
         step.status, step.finished_at, step.result = "done", now(), {"answers": len(answers), "documents": len(documents)}
@@ -705,6 +858,81 @@ def _close_step(case_id: int, step_id: int) -> bool:
         step = s.get(CaseStep, step_id)
         step.status, step.finished_at = "done", now()
         s.commit()
+    return True
+
+
+# ----------------------------------------------------------------------------- a skill waiting for the director
+def start_skill(action: dict, summary: str, mode: str, *, chat: str, requested_by: str, employee_id=None,
+                sender: dict | None = None, full: bool = False) -> int:
+    """A request from the chat whose skill needs the director (Skills page: «с подтверждением» or «только предложить»):
+    a case of run_skill → close that waits for the approval, then does it and tells the person who asked."""
+    mode = mode if mode in ("approve", "suggest") else "approve"
+    with SessionLocal() as s:
+        case = Case(title=summary[:500] or "Просьба из чата", kind="skill", autonomy=mode, planner="agent",
+                    status="awaiting_approval" if mode == "approve" else "suggested")
+        case.steps.extend([
+            CaseStep(position=0, tool="run_skill",
+                     args={"skill": action.get("type"), "action": dict(action), "summary": summary[:500],
+                           "chat": str(chat), "employee_id": employee_id, "author": requested_by[:120],
+                           "sender": sender or {}, "full": bool(full), "requested_by": requested_by[:120],
+                           "requested_chat": str(chat)}),
+            CaseStep(position=1, tool="close", args={})])
+        s.add(case)
+        s.flush()
+        _event(s, case.id, "planned", f"Просьба от {requested_by or 'сотрудника'}: {summary}")
+        s.commit()
+        case_id = case.id
+    _tell_leaders(case_id, "approval", {"plan": summary, "autonomy": mode, "requested_by": requested_by})
+    return case_id
+
+
+def _tell_requester(case_id: int, purpose: str, extra: dict) -> None:
+    """The person who asked hears how their request ended; failures are logged, never raised."""
+    if not userbot.ai_mode():
+        return
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        step = next((x for x in case.steps if x.tool == "run_skill"), None) if case else None
+        if step is None or not (step.args or {}).get("requested_chat"):
+            return
+        chat = str(step.args["requested_chat"])
+        facts = {"case": {"id": case.id, "title": case.title}, "requested_by": step.args.get("requested_by"), **extra}
+    try:
+        _send_text(chat, _write(purpose, facts))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("case %s: the person who asked was not told (%s): %s", case_id, purpose, exc)
+        return
+    with SessionLocal() as s:
+        _event(s, case_id, "told_requester", purpose)
+        s.commit()
+
+
+def _run_skill(case_id: int, step_id: int) -> bool:
+    from . import agent_skills, assistant
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        a = dict(step.args or {})
+    action = dict(a.get("action") or {})
+    if action.get("type") not in agent_skills.SKILLS:
+        raise CaseError(f"неизвестный навык {action.get('type')!r}")
+    try:
+        agent_skills.execute(action, a.get("chat") or "", a.get("employee_id"), a.get("author") or "", a.get("sender") or None,
+                             full=bool(a.get("full")))
+        if action["type"] == "team_report" and a.get("chat"):
+            assistant.send_team_report(a["chat"], action.get("scope") or "all")
+    except agent_skills.SkillError as exc:
+        skill_stats.record(action["type"], "error", str(exc), a.get("chat") or "")
+        raise CaseError(str(exc)) from exc
+    skill_stats.record(action["type"], "done", chat=a.get("chat") or "")
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        step.status, step.finished_at, step.result = "done", now(), {"done": a.get("summary") or ""}
+        _event(s, case_id, "skill_done", f"Сделано: {a.get('summary') or action['type']}", step_id)
+        s.commit()
+    _tell_requester(case_id, "skill_done", {"done": a.get("summary") or ""})
+    if action["type"] == "make_document" and a.get("chat"):
+        from . import doc_templates
+        doc_templates.show_pending(a["chat"], explain=True)  # the approved draft goes to the person who asked
     return True
 
 
@@ -744,9 +972,10 @@ def _checked_documents(s, ids) -> list:
 
 
 def start_delivery(requested_by: str, to_employee_id: int, document_ids: list, as_zip: bool,
-                   archive_name: str = "", note: str = "", requested_chat: str = "") -> int:
+                   archive_name: str = "", note: str = "", requested_chat: str = "", report: bool = True) -> int:
     """An order in the chat («перешли ему», «запакуй и отправь зипом»): a case of code-built steps
-    zip_pack → send_files → report → close. It ends only when Telegram confirmed the sending."""
+    zip_pack → send_files → report → close. It ends only when Telegram confirmed the sending. Without `report` nobody
+    is told the result (a file passed on by the «что кому» rules: the sender already heard where it goes)."""
     ids = list(dict.fromkeys(int(x) for x in document_ids))
     if not ids or len(ids) > MAX_DELIVERY_FILES:
         raise CaseError(f"нужно от 1 до {MAX_DELIVERY_FILES} файлов")
@@ -771,8 +1000,9 @@ def start_delivery(requested_by: str, to_employee_id: int, document_ids: list, a
                               args={"to": recipient.id, "to_ref": recipient.telegram_chat_id,
                                     "requested_by": requested_by[:120], "requested_chat": str(requested_chat),
                                     **({"from_step": 0} if as_zip else {"document_ids": ids})}))
-        steps += [CaseStep(position=len(steps), tool="report", args={}),
-                  CaseStep(position=len(steps) + 1, tool="close", args={})]
+        if report:
+            steps.append(CaseStep(position=len(steps), tool="report", args={}))
+        steps.append(CaseStep(position=len(steps), tool="close", args={}))
         case.steps.extend(steps)
         s.add(case)
         s.flush()
@@ -833,7 +1063,8 @@ def _send_files(case_id: int, step_id: int) -> bool:
         facts.update({"from": step.args.get("requested_by") or "руководителя", "to": recipient.name,
                       "filename": archive or ", ".join(listed[:5]), "files_count": len(listed)})
         ref, name = recipient.telegram_chat_id, recipient.name
-    caption = _write("deliver", facts)
+        fixed = step.args.get("caption")  # the attachments of a letter (mail_route.py): its text went just before
+    caption = fixed if fixed is not None else _write("deliver", facts)
     with SessionLocal() as s:
         s.get(CaseStep, step_id).status = "sending"
         s.commit()
@@ -844,12 +1075,12 @@ def _send_files(case_id: int, step_id: int) -> bool:
             if not isinstance(sent, dict) or not sent.get("message_id"):
                 raise CaseError("Telegram не подтвердил отправку файла")
             message_ids.append(sent["message_id"])
-    except userbot.QuietHours:
+    except userbot.QuietHours as exc:
         if not message_ids:
             with SessionLocal() as s:
                 s.get(CaseStep, step_id).status = "pending"
                 s.commit()
-            _quiet(case_id)
+            _quiet(case_id, exc)
             return False
         raise CaseError("тихие часы начались посреди отправки; часть файлов ушла — проверьте чат") from None
     except Exception as exc:  # noqa: BLE001
@@ -876,6 +1107,79 @@ def _send_files(case_id: int, step_id: int) -> bool:
     return True
 
 
+def _send_step(case_id: int, step_id: int, text: str, event: str) -> dict | None:
+    """Send a text made by code to the person of the step (quiet hours, retries and «uncertain» as for any message).
+    Returns what Telegram said, or None when the case waits (the quiet hours)."""
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        person = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
+        ref, name = person.telegram_chat_id, person.name
+        step.status, step.started_at = "sending", now()
+        s.commit()
+    try:
+        sent = _send_text(ref, text)
+    except userbot.QuietHours as exc:
+        with SessionLocal() as s:
+            s.get(CaseStep, step_id).status = "pending"
+            s.commit()
+        _quiet(case_id, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as s:
+            step = s.get(CaseStep, step_id)
+            step.status, step.error = "uncertain", str(exc)[:500]
+            s.commit()
+        raise CaseError(f"не удалось подтвердить доставку сообщения {name}: {str(exc)[:200]}. Проверьте чат перед повтором")
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        step.status, step.finished_at = "done", now()
+        step.result = {"message_id": sent.get("message_id"), "user_id": sent.get("user_id")}
+        case = s.get(Case, case_id)
+        case.attempts, case.retry_at = 0, None
+        _event(s, case_id, "message_sent", f"{event} {name}: {text[:600]}", step_id)
+        s.commit()
+    return sent
+
+
+def _mail_notice(case_id: int, step_id: int) -> bool:
+    """A letter for the person who handles it (mail_route.py): the text is made by code and goes as it is."""
+    if _quiet(case_id):
+        return False
+    with SessionLocal() as s:
+        text = str(s.get(CaseStep, step_id).args.get("text") or "")
+    return _send_step(case_id, step_id, text, "Переслал письмо") is not None
+
+
+def _mail_draft(case_id: int, step_id: int) -> bool:
+    """The draft of the answer to the letter (mail_reply.py) for the same person; it waits for their «ок»."""
+    from . import mail_reply
+    if _quiet(case_id):
+        return False
+    with SessionLocal() as s:
+        step = s.get(CaseStep, step_id)
+        person = _checked_contact(s, step.args["to"], step.args.get("to_ref", ""))
+        mail_id, employee_id = step.args.get("mail_id"), person.id
+    try:
+        draft_id, text = mail_reply.for_case(mail_id, employee_id)
+        reason = "по письму уже решено"
+    except mail_reply.DraftLater as exc:  # the model is down: the step is tried again later
+        raise Retry(str(exc)) from exc
+    except mail_reply.ReplyError as exc:
+        draft_id, text, reason = None, "", str(exc)
+    if draft_id is None:
+        with SessionLocal() as s:
+            step = s.get(CaseStep, step_id)
+            step.status, step.finished_at = "skipped", now()
+            _event(s, case_id, "note", f"Черновик ответа не готовлю: {reason}", step_id)
+            s.commit()
+        return True
+    sent = _send_step(case_id, step_id, text, "Прислал черновик ответа")
+    if sent is None:
+        return False
+    mail_reply.shown(draft_id)
+    return True
+
+
 def _local_time(moment) -> str:
     from zoneinfo import ZoneInfo
     if moment is None:
@@ -885,7 +1189,7 @@ def _local_time(moment) -> str:
     return local.strftime("%H:%M") if local.date() == today else local.strftime("%d.%m %H:%M")
 
 
-EVENT_SKIP = ("retry", "told_leader")  # internal noise, not what a person wants to hear about
+EVENT_SKIP = ("retry", "told_leader", "told_requester")  # internal noise, not what a person wants to hear about
 
 
 def _case_story(s, case, events: int = 5) -> dict:
@@ -894,7 +1198,7 @@ def _case_story(s, case, events: int = 5) -> dict:
     waiting_for = []
     for w in waits:
         e = s.get(Employee, w.employee_id) if w.employee_id else None
-        waiting_for.append({"person": e.name if e else w.chat_ref, "expects": "ответ" if w.expects == "answer" else "файл",
+        waiting_for.append({"person": e.name if e else w.chat_ref, "expects": EXPECT_RU.get(w.expects, "ответ"),
                             "since": _local_time(w.started_at)})
     story = [{"at": _local_time(ev.created_at), "text": ev.text[:300]}
              for ev in case.events if ev.kind not in EVENT_SKIP][-events:]
@@ -953,12 +1257,13 @@ def recent_view(hours: int = 48, limit: int = 8) -> list:
 
 
 _RUN = {"send_message": _send_message, "wait_reply": _wait_reply, "forward_document": _forward_document,
-        "report": _report, "close": _close_step, "zip_pack": _zip_pack, "send_files": _send_files}
+        "report": _report, "close": _close_step, "zip_pack": _zip_pack, "send_files": _send_files,
+        "run_skill": _run_skill, "mail_notice": _mail_notice, "mail_draft": _mail_draft}
 
 
 def _close(s, case) -> None:
     case.status, case.closed_at, case.note = "done", now(), ""
-    if case.task is not None:
+    if case.task is not None and case.task.executor == "assistant":  # a person's task keeps the status they reported
         case.task.status = "assistant_done"
         s.add(Note(task_id=case.task_id, meeting_id=case.meeting_id, kind="done", source="system", author="ассистент",
                    text=f"Ассистент довёл дело «{case.title}» до конца"[:800]))
@@ -1014,11 +1319,12 @@ def intake_document(msg: dict, employee_id) -> dict:
 
 
 def read_later(document_id: int) -> None:
-    """The text of a received document is read in the background (memory search, questions about it)."""
+    """The text of a received document is read in the background (memory search, questions about it), then the
+    requisites, the sums and the deadlines are taken out of it and its route is planned (doc_intake.py)."""
     if _testing():
         return  # tests call doctext.process themselves
-    from . import doctext
-    _pool().submit(doctext.process, document_id)
+    from . import doc_intake
+    _pool().submit(doc_intake.process, document_id)
 
 
 def _pick_wait(waits: list, reply_to):
@@ -1049,7 +1355,8 @@ def on_message(employee_id, text: str, reply_to=None, document_id=None) -> dict:
         expects = "document" if document_id else "answer"
         if not document_id and is_acknowledgement(text):
             for other in s.query(CaseWait).filter_by(employee_id=employee_id, status="open").all():
-                _event(s, other.case_id, "note", f"Ответил(а): «{text[:200]}» — жду ответа по существу", other.step_id)
+                _event(s, other.case_id, "note", f"Ответил(а): «{text[:200]}» — " +
+                       ("жду, когда сделает" if other.expects == "done" else "жду ответа по существу"), other.step_id)
             s.commit()
             return {}
         waits = (s.query(CaseWait).filter(CaseWait.employee_id == employee_id, CaseWait.status == "open",
@@ -1061,7 +1368,9 @@ def on_message(employee_id, text: str, reply_to=None, document_id=None) -> dict:
                         "kind": expects}
             if not document_id:
                 for other in s.query(CaseWait).filter_by(employee_id=employee_id, status="open").all():
-                    _event(s, other.case_id, "note", f"Написал(а), но документа пока нет: {text[:300]}", other.step_id)
+                    _event(s, other.case_id, "note", (f"Написал(а) по поручению: {text[:300]}" if other.expects == "done"
+                                                      else f"Написал(а), но документа пока нет: {text[:300]}"),
+                           other.step_id)
                 s.commit()
             return {}
         s.commit()
@@ -1084,6 +1393,13 @@ def _resolve(wait_id: int, answer=None, document_id=None, by: str = "") -> dict:
             step.result = {"document_id": doc.id, "sha256": doc.sha256, "filename": doc.filename}
             _event(s, case.id, "document_received", f"Получил «{doc.filename}» ({doc.size} байт){suffix}", step.id,
                    {"sha256": doc.sha256})
+        elif wait.expects == "done":
+            wait.answer = str(answer or "")[:4000]
+            step.result = {"answer": wait.answer, "done": True}
+            if case.task is not None and case.task.executor != "assistant" and case.task.status != "done":
+                case.task.status = "done"
+            _event(s, case.id, "done_reported", f"Сделано{suffix}" + (f": {wait.answer[:600]}" if wait.answer else ""),
+                   step.id)
         else:
             wait.answer = str(answer or "")[:4000]
             step.result = {"answer": wait.answer}
@@ -1094,7 +1410,8 @@ def _resolve(wait_id: int, answer=None, document_id=None, by: str = "") -> dict:
         forward_to = [s.get(Employee, x.args["to"]).name for x in case.steps
                       if x.tool == "forward_document" and s.get(Employee, x.args["to"])]
         s.commit()
-        link = {"case_id": case.id, "title": case.title, "kind": "document" if document_id else "answer",
+        link = {"case_id": case.id, "title": case.title,
+                "kind": "document" if document_id else ("done" if wait.expects == "done" else "answer"),
                 "forward_to": forward_to}
         case_id = case.id
     if _testing():
@@ -1151,10 +1468,16 @@ def cancel(case_id: int, by: str = "") -> bool:
             wait.status = "cancelled"
         for transfer in s.query(DocumentTransfer).filter_by(case_id=case_id, status="awaiting_approval"):
             transfer.status = "blocked"
-        if case.task is not None:
-            case.task.status = "assistant_failed"
+        if case.task is not None:  # an order a person was doing is withdrawn, not failed
+            case.task.status = "assistant_failed" if case.task.executor == "assistant" else "cancelled"
         _event(s, case_id, "cancelled", f"Дело отменил {by or 'руководитель'}")
         s.commit()
+        declined = case.kind == "skill" and not any(x.tool == "run_skill" and x.status == "done" for x in case.steps)
+        skill = next(((x.args or {}).get("skill") for x in case.steps if x.tool == "run_skill"), None)
+        title = case.title
+    if declined:
+        skill_stats.record(skill or "?", "cancelled", title)
+        _tell_requester(case_id, "skill_declined", {"asked": title})
     return True
 
 
@@ -1208,12 +1531,38 @@ def record_answer(case_id: int, text: str, by: str = "") -> bool:
         return False
     with SessionLocal() as s:
         case = s.get(Case, case_id)
-        wait = _open_wait(s, case_id, "answer") if case is not None and case.status in OPEN else None
+        wait = ((_open_wait(s, case_id, "answer") or _open_wait(s, case_id, "done"))
+                if case is not None and case.status in OPEN else None)
         if wait is None:
             return False
         wait_id = wait.id
     _resolve(wait_id, answer=text[:4000], by=by or "руководитель")
     return True
+
+
+def task_reported(task_id: int, status: str, note: str = "", by: str = "") -> None:
+    """The person doing an order from the chat said how it goes (task_status): «готово» ends the wait and the person
+    who gave the order hears the result; «мешает» is passed on to them at once; «в работе» goes into the diary."""
+    with SessionLocal() as s:
+        case = s.query(Case).filter_by(task_id=task_id).first()
+        if case is None or case.status not in OPEN:
+            return
+        wait = s.query(CaseWait).filter_by(case_id=case.id, status="open", expects="done").first()
+        if wait is None:
+            return
+        person = s.get(Employee, wait.employee_id) if wait.employee_id else None
+        case_id, wait_id, title = case.id, wait.id, case.title
+        if status == "done":
+            s.commit()
+        else:
+            _event(s, case_id, "note", ("Мешает: " if status == "blocked" else "В работе") +
+                   (f"{': ' if status != 'blocked' else ''}{note[:400]}" if note else ""), wait.step_id)
+            s.commit()
+    if status == "done":
+        _resolve(wait_id, answer=note or "сделано", by="")
+    elif status == "blocked":
+        _tell_owner(case_id, "order_blocked", {"task": {"title": title}, "person": {"name": person.name if person else ""},
+                                               "note": note or "не уточнил(а)"})
 
 
 def attach_document(case_id: int, filename: str, mime: str, data: bytes, by: str = "") -> bool:
@@ -1290,7 +1639,110 @@ def send_manual(case_id: int, text: str, by: str = "") -> bool:
     return True
 
 
-def hand_over(case_id: int, employee_id: int, by: str = "") -> bool:
+# ----------------------------------------------------------------------------- somebody was told about a silence
+def silence_view(sender: dict) -> list:
+    """Silences this chat was told about and may decide on: «напомни ещё», «займусь сам», «отмени» (the conversation
+    model sees them as silence_to_decide)."""
+    out = []
+    with SessionLocal() as s:
+        for wait in (s.query(CaseWait).filter(CaseWait.status == "open", CaseWait.escalated.is_(True))
+                     .order_by(CaseWait.id.desc()).limit(50)):
+            refs = wait.escalated_to or []
+            if not any(userbot.same_person(str(r), sender) for r in refs):
+                continue
+            case = s.get(Case, wait.case_id)
+            if case is None or case.status not in ("waiting", "attention"):
+                continue
+            person = s.get(Employee, wait.employee_id) if wait.employee_id else None
+            out.append({"case_id": case.id, "title": case.title, "person": person.name if person else "",
+                        "expects": WAIT_RU.get(wait.expects, "ответа"),
+                        "silent_hours": round((now() - _aware(wait.started_at)).total_seconds() / 3600, 1),
+                        "reminders": wait.reminders_sent})
+            if len(out) >= 5:
+                break
+    return out
+
+
+def remind_again(case_id: int, by: str = "") -> bool:
+    """«Напомнить ещё»: one more reminder now; if the silence goes on, the same person hears again after the hours of
+    the silence rule."""
+    moment = now()
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        wait = (s.query(CaseWait).filter_by(case_id=case_id, status="open").order_by(CaseWait.id).first()
+                if case is not None and case.status in ("waiting", "attention") else None)
+        if wait is None:
+            return False
+        person = _checked_contact(s, wait.employee_id, wait.chat_ref) if wait.employee_id else None
+        if person is None:
+            raise CaseError("некому напоминать: в деле нет сотрудника")
+        asked = s.query(CaseStep).filter(CaseStep.case_id == case.id, CaseStep.tool == "send_message",
+                                         CaseStep.status == "done").order_by(CaseStep.position.desc()).first()
+        facts = {**_case_facts(s, case), "person": {"name": person.name, "address": voice.address_of(person)},
+                 "what_was_asked": ((asked.result or {}).get("text") if asked else "") or case.title,
+                 "reminder_number": wait.reminders_sent + 1, "asked_by": by or None}
+        rule = silence_rule(s, person)
+        ref, wait_id = person.telegram_chat_id, wait.id
+    text = _write("remind", facts)
+    _send_text(ref, text)
+    with SessionLocal() as s:
+        wait = s.get(CaseWait, wait_id)
+        wait.reminders_sent += 1
+        wait.escalated, wait.escalated_to = False, None
+        if wait.expects == "done":
+            wait.escalate_at = moment + dt.timedelta(hours=_hours("order_reminder_hours", 24))
+        else:
+            wait.escalate_at = userbot.working_after(moment, rule["hours"])
+        wait.next_reminder_at = wait.escalate_at
+        case = s.get(Case, wait.case_id)
+        if case.status == "attention":
+            case.status = "waiting"
+        case.note = f"напомнил ещё раз по просьбе {by}" if by else "напомнил ещё раз"
+        _event(s, wait.case_id, "reminder", f"Напоминание №{wait.reminders_sent} (попросил{' ' + by if by else 'и'}): "
+                                            f"{text}", wait.step_id)
+        s.commit()
+    return True
+
+
+def take_over(case_id: int, by: str = "", employee_id=None) -> bool:
+    """«Займусь сам»: the person who was told about the silence takes the case; the assistant stops reminding.
+    A person of the directory gets the task; somebody else (a reviewer without a card) is only noted."""
+    if employee_id:
+        with SessionLocal() as s:
+            person = s.get(Employee, employee_id)
+            active = person is not None and person.active
+        if active:
+            return hand_over(case_id, employee_id, by, notify=False)
+    with SessionLocal() as s:
+        case = s.get(Case, case_id)
+        if case is None or case.status not in OPEN:
+            return False
+        for wait in s.query(CaseWait).filter_by(case_id=case_id, status="open"):
+            wait.status = "cancelled"
+        case.status, case.closed_at, case.note = "handed_over", now(), f"занялся сам: {by or 'руководитель'}"
+        _event(s, case_id, "handed_over", f"{by or 'Руководитель'}: «займусь сам» — ассистент больше не напоминает")
+        s.commit()
+    return True
+
+
+def silence_choice(case_id: int, choice: str, by: str = "", employee_id=None) -> str:
+    """The answer of the person told about a silence. Returns what was done, in words."""
+    if choice == "remind":
+        if not remind_again(case_id, by):
+            raise CaseError("дело уже не ждёт ответа")
+        return "напомнил ещё раз"
+    if choice == "self":
+        if not take_over(case_id, by, employee_id):
+            raise CaseError("дело уже закрыто")
+        return "дело передано: больше не напоминаю"
+    if choice == "cancel":
+        if not cancel(case_id, by):
+            raise CaseError("дело уже закрыто")
+        return "дело отменено"
+    raise CaseError("choice: remind, self или cancel")
+
+
+def hand_over(case_id: int, employee_id: int, by: str = "", notify: bool = True) -> bool:
     """The case goes to a person: the assistant stops, the task becomes theirs, they get a short handover note."""
     with SessionLocal() as s:
         case = s.get(Case, case_id)
@@ -1314,9 +1766,9 @@ def hand_over(case_id: int, employee_id: int, by: str = "") -> bool:
                    text=f"Дело «{case.title}» передано: {person.name}"[:800]))
         _event(s, case_id, "handed_over", f"{by or 'Руководитель'} передал дело: {person.name}")
         s.commit()
-        facts = {"task": {"title": case.title}, "person": {"name": person.name}, "done_so_far": done_so_far,
-                 "documents": documents}
-        ref = person.telegram_chat_id
+        facts = {"task": {"title": case.title}, "person": {"name": person.name, "address": voice.address_of(person)},
+                 "done_so_far": done_so_far, "documents": documents}
+        ref = person.telegram_chat_id if notify else ""
     if ref and userbot.ai_mode():
         try:
             _send_text(ref, _write("handover", facts))
@@ -1340,7 +1792,7 @@ def close_manually(case_id: int, by: str = "", note: str = "") -> bool:
         case.status, case.closed_at = "done", now()
         case.note = f"закрыто вручную{': ' + note.strip()[:300] if note and note.strip() else ''}"
         if case.task is not None:
-            case.task.status = "assistant_done"
+            case.task.status = "assistant_done" if case.task.executor == "assistant" else "done"
         _event(s, case_id, "closed", f"{by or 'Руководитель'} закрыл дело вручную" + (f": {note.strip()[:300]}" if note and note.strip() else ""))
         s.commit()
     return True
@@ -1370,7 +1822,6 @@ def run_due(now_utc=None) -> None:
 
 
 def _nudge(wait_id: int, moment) -> None:
-    max_reminders = int(_hours("case_max_reminders", 2))
     with SessionLocal() as s:
         wait = s.get(CaseWait, wait_id)
         if wait is None or wait.status != "open":
@@ -1379,13 +1830,24 @@ def _nudge(wait_id: int, moment) -> None:
         if case.status != "waiting":
             return  # paused, stopped or closed: no reminders
         person = s.get(Employee, wait.employee_id) if wait.employee_id else None
+        rule = silence_rule(s, person)
+        max_reminders = int(_hours("case_max_reminders", 2)) if wait.expects == "done" else rule["reminders"]
+        contact = rule["contact"]
+        contact_view = {"id": contact.id, "name": contact.name, "ref": contact.telegram_chat_id} if contact else None
         asked = s.query(CaseStep).filter(CaseStep.case_id == case.id, CaseStep.tool == "send_message",
                                          CaseStep.status == "done").order_by(CaseStep.position.desc()).first()
-        facts = {**_case_facts(s, case), "person": {"name": person.name if person else ""},
+        facts = {**_case_facts(s, case), "person": {"name": person.name if person else "",
+                                                    "address": voice.address_of(person)},
                  "what_was_asked": ((asked.result or {}).get("text") if asked else "") or case.title,
                  "reminder_number": wait.reminders_sent + 1}
         hours = round((moment - _aware(wait.started_at)).total_seconds() / 3600, 1)
-        if wait.reminders_sent < max_reminders and person is not None:
+        due = not wait.escalated and wait.escalate_at is not None and moment >= _aware(wait.escalate_at)
+        done_wait = wait.expects == "done"
+        owner = _owner(case)
+        case_id_, wait_reminders = case.id, wait.reminders_sent
+        if done_wait and due:  # the deadline evening: the person who gave the order hears, reminders or not
+            ref, kind = None, "escalate"
+        elif wait.reminders_sent < max_reminders and person is not None:
             try:
                 _checked_contact(s, person.id, wait.chat_ref)
             except CaseError as exc:
@@ -1393,7 +1855,7 @@ def _nudge(wait_id: int, moment) -> None:
                 _attention(case.id, wait.step_id, str(exc))
                 return
             ref, kind = person.telegram_chat_id, "remind"
-        elif not wait.escalated and moment >= _aware(wait.escalate_at):
+        elif due:
             ref, kind = None, "escalate"
         else:
             wait.next_reminder_at = wait.escalate_at if not wait.escalated else None
@@ -1405,6 +1867,10 @@ def _nudge(wait_id: int, moment) -> None:
             _send_text(ref, text)
         except (Retry, userbot.QuietHours) as exc:
             log.info("case wait %s: reminder later: %s", wait_id, exc)
+            if isinstance(exc, userbot.Busy):  # the hourly limit of this person: not again on every tick
+                with SessionLocal() as s:
+                    s.get(CaseWait, wait_id).next_reminder_at = moment + dt.timedelta(seconds=exc.retry_after)
+                    s.commit()
             return
         except Exception as exc:  # noqa: BLE001
             log.warning("case wait %s: reminder not sent: %s", wait_id, exc)
@@ -1412,20 +1878,35 @@ def _nudge(wait_id: int, moment) -> None:
         with SessionLocal() as s:
             wait = s.get(CaseWait, wait_id)
             wait.reminders_sent += 1
-            wait.next_reminder_at = moment + dt.timedelta(hours=_hours("case_reminder_hours", 4))
-            if wait.reminders_sent >= max_reminders:
+            wait.next_reminder_at = (moment + dt.timedelta(hours=_hours("order_reminder_hours", 24)) if done_wait
+                                     else userbot.working_after(moment, _hours("case_reminder_hours", 4)))
+            if done_wait and not wait.escalated and wait.escalate_at is not None:
+                wait.next_reminder_at = min(wait.next_reminder_at, _aware(wait.escalate_at))
+            elif wait.reminders_sent >= max_reminders:
                 wait.next_reminder_at = max(wait.next_reminder_at, _aware(wait.escalate_at))
             _event(s, wait.case_id, "reminder", f"Напоминание №{wait.reminders_sent}: {text}", wait.step_id)
             s.commit()
         return
-    told = _tell_leaders(case.id, "escalate", {"person": facts["person"], "hours": hours,
-                                               "reminders": max_reminders, "what_was_asked": facts["what_was_asked"]})
+    silence = {"person": facts["person"], "hours": hours, "reminders": wait_reminders,
+               "what_was_asked": facts["what_was_asked"], **({"deadline": facts["deadline"]} if facts.get("deadline") else {})}
+    if owner is not None:
+        told = _tell_owner(case_id_, "order_silent", silence)
+        whom, refs = owner["name"] or "тому, кто поручил", [owner["chat"]]
+    elif contact_view is not None:  # the person named in the card (or the department) for this silence
+        told = _tell_contact(case_id_, contact_view, "escalate", silence)
+        whom, refs = contact_view["name"], [contact_view["ref"]]
+    else:
+        told = _tell_leaders(case_id_, "escalate", silence)
+        whom, refs = "руководителю", _leaders()
     with SessionLocal() as s:
         wait = s.get(CaseWait, wait_id)
         wait.escalated, wait.next_reminder_at = True, None
-        s.get(Case, wait.case_id).note = f"Нет ответа {hours} ч, руководитель уведомлён"
-        _event(s, wait.case_id, "escalated", f"Нет ответа {hours} ч — сообщил руководителю" + ("" if told else
-                                                                                             " (не доставлено)"),
+        wait.escalated_to = [str(r) for r in refs if r] if told else None
+        s.get(Case, wait.case_id).note = (f"Не отписался(лась) {hours} ч, сообщил: {whom}" if done_wait
+                                          else f"Нет ответа {hours} ч, руководитель уведомлён" if owner is None
+                                          and contact_view is None else f"Нет ответа {hours} ч, сообщил: {whom}")
+        _event(s, wait.case_id, "escalated", f"Нет ответа {hours} ч — сообщил {whom}" + ("" if told else
+                                                                                       " (не доставлено)"),
                wait.step_id)
         s.commit()
 
@@ -1472,8 +1953,11 @@ def waiting_view(employee_id) -> list:
         out = []
         for wait in s.query(CaseWait).filter_by(employee_id=employee_id, status="open").order_by(CaseWait.id).limit(5):
             case = s.get(Case, wait.case_id)
-            out.append({"case": case.title, "expects": wait.expects,
-                        "since_hours": round((now() - _aware(wait.started_at)).total_seconds() / 3600, 1)})
+            item = {"case": case.title, "expects": wait.expects,
+                    "since_hours": round((now() - _aware(wait.started_at)).total_seconds() / 3600, 1)}
+            if wait.expects == "done" and case.task_id:  # an order: «сделал» is task_status done of this task
+                item["task_id"] = case.task_id
+            out.append(item)
         return out
 
 

@@ -3,6 +3,7 @@ services:
   - type: web
     name: sysai
     runtime: docker
+    # free засыпает через 15 минут без запросов; starter (7 $/мес) не засыпает. Что выбрать: deploy/HOSTING.md
     plan: free
     healthCheckPath: /health
     envVars:
@@ -21,4 +22,13 @@ services:
       - key: TIMEZONE
         value: Europe/Minsk
       - key: DATABASE_URL
+        sync: false
+      # Recordings storage (see README, «Хранилище записей»): without these four the recordings are not kept.
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
         sync: false

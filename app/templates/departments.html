@@ -7,6 +7,18 @@
   <label class="f">Название подразделения<input name="name" required maxlength="100" value="{{ d.name if d else '' }}" placeholder="Например, Технический отдел"></label>
   <label class="f">Зона ответственности<textarea name="description" rows="2" maxlength="1000" placeholder="Основные задачи подразделения">{{ d.description if d else '' }}</textarea></label>
   <label class="f">Регламенты: порядок работы, кто что согласует и подписывает<textarea name="regulations" rows="3" maxlength="10000" placeholder="Например: счета согласует руководитель отдела, оплату — директор">{{ d.regulations if d else '' }}</textarea></label>
+  <input type="hidden" name="silence_form" value="1">
+  <details class="more"{% if d and (d.silence_contact_id or d.silence_hours is not none or d.silence_reminders is not none) %} open{% endif %}><summary>Если сотрудник отдела не отвечает ассистенту</summary>
+    <label class="f">Кому сообщать
+      <select name="silence_contact_id">
+        <option value="">проверяющим (как в настройках)</option>
+        {% for p in silence_people %}<option value="{{ p.id }}" {% if d and d.silence_contact_id == p.id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+      </select>
+      <small class="muted">Если у самого сотрудника в карточке указан другой человек — сообщим ему.</small>
+    </label>
+    <label class="f">Через сколько часов молчания<input type="number" name="silence_hours" min="1" max="336" value="{{ d.silence_hours if d and d.silence_hours is not none else '' }}" placeholder="{{ silence_defaults.hours }}"></label>
+    <label class="f">Сколько раз напомнить до этого<input type="number" name="silence_reminders" min="0" max="10" value="{{ d.silence_reminders if d and d.silence_reminders is not none else '' }}" placeholder="{{ silence_defaults.reminders }}"><small class="muted">0 — сразу сообщать, без напоминаний.</small></label>
+  </details>
   {% if d %}<label class="check"><input type="checkbox" name="active" {% if d.active %}checked{% endif %}> Подразделение активно</label>{% endif %}
   <div class="actions"><button class="btn primary">{{ 'Сохранить изменения' if d else 'Создать подразделение' }}</button>{% if d %}<a class="btn ghost" href="/departments?view={{ view }}#department-{{ d.id }}">Отмена</a>{% endif %}</div>
 </form>

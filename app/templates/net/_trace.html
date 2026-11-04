@@ -1,0 +1,7 @@
+{# The head of a run of the trace (ОПО-5.7): on the agent page and on the trace page. #}
+{% macro run_head(r, fmt_tokens, fmt_ms, clock) %}
+<span class="tr-when">{{ net_when(r.start) }}{% if r.steps|length > 1 %}–{{ clock(r.end)[:5] }}{% endif %}</span>
+<span class="tr-task">{% if r.task %}задача <b>{{ r.task }}</b>{% else %}<span class="muted">без задачи</span>{% endif %}</span>
+<span class="tr-nums">{{ r.models }} к моделям · {{ r.mcp }} MCP · {{ fmt_tokens(r.tokens) }} токенов{% if r.cached %} · из кэша {{ r.cache_pct }}%{% endif %} · ${{ '%.4f'|format(r.cost) if r.cost < 0.01 else '%.2f'|format(r.cost) }} · {{ r.minutes }} мин</span>
+{% if r.errors %}<span class="pill red">ошибок: {{ r.errors }}</span>{% endif %}
+{% endmacro %}

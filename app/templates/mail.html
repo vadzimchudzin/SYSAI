@@ -1,0 +1,243 @@
+{% extends "base.html" %}{% block title %}Секретарь — SYSAI{% endblock %}
+{% block head %}<style>
+.content:has(.mail-layout){max-width:1480px}
+.mail-layout{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:18px;align-items:start}
+.mail-main{min-width:0}.mail-main>.card:last-child{margin-bottom:0}
+.mail-panel.card{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;margin:0;padding:18px 18px 8px}
+.mail-panel>h2{margin:0 0 4px;font-size:18px}
+.mail-panel>.lead{margin:0 0 12px}
+.mail-sec{border-top:1px solid var(--line);padding:12px 0}
+.mail-sec>summary{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;align-items:center}
+.mail-sec>summary .t{font-weight:650;color:var(--text);font-size:14.5px}
+.mail-sec>summary .s{grid-column:1;font-size:12.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mail-sec>summary::after{content:"";grid-column:2;grid-row:1/span 2;width:7px;height:7px;border-right:1.8px solid var(--muted);border-bottom:1.8px solid var(--muted);transform:rotate(45deg);margin:0 4px 4px 0;transition:transform .15s}
+.mail-sec[open]>summary::after{transform:rotate(225deg);margin:4px 4px 0 0}
+.mail-sec>summary:hover .t{color:var(--clay2)}
+.mail-sec>summary:focus-visible{outline:2px solid var(--clay);outline-offset:4px;border-radius:4px}
+.mail-sec[open]>summary{margin-bottom:12px}
+.mail-sec p{margin:0 0 10px}
+.mail-panel .f{min-width:0;flex:1 1 100%}.mail-panel .f.half{flex:1 1 130px}.mail-panel .f.port{flex:0 0 80px}
+.mail-form .row{gap:8px;flex-wrap:wrap;margin-bottom:8px}.mail-form textarea{width:100%}.mail-form>label.small{display:block;margin:4px 0}
+.mail-sub>summary{color:var(--clay);margin:2px 0 8px}
+.mail-hint{margin:6px 0 10px}.mail-hint [data-preset]{display:block}.mail-hint [hidden]{display:none}
+.mail-rules{list-style:none;margin:0 0 12px;padding:0}
+.mail-rules li{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}.mail-rules li:first-child{padding-top:0}
+.mail-rules li.off{opacity:.55}.mail-rules .acts{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap}
+.mail-ideas{margin:0 0 12px;padding-left:18px}.mail-ideas li{margin-bottom:6px}
+.mail-head{display:flex;justify-content:space-between;align-items:center;gap:10px 16px;flex-wrap:wrap;margin-bottom:12px}.mail-head h2{margin:0}
+.mail-find{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.mail-find input{width:190px}.mail-find select{width:auto;max-width:180px}
+.mail-st{display:flex;gap:6px 12px;align-items:center;flex-wrap:wrap;margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)}
+.mail-st form{margin-left:auto}
+.mail-score{margin:0 0 6px}
+.mail-list td{font-size:13.5px}
+.mail-sum{min-width:240px}.mail-sum>div{margin-top:3px}
+.mail-from{font-size:12.5px;color:var(--soft)}.mail-from .muted{margin-left:4px}
+.mail-kind{width:160px}.mail-kind>div{margin-top:3px}.mail-route{width:170px}.mail-route .pill{white-space:normal}
+.mail-tags .pill{margin:2px 4px 0 0}
+.mail-ok{color:var(--green)}.mail-bad{color:var(--red)}
+.mail-flash{margin:0 0 10px}
+.mail-dep{border:0;border-bottom:1px solid var(--line);margin:0 0 10px;padding:0 0 8px;min-width:0}
+.mail-dep legend{padding:0;margin:0 0 6px;font-size:14px}.mail-dep legend .muted{font-size:12px;margin-left:4px}
+.mail-dep.off .row,.mail-dep.off .mail-bad{opacity:.5}.mail-dep .mail-bad{margin:0 0 6px}
+.mail-dep .where{font-size:12px;color:var(--muted);margin:-4px 0 6px}
+.mail-folders{list-style:none;margin:0 0 12px;padding:0}.mail-folders li{padding:3px 0;font-size:13px}
+.mail-folders .muted{margin-left:4px}.mail-acts{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 6px}
+.mail-place{color:var(--soft);font-size:12.5px;margin-top:3px}
+@media (max-width:1280px){.mail-layout{grid-template-columns:minmax(0,1fr)}.mail-panel.card{position:static;max-height:none;overflow:visible}}
+</style>{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>Секретарь</h1>
+  <p>ИИ-сотрудник на почте компании: читает ящик, разбирает письма, передаёт их тем, кто ими занимается, и готовит ответы.</p></div></div>
+{% if msg %}<div class="people-msg mail-flash" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="people-msg warn mail-flash" role="alert">Не сделано: {{ error }}</div>{% endif %}
+<div class="mail-layout">
+<div class="mail-main">
+<section class="card">
+  <div class="mail-head"><h2>Письма</h2>
+    <form method="get" action="/mail" class="mail-find"><input name="q" value="{{ q }}" placeholder="Тема, отправитель, текст">
+      <select name="kind"><option value="">все типы</option>{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if kind == k }}>{{ v.name }}</option>{% endfor %}</select>
+      <select name="only"><option value="">все письма</option><option value="unsorted" {{ 'selected' if only == 'unsorted' }}>не разобранные</option><option value="unchecked" {{ 'selected' if only == 'unchecked' }}>не проверенные</option><option value="unrouted" {{ 'selected' if only == 'unrouted' }}>ждут решения, кому передать</option></select>
+      <button class="btn sm">Найти</button></form></div>
+  {% if not st.configured %}<p class="mail-st"><span><b>Почта не подключена.</b> Откройте <a href="#connect">«Подключение»</a> в настройках секретаря: адрес ящика и пароль приложения.</span></p>
+  {% else %}<div class="mail-st small"><span><b>{{ st.address }}</b>{% if st.service %} · {{ st.service }}{% endif %} · папка «{{ st.folder }}»</span>
+    {% if not st.enabled %}<span class="pill gray">чтение выключено</span>{% endif %}
+    {% if st.checked_at %}<span>посмотрено {{ st.checked_at.strftime('%d.%m %H:%M') }}{% if st.ok %} <span class="mail-ok">✓</span>{% if st.new %} · новых {{ st.new }}{% endif %}{% endif %}</span>{% endif %}
+    {% if st.ok == false %}<span class="mail-bad">ошибка: {{ st.error }}</span>{% endif %}
+    <span class="muted">писем: {{ st.total }}{% if st.waiting %} · ждут разбора: {{ st.waiting }}{% endif %}</span>
+    <form method="post" action="/mail/check"><button class="btn sm">Проверить почту сейчас</button></form></div>{% endif %}
+  <p class="small mail-score">{% if score.checked %}Сортировка: <b>верно {{ score.right }} из {{ score.checked }}</b> проверенных ({{ score.share }}%, цель — 9 из 10){% else %}<span class="muted">Отметьте «верно» у разобранных писем или поправьте тип — здесь будет точность сортировки (цель: 9 из 10).</span>{% endif %}
+    {% if route_score.total %}<br>Пересылка: <b>ошибок {{ route_score.wrong }} из {{ route_score.total }}</b> переданных за 30 дней ({{ route_score.share }}%, цель — меньше 1 из 10){% endif %}
+    {% if waiting %}<br><a href="/mail?only=unrouted">Ждут решения, кому передать: {{ waiting }}</a>{% endif %}</p>
+  <p class="small muted">{% if folders.on %}Разобранные письма секретарь раскладывает по папкам самого ящика (<a href="#folders">«Папки в ящике»</a>): по отделам и особым папкам; письма, которые ждут решения, остаются во «Входящих». Прочитанными они не становятся.{% else %}Ящик только читается: в нём ничего не меняется, письма не становятся прочитанными. Разложить письма по папкам отделов в самом ящике — <a href="#folders">«Папки в ящике»</a>.{% endif %} Новые письма появляются здесь через несколько минут, вложения — в «Документах». Отметьте «верно» у письма или поправьте тип — так считается точность сортировки.</p>
+  {% if not rows %}<p class="muted">Писем пока нет{% if q or kind or only %} по этому запросу{% endif %}.</p>{% else %}
+  <div class="table-wrap"><table class="small mail-list">
+    <thead><tr><th>Письмо</th><th>Тип и клиент</th><th>Кому</th></tr></thead>
+    <tbody>{% for r in rows %}<tr id="m{{ r.id }}">
+      <td class="mail-sum"><div class="mail-from"><span title="{{ r.addr }}">{{ r.from }}</span>{% if r.at %}<span class="muted">{{ r.at.strftime('%d.%m %H:%M') }}</span>{% endif %}</div>
+        <a href="/mail/{{ r.id }}"><b>{{ r.subject }}</b></a>{% if r.summary %}<div class="muted">{{ r.summary }}</div>{% endif %}
+        {% if r.attachments %}<div class="muted">📎 {% for a in r.attachments %}<a href="/documents/{{ a.document_id }}/view">{{ a.filename }}</a>{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
+        {% if r.link %}<div class="muted">{{ 'дело' if r.link.type == 'case' else 'задача' }}: <a href="{{ r.link.url }}">{{ r.link.title }}</a></div>{% endif %}
+        {% if r.labels %}<div class="mail-tags">{% for l in r.labels %}<span class="pill {{ 'red' if l == 'срочно' else ('amber' if l == 'ждёт ответа' else 'gray') }}">{{ l }}</span>{% endfor %}</div>{% endif %}</td>
+      <td class="mail-kind">{% if r.kind %}{{ r.kind_name }}{% elif r.sort_status == 'skipped' %}<span class="muted">не разбирается</span>{% else %}<span class="muted">разбирается…</span>{% endif %}
+        {% if r.entity %}<div><a href="/entities/{{ r.entity.id }}">{{ r.entity.name }}</a></div>{% endif %}
+        {% if r.checked == 'ok' %}<div class="mail-ok small" title="проверено: верно">✓ верно</div>{% elif r.checked == 'fixed' %}<div class="muted small" title="поправлено вручную">поправлено</div>{% elif r.kind %}<div><form method="post" action="/mail/{{ r.id }}/check"><input type="hidden" name="ok" value="1"><input type="hidden" name="back" value="list"><button class="btn sm ghost" title="Тип и клиент определены верно">верно</button></form></div>{% endif %}</td>
+      <td class="mail-route">{% if r.route_status in ('unclear', 'no_contact', 'failed') %}<a class="pill amber" href="/mail/{{ r.id }}#route">{{ r.route }}</a>{% elif r.route %}{{ r.route }}{% else %}<span class="muted">—</span>{% endif %}
+        {% if r.place %}<div class="mail-place" title="папка в ящике">📁 {{ r.place|replace('INBOX/', 'Входящие/')|replace('/', ' / ') }}</div>{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if rows|length >= limit %}<p class="small"><a href="/mail?limit={{ limit + 100 }}&kind={{ kind }}&q={{ q|urlencode }}&only={{ only }}">Показать ещё</a></p>{% endif %}{% endif %}
+</section>
+{% if drafts %}<section class="card" id="drafts"><h2>Последние черновики ответов</h2>
+  <div class="table-wrap"><table class="small"><thead><tr><th>Когда</th><th>Письмо</th><th>Адресат</th><th>Кто готовил</th><th>Статус</th></tr></thead>
+    <tbody>{% for d in drafts %}<tr><td>{{ d.at.strftime('%d.%m %H:%M') if d.at }}</td><td><a href="/mail/{{ d.mail_id }}#drafts">{{ d.subject or 'без темы' }}</a></td><td>{{ d.to }}</td><td>{{ d.who }}</td>
+      <td>{{ d.status_ru }}{% if d.version > 1 %} · вариант {{ d.version }}{% endif %}{% if d.error %} <span class="mail-bad">{{ d.error }}</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+</section>{% endif %}
+</div>
+
+<aside class="card mail-panel" id="mail-settings" aria-label="Настройки секретаря">
+  <h2>{{ icon('gear') }}Настройки секретаря</h2>
+  <p class="small muted lead">Всё, что настраивается у секретаря, — здесь: почтовый ящик, отделы и папки, кому передавать письма, как отвечать и какие бывают письма.</p>
+
+  <details class="mail-sec" id="connect" {{ 'open' if not st.configured }}>
+    <summary><span class="t">Подключение</span><span class="s">{% if st.configured %}{{ st.address }}{% if not st.enabled %} · чтение выключено{% elif st.ok == false %} · ошибка{% else %} · читает почту{% endif %}{% else %}почта не подключена{% endif %}</span></summary>
+    <p class="small muted">Нужен адрес ящика и <b>пароль приложения</b> (не обычный пароль от почты): его создают в настройках безопасности почтового сервиса. Пароль хранится зашифрованным и больше не показывается. В ящике секретарь только раскладывает письма по папкам (если включено) — ничего не удаляет; ответы (черновики) отправляются лишь после подтверждения ответственного.</p>
+    <form method="post" action="/mail/settings" class="mail-form">
+      <input type="hidden" name="present_flags" value="1">
+      <div class="row"><label class="f">Почтовый сервис <select name="mail_service">{% for k, p in presets.items() %}<option value="{{ k }}" {{ 'selected' if (form.mail_service or 'yandex') == k }}>{{ p.name }}</option>{% endfor %}</select></label></div>
+      <p class="small muted mail-hint">{% for k, p in presets.items() %}<span data-preset="{{ k }}"><b>{{ p.name }}:</b> {{ p.hint }}</span>{% endfor %}</p>
+      <div class="row"><label class="f">Адрес ящика <input name="mail_address" type="email" maxlength="320" value="{{ form.mail_address or '' }}" placeholder="office@company.by" autocomplete="off"></label></div>
+      <div class="row"><label class="f half">Пароль приложения {% if has_password %}<span class="pill green">сохранён</span>{% endif %}
+          <input name="mail_password" type="password" maxlength="300" autocomplete="new-password" placeholder="{{ 'оставьте пустым, чтобы не менять' if has_password else 'пароль приложения' }}"
+                 oninput="this.form.password_action.value = this.value ? 'replace' : 'keep'"></label>
+        <label class="f half">Пароль <select name="password_action"><option value="keep">не менять</option><option value="replace">заменить</option>{% if has_password %}<option value="clear">удалить</option>{% endif %}</select></label></div>
+      <details class="small mail-sub" {{ 'open' if form.mail_service == 'custom' }}><summary>Серверы и папка (для известных сервисов заполнятся сами)</summary>
+        <div class="row"><label class="f half">Сервер IMAP <input name="mail_imap_host" maxlength="200" value="{{ form.mail_imap_host or '' }}" placeholder="imap.company.by"></label>
+          <label class="f port">Порт <input name="mail_imap_port" inputmode="numeric" maxlength="5" value="{{ form.mail_imap_port or 993 }}"></label></div>
+        <div class="row"><label class="f half">Сервер SMTP (для ответов) <input name="mail_smtp_host" maxlength="200" value="{{ form.mail_smtp_host or '' }}" placeholder="smtp.company.by"></label>
+          <label class="f port">Порт <input name="mail_smtp_port" inputmode="numeric" maxlength="5" value="{{ form.mail_smtp_port or 465 }}"></label></div>
+        <div class="row"><label class="f">Папка <input name="mail_folder" maxlength="200" value="{{ form.mail_folder or 'INBOX' }}"></label></div>
+        <div class="row"><label class="f half">Смотреть почту каждые, минут <input name="mail_poll_minutes" inputmode="numeric" maxlength="2" value="{{ form.mail_poll_minutes or 3 }}"></label>
+          <label class="f half">В первый раз взять письма за, дней <input name="mail_history_days" inputmode="numeric" maxlength="2" value="{{ form.mail_history_days if form.mail_history_days is not none else 3 }}"></label></div>
+      </details>
+      <label class="small"><input type="checkbox" name="mail_enabled" value="1" {{ 'checked' if form.mail_enabled }}> читать почту (новые письма появляются на этой странице)</label>
+      <label class="small"><input type="checkbox" name="mail_labels" value="1" {{ 'checked' if form.mail_labels }}> ставить тип и метки и в самом ящике (Gmail — ярлыки «SYSAI/…», другие почты — ключевые слова; Яндекс их не показывает — для него нагляднее <a href="#folders">папки</a>)</label>
+      <div class="row" style="margin-top:10px"><button class="btn sm primary">Сохранить</button></div>
+    </form>
+    {% if st.configured %}<form method="post" action="/mail/test"><button class="btn sm ghost">Проверить подключение</button></form>{% endif %}
+  </details>
+
+  <details class="mail-sec" id="departments">
+    <summary><span class="t">Отделы</span><span class="s">{% if departments %}{{ departments|selectattr('on')|list|length }} из {{ departments|length }} получают письма{% if dep_auto %} · по смыслу — сразу{% endif %}{% else %}отделов пока нет{% endif %}</span></summary>
+    <p class="small muted">По умолчанию — структура компании из «<a href="/departments">Отделов</a>». Секретарь читает письмо, понимает, чьё это дело, передаёт его в Telegram ответственному за почту отдела и кладёт в папку отдела в ящике. Правила «Кто чем занимается» — главнее.</p>
+    {% if not departments %}<p class="small">Отделов пока нет — заведите их в «<a href="/departments">Отделах</a>», и они появятся здесь.</p>
+    {% else %}<form method="post" action="/mail/departments" class="mail-form">
+      <input type="hidden" name="present_auto" value="1">
+      {% for d in departments %}<fieldset class="mail-dep{{ ' off' if not d.on }}"><input type="hidden" name="present_{{ d.id }}" value="1">
+        <legend><label><input type="checkbox" name="on_{{ d.id }}" value="1" {{ 'checked' if d.on }}> <b>{{ d.name }}</b></label><span class="muted">{{ d.size }} чел.</span></legend>
+        {% set inside = staff|selectattr('id', 'in', d.members)|list %}{% set outside = staff|rejectattr('id', 'in', d.members)|list %}
+        <div class="row"><label class="f">Ответственный за почту <select name="to_{{ d.id }}"><option value="">{{ d.default }}</option>
+          {% if inside %}<optgroup label="В отделе">{% for p in inside %}<option value="{{ p.id }}" {{ 'selected' if d.to == p.id }}>{{ p.name }}{{ ' — нет Telegram' if not p.tg }}</option>{% endfor %}</optgroup>{% endif %}
+          {% if outside %}<optgroup label="Другие сотрудники">{% for p in outside %}<option value="{{ p.id }}" {{ 'selected' if d.to == p.id }}>{{ p.name }}{{ ' — нет Telegram' if not p.tg }}</option>{% endfor %}</optgroup>{% endif %}</select></label></div>
+        <div class="row"><label class="f">Папка в ящике <input name="folder_{{ d.id }}" maxlength="200" value="{{ d.folder }}" placeholder="без папки — остаётся во «Входящих»"></label></div>
+        {% if d.shown and folders.root %}<p class="where">в ящике: 📁 {{ d.shown }}</p>{% endif %}
+        <div class="row"><label class="f">Какие письма <input name="letters_{{ d.id }}" maxlength="300" value="{{ d.letters }}" placeholder="например: счета, акты сверки, оплаты"></label></div>
+        {% if d.warn %}<p class="small mail-bad">{{ d.warn }}</p>{% endif %}
+      </fieldset>{% endfor %}
+      <label class="small"><input type="checkbox" name="mail_departments_auto" value="1" {{ 'checked' if dep_auto }}> если правила нет, а секретарь уверен, чьё письмо, — сразу передавать ответственному отдела (если не уверен — письмо ждёт решения руководителя с подсказкой)</label>
+      <div class="row" style="margin-top:8px"><button class="btn sm primary">Сохранить</button></div>
+    </form>{% endif %}
+  </details>
+
+  <details class="mail-sec" id="folders">
+    <summary><span class="t">Папки в ящике</span><span class="s">{% if folders.on %}раскладывает по папкам: {{ folders.folders|length }}{% if folders.state.ok == false %} · ошибка{% elif folders.moved %} · за 30 дней — {{ folders.moved }}{% endif %}{% else %}выключено — письма остаются во «Входящих»{% endif %}</span></summary>
+    <p class="small muted">Секретарь перекладывает разобранные письма в папки самого ящика — видно, что куда пришло, в том числе в почте на телефоне. Сначала — особые папки (ниже), потом папка отдела, которому письмо передано (или чьё оно по смыслу). Письма, которые ждут решения, остаются во «Входящих» и переезжают, когда их передадут. Прочитанными письма не становятся, ничего не удаляется.</p>
+    <form method="post" action="/mail/folders" class="mail-form">
+      <label class="small"><input type="checkbox" name="mail_folders_on" value="1" {{ 'checked' if folders.on }}> раскладывать письма по папкам в ящике</label>
+      <div class="row"><label class="f">Где создавать папки <input name="mail_folders_root" maxlength="200" value="{{ folders.root }}" placeholder="пусто — рядом с «Входящими»"></label></div>
+      <p class="small muted">Пусто — на верхнем уровне, рядом с «Входящими»; «Входящие» — внутри «Входящих»; или своя папка, например «Отделы». Вложенные папки — через «/».</p>
+      <div class="row"><button class="btn sm primary">Сохранить</button></div></form>
+    <p class="small" style="margin-top:12px"><b>Папки</b> <span class="muted">— {{ folders.where }}; число — писем за 30 дней</span></p>
+    {% if folders.folders %}<ul class="mail-folders">{% for f in folders.folders %}<li>📁 {{ f.shown }}{% if f.count %}<span class="muted">{{ f.count }}</span>{% endif %}</li>{% endfor %}
+      {% for f in folders.other %}<li class="muted">📁 {{ f.shown }}<span class="muted">{{ f.count }} · больше не в настройках</span></li>{% endfor %}</ul>
+    {% else %}<p class="small muted">Папок нет: у отделов не указаны папки, особых папок нет.</p>{% endif %}
+    <p class="small"><b>Особые папки</b> <span class="muted">— проверяются первыми, сверху вниз</span></p>
+    {% if folders.rules %}<ol class="mail-rules">{% for r in folders.rules %}<li><div><b>{{ r.condition }}</b> → 📁 {{ r.shown }}</div>
+      <div class="acts"><form method="post" action="/mail/folder-rules/{{ r.index }}/up"><button class="btn sm ghost" title="Выше">↑</button></form>
+        <form method="post" action="/mail/folder-rules/{{ r.index }}/delete" onsubmit="return confirm('Удалить особую папку из настроек? Сама папка и письма в ящике останутся.')"><button class="btn sm ghost">удалить</button></form></div></li>{% endfor %}</ol>
+    {% else %}<p class="small muted">Особых папок нет. Например: «Рассылка → Рассылки», «от @nalog.gov.by → Налоговая».</p>{% endif %}
+    <form method="post" action="/mail/folder-rules" class="mail-form"><p class="small"><b>Новая особая папка</b></p>
+      <div class="row"><label class="f half">Тип <select name="kind"><option value="">любой</option>{% for k, v in kinds.items() %}<option value="{{ k }}">{{ v.name }}</option>{% endfor %}</select></label>
+        <label class="f half">Папка <input name="folder" maxlength="200" required placeholder="Банк"></label></div>
+      <div class="row"><label class="f">От кого <input name="senders" maxlength="500" placeholder="@belarusbank.by"></label></div>
+      <div class="row"><label class="f">Слова в письме <input name="keywords" maxlength="300" placeholder="выписка, платёжное поручение"></label></div>
+      <div class="row"><button class="btn sm">Добавить папку</button></div></form>
+    {% if st.configured %}<div class="mail-acts"><form method="post" action="/mail/folders/create"><button class="btn sm ghost">Создать папки в ящике</button></form>
+      {% if folders.on %}<form method="post" action="/mail/folders/apply"><button class="btn sm ghost">Разложить письма за 30 дней</button></form>{% endif %}</div>{% endif %}
+    {% if folders.state.at %}<p class="small {{ 'mail-bad' if folders.state.ok == false else 'muted' }}">{% if folders.state.ok == false %}Ошибка {{ folders.state.at.strftime('%d.%m %H:%M') }}: {{ folders.state.error }}{% else %}С ящиком работал {{ folders.state.at.strftime('%d.%m %H:%M') }} ✓{% endif %}{% if folders.errors %} · не переложено писем: {{ folders.errors }}{% endif %}{% if folders.gone %} · пропали из папки: {{ folders.gone }}{% endif %}</p>{% endif %}
+  </details>
+
+  <details class="mail-sec" id="rules">
+    <summary><span class="t">Кто чем занимается</span><span class="s">{% if rules %}правил: {{ rules|length }}{% else %}правил пока нет{% endif %} · пересылка {{ 'включена' if route_form.mail_forward else 'выключена' }}</span></summary>
+    <p class="small muted">Кому секретарь передаёт письмо в Telegram — с кратким содержанием, вложениями и задачами по срокам из письма. Правила проверяются сверху вниз: решает первое подходящее.</p>
+    <details class="small mail-sub"><summary>Как это работает</summary><p class="muted">Задачи из письма видны в «Прогрессе», с напоминанием и отчётом тому, кто передал. Если правила нет, письмо уходит тому, кто ведёт эту переписку или задачу, а если и так не ясно — ответственному за почту отдела, чьё это дело по смыслу письма (<a href="#departments">«Отделы»</a>). Когда секретарь не уверен, он подсказывает, кому, а письмо ждёт решения руководителя — здесь и в утренней сводке. Получатель может ответить «не моё»: письмо вернётся на решение, ошибка учтётся. Старые письма (до подключения ящика, старше недели) и рассылки не пересылаются.</p></details>
+    {% if rules %}<ol class="mail-rules">{% for r in rules %}<li{% if not r.active %} class="off"{% endif %}><div><b>{{ r.condition }}</b> → {{ r.to_name }}</div>
+      <div class="muted">задачи по срокам: {{ 'ставить' if r.make_tasks else 'нет' }}{% if not r.active %} · выключено{% endif %}</div>
+      <div class="acts"><form method="post" action="/mail/rules/{{ r.id }}/up"><button class="btn sm ghost" title="Выше">↑</button></form>
+        <form method="post" action="/mail/rules/{{ r.id }}/toggle"><button class="btn sm ghost">{{ 'выключить' if r.active else 'включить' }}</button></form>
+        <form method="post" action="/mail/rules/{{ r.id }}/delete" onsubmit="return confirm('Удалить правило?')"><button class="btn sm ghost">удалить</button></form></div></li>{% endfor %}</ol>
+    {% else %}<p class="small muted">Правил пока нет. Например: «Счёт → бухгалтерия», «письма от @krinica.by → Ольга», «объект ЖК Северный → прораб».</p>{% endif %}
+    {% if suggestions %}<p class="small"><b>Подсказки:</b></p><ul class="small mail-ideas">{% for x in suggestions %}<li>Письма от {{ x.sender }} уже {{ x.count }} раза передавали {{ x.to_name }}.
+      <form method="post" action="/mail/rules" style="display:inline"><input type="hidden" name="senders" value="{{ x.sender }}"><input type="hidden" name="to" value="{{ x.to }}"><input type="hidden" name="make_tasks" value="1"><button class="btn sm ghost">Сделать правилом</button></form></li>{% endfor %}</ul>{% endif %}
+    <form method="post" action="/mail/rules" class="mail-form"><p class="small"><b>Новое правило</b></p>
+      <div class="row"><label class="f half">Тип <select name="kind"><option value="">любой</option>{% for k, v in kinds.items() %}<option value="{{ k }}">{{ v.name }}</option>{% endfor %}</select></label>
+        <label class="f half">Клиент / объект <select name="entity_id"><option value="">любой</option>{% for c in cards %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select></label></div>
+      <div class="row"><label class="f">От кого <input name="senders" maxlength="500" placeholder="ivanov@krinica.by, @krinica.by"></label></div>
+      <div class="row"><label class="f">Слова в письме <input name="keywords" maxlength="300" placeholder="смета, КС-2"></label></div>
+      <div class="row"><label class="f">Кому <select name="to" required><option value="">— выберите —</option>{% for t in targets %}<option value="{{ t.value }}">{{ t.label }}</option>{% endfor %}</select></label></div>
+      <label class="small"><input type="checkbox" name="make_tasks" value="1" checked> ставить задачи по срокам из письма</label>
+      <div class="row" style="margin-top:8px"><button class="btn sm primary">Добавить правило</button></div></form>
+    <form method="post" action="/mail/route-settings" class="mail-form" style="margin-top:14px"><p class="small"><b>Пересылка</b></p>
+      <label class="small"><input type="checkbox" name="mail_forward" value="1" {{ 'checked' if route_form.mail_forward }}> передавать письма в Telegram тем, кто ими занимается</label>
+      <label class="small"><input type="checkbox" name="mail_hints_auto" value="1" {{ 'checked' if route_form.mail_hints_auto }}> если правила нет, а секретарь уверен, кому, — передавать по его подсказке без руководителя</label>
+      <label class="small"><input type="checkbox" name="mail_drafts_auto" value="1" {{ 'checked' if route_form.mail_drafts_auto }}> к письмам, которые ждут ответа, сразу присылать черновик ответа</label>
+      <div class="row" style="margin-top:8px"><button class="btn sm">Сохранить</button></div></form>
+  </details>
+
+  <details class="mail-sec" id="replies">
+    <summary><span class="t">Ответы на письма</span><span class="s">{{ 'отправка настроена' if smtp_ready else 'отправка не настроена' }}{% if reply_form.mail_signature %} · подпись есть{% endif %}{% if reply_form.mail_reply_examples %} · есть примеры{% endif %}</span></summary>
+    <p class="small muted">Тот, кому передали письмо, пишет секретарю, что ответить («ответь, что сроки сдвигаются на неделю»), — секретарь готовит черновик и присылает в Telegram. <b>Письмо уходит только после «ок»</b> того, кто его готовил.</p>
+    <details class="small mail-sub"><summary>Как это работает</summary><p class="muted">Черновик пишется по письму, переписке и базе знаний в стиле примеров ниже. Поправки — словами («сумма 12 400», «помягче»). Числа, которых нет ни в письме, ни в словах человека, ни в базе знаний, помечаются «Проверь».</p></details>
+    {% if not smtp_ready %}<p class="small"><b>Отправка не настроена:</b> укажите сервер SMTP в <a href="#connect">«Подключении»</a> (для известных сервисов он заполняется сам).</p>{% endif %}
+    <form method="post" action="/mail/reply-settings" class="mail-form">
+      <div class="row"><label class="f">Имя отправителя <input name="mail_sender_name" maxlength="200" value="{{ reply_form.mail_sender_name or '' }}" placeholder="ООО «Компания»"></label></div>
+      <div class="row"><label class="f">Подпись <textarea name="mail_signature" rows="3" maxlength="1000" placeholder="С уважением,&#10;отдел снабжения ООО «Компания»&#10;+375 …">{{ reply_form.mail_signature or '' }}</textarea></label></div>
+      <div class="row"><label class="f">Примеры хороших ответов — образец тона и оформления (разделяйте строкой ---) <textarea name="mail_reply_examples" rows="6" maxlength="20000">{{ reply_form.mail_reply_examples or '' }}</textarea></label></div>
+      <div class="row"><button class="btn sm primary">Сохранить</button></div></form>
+    {% if smtp_ready %}<form method="post" action="/mail/smtp-test" style="margin-top:8px"><button class="btn sm ghost">Проверить отправку</button></form>{% endif %}
+  </details>
+
+  <details class="mail-sec" id="kinds">
+    <summary><span class="t">Типы писем</span><span class="s">{% for k, v in kinds.items() %}{{ v.name }}{{ ', ' if not loop.last }}{% endfor %}</span></summary>
+    <p class="small muted">По одному в строке: название — когда ставить. Пояснение помогает секретарю не путать типы. Уже разобранные письма сохраняют свой тип; «Другое» есть всегда.</p>
+    <form method="post" action="/mail/kinds" class="mail-form"><textarea name="text" rows="{{ [kinds|length * 2 + 2, 20]|min }}">{{ kinds_text }}</textarea>
+      <button class="btn sm" style="margin-top:8px">Сохранить типы</button></form>
+  </details>
+</aside>
+</div>
+<script>
+(function () {
+  function section(id) { var d = id && document.getElementById(id); return d && d.classList.contains('mail-sec') ? d : null; }
+  function show(first) {
+    var d = section(decodeURIComponent(location.hash.slice(1)));
+    if (!d) return;
+    d.open = true;
+    if (first) document.querySelectorAll('.mail-flash').forEach(function (m) { d.querySelector('summary').after(m); });
+    d.scrollIntoView({block: 'start'});
+  }
+  show(true);
+  window.addEventListener('hashchange', function () { show(false); });
+  var service = document.querySelector('select[name=mail_service]');
+  function hint() { document.querySelectorAll('.mail-hint [data-preset]').forEach(function (h) { h.hidden = h.dataset.preset !== service.value; }); }
+  if (service) { service.addEventListener('change', hint); hint(); }
+})();
+</script>
+{% endblock %}

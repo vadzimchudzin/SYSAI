@@ -101,7 +101,7 @@ def test_a_window_inside_one_day_works_too():
 def test_a_message_to_a_person_waits_for_the_morning_and_is_not_an_attempt(tgacc, monkeypatch):
     mid = make_meeting(status="done")
     morning = utc(6, 0, 13)
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: morning)
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: morning)
     with SessionLocal() as s:
         row_id = delivery.enqueue(s, mid, "final", "summary", "@team", {"text": "Привет"}).id
         s.commit()
@@ -113,7 +113,7 @@ def test_a_message_to_a_person_waits_for_the_morning_and_is_not_an_attempt(tgacc
         when = row.next_attempt_at if row.next_attempt_at.tzinfo else row.next_attempt_at.replace(tzinfo=dt.timezone.utc)
         assert when == morning  # SQLite hands back naive times, Postgres aware ones
         assert "Тихие часы" in row.error and "09:00 13.10" in row.error
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: None)
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: None)
     with SessionLocal() as s:
         s.get(Delivery, row_id).next_attempt_at = None  # the morning has come
         s.commit()
@@ -122,7 +122,7 @@ def test_a_message_to_a_person_waits_for_the_morning_and_is_not_an_attempt(tgacc
 
 
 def test_a_direct_send_in_quiet_hours_says_when_it_can_go(tgacc, monkeypatch):
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: utc(6, 0, 13))
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: utc(6, 0, 13))
     with pytest.raises(userbot.QuietHours) as caught:
         userbot.send_message("@ivan", "привет")
     assert caught.value.retryable and caught.value.retry_after >= 60
@@ -131,7 +131,7 @@ def test_a_direct_send_in_quiet_hours_says_when_it_can_go(tgacc, monkeypatch):
 
 def test_replies_wait_until_the_quiet_hours_end(tgacc, model, monkeypatch):
     make_meeting(task_status="sent")
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: utc(6, 0, 13))
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: utc(6, 0, 13))
     model.decisions.append({"reply": "Привет", "actions": []})
     agent.handle_incoming(incoming(text="привет"))
     assert tgacc.sent == [] and model.calls == []
@@ -140,7 +140,7 @@ def test_replies_wait_until_the_quiet_hours_end(tgacc, model, monkeypatch):
         assert row.status == "agent_pending"
         row.created_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)
         s.commit()
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: None)
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: None)
     agent.run_pending()
     assert tgacc.sent == [("42", "Привет")]
 
@@ -154,7 +154,7 @@ def test_the_assistant_starts_its_work_after_the_quiet_hours(tgacc, model, monke
         s.add(meeting)
         s.commit()
         task_id = meeting.tasks[0].id
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: utc(6, 0, 13))
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: utc(6, 0, 13))
     assistant.run_task(task_id)
     assert model.calls == []
     with SessionLocal() as s:
@@ -195,7 +195,7 @@ def test_the_meeting_page_shows_the_card_and_the_quiet_hours(client, tgacc, monk
     page = client.get(f"/meetings/{mid}").text
     assert "Что уйдёт после подтверждения" in page and "Иван Петров" in page and "Анна Орлова" in page
     assert "Сейчас тихие часы" not in page
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: utc(6, 0, 13))
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: utc(6, 0, 13))
     assert "Сейчас тихие часы: сообщения людям уйдут после 09:00 13.10" in client.get(f"/meetings/{mid}").text
 
 

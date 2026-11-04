@@ -84,6 +84,74 @@ def vocabulary(settings: dict = None) -> list:
     return sorted(w for w in words if len(w) >= 4)
 
 
+KEYTERMS_LIMIT = 100   # ElevenLabs takes up to 100 terms (OpenRouter passes up to 1000 of up to 100 characters)
+KEYTERM_CHARS = 50     # …of up to 50 characters
+KEYTERM_WORDS = 5
+
+
+def _glossary_terms(glossary: str) -> list:
+    """The terms of a glossary: «SYSAI, Bitrix24; имена сотрудников: Вадим Чудин» → SYSAI, Bitrix24, Вадим Чудин."""
+    out = []
+    for term in re.split(r"[,;\n]", str(glossary or "")):
+        term = term.rsplit(":", 1)[-1].strip()
+        if term:
+            out.append(term)
+    return out
+
+
+def keyterms(settings: dict = None, limit: int = KEYTERMS_LIMIT) -> list:
+    """Names and terms the STT should hear right (its ``keyterms``), the likeliest first: the people of the meeting,
+    the glossary, clients and objects by how often they come up, the other people, departments."""
+    from sqlalchemy import func
+
+    from .db import Department, Employee, Entity, EntityLink, SessionLocal
+    out, seen = [], set()
+
+    def add(term):
+        term = re.sub(r"\s+", " ", str(term or "")).strip(" ,;:.!?\"'«»()")
+        key = term.casefold().replace("ё", "е")
+        if len(term) < 2 or len(term) > KEYTERM_CHARS or len(term.split()) > KEYTERM_WORDS or key in seen:
+            return
+        seen.add(key)
+        out.append(term)
+
+    def person(employee):
+        add(employee.name)
+        for alias in (employee.aliases or "").split(","):
+            add(alias)
+
+    settings = settings or {}
+    allowed = settings.get("_participants")
+    people, entities, departments = [], [], []
+    try:
+        with SessionLocal() as s:
+            people = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.id).all()
+            mentions = dict(s.query(EntityLink.entity_id, func.count(EntityLink.id)).group_by(EntityLink.entity_id).all())
+            found = s.query(Entity).filter(Entity.active.is_(True), Entity.merged_into_id.is_(None)).all()
+            entities = [(entity.name, list(entity.aliases or []) if isinstance(entity.aliases, list) else [])
+                        for entity in sorted(found, key=lambda e: (-mentions.get(e.id, 0), e.name or ""))]
+            departments = [d.name for d in s.query(Department).filter(Department.active.is_(True)).order_by(Department.id)]
+            present = [e for e in people if allowed is not None and e.id in set(allowed)]
+            for employee in present:
+                person(employee)
+            for term in _glossary_terms(settings.get("glossary") if "glossary" in settings else settings_store.get("glossary")):
+                add(term)
+            for name, aliases in entities:
+                add(name)
+                for alias in aliases[:3]:
+                    add(alias)
+            for employee in people:
+                if employee not in present:
+                    person(employee)
+    except Exception:  # noqa: BLE001  no database: the glossary alone
+        log.warning("keyterms: the directory is unavailable", exc_info=True)
+        for term in _glossary_terms(settings.get("glossary", "")):
+            add(term)
+    for name in departments:
+        add(name)
+    return out[:limit]
+
+
 def prompt_text(settings: dict = None) -> str:
     """The recognition hint: names and terms, comma separated (the STT «prompt»)."""
     return ", ".join(vocabulary(settings))[:900]

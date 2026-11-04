@@ -1,0 +1,46 @@
+{% extends "base.html" %}{% block title %}{{ 'Агенты' if boss else 'Мой агент' }} — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>{{ 'Агенты' if boss else 'Мой агент' }}</h1>
+  <p>У каждого сотрудника свой агент на его ПК: своя память, свои доступы. Доступы — только здесь, в настройках SYSAI: агент ничего не спрашивает в Telegram, что не разрешено — запрещено.</p></div>
+  <div class="actions"><a class="btn" href="/agents/spend">Расходы</a>{% if boss %}<a class="btn" href="/agents/access">Доступы</a><a class="btn" href="/hub">SYSAI_Hub</a>{% endif %}</div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+<section class="card"><h2>{{ 'Все агенты' if boss else 'Мои агенты' }} ({{ agents|length }})</h2>
+  {% if not agents %}<p class="muted">Агентов пока нет. Создайте агента и подключите компьютер одноразовым кодом.</p>{% else %}
+  <div class="table-wrap"><table class="list">
+    <thead><tr><th>Агент</th><th>Человек</th><th>Статус</th><th>Компьютер</th><th>Доступы</th><th>На связи</th><th>Сегодня</th></tr></thead>
+    <tbody>
+    {% for a in agents %}
+    <tr onclick="location.href='/agents/{{ a.id }}'">
+      <td><a href="/agents/{{ a.id }}"><b>{{ a.name }}</b></a><div class="small muted">{{ a.harness }}{% if a.department %} · {{ a.department }}{% endif %}</div></td>
+      <td>{{ a.user_name }}<div class="small muted">{{ a.user }}</div></td>
+      <td><span class="pill {{ a.status_ru[1] }}">{{ a.status_ru[0] }}</span>{% if a.last_error %}<div class="small net-err" title="{{ a.last_error }}">есть ошибка</div>{% endif %}</td>
+      <td>{{ a.host or '—' }}{% if a.versions %}<div class="small muted">{% for k, v in a.versions.items() %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}</td>
+      <td>{{ a.profile }}<div class="small {{ 'net-ok' if a.applied_rev == a.rev else 'muted' }}">{% if a.applied_rev == a.rev %}применены{% elif a.applied_rev %}ждут применения{% else %}ещё не применялись{% endif %}</div></td>
+      <td class="small">{{ net_when(a.last_seen_at) }}</td>
+      <td class="small">${{ '%.2f'|format(spend.get(a.id, 0)) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody></table></div>{% endif %}
+</section>
+{% if can_create %}
+<section class="card"><h2>Новый агент</h2>
+  <form method="post" action="/agents/create" class="net-form">
+    {% if boss %}
+    <label class="f">Человек (аккаунт SYSAI) <select name="user_id" required>{% for u in users %}<option value="{{ u.id }}" {{ 'selected' if me and u.username == me.username }}>{{ u.name }} ({{ u.username }})</option>{% endfor %}</select></label>
+    {% endif %}
+    <label class="f">Отдел <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select></label>
+    <label class="f">Имя агента <input name="name" placeholder="opo-ivanov" pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength="64"><small class="muted">пусто — из отдела и логина</small></label>
+    <label class="f">Обвязка <select name="harness">{% for k, v in harnesses.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
+    {% if boss %}
+    <label class="f">Сотрудник (Telegram для сообщений агента) <select name="employee_id"><option value="">—</option>{% for e in employees %}<option value="{{ e.id }}">{{ e.name }}{{ '' if e.telegram else ' (без Telegram)' }}</option>{% endfor %}</select></label>
+    <label class="f">Профиль доступа <select name="profile"><option value="">по отделу (opo- → «Инженер ОПО»)</option>{% for p in profiles %}<option value="{{ p.code }}">{{ p.name }}</option>{% endfor %}</select></label>
+    {% else %}
+    <p class="small muted wide">Агент начнёт с профиля «Наблюдатель». Доступы для работы назначает суперпользователь в настройках SYSAI.</p>
+    {% endif %}
+    <div class="wide"><button class="btn primary">Создать агента</button></div>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

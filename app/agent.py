@@ -23,13 +23,13 @@ import time
 
 from sqlalchemy.exc import IntegrityError
 
-from . import access, bitrix, cases, deadlines, memory as company_memory, llm, meeting_alerts, reminders, settings_store, transcribe, userbot, voice
+from . import (access, agent_skills, cases, deadlines, dialog_memory, doc_intake, doc_templates, entities,
+               memory as company_memory, llm, orders, reminders, settings_store, transcribe, userbot, voice)
 from .db import (ConversationEscalation, ConversationMessage, Document, Employee, Meeting, Note, PersonMemory, SessionLocal,
                  Task, now)
 
 log = logging.getLogger("sysai.agent")
 
-HISTORY = 40            # messages of one conversation the model sees
 MAX_ATTEMPTS = 3
 RECENT_FILES_HOURS = 48
 RETRY_AFTER = 20        # seconds before a waiting message is picked up again
@@ -427,14 +427,41 @@ def _notes_view(s, employee_id=None, limit=15) -> list:
     return out
 
 
+def _departments_view(p) -> list:
+    return [{"name": m.department.name, "role": m.role or "", "responsibilities": m.responsibilities or ""}
+            for m in p.department_memberships if m.department is not None and m.department.active]
+
+
+def _refer_to(s, employee) -> list:
+    """Whom to send a person with a request beyond their rights: the heads of their departments, otherwise the reviewers
+    (the director is never named)."""
+    out, names = [], set()
+    for m in (employee.department_memberships if employee is not None else []):
+        department = m.department
+        if department is None or not department.active:
+            continue
+        head = next((x for x in department.memberships if x.is_primary and x.employee is not None and x.employee.active
+                     and x.employee_id != employee.id), None)
+        if head is not None and head.employee.name not in names and access.level_of(head.employee) != "director":
+            out.append({"name": head.employee.name, "role": f"руководитель: {department.name}"})
+            names.add(head.employee.name)
+    if not out:
+        for e in s.query(Employee).filter_by(active=True).order_by(Employee.name).all():
+            if (employee is None or e.id != employee.id) and access.level_of(e) == "reviewer":
+                out.append({"name": e.name, "role": "проверяющий"})
+            if len(out) >= 3:
+                break
+    return out
+
+
 def _context(s, row, result: dict, employee, reviewer: bool, full: bool, director: bool = False,
-             director_mode: bool = False) -> dict:
+             director_mode: bool = False, person=None) -> dict:
     chat = row.chat_id
-    history = (s.query(ConversationMessage).filter(
-        ConversationMessage.chat_id == chat, ConversationMessage.role.in_(("user", "assistant")),
-        ConversationMessage.status.in_(("agent_pending", "agent_done")), ConversationMessage.id < row.id)
-        .order_by(ConversationMessage.id.desc()).limit(HISTORY).all())
-    history.reverse()
+    person = person or agent_skills.person_of(s, employee, reviewer, full, director)
+    # The whole conversation (dialog_memory.py): the fresh part word for word, a retelling of the older part, and the
+    # old messages this one seems to speak about.
+    talk = dialog_memory.window(s, chat, row.id)
+    history = talk["fresh"]
     last = _aware(history[-1].created_at) if history and history[-1].created_at else None
     minutes = int((now() - last).total_seconds() // 60) if last else None
     memory = s.get(PersonMemory, chat)
@@ -444,9 +471,18 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                      ("reviewer", reviewer), ("director", director)) if on],
            "director_mode": director_mode,
            "conversation": {"already_talking": minutes is not None and minutes < TALKING_HOURS * 60,
-                            "minutes_since_last_message": minutes, "messages_so_far": len(history)},
-           "memory": (memory.summary if memory else "") or None,
-           "history": [{"from": "человек" if h.role == "user" else "ты", "text": h.text[:900]} for h in history]}
+                            "minutes_since_last_message": minutes, "messages_so_far": talk["total"]},
+           "memory": (memory.summary if memory else "") or None}
+    older = talk["total"] - len(history)
+    if older > 0:
+        ctx["conversation"]["older_not_shown"] = older
+        if talk["summary"]:
+            ctx["dialog_memory"] = talk["summary"]
+        earlier = dialog_memory.related(s, chat, getattr(row, "text", "") or "", history[0].id if history else row.id)
+        if earlier:
+            ctx["from_earlier"] = earlier
+    ctx["history"] = [{"from": "человек" if h.role == "user" else "ты", "text": dialog_memory.clip(h.text)}
+                      for h in history]
     if employee is not None:
         tasks = (s.query(Task).filter(Task.assignee_id == employee.id, Task.status.in_(OPEN_STATUSES + ("done",)))
                  .order_by(Task.id.desc()).limit(30).all())
@@ -459,7 +495,10 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                            if m.department is not None and m.department.active],
                            "tasks": [_task_view(t, True) for t in mine],
                            "done_recently": [t.title for t in tasks if t.status == "done"][:5]}
-        meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks))[:4]
+        address = voice.address_of(employee)
+        if address:
+            ctx["employee"]["address"] = address  # how to address this person (the card)
+        meeting_ids = list(dict.fromkeys(t.meeting_id for t in tasks if t.meeting_id))[:4]
         ctx["meetings"] = [_meeting_view(m) for m in (s.get(Meeting, i) for i in meeting_ids) if m]
         ctx["waiting_for_reviewer"] = [{"id": e.id, "question": e.reason} for e in
                                        s.query(ConversationEscalation).filter_by(chat_id=chat, status="open").all()]
@@ -469,6 +508,10 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
     # What the company memory knows about this message: an employee sees only their own card and notes.
     query = " ".join(h.text for h in history[-2:] if h.role == "user")[-600:] + " " + (getattr(row, "text", "") or "")
     ctx["known_facts"] = company_memory.for_prompt(query, viewer=None if full else (employee.id if employee else -1))
+    about = entities.for_prompt(s, query, full)
+    if about:
+        ctx["about_entities"] = about
+    company_memory.number_sources(ctx)  # refs and sources of what may be answered from (№20); the pages kept aside
     found_skills = company_memory.skills_for(getattr(row, "text", "") or "")
     if found_skills:
         ctx["skills"] = found_skills
@@ -489,10 +532,7 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                         "department": getattr(p, "department", "") or None,
                         "competencies": getattr(p, "competencies", "") or None,
                         "responsibilities": getattr(p, "responsibilities", "") or None,
-                        "departments": [{"name": m.department.name, "role": m.role or "",
-                                         "responsibilities": m.responsibilities or ""}
-                                        for m in p.department_memberships
-                                        if m.department is not None and m.department.active],
+                        "departments": _departments_view(p),
                         "context": getattr(p, "context", "") or None,
                         "reachable": reminders.reachable(p),
                         "open_tasks": [_task_view(t, False) for t in by_person[p.id] if t.status in OPEN_STATUSES][:8],
@@ -511,6 +551,52 @@ def _context(s, row, result: dict, employee, reviewer: bool, full: bool, directo
                                 "at": d.created_at.isoformat() if d.created_at else None}
                                for d in s.query(Document).filter(Document.chat_id == chat, Document.created_at >= since)
                                .order_by(Document.id.desc()).limit(30)]
+    scope = person.order_scope
+    if not full and scope in ("all", "department"):  # people they may give orders to (department: with their tasks)
+        people = [p for p in s.query(Employee).filter_by(active=True).order_by(Employee.name).all()
+                  if scope == "all" or p.id in person.team]
+        tasks = (s.query(Task).filter(Task.assignee_id.in_([p.id for p in people]), Task.executor != "assistant",
+                                      Task.status.in_(OPEN_STATUSES)).order_by(Task.id.desc()).limit(200).all()
+                 if scope == "department" and people else [])
+        ctx["team"] = [{"id": p.id, "name": p.name, "position": p.position or None,
+                        "department": getattr(p, "department", "") or None,
+                        "responsibilities": getattr(p, "responsibilities", "") or None,
+                        "departments": _departments_view(p), "reachable": reminders.reachable(p),
+                        **({"open_tasks": [_task_view(t, False) for t in tasks if t.assignee_id == p.id][:8]}
+                           if scope == "department" else {})} for p in people]
+    ctx["order_scope"] = scope
+    if scope != "all":
+        hint = _refer_to(s, employee)
+        if hint:
+            ctx["refer_to"] = hint
+    off = [agent_skills.SKILLS[n].title for n in agent_skills.SKILLS  # the card and the Skills page
+           if n not in agent_skills.PAIRED and not agent_skills.allowed_skill(n, person)]
+    if off:
+        ctx["skills_off"] = off
+    waiting_order = orders.pending_view(s, chat)
+    if waiting_order:
+        ctx["order_to_confirm"] = waiting_order
+    if agent_skills.allowed_skill("make_document", person):  # the templates of the panel and the draft waiting for «ок»
+        templates = doc_templates.view(s)
+        if templates:
+            ctx["document_templates"] = templates
+        draft = doc_templates.pending_view(s, chat)
+        if draft:
+            ctx["document_draft"] = draft
+    if any(agent_skills.available(agent_skills.SKILLS[n], person) for n in ("mail_reply", "mail_pass")):
+        from . import mail_reply, mail_route  # the letters of the company box passed to this person (№24, №25)
+        letters = mail_route.for_prompt(s, employee, bool(reviewer or director))
+        if letters:
+            ctx["mail_letters"] = letters
+        waiting_draft = mail_reply.pending_view(s, chat, employee.id if employee is not None else None)
+        if waiting_draft:
+            ctx["mail_draft"] = waiting_draft
+        if letters or waiting_draft:
+            ctx["mail_can_reply"] = mail_reply.ready()
+    silences = cases.silence_view({"user_id": chat, "username": result.get("username") or "",
+                                   "phone": result.get("phone") or ""})
+    if silences:
+        ctx["silence_to_decide"] = silences  # you told this person that somebody is silent: their answer decides
     ctx["reminders_pending"] = reminders.pending_view(s, chat, full)
     if reviewer or director:
         ctx["cases_awaiting_decision"] = cases.decisions_view()
@@ -529,66 +615,106 @@ def _name_for_chat(s, chat: str) -> str:
     return employee.name if employee else chat
 
 
-ACTIONS_HELP = (
-    'Формат ответа: {"reply": "что написать человеку или пустая строка", "actions": [...], "memory": "необязательно"}. '
-    "При назначении задачи сначала учитывай прямое указание директора; если исполнителя не назвали, сравнивай смысл задачи с department, competencies, responsibilities и context каждого сотрудника. Не выбирай только по имени или должности. Если подходят несколько сотрудников либо данных мало, задай директору один конкретный уточняющий вопрос и не создавай назначение наугад. Не выдумывай компетенции и загрузку. " 
-    "Действия (ID бери только из данных; код проверяет права и ID): "
-    '{"type":"set_deadline","task_id":ID,"date":"ГГГГ-ММ-ДД"}: сотрудник назвал конкретную дату, а у его задачи нет срока; '
-    '{"type":"task_status","task_id":ID,"status":"in_progress|done|blocked","note":"что сделано или что мешает"}: '
-    "человек сообщил, как идёт задача; "
-    '{"type":"note","text":"...","employee_id":ID или null,"task_id":ID или null,"kind":"fact|status|commitment|done"}: '
-    "запомнить факт о том, кто что сделал, пообещал или сказал (для себя, не для пересылки); "
-    '{"type":"ask_reviewer","task_id":ID или null,"question":"суть","message":"точный текст проверяющему"}: сотруднику нужен '
-    "ответ, которого нет в данных, или он просит изменить условия задачи (срок, выезд раньше, водитель, машина, состав) — "
-    "это решает руководитель, не ты; "
-    '{"type":"relay_answer","question_id":ID,"message":"точный текст сотруднику"}: проверяющий ответил на вопрос сотрудника; '
-    '{"type":"approve_meeting","meeting_id":ID} и {"type":"reject_meeting","meeting_id":ID}: проверяющий прямо согласился '
-    "отправить именно это совещание или отклонил его (если совещаний несколько и неясно какое, спроси); "
-    '{"type":"assign_task","task_id":ID,"to":ID сотрудника или "assistant","message":"текст сотруднику, если совещание уже '
-    'отправлено"}: проверяющий решил, кто делает задачу (to="assistant" значит, что задачу выполнишь ты сам: график, '
-    "таблица, сводка, отчёт, напоминание, запрос статуса; так же повторяют задачу ассистента со статусом "
-    "assistant_failed); "
-    '{"type":"deliver_files","to":ID сотрудника,"document_ids":[ID из files_received или recent_files],"zip":true|false,'
-    '"archive_name":"имя архива","note":"по какому делу"}: человек с полным доступом просит переслать, передать, упаковать '
-    "или отправить файлы сотруднику («перешли ему», «запакуй и отправь зипом»). Код соберёт ZIP (если zip=true), "
-    "отправит и доложит, когда Telegram подтвердит доставку. «Ему/ей» ищи в recent_cases и в разговоре. Бери все файлы, "
-    "которые человек прислал для этого, а не один. ОБЕЩАНИЕ = ДЕЙСТВИЕ: не пиши «перешлю», «упакую», «отправлю», "
-    "«передам», если в actions нет deliver_files (или другого действия, которое это делает); если не хватает данных "
-    "(кому, какие файлы) — спроси. "
-    '{"type":"team_report","scope":"all или ID сотрудника"}: человек с полным доступом просит отчёт о том, кто что делает '
-    "(код соберёт красивый PDF из базы и пришлёт после твоего ответа, в reply коротко скажи главное). "
-    '{"type":"remind","to":"me" или "all" или "reviewers" или [ID сотрудников из команды],"at":"ГГГГ-ММ-ДД ЧЧ:ММ" или null,'
-    '"topic":"о чём напомнить, коротко","details":"время и место, что подготовить, если назвали","meeting":true или false}: '
-    "человек просит кому-то напомнить (например, о совещании). meeting=true, если напоминание о совещании, встрече или "
-    "планёрке: напоминание, которое поставлено в личном кабинете и ещё не сработало, тогда снимается для этих людей, чтобы "
-    "не писать им дважды (для остальных тем meeting не указывай). at это время напоминания по now.local (сегодня в 15:00, за час до "
-    "совещания, завтра утром считай сам от now), null значит сразу. to=me: себе, это может любой; остальным (all это "
-    "все сотрудники из справочника, reviewers это проверяющие) напоминают только проверяющий и люди с полным доступом. "
-    "Текст напоминания потом напишешь сам, в reply скажи кому и когда напомнишь; если неясно кому, когда или о чём, "
-    'сначала спроси; '
-    '{"type":"cancel_reminder","reminder_id":ID}: отменить напоминание из reminders_pending. '
-    '{"type":"approve_case","case_id":ID} и {"type":"cancel_case","case_id":ID}: руководитель прямо разрешил начать дело, '
-    "переслать документ или повторить остановленный шаг из cases_awaiting_decision, либо отменил дело (если дел несколько и "
-    "неясно какое, спроси). "
-    "Дела ведёт код: если this_message_for_case задан, человек ответил или прислал документ по делу — коротко поблагодари и "
-    "скажи, что передашь (кому — в forward_to); сам ничего не пересылай и не обещай сверх этого. Если в нём ambiguous_cases, "
-    "спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с просьбой. my_cases — дела ассистента, где участвует этот человек или которые он поручил: your_role, статус, last_events "
-    "(что и когда было), waiting_for (кого и чего ждём). На вопросы «ну что там?», «как там?», «есть новости?», «где файлы?» "
-    "отвечай по my_cases (и recent_cases, если есть): что уже сделано, чего ждёшь и от кого; если дел нет — так и скажи и "
-    "спроси, о чём речь. Не выдумывай дел и событий, которых нет в данных. assistant_waiting_for_you — "
-    "чего ты ждёшь от этого человека. file_received — человек прислал файл; он сохранён в библиотеке документов. "
-    "files_received — человек прислал сразу несколько файлов (альбом): ответь один раз на все вместе. "
-    "known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки с источником и "
-    "уверенностью, фрагменты документов). На вопросы о компании, людях и документах отвечай по known_facts и данным "
-    "выше; при низкой уверенности так и скажи; если ответа нет — честно скажи, что не знаешь, и предложи уточнить у "
-    "руководителя, не выдумывай. skills — навыки компании для таких ситуаций: следуй им. Новое устойчивое знание о "
-    "человеке или работе сохраняй действием note (только факты, без оценок людей). "
+FORMAT_JSON = ('Формат ответа: {"reply": "что написать человеку или пустая строка", "actions": [...], '
+               '"memory": "необязательно"}. ')
+ASSIGN_RULES = (
+    "При назначении задачи сначала учитывай прямое указание директора; если исполнителя не назвали, сравнивай смысл "
+    "задачи с department, competencies, responsibilities и context каждого сотрудника. Не выбирай только по имени или "
+    "должности. Если подходят несколько сотрудников либо данных мало, задай директору один конкретный уточняющий вопрос "
+    "и не создавай назначение наугад. Не выдумывай компетенции и загрузку. ")
+ORDER_RULES = (
+    "Поручения из чата: новую работу коллеге (сделать к сроку, узнать у него, запросить документ) оформляй действием "
+    "order, а не обещанием. Сначала убедись, что ясно кому, что и (для задачи) к какому сроку; если не хватает одного "
+    "из этого — задай один короткий уточняющий вопрос. С order в reply перескажи поручение и спроси подтверждение "
+    "(«Понял: Виктору — купить перфоратор до 14.11. Делаю?»); пока человек не ответил «да», не пиши, что поручение "
+    "передано. order_to_confirm — твой пересказ, который ждёт ответа: «да» — confirm_order с ok=true, «нет» — ok=false, "
+    "поправка («нет, до среды», «лучше Ольге») — новый order с исправлением и снова «Делаю?». После confirm_order "
+    "коротко скажи, кому передал и что сообщишь, когда будет готово. assistant_waiting_for_you с expects=done — "
+    "поручение, которое выполняет этот человек: когда он пишет, что сделал или что мешает, отметь task_status по task_id. "
+    "silence_to_decide — дела, по которым ты сообщил этому человеку, что сотрудник молчит: «напомни ещё», «займусь "
+    "сам», «отмени» — это silence_choice с case_id этого дела. ")
+DOC_RULES = (
+    "Документы по шаблону: document_templates — шаблоны компании (письма, акты, служебки) с полями fields. Просьбу "
+    "подготовить такой документ выполняй действием make_document: значения всех полей бери из сообщения, разговора, "
+    "known_facts и team (hint подсказывает, что в поле), не выдумывай; если чего-то нет — задай один короткий вопрос о "
+    "недостающем без действия. С make_document в reply коротко скажи, что ниже черновик, и попроси проверить: «ок» — "
+    "сохранишь (и отправишь, если назвали кому), или пусть напишет, что поправить. document_draft — черновик, который "
+    "ждёт ответа: «ок» — confirm_document с ok=true, «не надо» — ok=false, поправка — новый make_document с "
+    "исправленными values. Если подходящего шаблона нет, так и скажи и не обещай документ. "
+    "Входящие документы: intake в file_received (и в каждом из files_received) — что код разобрал в файле: doc_type, "
+    "requisites (номер, дата, контрагент, УНП, суммы — только подтверждённое цитатой из файла), deadlines (сроки), "
+    "problems (не сходятся суммы или НДС, неверный УНП). Если человек прислал документ без вопроса — одной-двумя "
+    "фразами скажи, что это (тип, номер, от кого, сумма), и назови problems, если они есть; ничего не добавляй от себя. "
+    "route.to — кому код сам передаст файл по правилам компании после твоего ответа (route.tasks — и поставит задачи по "
+    "срокам с напоминанием): так и скажи, deliver_files для этого не нужен. Если человек сам сказал, кому передать, — "
+    "deliver_files по его словам, правило тогда не сработает. route.to нет — не обещай передать; если неясно, что с "
+    "файлом делать, спроси. intake.pending — файл ещё разбирается: скажи, что посмотришь и напишешь, без «передам». ")
+MAIL_RULES = (
+    "Почта компании: mail_letters — письма из ящика компании: переданные этому человеку (routed_to — кому передано), "
+    "ждущие решения, кому их передать (waits_for_decision, hint — подсказка кода), и ждущие ответа (needs_reply). На "
+    "«что пришло на почту?», «что пишет Монолит?» отвечай по ним (from, subject, summary, ask, deadlines); писем, "
+    "которых там нет, не выдумывай. «Ответь им, что…» — mail_reply: в points перескажи словами человека, что сказать; "
+    "код сам напишет письмо и пришлёт черновик после твоего ответа, а в reply коротко скажи, что ниже черновик, и "
+    "попроси проверить. mail_draft — черновик, который ждёт ответа: «ок», «отправляй» — confirm_mail_reply с ok=true, "
+    "«не надо» — ok=false, поправка — новый mail_reply с тем же mail_id и поправкой в points. Пока человек не ответил "
+    "«ок», не пиши, что письмо отправлено; после confirm_mail_reply с ok=true коротко скажи, что отправляешь (код сам "
+    "сообщит, когда письмо уйдёт). mail_can_reply=false — отвечать на письма из чата пока нельзя (не настроена "
+    "отправка): так и скажи. «Не моё», «это не ко мне» о письме — mail_pass с to=null; «передай это письмо Ольге» — "
+    "mail_pass с to=ID из team. ")
+GENERAL_RULES = ORDER_RULES + DOC_RULES + MAIL_RULES + (
+    "Память разговора: history — последние сообщения целиком; dialog_memory — краткий пересказ более ранней части "
+    "разговора; from_earlier — старые сообщения, которые код нашёл по словам этого сообщения; recalled — что нашлось, "
+    "когда ты сам попросил вспомнить. На «как договаривались», «тот акт», «как в прошлый раз» отвечай по ним и "
+    "называй, когда это было. Если нужного там нет, а conversation.older_not_shown больше нуля, попроси вспомнить "
+    "(поиск по всей истории чата); если не нашлось и там, честно скажи, что не помнишь, и попроси напомнить. Не "
+    "выдумывай того, чего не было в разговоре. "
+    "Дела ведёт код: если this_message_for_case задан, человек ответил или прислал документ по делу — коротко "
+    "поблагодари и скажи, что передашь (кому — в forward_to); сам ничего не пересылай и не обещай сверх этого. Если "
+    "в нём ambiguous_cases, спроси, к какому делу относится сообщение, и попроси ответить на твоё сообщение с "
+    "просьбой. my_cases — дела ассистента, где участвует этот человек или которые он поручил: your_role, статус, "
+    "last_events (что и когда было), waiting_for (кого и чего ждём). На вопросы «ну что там?», «как там?», «есть "
+    "новости?», «где файлы?» отвечай по my_cases (и recent_cases, если есть): что уже сделано, чего ждёшь и от "
+    "кого; если дел нет — так и скажи и спроси, о чём речь. Не выдумывай дел и событий, которых нет в данных. "
+    "assistant_waiting_for_you — чего ты ждёшь от этого человека. file_received — человек прислал файл; он сохранён "
+    "в библиотеке документов. files_received — человек прислал сразу несколько файлов (альбом): ответь один раз на "
+    "все вместе. known_facts — найденное в памяти компании по этому сообщению (компания, отделы, люди, заметки, "
+    "фрагменты документов, карточки): у каждой записи ref, cite — откуда она (совещание, документ, заметка, карточка) "
+    "и confidence — уверенность. about_entities — карточки объектов и клиентов, о которых говорит сообщение: другие "
+    "написания, УНП, адрес, контакты, facts, а для тех, кто видит команду, — совещания, открытые задачи и документы по "
+    "ним; у карточки и у каждого факта тоже есть ref и cite. На вопросы о компании, людях, объектах и документах "
+    "отвечай по этим данным, в контексте того объекта или клиента, о котором спросили. ИСТОЧНИК: после каждой фразы, "
+    "взятой из known_facts или about_entities, ставь ref этой записи в квадратных скобках: «Сдачу кровли перенесли на "
+    "20 ноября [m2].» Код заменит метки строкой «Источник: …» с точным названием и датой, поэтому сам источник "
+    "словами не пересказывай. При низкой уверенности так и скажи. Если ответа в данных нет — честно скажи, что не "
+    "знаешь, и предложи уточнить у руководителя; не выдумывай и не додумывай. "
+    "skills — навыки компании для таких ситуаций: следуй им. "
+    "Новое устойчивое знание о человеке или работе сохраняй действием note (только факты, без оценок людей). "
+    "skills_with_approval — действия, которые для этого человека выполняются только после одобрения руководителя "
+    "(или только предлагаются ему): проси их как обычно, но в reply не говори, что уже сделал, а скажи, что передал "
+    "руководителю на одобрение. ")
+MEMORY_JSON = ("Поле memory: если узнал что-то важное о человеке или его работе, верни обновлённую краткую память (до 1200 "
+               "символов, сохрани важное из прошлой памяти), иначе не добавляй поле.")
+RECALL_JSON = ('{"type":"recall","query":"что искать"}: вспомнить — найти в полной истории этого чата старые сообщения, '
+               "когда нужного нет в history, dialog_memory и from_earlier; reply тогда оставь пустым: найденное придёт "
+               "в recalled, и тебя попросят ответить ещё раз; ")
+# The skills (agent_skills.py) in the JSON answer: what the model may ask for and when.
+ACTIONS_HELP = (FORMAT_JSON + ASSIGN_RULES + "Действия (ID бери только из данных; код проверяет права и ID): "
+                + agent_skills.json_help() + RECALL_JSON + GENERAL_RULES + MEMORY_JSON)
+# The same skills as function calls (OpenRouter tools); the reply is the text of the answer.
+TOOLS_HELP = (
+    ASSIGN_RULES +
+    "Действия выполняй вызовом функций (tools); ID бери только из данных, код проверит права и ID. Здесь actions — "
+    "это вызовы функций, а reply — текст твоего ответа человеку: пиши его обычным текстом в том же ответе (пустой "
+    "текст, если отвечать не нужно). ОБЕЩАНИЕ = ДЕЙСТВИЕ: не пиши «перешлю», «напомню», «уточню», «передам», если не "
+    "вызываешь функцию, которая это делает; если не хватает данных — спроси. Функций, которых нет в списке, у этого "
+    "человека нет: такие просьбы мягко отклоняй, как сказано выше. "
+    + GENERAL_RULES +
+    "Вспомнить — функция recall_conversation. Если узнал что-то важное о человеке или его работе, вызови update_memory "
+    "с обновлённой краткой памятью.")
+_NO_TOOLS = set()  # models whose providers refused function calls in this process: they answer in JSON
 
-    "Поле memory: если узнал что-то важное о человеке или его работе, верни обновлённую краткую память (до 1200 символов, "
-    "сохрани важное из прошлой памяти), иначе не добавляй поле.")
 
-
-def _system() -> str:
+def _system(transport: str = "json") -> str:
     task = (
         "Тебе пишет человек в личные сообщения. Веди живой разговор, как внимательный коллега, своими словами. "
         "Приветствие: здоровайся только когда знакомство начинается или после долгого перерыва "
@@ -607,8 +733,9 @@ def _system() -> str:
         "не утверждай, что «так решено и изменить нельзя». В message — кто просит, какая задача, что нужно, что в протоколе. "
         "Шутки про зарплату и прочее не по делу не эскалируй. Если ты уже "
         "ждёшь ответа проверяющего (waiting_for_reviewer), честно скажи об этом и что вернёшься с ответом. "
-        "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих и "
-        "людей с полным доступом. При выборе исполнителя используй responsibilities (реальные обязанности и компетенции), " +
+        "Сотруднику не раскрывай задачи и данные других людей. Данные команды (team) есть только у проверяющих, "
+        "людей с полным доступом и у тех, кто может поручать другим (order_scope all или department: тогда team — "
+        "те, кому они могут поручать). При выборе исполнителя используй responsibilities (реальные обязанности и компетенции), " +
         "должность и текущие задачи. Если есть несколько людей с одинаковым именем, не выбирай только по имени: " +
         "сопоставь смысл поручения с обязанностями; если уверенного единственного совпадения нет, задай уточняющий вопрос " +
         "и не назначай задачу наугад. Простые действия, которые ты реально можешь выполнить доступными действиями, " +
@@ -619,212 +746,210 @@ def _system() -> str:
         "выполняют для директора: ему можно рассказывать всё, что есть в данных. Если director_mode=false, их выполняют "
         "также проверяющие и люди с полным доступом (roles содержит reviewer или full_access). Всем остальным, а при "
         "director_mode=true всем, кроме директора, такие просьбы ты не выполняешь и данных о других людях не раскрываешь. "
+        "Поручения (order) и напоминания другим людям, кроме того, ограничены order_scope этого человека: all — любому "
+        "из team, department — только людям из team (это его отдел), self — только себе (to=\"me\"); в этих пределах "
+        "выполняй их для любого человека, за пределами — нет. skills_off — что для этого человека выключено: такие "
+        "просьбы не выполняй. "
         "Откажи мягко, коротко и своими словами, чтобы человек не почувствовал стену: скажи, что такие просьбы ты по "
-        "запросам коллег не выполняешь и с ними лучше к руководителю, и сразу предложи то, что можешь сделать для него "
-        "самого (его задачи, статусы, напоминание ему самому). Не пиши «нет доступа», «недостаточно прав», «запрещено», "
-        "«не уполномочен», не объясняй, как устроены роли, и не называй, кто директор. "
+        "запросам коллег не выполняешь и с ними лучше к руководителю (если есть refer_to — назови, к кому именно), и "
+        "сразу предложи то, что можешь сделать для него самого (его задачи, статусы, напоминание ему самому). Не пиши "
+        "«нет доступа», «недостаточно прав», «запрещено», «не уполномочен», не объясняй, как устроены роли, и не "
+        "называй, кто директор. "
         "Если voice_message=true, текст это автоматическая расшифровка голосового сообщения: возможны ошибки в именах, "
         "числах и времени. Когда от точности зависит действие (кому писать, во сколько напомнить), назови в reply, что "
         "именно ты понял и сделал, чтобы человек мог поправить. Если voice_problem задан (too_long, failed, empty), текст "
         "в скобках это пометка системы, а не слова человека: скажи по-человечески, что голосовое не удалось разобрать, и "
         "попроси повторить или написать. "
-        + ACTIONS_HELP)
+        + (TOOLS_HELP if transport == "tools" else ACTIONS_HELP))
     return voice.system_prompt(task)
 
 
-def _decide(system: str, ctx: dict, text: str, feedback: str = "") -> dict:
-    user = ("<data>" + json.dumps(ctx, ensure_ascii=False) + "</data>\nСообщение человека:\n<data>" + text + "</data>" + feedback)
-    try:
-        raw = llm.chat(voice.model(), [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                       json_mode=True, temperature=0.6, max_tokens=1800, timeout=90)
-        data = llm.parse_json(raw)
-    except llm.LLMError as exc:
-        raise AgentError(f"модель недоступна: {str(exc)[:200]}") from exc
+def _user_message(ctx: dict, text: str, feedback: str) -> str:
+    shown = {k: v for k, v in ctx.items() if not k.startswith("_")}  # "_links" and the like are for the code only
+    return "<data>" + json.dumps(shown, ensure_ascii=False) + "</data>\nСообщение человека:\n<data>" + text + "</data>" + feedback
+
+
+def _decision(data) -> dict:
     if not isinstance(data, dict):
         raise AgentError("модель вернула не объект")
     reply, actions, memory = data.get("reply"), data.get("actions") or [], data.get("memory")
     if (reply is not None and not isinstance(reply, str)) or not isinstance(actions, list) \
             or (memory is not None and not isinstance(memory, str)):
         raise AgentError("модель вернула ответ в неверной форме")
-    return {"reply": (reply or "").strip()[:MAX_REPLY], "actions": [a for a in actions if isinstance(a, dict)],
+    return {"reply": (reply or "").strip()[:MAX_REPLY],
+            "actions": [agent_skills.normalize(a) for a in actions if isinstance(a, dict)],
             "memory": (memory or "").strip()[:1200]}
 
 
-# ----------------------------------------------------------------------------- checking actions (no database here)
+TOOL_ACCEPTED = json.dumps({"ok": True, "note": "принято: код проверит права и выполнит после ответа"}, ensure_ascii=False)
+RECALL_NAME = agent_skills.RECALL_TOOL["function"]["name"]
+RECALL_DONE = json.dumps({"ok": False, "note": "уже искал в истории чата: ответь по найденному"}, ensure_ascii=False)
+RECALLED_NOTE = ("\nТы попросил вспомнить: найденное в полной истории чата — в recalled (пустой found — ничего не "
+                 "нашлось). Теперь ответь человеку целиком с учётом найденного; recall больше не проси.")
+
+
+def _take_recall(decision: dict):
+    """Takes the requests to remember out of the actions: what to look for, or None when there are none."""
+    asked = [a for a in decision["actions"] if a.get("type") == "recall"]
+    decision["actions"] = [a for a in decision["actions"] if a.get("type") != "recall"]
+    return " ".join(str(a.get("query") or "").strip() for a in asked).strip()[:300] if asked else None
+
+
+def _recall(ctx: dict, query: str, recall) -> dict:
+    """Looks through the whole chat once per message; what was found stays in ctx (a second try sees it too)."""
+    found = []
+    if recall is not None and query:
+        try:
+            found = recall(query) or []
+        except Exception as exc:  # noqa: BLE001  nothing found is an answer too
+            log.warning("recall %r failed: %s", query, exc)
+    ctx["recalled"] = {"query": query, "found": found}
+    return ctx["recalled"]
+
+
+def _ask_json(system: str, ctx: dict, text: str, feedback: str, model: str) -> dict:
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": _user_message(ctx, text, feedback)}]
+    return _decision(llm.parse_json(llm.chat(model, messages, json_mode=True, temperature=0.6, max_tokens=1800,
+                                             timeout=90)))
+
+
+def _decide_json(system: str, ctx: dict, text: str, feedback: str, model: str, recall) -> dict:
+    decision = _ask_json(system, ctx, text, feedback, model)
+    query = _take_recall(decision)
+    if query is None or "recalled" in ctx:
+        return decision
+    _recall(ctx, query, recall)
+    again = _ask_json(system, ctx, text, feedback + RECALLED_NOTE, model)
+    _take_recall(again)
+    again["memory"] = again["memory"] or decision["memory"]
+    again["recalled"] = query
+    return again
+
+
+def _as_call(call: dict) -> dict:
+    return {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}
+
+
+def _query_of(calls: list) -> str:
+    words = []
+    for call in calls:
+        raw = call.get("arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
+        except json.JSONDecodeError:
+            args = {}
+        words.append(str(args.get("query") or "").strip() if isinstance(args, dict) else "")
+    return " ".join(w for w in words if w)[:300]
+
+
+def _unique(actions: list) -> list:
+    seen, out = set(), []
+    for action in actions:
+        mark = json.dumps(action, ensure_ascii=False, sort_keys=True, default=str)
+        if mark not in seen:
+            seen.add(mark)
+            out.append(action)
+    return out
+
+
+def _decide_tools(system: str, ctx: dict, text: str, feedback: str, model: str, person, recall) -> dict:
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": _user_message(ctx, text, feedback)}]
+    tools = agent_skills.tools(person or agent_skills.Person())
+    if "recalled" not in ctx:
+        tools = tools + [agent_skills.RECALL_TOOL]
+    actions, memory, reply, recalled = [], "", "", None
+    for _ in range(2):  # the answer, or a look through the chat and then the answer
+        out = llm.chat(model, messages, tools=tools, tool_choice="auto", temperature=0.6, max_tokens=1800, timeout=90)
+        if isinstance(out, str):  # the model answered in JSON anyway
+            decision = _decision(llm.parse_json(out))
+            _take_recall(decision)
+            decision["actions"] = _unique(actions + decision["actions"])
+            decision["memory"] = decision["memory"] or memory[:1200]
+            if recalled is not None:
+                decision["recalled"] = recalled
+            return decision
+        calls = out.get("tool_calls") or []
+        asked = [c for c in calls if c["name"] == RECALL_NAME]
+        found_actions, found_memory = agent_skills.from_calls([c for c in calls if c["name"] != RECALL_NAME])
+        actions += found_actions
+        memory = found_memory or memory
+        reply = str(out.get("content") or "").strip()
+        if not asked or recalled is not None or "recalled" in ctx:
+            break
+        recalled = _query_of(asked)
+        found = _recall(ctx, recalled, recall)
+        messages.append({"role": "assistant", "content": out.get("content") or "", "tool_calls": [_as_call(c) for c in calls]})
+        messages += [{"role": "tool", "tool_call_id": c["id"],
+                      "content": (json.dumps(found, ensure_ascii=False) if c["name"] == RECALL_NAME else TOOL_ACCEPTED)}
+                     for c in calls]
+        tools = [t for t in tools if t["function"]["name"] != RECALL_NAME]
+        calls, reply = [], ""  # the answer comes once the model has read what was found
+    if calls and not reply:  # only the calls came: the model writes the reply once it sees them accepted
+        messages.append({"role": "assistant", "content": "", "tool_calls": [_as_call(c) for c in calls]})
+        messages += [{"role": "tool", "tool_call_id": c["id"],
+                      "content": TOOL_ACCEPTED if c["name"] != RECALL_NAME else RECALL_DONE} for c in calls]
+        again = llm.chat(model, messages, tools=tools, tool_choice="none", temperature=0.6, max_tokens=1200, timeout=90)
+        if isinstance(again, str):
+            try:
+                parsed = llm.parse_json(again)
+                again = parsed.get("reply", again) if isinstance(parsed, dict) else again
+            except llm.LLMError:
+                pass
+            reply = str(again or "").strip()
+        else:
+            reply = str(again.get("content") or "").strip()
+    decision = {"reply": reply[:MAX_REPLY], "actions": _unique(actions), "memory": memory[:1200]}
+    if recalled is not None:
+        decision["recalled"] = recalled
+    return decision
+
+
+def _decide(system: str, ctx: dict, text: str, feedback: str = "", *, model: str | None = None,
+            transport: str = "json", person=None, recall=None) -> dict:
+    """One answer of the model: {"reply", "actions", "memory"} (actions are not checked here). `recall(query)` looks
+    through the whole history of the chat when the model asks to remember (once per message)."""
+    model = model or voice.model()
+    try:
+        if transport != "tools":
+            return _decide_json(system, ctx, text, feedback, model, recall)
+        return _decide_tools(system, ctx, text, feedback, model, person, recall)
+    except llm.ToolsUnsupported:
+        raise
+    except llm.LLMError as exc:
+        raise AgentError(f"модель недоступна: {str(exc)[:200]}") from exc
+
+
+# ----------------------------------------------------------------------------- checking actions (agent_skills.py)
+def _person(employee, reviewer: bool, full: bool, director: bool = False):
+    return agent_skills.Person(employee=employee, reviewer=bool(reviewer), full=bool(full), director=bool(director))
+
+
 def _known_task_ids(ctx: dict, *, own_only: bool = False) -> set:
-    ids = {t["id"] for t in (ctx.get("employee") or {}).get("tasks", [])}
-    if not own_only:
-        for person in ctx.get("team", []):
-            ids |= {t["id"] for t in person["open_tasks"]}
-        ids |= {t["id"] for t in ctx.get("unassigned_tasks", [])}
-    return ids
+    return agent_skills._known_task_ids(ctx, own_only=own_only)
 
 
 def _check(action: dict, ctx: dict, employee, reviewer: bool, full: bool) -> str:
     """Returns an error text or "" when the action may run."""
-    kind = action.get("type")
-    if kind == "set_deadline":
-        if employee is None:
-            return "set_deadline доступно только сотруднику"
-        ids = {t["id"] for t in ctx["employee"]["tasks"] if t["can_set_deadline"]}
-        if action.get("task_id") not in ids:
-            return "set_deadline: задача не найдена среди задач без срока"
-        try:
-            date = dt.date.fromisoformat(str(action.get("date")))
-        except ValueError:
-            return "set_deadline: дата должна быть в формате ГГГГ-ММ-ДД"
-        return "" if date >= deadlines.today() else "set_deadline: дата уже прошла"
-    if kind == "task_status":
-        if action.get("status") not in ("in_progress", "done", "blocked"):
-            return "task_status: статус in_progress, done или blocked"
-        ids = _known_task_ids(ctx, own_only=not full)
-        return "" if action.get("task_id") in ids else "task_status: задача не найдена среди доступных"
-    if kind == "note":
-        if not str(action.get("text") or "").strip():
-            return "note: нужен text"
-        if action.get("kind", "fact") not in ("fact", "status", "commitment", "done"):
-            return "note: kind fact, status, commitment или done"
-        employee_id = action.get("employee_id")
-        if employee is not None and not full:
-            if employee_id not in (None, employee.id):
-                return "note: сотрудник может писать заметки только о себе"
-            if action.get("task_id") is not None and action["task_id"] not in _known_task_ids(ctx, own_only=True):
-                return "note: задача не найдена среди задач сотрудника"
-        elif employee_id is not None and employee_id not in {p["id"] for p in ctx.get("team", [])}:
-            return "note: сотрудник не найден в команде"
-        return ""
-    if kind == "ask_reviewer":
-        if employee is None:
-            return "ask_reviewer доступно только сотруднику"
-        if not (settings_store.get("approver_chat_ids") or []):
-            return "ask_reviewer: проверяющие не указаны в настройках"
-        if not str(action.get("message") or "").strip() or not str(action.get("question") or "").strip():
-            return "ask_reviewer: нужны question и message"
-        task_ids = {t["id"] for t in ctx["employee"]["tasks"]}
-        if action.get("task_id") is not None and action.get("task_id") not in task_ids:
-            return "ask_reviewer: задача не найдена среди задач сотрудника"
-        return "" if task_ids else "ask_reviewer: у сотрудника нет задач, вопрос не к чему привязать"
-    if kind == "relay_answer":
-        if not reviewer:
-            return "relay_answer доступно только проверяющему"
-        if action.get("question_id") not in {q["id"] for q in ctx.get("open_questions_from_employees", [])}:
-            return "relay_answer: вопрос не найден среди открытых"
-        return "" if str(action.get("message") or "").strip() else "relay_answer: нужен message"
-    if kind in ("approve_meeting", "reject_meeting"):
-        if not reviewer:
-            return f"{kind} доступно только проверяющему"
-        ids = {m["id"] for m in ctx.get("meetings_awaiting_approval", [])}
-        return "" if action.get("meeting_id") in ids else f"{kind}: совещание не ждёт проверки"
-    if kind == "assign_task":
-        if not (reviewer and full):
-            return "assign_task доступно только проверяющему"
-        task = next((t for t in ctx.get("unassigned_tasks", []) if t["id"] == action.get("task_id")), None)
-        if task is None:
-            task = next((t for person in ctx.get("team", []) for t in person["open_tasks"] if t["id"] == action.get("task_id")), None)
-        again = next((t for t in ctx.get("assistant_tasks", []) if t["id"] == action.get("task_id")
-                      and t["status"] in ("assistant_failed", "assistant_done")), None)
-        if task is None and again is None:
-            return "assign_task: задача не найдена среди доступных"
-        target = action.get("to")
-        if target != "assistant" and target not in {p["id"] for p in ctx.get("team", [])}:
-            return 'assign_task: to должен быть ID сотрудника из команды или "assistant"'
-        if target != "assistant" and task is not None and task.get("status") in ("sent", "in_progress", "blocked", "awaiting_deadline") \
-                and not str(action.get("message") or "").strip():
-            return "assign_task: совещание уже отправлено, нужен message сотруднику"
-        return ""
-    if kind == "remind":
-        if not str(action.get("topic") or "").strip():
-            return "remind: нужен topic (о чём напомнить)"
-        if action.get("meeting") not in (None, True, False):
-            return "remind: meeting это true или false"
-        to = action.get("to")
-        if to != "me":
-            if not full:
-                return 'remind: сотрудник может попросить напомнить только себе (to: "me")'
-            team = {p["id"]: p for p in ctx.get("team", [])}
-            if to == "all":
-                if not any(p.get("reachable") for p in team.values()):
-                    return "remind: ни у кого из сотрудников нет Telegram-контакта в справочнике"
-            elif to == "reviewers":
-                if not (settings_store.get("approver_chat_ids") or []):
-                    return "remind: проверяющие не указаны в настройках"
-            elif isinstance(to, list) and to and all(isinstance(x, int) and not isinstance(x, bool) for x in to):
-                missing = [x for x in to if x not in team]
-                if missing:
-                    return f"remind: сотрудники {missing} не найдены в команде"
-                silent = [team[x]["name"] for x in to if not team[x].get("reachable")]
-                if silent:
-                    return f"remind: у {', '.join(silent)} нет Telegram-контакта в справочнике, написать нельзя"
-            else:
-                return 'remind: to это "me", "all", "reviewers" или список ID сотрудников'
-        try:
-            reminders.parse_when(action.get("at"))
-        except reminders.WhenError as exc:
-            return f"remind: {exc}"
-        return ""
-    if kind == "cancel_reminder":
-        ids = {r["id"] for r in ctx.get("reminders_pending", [])}
-        return "" if action.get("reminder_id") in ids else "cancel_reminder: напоминание не найдено среди ожидающих"
-    if kind in ("approve_case", "cancel_case"):
-        if not reviewer:
-            return f"{kind} доступно только руководителю"
-        ids = {c["id"] for c in ctx.get("cases_awaiting_decision", [])}
-        if kind == "cancel_case":
-            return "" if isinstance(action.get("case_id"), int) else "cancel_case: укажи case_id"
-        return "" if action.get("case_id") in ids else "approve_case: дело не найдено среди ждущих решения"
-    if kind == "deliver_files":
-        if not full:
-            return "deliver_files доступно только проверяющему и людям с полным доступом"
-        team = {p["id"]: p for p in ctx.get("team", [])}
-        if action.get("to") not in team:
-            return "deliver_files: to должен быть ID сотрудника из команды"
-        if not team[action["to"]].get("reachable"):
-            return f"deliver_files: у {team[action['to']]['name']} нет Telegram-контакта в справочнике"
-        ids = action.get("document_ids")
-        if not isinstance(ids, list) or not ids or not all(isinstance(x, int) and not isinstance(x, bool) for x in ids):
-            return "deliver_files: document_ids — непустой список ID файлов"
-        known = {d["id"] for d in ctx.get("recent_files", [])}
-        known |= {d.get("document_id") for d in ctx.get("files_received", []) if isinstance(d, dict)}
-        if isinstance(ctx.get("file_received"), dict):
-            known.add(ctx["file_received"].get("document_id"))
-        missing = [x for x in ids if x not in known]
-        if missing:
-            return f"deliver_files: файлы {missing[:5]} не найдены среди присланных этим человеком (recent_files)"
-        if len(set(ids)) > cases.MAX_DELIVERY_FILES:
-            return f"deliver_files: не больше {cases.MAX_DELIVERY_FILES} файлов за раз"
-        if action.get("zip") not in (None, True, False):
-            return "deliver_files: zip это true или false"
-        return ""
-    if kind == "team_report":
-        if not full:
-            return "team_report доступно только проверяющему и людям с полным доступом"
-        scope = action.get("scope")
-        return "" if scope == "all" or scope in {p["id"] for p in ctx.get("team", [])} else "team_report: scope all или ID сотрудника"
-    return f"неизвестное действие {kind!r}"
+    return agent_skills.check(action, ctx, _person(employee, reviewer, full))
 
 
 def _denied(action: dict, employee, reviewer: bool, full: bool) -> bool:
     """The action needs more than this person is allowed (as opposed to a mistake in the action itself)."""
-    kind = action.get("type")
-    if kind in ("team_report", "assign_task", "deliver_files"):
-        return not full
-    if kind == "remind":
-        return action.get("to") != "me" and not full
-    if kind in ("relay_answer", "approve_meeting", "reject_meeting", "approve_case", "cancel_case"):
-        return not reviewer
-    if kind == "note":
-        return action.get("employee_id") not in (None, employee.id if employee else None) and not full
-    return False
+    return agent_skills.denied(action, _person(employee, reviewer, full))
 
 
 # ----------------------------------------------------------------------------- «обещал — сделал»
 _W = r"(?<![а-яёa-z])({})(?![а-яёa-z])"
 PROMISES = (  # (words in the reply, actions that keep the promise, does a running case keep it)
     (_W.format("перешлю|передам|отправлю|скину|пришлю|упакую|запакую|заархивирую"),
-     {"deliver_files", "relay_answer", "assign_task", "team_report"}, True),
-    (_W.format("напомню"), {"remind"}, False),
-    (_W.format("уточню|спрошу|узнаю|запрошу"), {"ask_reviewer", "assign_task", "relay_answer"}, False),
-    (_W.format("подготовлю|соберу|сделаю"), {"team_report", "assign_task", "deliver_files", "remind"}, False),
+     {"deliver_files", "relay_answer", "assign_task", "team_report", "order", "confirm_order", "make_document",
+      "confirm_document", "mail_reply", "confirm_mail_reply", "mail_pass"}, True),
+    (_W.format("напомню"), {"remind", "order", "confirm_order"}, False),
+    (_W.format("уточню|спрошу|узнаю|запрошу"), {"ask_reviewer", "assign_task", "relay_answer", "order", "confirm_order"},
+     False),
+    (_W.format("подготовлю|соберу|сделаю|составлю"), {"team_report", "assign_task", "deliver_files", "remind",
+                                                      "make_document", "mail_reply"}, False),
+    (_W.format("поручу|назначу|поставлю задачу"), {"order", "confirm_order", "assign_task"}, False),
 )
 _CONDITIONAL = re.compile(r"(?<![а-яё])(если|как только|когда|после того как|могу|можно|хочешь|нужно ли)(?![а-яё])")
 # Employee asks to change logistics (car/driver/date), not a joke about pay.
@@ -863,7 +988,18 @@ def unbacked_promises(reply: str, actions: list, ctx: dict) -> list:
     """Sentences where the assistant promises to do something («перешлю», «напомню») with no action that does it.
     Offers and conditions («могу переслать», «если пришлёшь — передам») are not promises."""
     kinds = {a.get("type") for a in actions or [] if isinstance(a, dict)}
-    case_running = bool(ctx.get("this_message_for_case"))
+    for received in [ctx.get("file_received")] + list(ctx.get("files_received") or []):  # the code routes these itself
+        route = ((received or {}).get("intake") or {}).get("route") or {} if isinstance(received, dict) else {}
+        if route.get("to") and not route.get("done") and not route.get("already_theirs"):
+            kinds.add("deliver_files")
+        if route.get("tasks"):
+            kinds |= {"assign_task", "remind"}
+    orders_of_person = {w.get("task_id") for w in ctx.get("assistant_waiting_for_you") or []
+                        if isinstance(w, dict) and w.get("expects") == "done"}
+    # «передам» after «сделал» on an order from the chat is kept by the case: it reports to whoever gave the order
+    case_running = bool(ctx.get("this_message_for_case")) or any(
+        a.get("type") == "task_status" and a.get("task_id") in orders_of_person and a.get("status") in ("done", "blocked")
+        for a in actions or [] if isinstance(a, dict))
     bad = []
     for sentence in _sentences(reply):
         low = sentence.lower()
@@ -887,152 +1023,15 @@ def _drop_sentences(reply: str, bad: list) -> str:
 
 DECLINE_GENTLY = ("\nЭти действия тебе недоступны: такие просьбы по запросам коллег ты не выполняешь. Не выполняй их и убери "
                   "из actions. В reply мягко, коротко и по-человечески скажи, что такие просьбы ты не выполняешь и с ними "
-                  "лучше к руководителю, и предложи, чем можешь помочь этому человеку сам. Без слов «нет доступа», «нет "
-                  "прав», «запрещено».")
+                  "лучше к руководителю (если есть refer_to — назови, к кому), и предложи, чем можешь помочь этому "
+                  "человеку сам. Без слов «нет доступа», «нет прав», «запрещено».")
+ORDER_CONFIRM = ("\nВ actions есть order, но reply не спрашивает подтверждения. Перескажи поручение коротко (кому, что, "
+                 "срок) и спроси «Делаю?»: без «да» оно не начнётся.")
 
 
-# ----------------------------------------------------------------------------- applying actions (short sessions)
-def _remember(s, text: str, *, employee_id=None, task_id=None, meeting_id=None, kind="fact", source="conversation", author=""):
-    s.add(Note(employee_id=employee_id, task_id=task_id, meeting_id=meeting_id, kind=kind, text=str(text).strip()[:800],
-               source=source, author=author[:80]))
-
-
-def _employee_ref(s, chat: str):
-    employee = s.query(Employee).filter_by(telegram_user_id=chat).first()
-    return (employee.telegram_chat_id if employee and employee.telegram_chat_id else chat)
-
-
+# ----------------------------------------------------------------------------- applying actions (agent_skills.py)
 def _apply(action: dict, chat: str, employee_id, author: str, sender: dict | None = None, full: bool = False) -> None:
-    from . import assistant, pipeline
-    kind = action["type"]
-    with SessionLocal() as s:
-        if kind == "set_deadline":
-            task = s.get(Task, action["task_id"])
-            task.deadline, task.deadline_source = dt.date.fromisoformat(action["date"]), "asked"
-            if task.status == "awaiting_deadline":
-                task.status = "sent"
-            if task.bitrix_task_id:
-                try:
-                    bitrix.update_deadline(task)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("bitrix update failed: %s", exc)
-            _remember(s, f"Срок по задаче «{task.title}»: {action['date']}", employee_id=task.assignee_id, task_id=task.id,
-                      kind="commitment", author=author)
-            s.commit()
-        elif kind == "task_status":
-            task = s.get(Task, action["task_id"])
-            task.status = action["status"]
-            note = str(action.get("note") or "").strip()
-            label = {"in_progress": "в работе", "done": "выполнена", "blocked": "заблокирована"}[action["status"]]
-            _remember(s, f"Задача «{task.title}»: {label}" + (f". {note}" if note else ""), employee_id=task.assignee_id,
-                      task_id=task.id, kind="done" if action["status"] == "done" else "status", author=author)
-            s.commit()
-        elif kind == "note":
-            target = action.get("employee_id") if action.get("employee_id") is not None else employee_id
-            _remember(s, action["text"], employee_id=target, task_id=action.get("task_id"),
-                      kind=action.get("kind", "fact"), author=author)
-            s.commit()
-        elif kind == "ask_reviewer":
-            task = s.get(Task, action["task_id"]) if action.get("task_id") is not None else None
-            meeting_id = task.meeting_id if task else (
-                s.query(Task).filter(Task.assignee_id == employee_id).order_by(Task.id.desc()).first().meeting_id)
-            s.add(ConversationEscalation(meeting_id=meeting_id, task_id=task.id if task else None, chat_id=chat,
-                                         reason=str(action["question"]).strip()[:1000], status="open"))
-            _remember(s, f"Вопрос проверяющему: {str(action['question']).strip()}", employee_id=employee_id,
-                      task_id=task.id if task else None, kind="status", source="system", author=author)
-            s.commit()
-            delivered = 0
-            for ref in settings_store.get("approver_chat_ids") or []:
-                try:
-                    userbot.send_message(ref, str(action["message"]).strip())
-                    delivered += 1
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("question for reviewer %s not delivered: %s", ref, exc)
-            if not delivered:
-                raise AgentError("вопрос не дошёл ни до одного проверяющего")
-        elif kind == "relay_answer":
-            question = s.get(ConversationEscalation, action["question_id"])
-            target = _employee_ref(s, question.chat_id)
-            employee_chat = question.chat_id
-            text = str(action["message"]).strip()
-            sent = userbot.send_message(target, text)
-            s.add(ConversationMessage(chat_id=employee_chat, message_id=sent["message_id"], role="assistant",
-                                      status="agent_done", text=text[:4000], result={}))
-            question.status = "resolved"
-            _remember(s, f"Ответ проверяющего на вопрос «{question.reason[:120]}»: {text}", employee_id=employee_id,
-                      kind="status", source="system", author=author)
-            s.commit()
-        elif kind in ("approve_meeting", "reject_meeting"):
-            meeting = s.get(Meeting, action["meeting_id"])
-            revision = int((meeting.options or {}).get("approval_revision", 1))
-            meeting_id = meeting.id
-            s.commit()
-            if kind == "approve_meeting":
-                if not pipeline.submit_deliver(meeting_id, allowed=("awaiting_approval",), revision=revision):
-                    raise AgentError("совещание уже обработано")
-            else:
-                pipeline.reject(meeting_id, revision=revision)
-        elif kind == "remind":
-            people = reminders.recipients_for(s, action["to"], chat, sender)
-            if not people:
-                raise AgentError("некому напоминать: у адресатов нет контактов или это сам автор просьбы")
-            due = max(reminders.parse_when(action.get("at")), now() + dt.timedelta(seconds=reminders.SEND_DELAY))
-            reminder_id = reminders.create(s, chat=chat, requested_by=author, due=due, topic=str(action["topic"]),
-                                           details=str(action.get("details") or ""), recipients=people)
-            if action.get("meeting") is True and full:  # the alert from the panel that has not fired gives way to this
-                meeting_alerts.claim(s, people, due, reminder_id)
-            names = ", ".join(p["name"] or p["ref"] for p in people)
-            _remember(s, f"Напоминание «{str(action['topic']).strip()[:120]}» для: {names}, на {reminders.local_text(due)}",
-                      employee_id=employee_id, kind="commitment", source="system", author=author)
-            s.commit()
-            pipeline.poke()
-        elif kind == "cancel_reminder":
-            if not reminders.cancel(s, action["reminder_id"]):
-                raise AgentError("напоминание уже отправлено или отменено")
-            meeting_alerts.release(s, action["reminder_id"])
-            s.commit()
-        elif kind == "deliver_files":
-            s.commit()
-            try:
-                case_id = cases.start_delivery(author or "руководителя", action["to"], action["document_ids"],
-                                               bool(action.get("zip")), str(action.get("archive_name") or ""),
-                                               str(action.get("note") or ""), requested_chat=chat)
-            except cases.CaseError as exc:
-                raise AgentError(f"deliver_files: {exc}") from exc
-            if _testing():
-                cases.advance(case_id)
-            else:
-                cases._pool().submit(cases.advance, case_id)
-        elif kind in ("approve_case", "cancel_case"):
-            s.commit()
-            if kind == "cancel_case":
-                cases.cancel(action["case_id"], author)
-            elif not cases.approve(action["case_id"], author):
-                cases.retry_step(action["case_id"], author)
-        elif kind == "assign_task":
-            task = s.get(Task, action["task_id"])
-            target = action["to"]
-            delivered = task.status in ("sent", "in_progress", "blocked", "awaiting_deadline")
-            meeting_id = task.meeting_id
-            if target == "assistant":
-                task.executor, task.assignee_id, task.assignee_name = "assistant", None, "ассистент"
-                task.status = "assistant_todo"
-                _remember(s, f"Задача «{task.title}» поручена ассистенту", task_id=task.id, meeting_id=meeting_id,
-                          kind="commitment", source="system", author=author)
-                s.commit()
-                assistant.schedule(meeting_id)
-            else:
-                person = s.get(Employee, target)
-                task.executor, task.assignee_id, task.assignee_name = "person", person.id, person.name
-                ref = person.telegram_chat_id
-                if delivered or task.status.startswith("assistant_"):
-                    task.status = "sent"
-                _remember(s, f"Задача «{task.title}» поручена: {person.name}", employee_id=person.id, task_id=task.id,
-                          meeting_id=meeting_id, kind="commitment", source="system", author=author)
-                s.commit()
-                message = str(action.get("message") or "").strip()
-                if message and ref:
-                    userbot.send_message(ref, message)
+    agent_skills.execute(action, chat, employee_id, author, sender, full=full)
 
 
 def _save_memory(chat: str, employee_id, summary: str) -> None:
@@ -1052,8 +1051,105 @@ def _store(row_id: int, result: dict) -> None:
         s.commit()
 
 
+def decide(ctx: dict, text: str, person, *, model: str | None = None, transport: str | None = None,
+           approvers=None, label: str = "", recall=None) -> dict:
+    """The model's answer to one message, checked: every action against the data and the person's rights, promises
+    against the actions, the style once. A wrong answer is explained to the model once; still wrong: AgentError.
+    The real conversation and the checking dialogs (agent_checks.py) both answer through here. `recall(query)` finds
+    old messages of the chat when the model asks to remember (dialog_memory.recall; nothing found when not given)."""
+    model = model or voice.model()
+    transport = transport or agent_skills.transport()
+    if transport == "tools" and model in _NO_TOOLS:
+        transport = "json"
+    employee, reviewer, full = person.employee, person.reviewer, person.full
+    company_memory.number_sources(ctx)  # the refs the reply marks its facts with (already there for a real chat)
+    feedback = ""
+    for attempt in (1, 2):
+        try:
+            decision = _decide(_system(transport), ctx, text, feedback, model=model, transport=transport, person=person,
+                               recall=recall)
+        except llm.ToolsUnsupported as exc:
+            log.info("%s answers in JSON: %s", model, exc)
+            _NO_TOOLS.add(model)
+            transport = "json"
+            decision = _decide(_system(transport), ctx, text, feedback, model=model, transport=transport, person=person,
+                               recall=recall)
+        decision["actions"] = [agent_skills.personal(a, person) for a in decision["actions"]]
+        errors = [e for e in (agent_skills.check(a, ctx, person, approvers) for a in decision["actions"]) if e]
+        if (employee is not None and not reviewer and not full
+                and organizational_change_request(text)
+                and not any(a.get("type") == "ask_reviewer" for a in decision["actions"])):
+            errors.append(
+                "человек просит то, что ты сам решить не можешь (водитель, машина, выезд раньше): "
+                "нужен ask_reviewer руководителю/проверяющему, узнай у него, не закрывай тему сам"
+            )
+        stiff = voice.officialese(decision["reply"]) if attempt == 1 else []
+        if attempt == 1 and voice.questions(decision["reply"]) > 1:
+            stiff.append("несколько вопросов сразу")
+        if attempt == 1 and len(decision["reply"]) > voice.LONG_REPLY:
+            stiff.append("слишком длинно")
+        promises = unbacked_promises(decision["reply"], decision["actions"], ctx)
+        unconfirmed = any(a.get("type") == "order" for a in decision["actions"]) and "?" not in decision["reply"]
+        if not errors and not stiff and not promises and not unconfirmed:
+            break
+        if not errors:
+            if attempt == 2:
+                if promises:  # a promise nobody will keep is not sent: those sentences are dropped
+                    log.warning("%s: unbacked promise dropped: %s", label or "message", promises)
+                    decision["reply"] = _drop_sentences(decision["reply"], promises)
+                if unconfirmed:  # an order is never started without the person's «да»
+                    decision["reply"] = (decision["reply"].rstrip() + " Делаю?").strip()
+                break
+            feedback = ORDER_CONFIRM if unconfirmed else ""
+            if stiff:  # the style: one rewrite, then the reply goes as it is
+                feedback += (f"\nОтвет написан тяжело ({', '.join(stiff)}). Перепиши reply проще и короче, как "
+                             "коллега в мессенджере, с одним вопросом за раз; actions и memory оставь.")
+            if promises:
+                feedback += ("\nВ reply ты обещаешь сделать: «" + "»; «".join(promises) + "», но в actions нет действия, "
+                             "которое это делает. Либо добавь нужное действие (deliver_files, remind, ask_reviewer, order, "
+                             "assign_task, team_report), либо убери обещание и честно скажи, что нужно, чтобы это "
+                             "сделать (кому, какие файлы, когда).")
+            continue
+        if attempt == 2:
+            raise AgentError("; ".join(errors)[:300])
+        feedback = "\nПрошлый ответ нельзя выполнить: " + "; ".join(errors) + ". Исправь ответ."
+        if any(agent_skills.denied(a, person) for a in decision["actions"]):
+            feedback += DECLINE_GENTLY
+    acting = any(a.get("type") not in ("note", "ask_reviewer") for a in decision["actions"])
+    decision["reply"], decision["sources"] = company_memory.cite(  # the marks become «Источник: …» (№20)
+        decision["reply"], ctx, text, acting=acting, panel=bool(person.reviewer or person.director or person.full))
+    decision["transport"] = transport
+    return decision
+
+
+def _received_ids(result: dict) -> list:
+    docs = list(result.get("documents") or []) or ([result["document"]] if result.get("document") else [])
+    return [d["document_id"] for d in docs if isinstance(d, dict) and d.get("document_id")]
+
+
+def _prepare_documents(row_id: int) -> None:
+    """The files of this message are read and analyzed before the answer (doc_intake.py): the model can say what they
+    are, what does not add up and where they go. A file answering a case is the case's business."""
+    with SessionLocal() as s:
+        result = dict(s.get(ConversationMessage, row_id).result or {})
+    ids = _received_ids(result)
+    if not ids or result.get("decision") is not None or result.get("case") or result.get("documents_prepared"):
+        return
+    try:
+        views = doc_intake.prepare(ids, row_id)
+    except Exception:  # noqa: BLE001  the answer goes without the analysis
+        log.exception("message %s: files not analyzed", row_id)
+        views = {}
+    for d in [result.get("document")] + list(result.get("documents") or []):
+        if isinstance(d, dict) and views.get(d.get("document_id")):
+            d["intake"] = views[d["document_id"]]
+    result["documents_prepared"] = True
+    _store(row_id, result)
+
+
 def _process(row_id: int) -> None:
     from . import assistant
+    _prepare_documents(row_id)
     with SessionLocal() as s:  # 1. read, then let go of the connection while the model thinks
         row = s.get(ConversationMessage, row_id)
         result, chat, text = dict(row.result or {}), row.chat_id, row.text
@@ -1069,57 +1165,30 @@ def _process(row_id: int) -> None:
             return
         if director_mode and not director:
             full = False  # once there is a director, the view of the whole team and the orders are theirs alone
-        employee_id = employee.id if employee else None
         author = result.get("name") or (employee.name if employee else "")
+        person = agent_skills.person_of(s, employee, reviewer, full, director)  # with the rights of the employee card
         decision = result.get("decision")
-        ctx = _context(s, row, result, employee, reviewer, full, director, director_mode) if decision is None else None
+        ctx = (_context(s, row, result, employee, reviewer, full, director, director_mode, person=person)
+               if decision is None else None)
     if decision is None:  # 2. decide (checked actions; a bad answer is explained to the model once)
-        system, feedback = _system(), ""
-        for attempt in (1, 2):
-            decision = _decide(system, ctx, text, feedback)
-            errors = [e for e in (_check(a, ctx, employee, reviewer, full) for a in decision["actions"]) if e]
-            if (employee is not None and not reviewer and not full
-                    and organizational_change_request(text)
-                    and not any(a.get("type") == "ask_reviewer" for a in decision["actions"])):
-                errors.append(
-                    "человек просит то, что ты сам решить не можешь (водитель, машина, выезд раньше): "
-                    "нужен ask_reviewer руководителю/проверяющему, узнай у него, не закрывай тему сам"
-                )
-            stiff = voice.officialese(decision["reply"]) if attempt == 1 else []
-            promises = unbacked_promises(decision["reply"], decision["actions"], ctx)
-            if not errors and not stiff and not promises:
-                break
-            if not errors:
-                if attempt == 2:  # a promise nobody will keep is not sent: those sentences are dropped
-                    log.warning("message %s: unbacked promise dropped: %s", row_id, promises)
-                    decision["reply"] = _drop_sentences(decision["reply"], promises)
-                    break
-                feedback = ""
-                if stiff:  # the style: one rewrite, then the reply goes as it is
-                    feedback += (f"\nОтвет звучит как служебное письмо ({', '.join(stiff)}). Перепиши reply проще, как "
-                                 "коллега в мессенджере; actions и memory оставь.")
-                if promises:
-                    feedback += ("\nВ reply ты обещаешь сделать: «" + "»; «".join(promises) + "», но в actions нет действия, "
-                                 "которое это делает. Либо добавь нужное действие (deliver_files, remind, ask_reviewer, "
-                                 "assign_task, team_report), либо убери обещание и честно скажи, что нужно, чтобы это "
-                                 "сделать (кому, какие файлы, когда).")
-                continue
-            if attempt == 2:
-                raise AgentError("; ".join(errors)[:300])
-            feedback = "\nПрошлый ответ нельзя выполнить: " + "; ".join(errors) + ". Исправь ответ."
-            if any(_denied(a, employee, reviewer, full) for a in decision["actions"]):
-                feedback += DECLINE_GENTLY
-        result["decision"] = decision
+        ctx.update(agent_skills.approval_hint(person))
+        model = voice.model()
+        decision = decide(ctx, text, person, model=model, label=f"message {row_id}",
+                          recall=lambda query: dialog_memory.recall(chat, query, row_id))
+        result["decision"], result["model"], result["transport"] = decision, model, decision.get("transport")
         _store(row_id, result)
-    if not result.get("actions_done"):  # 3. act
-        for action in decision["actions"]:
-            _apply(action, chat, employee_id, author,
-                   {"user_id": chat, "username": result.get("username", ""), "phone": result.get("phone", "")}, full=full)
-        _save_memory(chat, employee_id, decision.get("memory", ""))
+    if not result.get("actions_done"):  # 3. act (each action once, even when a later one fails and all is retried)
+        sender = {"user_id": chat, "username": result.get("username", ""), "phone": result.get("phone", "")}
+        outcomes = list(result.get("outcomes") or [])
+        for action in decision["actions"][len(outcomes):]:
+            outcomes.append(agent_skills.run(action, chat, person, author, sender))
+            result["outcomes"] = outcomes
+            _store(row_id, result)
+        _save_memory(chat, person.employee_id, decision.get("memory", ""))
         result["actions_done"] = True
         _store(row_id, result)
     if decision["reply"] and not result.get("reply_sent"):  # 4. answer
-        sent = userbot.send_message(chat, decision["reply"])
+        sent = userbot.send_message(chat, decision["reply"], answering=True)
         with SessionLocal() as s:
             s.add(ConversationMessage(chat_id=chat, message_id=sent["message_id"], role="assistant", status="agent_done",
                                       text=decision["reply"][:4000], result={}))
@@ -1129,12 +1198,34 @@ def _process(row_id: int) -> None:
                 s.rollback()
         result["reply_sent"] = True
         _store(row_id, result)
-    for action in decision["actions"]:  # 5. things that follow the reply
-        if action["type"] == "team_report" and not result.get("sent_team_report"):
+    outcomes = result.get("outcomes") or []
+    for index, action in enumerate(decision["actions"]):  # 5. things that follow the reply
+        done = index >= len(outcomes) or (outcomes[index] or {}).get("done")
+        if action["type"] == "team_report" and done and not result.get("sent_team_report"):
             assistant.send_team_report(chat, action["scope"])
             result["sent_team_report"] = True
             _store(row_id, result)
+        if action["type"] == "make_document" and done and not result.get("sent_document_draft"):
+            doc_templates.show_pending(chat)  # the draft file follows the reply that asks to check it
+            result["sent_document_draft"] = True
+            _store(row_id, result)
+        if action["type"] == "mail_reply" and done and not result.get("sent_mail_draft"):
+            from . import mail_reply
+            mail_reply.show_pending(chat, person.employee_id)  # the draft of the answer follows the reply
+            result["sent_mail_draft"] = True
+            _store(row_id, result)
+        if (action["type"] == "confirm_mail_reply" and action.get("ok") and done
+                and not result.get("sent_mail_reply")):
+            from . import mail_reply
+            mail_reply.send_approved(chat, person.employee_id)  # «ок»: the letter goes out after the reply
+            result["sent_mail_reply"] = True
+            _store(row_id, result)
+    if result.get("documents_prepared") and not result.get("documents_routed"):  # the files go where the rules say
+        doc_intake.after_reply(_received_ids(result), decision["actions"], by=author)
+        result["documents_routed"] = True
+        _store(row_id, result)
     with SessionLocal() as s:
         row = s.get(ConversationMessage, row_id)
         row.status, row.error, row.result = "agent_done", "", dict(result)
         s.commit()
+    dialog_memory.schedule(chat)  # the older part of the conversation is retold in the background

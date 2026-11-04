@@ -95,9 +95,11 @@ def _step_text(s, step, names) -> str:
             names[a.get(key)] = e.name if e else "?"
         return names[a.get(key)]
     if step.tool == "send_message":
-        return f"{'спросить' if a.get('purpose') == 'ask' else 'попросить документ у'} {who('to')}"
+        return f"{ {'ask': 'спросить', 'order': 'поручить'}.get(a.get('purpose'), 'попросить документ у')} {who('to')}"
     if step.tool == "wait_reply":
-        return f"дождаться {'ответа' if a.get('expects') == 'answer' else 'документа'} от {who('from')}"
+        if a.get("expects") == "done":
+            return f"дождаться, когда сделает {who('from')}"
+        return f"дождаться {cases.WAIT_RU.get(a.get('expects'), 'ответа')} от {who('from')}"
     if step.tool == "forward_document":
         return f"передать документ {who('to')}"
     if step.tool == "zip_pack":
@@ -105,7 +107,9 @@ def _step_text(s, step, names) -> str:
     if step.tool == "send_files":
         return f"отправить {'архив' if a.get('from_step') is not None else 'файлы'} {who('to')}"
     if step.tool == "report":
-        return "доложить руководителю"
+        return f"доложить {a['requested_by']}" if a.get("to_chat") and a.get("requested_by") else "доложить руководителю"
+    if step.tool == "run_skill":
+        return a.get("summary") or "выполнить просьбу"
     return "закрыть дело"
 
 
@@ -120,7 +124,12 @@ def case_card(s, case, at=None) -> dict:
     waiting = None
     if wait is not None:
         person = s.get(Employee, wait.employee_id) if wait.employee_id else None
-        waiting = {"who": person.name if person else "?", "what": "ответа" if wait.expects == "answer" else "документа",
+        rule = cases.silence_rule(s, person) if wait.expects != "done" else None
+        owner = cases._owner(case)
+        tell = (owner["name"] or "тому, кто поручил") if owner else (rule["contact"].name if rule and rule["contact"]
+                                                                   else "руководителю")
+        waiting = {"who": person.name if person else "?", "what": cases.WAIT_RU.get(wait.expects, "ответа"),
+                   "tell": tell, "told": tell if wait.escalated else "",
                    "expects": wait.expects, "for": _ago(wait.started_at, at),
                    "hours": round((at - _aware(wait.started_at)).total_seconds() / 3600, 1),
                    "reminders": wait.reminders_sent, "escalated": wait.escalated,
@@ -167,10 +176,13 @@ def case_card(s, case, at=None) -> dict:
                     "retry": case.status == "attention" and any(x.status in ("uncertain", "failed") for x in steps),
                     "pause": case.status in ("running", "waiting", "attention", "awaiting_approval", "suggested"),
                     "resume": case.status == "paused",
-                    "answer": bool(waiting and waiting["expects"] == "answer"),
+                    "answer": bool(waiting and waiting["expects"] in ("answer", "done")),
                     "upload": bool(waiting and waiting["expects"] == "document"),
                     "message": case.status in cases.OPEN, "handover": case.status in cases.OPEN,
-                    "close": case.status in cases.OPEN},
+                    "close": case.status in cases.OPEN,
+                    "remind": bool(waiting) and case.status in ("waiting", "attention"),
+                    "take_over": bool(waiting) and case.status in cases.OPEN,
+                    "cancel": case.status in cases.OPEN},
             "unlinked": cases.unlinked_documents(s, wait.employee_id) if wait is not None and wait.expects == "document" else [],
             "updated": _ago(events[-1].created_at, at) if events else "",
             "events": [{"at": _local(e.created_at), "kind": e.kind, "text": e.text} for e in events[-30:]]}

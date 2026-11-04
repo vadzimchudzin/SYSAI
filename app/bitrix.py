@@ -9,21 +9,39 @@ class BitrixError(RuntimeError):
     pass
 
 
-def call(method: str, params: dict) -> dict:
+def call_full(method: str, params: dict) -> dict:
+    """The whole answer of the portal: {"result", "next", "total"} — lists come by 50, `next` is where to go on."""
     url = config.bitrix_url()
     if not url:
-        raise BitrixError("Вебхук Bitrix24 не задан (Настройки → Подключения)")
-    r = httpx.post(f"{url}/{method}.json", json=params, timeout=30)
-    data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        raise BitrixError("Вебхук Bitrix24 не задан («Интеграции» → Битрикс24)")
+    try:
+        r = httpx.post(f"{url}/{method}.json", json=params, timeout=30)
+    except httpx.HTTPError as exc:
+        raise BitrixError(f"{method}: портал не ответил ({type(exc).__name__})") from exc
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
     if r.status_code != 200 or "error" in data:
         raise BitrixError(f"{method}: {data.get('error_description') or data.get('error') or r.text[:300]}")
-    return data.get("result")
+    return data
 
 
-def task_fields(task, meeting, created_by: str = "") -> dict:
-    desc = [task.description or "", "", f"Из совещания «{(meeting.report or {}).get('title') or meeting.title}»"]
-    if task.source_quote:
-        desc.append(f"[{task.source_time}] «{task.source_quote}»")
+def call(method: str, params: dict) -> dict:
+    return call_full(method, params).get("result")
+
+
+def task_fields(task, meeting=None, created_by: str = "") -> dict:
+    """The fields of tasks.task.add: a task of a meeting (with the quote and its time) or of the chat, a document, a
+    letter (with where it came from)."""
+    if meeting is not None:
+        desc = [task.description or "", "", f"Из совещания «{(meeting.report or {}).get('title') or meeting.title}»"]
+        if task.source_quote:
+            desc.append(f"[{task.source_time}] «{task.source_quote}»")
+    else:
+        desc = [task.description or "", "", task.source_quote or "Из SYSAI"]
     fields = {"TITLE": task.title, "DESCRIPTION": "\n".join(desc).strip(),
               "RESPONSIBLE_ID": task.assignee.bitrix_user_id if task.assignee else "",
               "PRIORITY": "2" if task.priority == "high" else "1"}
@@ -34,7 +52,7 @@ def task_fields(task, meeting, created_by: str = "") -> dict:
     return fields
 
 
-def create_task(task, meeting) -> str:
+def create_task(task, meeting=None) -> str:
     result = call("tasks.task.add", {"fields": task_fields(task, meeting)})
     return str((result or {}).get("task", {}).get("id", ""))
 

@@ -1,0 +1,46 @@
+{% extends "base.html" %}{% from "net/_trace.html" import run_head %}{% block title %}Трасса — {{ agent.name }} — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}
+<div class="page-h"><div><h1>Трасса · {{ agent.name }}</h1>
+  <p>Что агент делал по шагам: каждый запрос к нейронке (кто спросил, какой уровень, какая модель ответила, токены, цена, время, чем кончился) и каждый вызов MCP SYSAI. Шаги одной задачи доски или идущие подряд (перерыв меньше 15 минут) — один запуск.</p></div>
+  <div class="actions"><a class="btn" href="/agents/{{ agent.id }}">← Агент</a></div></div>
+{% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+
+<section class="card tr-debug" id="debug">
+  <div class="row between"><div>
+    <h2>Режим отладки {% if debug_until %}<span class="pill amber">включён до {{ net_when(debug_until) }}</span>{% else %}<span class="pill gray">выключен</span>{% endif %}</h2>
+    <p class="small muted">Сохраняет ещё и тексты: конец каждого запроса к модели и её ответ, аргументы и результат каждого вызова MCP. Сам выключается через {{ debug_hours }} ч, тексты хранятся {{ keep_days }} дней. Включение видно в журнале агента{% if debug_until and debug_by %} · включил {{ debug_by }}{% endif %}.</p></div>
+  <form method="post" action="/agents/{{ agent.id }}/debug">{% if debug_until %}<input type="hidden" name="on" value="0"><button class="btn">Выключить</button>{% else %}<input type="hidden" name="on" value="1"><button class="btn primary">Включить на {{ debug_hours }} ч</button>{% endif %}</form>
+  </div>
+</section>
+
+<div class="nx-chips tr-filter" role="group" aria-label="Период">
+  {% for d, label in ((1, 'сутки'), (3, '3 дня'), (7, '7 дней')) %}<a class="nx-chip{{ ' on' if days == d }}" href="?days={{ d }}{{ '&errors=1' if only_errors }}">{{ label }}</a>{% endfor %}
+  <a class="nx-chip{{ ' on' if only_errors }}" href="?days={{ days }}{{ '' if only_errors else '&errors=1' }}">только с ошибками</a>
+</div>
+
+{% for r in runs %}
+<details class="card tr-run{{ ' has-errors' if r.errors }}" {{ 'open' if loop.first }}>
+  <summary class="tr-head">{{ run_head(r, fmt_tokens, fmt_ms, clock) }}</summary>
+  {% if r.first_error %}<p class="small warn tr-first">Первая ошибка: {{ r.first_error }}</p>{% endif %}
+  {% if r.by_role|length > 1 %}<p class="small muted">Токены по тем, кто спрашивал: {% for k, v in r.by_role.items() %}{{ k }} {{ fmt_tokens(v) }}{{ ' · ' if not loop.last }}{% endfor %}</p>{% endif %}
+  <div class="table-wrap"><table class="tr-steps">
+    <thead><tr><th>Время</th><th>Шаг</th><th>Подробности</th><th class="num">Токены</th><th class="num">Время</th><th class="num">Цена</th><th>Итог</th></tr></thead>
+    <tbody>{% for s in r.steps[-300:] %}
+    <tr class="tr-{{ s.kind }}{{ ' bad' if not s.ok }}">
+      <td class="tr-clock">{{ clock(s.at) }}</td>
+      <td><span class="tr-kind">{{ 'модель' if s.kind == 'model' else ('MCP' if s.kind == 'mcp' else 'событие') }}</span> <b>{{ s.title }}</b>{% if s.role and s.kind == 'model' and s.role != 'главная' %} <span class="pill blue">{{ s.role }}</span>{% endif %}</td>
+      <td class="tr-detail">{% if s.kind == 'model' %}{{ s.model or '—' }}{% if s.route %}<div class="small muted">{{ s.route }}</div>{% endif %}{% if s.skill or s.project %}<div class="small muted">{% if s.skill %}<span class="nowrap">навык {{ s.skill }}</span>{% endif %}{{ ' · ' if s.skill and s.project }}{% if s.project %}<span class="nowrap">проект {{ s.project }}</span>{% endif %}</div>{% endif %}{% else %}<span class="small">{{ s.detail }}</span>{% endif %}</td>
+      <td class="num">{% if s.kind == 'model' %}{{ fmt_tokens(s.prompt) }} → {{ fmt_tokens(s.completion) }}{% if s.cached %}<div class="small muted">кэш {{ fmt_tokens(s.cached) }}</div>{% endif %}{% endif %}</td>
+      <td class="num">{{ fmt_ms(s.ms) if s.ms else '' }}</td>
+      <td class="num">{% if s.cost %}${{ '%.4f'|format(s.cost) }}{% endif %}</td>
+      <td>{% if s.ok %}<span class="ok">✓</span>{% else %}<span class="warn">{{ s.error or 'ошибка' }}</span>{% endif %}{% if s.text %} <a class="tr-text" href="/agents/{{ agent.id }}/trace/{{ s.text }}">текст</a>{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% if r.steps|length > 300 %}<p class="small muted">Показаны последние 300 шагов из {{ r.steps|length }}.</p>{% endif %}
+</details>
+{% else %}
+<section class="card"><p class="muted">{% if only_errors %}Запусков с ошибками за этот период нет.{% else %}За этот период агент ничего не делал через SYSAI: ни запросов к моделям, ни вызовов MCP.{% endif %}</p></section>
+{% endfor %}
+{% endblock %}

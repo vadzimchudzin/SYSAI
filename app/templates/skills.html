@@ -1,24 +1,144 @@
-{% extends "base.html" %}{% block title %}Навыки — SYSAI{% endblock %}
-{% block body %}
-<h1>Навыки</h1>
-<p class="muted small">Сценарии и шаблоны, по которым ИИ-сотрудник действует: как запросить документ, каким тоном писать подрядчикам, что проверить перед отправкой. Подходящий навык сам подставляется в сообщения и ответы ассистента.</p>
+{% extends "base.html" %}{% from "_icons.html" import icon %}{% block title %}Навыки — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('skills.css') }}">{% endblock %}
+{% block body %}{% set sm = summary %}
+<div class="sk-page" data-sk-root>
+<div class="page-h sk-head">
+  <div><h1>Навыки</h1><p>Что ИИ-сотрудник делает сам в чатах и по каким сценариям компании работает.</p></div>
+  <a class="btn" href="/skills/checks">Проверочные диалоги</a>
+</div>
+
+<div class="sk-kpis" aria-label="Навыки за 30 дней">
+  <div class="sk-kpi"><span class="sk-kpi-l">Включено</span><b class="sk-kpi-v">{{ sm.on }}<small> из {{ sm.count }}</small></b>
+    <span class="sk-kpi-s">{% if sm.off %}выключено: {{ sm.off }} <button type="button" class="sk-kpi-go" data-sk-go="off" hidden>показать</button>{% else %}все навыки работают{% endif %}</span></div>
+  <div class="sk-kpi"><span class="sk-kpi-l">Выполнено за 30 дней</span><b class="sk-kpi-v">{{ sm.done }}</b>
+    <span class="sk-kpi-s">{% if sm.busiest %}чаще всего — {{ sm.busiest }}{% else %}пока ни разу{% endif %}</span></div>
+  <div class="sk-kpi"><span class="sk-kpi-l">Ушло на одобрение</span><b class="sk-kpi-v">{{ sm.waiting }}</b>
+    <span class="sk-kpi-s">{% if sm.guarded %}одобрение у {{ sm.guarded }} {{ plural(sm.guarded, 'навыка', 'навыков', 'навыков') }} <button type="button" class="sk-kpi-go" data-sk-go="guarded" hidden>показать</button>{% else %}все навыки выполняются сразу{% endif %}</span></div>
+  <div class="sk-kpi{{ ' is-bad' if sm.errors }}"><span class="sk-kpi-l">Ошибок</span><b class="sk-kpi-v">{{ sm.errors }}</b>
+    <span class="sk-kpi-s">{% if sm.errors %}в {{ sm.failing }} {{ plural(sm.failing, 'навыке', 'навыках', 'навыках') }} <button type="button" class="sk-kpi-go" data-sk-go="errors" hidden>показать</button>{% else %}за 30 дней не было{% endif %}</span></div>
+</div>
+
+<section class="card sk-board" id="agent-skills" aria-labelledby="agent-skills-title">
+  <div class="sk-board-h">
+    <div><h2 id="agent-skills-title">Что умеет ИИ-сотрудник</h2>
+      <p class="sk-lead">Каждое действие — навык. Модель только предлагает действие; код проверяет права и данные и лишь потом выполняет.</p></div>
+  </div>
+  <details class="sk-how">
+    <summary>Как это работает</summary>
+    <dl class="sk-how-grid">
+      <div><dt>Переключатель</dt><dd>Выключает навык для всех, директора тоже: ассистент мягко ответит, что этого сейчас не делает. Для отдельного человека навыки выключаются в его карточке.</dd></div>
+      <div><dt>Кто может</dt><dd>Первый вариант — кому навык доступен по задумке (под выбором — уточнение, если оно есть). Выбор только сужает круг: например, оставить отчёт по команде одному директору.</dd></div>
+      <div><dt>Режим</dt><dd>«Сразу» — выполняет сам. «С одобрением» — просьбы сотрудников сначала уходят руководителю (ответ «да» в чате или «Одобрить» на странице <a href="/progress?scope=chat">Прогресс</a>), а просьбы самих руководителей выполняются сразу. «Только предложить» — предлагает руководителю, сам не делает.</dd></div>
+      <div><dt>За 30 дней</dt><dd><span class="sk-key ok">выполнено</span> <span class="sk-key wait">ушло на одобрение</span> <span class="sk-key no">отменено</span> — руководитель отклонил просьбу или на поручение ответили «нет»; <span class="sk-key err">ошибки</span> — навык не удалось выполнить, под навыком видна последняя причина.</dd></div>
+    </dl>
+  </details>
+  {% if saved %}<div class="people-msg" role="status">Сохранено: режимы навыков и способ вызова действуют со следующего сообщения.</div>{% endif %}
+
+  <form method="post" action="/skills/agent" data-sk-form>
+    <input type="hidden" name="present_switches" value="1">
+    <div class="sk-tools" data-sk-tools hidden>
+      <label class="sk-search">{{ icon('search') }}<input type="search" placeholder="Найти навык" aria-label="Найти навык" autocomplete="off" data-sk-search></label>
+      <div class="sk-filters" role="group" aria-label="Показать навыки">
+        {% for f, label, n in (('all', 'Все', sm.count), ('off', 'Выключены', sm.off), ('guarded', 'С одобрением', sm.guarded), ('errors', 'С ошибками', sm.failing), ('unused', 'Не применялись', sm.unused)) %}
+        <button type="button" class="sk-chip" data-sk-filter="{{ f }}" aria-pressed="{{ 'true' if f == 'all' else 'false' }}">{{ label }} <span data-sk-n>{{ n }}</span></button>{% endfor %}
+      </div>
+    </div>
+    <div class="sk-cols" aria-hidden="true"><span></span><span>Навык</span><span>Кто может</span><span>Режим</span><span>За 30 дней</span></div>
+    {% for g in groups %}
+    <section class="sk-group" data-sk-group aria-labelledby="sk-group-{{ loop.index }}">
+      <header class="sk-group-h"><h3 id="sk-group-{{ loop.index }}">{{ g.title }}</h3><span data-sk-count>{{ g.on }} из {{ g.skills|length }} включено</span></header>
+      <div class="sk-list">{% for k in g.skills %}
+        <div class="sk-row{{ '' if k.on else ' is-off' }}" data-sk-row data-errors="{{ k.errors }}" data-total="{{ k.total }}"
+             data-text="{{ (k.title ~ ' ' ~ k.hint ~ ' ' ~ k.name ~ ' ' ~ g.title ~ ' ' ~ k.companions|join(' '))|lower }}">
+          <label class="sk-switch" title="Включить или выключить навык"><input type="checkbox" name="on_{{ k.name }}" {{ 'checked' if k.on }} aria-label="Включить: {{ k.title }}"><span class="sw" aria-hidden="true"></span></label>
+          <div class="sk-main">
+            <div class="sk-title"><b>{{ k.title }}</b><span class="pill gray sk-off-pill">выключен</span></div>
+            <p class="sk-hint">{{ k.hint }}</p>
+            {% if k.errors or k.waiting or k.cancelled or k.no_director or k.companions %}<ul class="sk-notes">
+              {%- if k.errors %}<li class="err">{{ k.errors }} {{ plural(k.errors, 'ошибка', 'ошибки', 'ошибок') }}{% if k.last_error %} · последняя: {{ k.last_error }}{% endif %}</li>{% endif %}
+              {%- if k.waiting %}<li class="wait">ушло на одобрение: {{ k.waiting }}</li>{% endif %}
+              {%- if k.cancelled %}<li>отменено: {{ k.cancelled }}</li>{% endif %}
+              {%- if k.no_director %}<li class="err">директор не указан в <a href="/settings">Настройках</a> — навык никому не доступен</li>{% endif %}
+              {%- for c in k.companions %}<li class="pair">вместе с шагом «{{ c }}»</li>{% endfor %}</ul>{% endif %}
+          </div>
+          <div class="sk-cell sk-who{{ ' is-limited' if k.limit }}"><span class="sk-cell-l" aria-hidden="true">Кто может</span>
+            <select name="who_{{ k.name }}" aria-label="Кто может: {{ k.title }}" aria-describedby="sk-who-{{ k.name }}" title="{{ k.who }}">
+              <option value="" title="{{ k.who }}">{{ k.who_short }}</option>
+              {%- for x in k.limits %}<option value="{{ x }}" {{ 'selected' if k.limit == x }} title="{{ limit_ru[x] }}">{{ limit_short[x] }}</option>{% endfor %}
+            </select>
+            <span class="sk-who-cap{{ '' if k.who_note else ' is-empty' }}" id="sk-who-{{ k.name }}" title="{{ k.who }}"><span class="sk-who-pre">задумано: {{ k.who_short }}{{ ', ' if k.who_note }}</span>{{ k.who_note }}</span></div>
+          <div class="sk-cell sk-mode" data-mode="{{ k.mode if k.modes else 'fixed' }}"><span class="sk-cell-l" aria-hidden="true">Режим</span>
+            {%- if k.modes %}<select name="mode_{{ k.mode_name }}" aria-label="Режим: {{ k.title }}">{% for m, label in modes_short.items() %}<option value="{{ m }}" {{ 'selected' if k.mode == m }} title="{{ mode_hints[m] }}">{{ label }}</option>{% endfor %}</select>
+            {%- else %}<span class="sk-fixed" title="Это само обращение к руководителю или его решение — одобрять нечего">всегда сразу</span>{% endif %}</div>
+          <div class="sk-cell sk-uses"><span class="sk-cell-l" aria-hidden="true">За 30 дней</span>
+            {%- if k.total %}
+            <div class="sk-uses-in" title="выполнено {{ k.done }} · на одобрение {{ k.waiting }} · отменено {{ k.cancelled }} · ошибок {{ k.errors }}">
+              <span class="sk-uses-n"><b>{{ k.total }}</b> {{ plural(k.total, 'раз', 'раза', 'раз') }}</span>
+              <span class="sk-meter" role="img" aria-label="выполнено {{ k.done }}, на одобрение {{ k.waiting }}, отменено {{ k.cancelled }}, ошибок {{ k.errors }}">
+                {%- if k.done %}<i class="ok" style="flex-grow:{{ k.done }}"></i>{% endif %}{% if k.waiting %}<i class="wait" style="flex-grow:{{ k.waiting }}"></i>{% endif %}
+                {%- if k.cancelled %}<i class="no" style="flex-grow:{{ k.cancelled }}"></i>{% endif %}{% if k.errors %}<i class="err" style="flex-grow:{{ k.errors }}"></i>{% endif %}</span>
+              {%- if k.last %}<span class="sk-last">{{ k.last }}</span>{% endif %}
+            </div>
+            {%- else %}<span class="sk-never">не применялся</span>{% endif %}</div>
+        </div>{% endfor %}
+      </div>
+    </section>
+    {% endfor %}
+    <p class="sk-empty" data-sk-empty hidden>Таких навыков нет. <button type="button" class="sk-link" data-sk-reset>Показать все</button></p>
+
+    <div class="sk-way">
+      <div><b>Как модель просит действия</b>
+        <p>Модель ИИ-сотрудника: <b>{{ agent_model }}</b>. Какой способ и какая модель лучше — видно на странице <a href="/skills/checks">«Проверочные диалоги»</a>: там же их можно выбрать одной кнопкой.</p></div>
+      <select name="transport" aria-label="Как модель просит действия">{% for t, label in transports.items() %}<option value="{{ t }}" {{ 'selected' if transport == t }}>{{ 'вызов функций OpenRouter' if t == 'tools' else label ~ ' (как раньше)' }}</option>{% endfor %}</select>
+    </div>
+    <div class="sk-save" data-sk-save>
+      <span class="sk-save-msg" data-sk-msg>Изменения действуют со следующего сообщения.</span>
+      <button type="button" class="btn sm ghost" data-sk-undo hidden>Отменить</button>
+      <button class="btn sm primary">Сохранить</button>
+    </div>
+  </form>
+</section>
+
 {% set cur = (skills|selectattr('id', 'equalto', edit)|list|first) if edit else None %}
-<section class="card"><h2>{{ 'Изменить навык' if cur else 'Новый навык' }}</h2>
-  <form method="post" action="/skills"><input type="hidden" name="id" value="{{ cur.id if cur else '' }}">
-    <div class="row"><label class="f" style="flex:2">Название <input name="title" required maxlength="200" value="{{ cur.title if cur else '' }}" placeholder="Как запросить исполнительную документацию"></label>
-      <label class="f">Вид <select name="kind">{% for k, v in (('scenario','сценарий'),('template','шаблон'),('tone','тон общения')) %}<option value="{{ k }}" {{ 'selected' if cur and cur.kind == k }}>{{ v }}</option>{% endfor %}</select></label></div>
-    <label class="f">Когда применять <input name="when_to_use" value="{{ cur.when if cur else '' }}" placeholder="Запрос актов, исполнительной, КС-2 у подрядчиков"></label>
-    <label class="f">Что делать / текст шаблона <textarea name="body" rows="6" required placeholder="1. Назвать объект и период. 2. Перечислить документы… 3. Срок — 3 рабочих дня.">{{ cur.body if cur else '' }}</textarea></label>
-    <label class="small"><input type="checkbox" name="active" {{ 'checked' if not cur or cur.active }}> Включён</label>
-    <div style="margin-top:8px"><button class="btn sm primary">Сохранить</button>{% if cur %} <a href="/skills" class="small">отмена</a>{% endif %}</div>
-  </form></section>
-{% for k in skills %}<article class="card {{ '' if k.active else 'muted' }}"><div class="row between"><b>{{ k.title }}</b>
-  <span><span class="pill gray">{{ {'scenario':'сценарий','template':'шаблон','tone':'тон'}.get(k.kind, k.kind) }}</span> {% if not k.active %}<span class="pill gray">выключен</span>{% endif %}</span></div>
-  {% if k.when %}<div class="small muted">Когда: {{ k.when }}</div>{% endif %}
-  <div class="small" style="white-space:pre-line;margin-top:6px">{{ k.body }}</div>
-  <div class="row small" style="gap:8px;margin-top:8px"><span class="muted">применён {{ k.uses }} раз{% if k.by %} · {{ k.by }}{% endif %}</span>
-    <a href="/skills?edit={{ k.id }}">изменить</a>
-    <form method="post" action="/skills/{{ k.id }}/toggle"><button class="btn sm ghost">{{ 'выключить' if k.active else 'включить' }}</button></form>
-    <form method="post" action="/skills/{{ k.id }}/delete" onsubmit="return confirm('Удалить навык?')"><button class="btn sm ghost">удалить</button></form></div>
-</article>{% else %}<div class="card muted">Навыков пока нет.</div>{% endfor %}
+{% set kinds = {'scenario': 'сценарий', 'template': 'шаблон', 'tone': 'тон общения'} %}
+<section class="sk-company" id="company-skills" aria-labelledby="company-skills-title">
+  <div class="sk-company-h"><h2 id="company-skills-title">Навыки компании</h2>
+    {% if skills %}<span class="sk-company-n">{{ skills|length }} {{ plural(skills|length, 'навык', 'навыка', 'навыков') }} · включено {{ skills|selectattr('active')|list|length }}</span>{% endif %}</div>
+  <p class="sk-company-lead">Сценарии и шаблоны, по которым ИИ-сотрудник действует: как запросить документ, каким тоном писать подрядчикам, что проверить перед отправкой. Подходящий навык сам подставляется в сообщения и ответы ассистента.</p>
+  <details class="sk-new" id="skill-form" {{ 'open' if cur or not skills }}>
+    <summary>{{ icon('edit') if cur else icon('plus') }}<span>{{ 'Изменить навык «' ~ cur.title ~ '»' if cur else 'Новый навык' }}</span></summary>
+    <form method="post" action="/skills" class="sk-new-form"><input type="hidden" name="id" value="{{ cur.id if cur else '' }}"><input type="hidden" name="active_shown" value="1">
+      <div class="sk-new-row">
+        <label class="f">Название <input name="title" required maxlength="200" value="{{ cur.title if cur else '' }}" placeholder="Как запросить исполнительную документацию"></label>
+        <label class="f sk-kind">Вид <select name="kind">{% for k, v in kinds.items() %}<option value="{{ k }}" {{ 'selected' if cur and cur.kind == k }}>{{ v }}</option>{% endfor %}</select></label>
+      </div>
+      <label class="f">Когда применять <input name="when_to_use" value="{{ cur.when if cur else '' }}" placeholder="Запрос актов, исполнительной, КС-2 у подрядчиков"></label>
+      <label class="f">Что делать / текст шаблона <textarea name="body" rows="6" required placeholder="1. Назвать объект и период. 2. Перечислить документы… 3. Срок — 3 рабочих дня.">{{ cur.body if cur else '' }}</textarea></label>
+      <div class="sk-new-foot">
+        <label class="sk-switch sk-switch-text"><input type="checkbox" name="active" {{ 'checked' if not cur or cur.active }}><span class="sw" aria-hidden="true"></span><span>Включён</span></label>
+        <span class="sk-new-btns">{% if cur %}<a class="btn sm ghost" href="/skills#company-skills">Отмена</a>{% endif %}<button class="btn sm primary">Сохранить</button></span>
+      </div>
+    </form>
+  </details>
+  {% if skills %}<div class="sk-cards">{% for k in skills %}
+    <article class="sk-card{{ '' if k.active else ' is-off' }}{{ ' is-editing' if cur and cur.id == k.id }}">
+      <div class="sk-card-top"><span class="pill {{ {'scenario': 'blue', 'template': 'amber', 'tone': 'green'}.get(k.kind, 'gray') }}">{{ kinds.get(k.kind, k.kind) }}</span>{% if not k.active %}<span class="pill gray">выключен</span>{% endif %}
+        <form method="post" action="/skills/{{ k.id }}/toggle" class="sk-card-sw"><label class="sk-switch" title="{{ 'Выключить' if k.active else 'Включить' }} навык"><input type="checkbox" {{ 'checked' if k.active }} onchange="this.form.submit()" aria-label="Навык «{{ k.title }}» включён"><span class="sw" aria-hidden="true"></span></label>
+          <noscript><button class="btn sm ghost">{{ 'выключить' if k.active else 'включить' }}</button></noscript></form></div>
+      <h3>{{ k.title }}</h3>
+      {% if k.when %}<p class="sk-card-when"><span>Когда:</span> {{ k.when }}</p>{% endif %}
+      <div class="sk-card-body"><div class="sk-card-text" data-sk-clamp>{{ k.body }}</div></div>
+      <button type="button" class="sk-link sk-card-more" data-sk-more hidden>Показать полностью</button>
+      <footer class="sk-card-foot">
+        <span class="sk-card-uses">применён {{ k.uses }} {{ plural(k.uses, 'раз', 'раза', 'раз') }}{% if k.by %} · {{ k.by }}{% endif %}</span>
+        <span class="sk-card-act">
+          <a class="btn sm ghost" href="/skills?edit={{ k.id }}#skill-form" title="Изменить навык" aria-label="Изменить навык «{{ k.title }}»">{{ icon('edit') }}</a>
+          <form method="post" action="/skills/{{ k.id }}/delete" onsubmit="return confirm('Удалить навык «{{ k.title|e }}»?')"><button class="btn sm ghost sk-del" title="Удалить навык" aria-label="Удалить навык «{{ k.title }}»">{{ icon('trash') }}</button></form>
+        </span>
+      </footer>
+    </article>{% endfor %}
+  </div>{% else %}<p class="sk-company-empty">Навыков пока нет. Добавьте первый сценарий — например, как запрашивать документы у подрядчиков.</p>{% endif %}
+</section>
+</div>
+<script src="{{ asset('skills.js') }}" defer></script>
 {% endblock %}

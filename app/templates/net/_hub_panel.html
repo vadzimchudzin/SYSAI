@@ -1,0 +1,136 @@
+{% from "_icons.html" import icon %}
+{% if panel == 'item' and k %}
+<div class="nx-panel-head">
+  <span class="nx-ic lg" data-kind="{{ k.kind }}">{{ icon(k.icon) }}</span>
+  <div class="nx-panel-title"><h2>{{ k.title }}</h2>
+    <p><code>{{ k.name }}</code><span>{{ k.kind_ru }}</span><span class="pill {{ k.status_ru[1] }}">{{ k.status_ru[0] }}</span>{% if k.current %}<span>действует {{ k.current }}</span>{% endif %}</p></div>
+  <a class="nx-close" href="/hub" data-nx-open aria-label="Закрыть">×</a>
+</div>
+{% if k.description %}<div class="nx-sec"><p>{{ k.description }}</p></div>{% endif %}
+
+{% if k.builtin %}
+<div class="nx-sec"><h3>Инструменты ({{ k.tools|length }})</h3>
+  <ul class="net-list">{% for t in k.tools %}<li><code>{{ t.name }}</code> — {{ t.description }}{% if not t.read_only %} <span class="pill amber" title="Меняет данные или пишет людям">меняет</span>{% endif %}</li>{% endfor %}</ul>
+  <p class="small muted" style="margin-top:8px">Подключён у каждого агента и ставить его не нужно. Какие инструменты можно агенту — в «Доступах»: MCP-инструменты → «sysai: …»; хранилище — отдельный раздел «Хранилище» там же.</p>
+</div>
+{% else %}
+<div class="nx-sec"><h3>У агентов</h3>
+  <dl class="net-kv">
+    <dt>Как берут</dt><dd>{{ k.delivery_ru }} — {% if k.delivery == 'on_demand' %}агент находит (hub_search) и берёт под задачу (hub_take){% else %}синхронизатор держит у каждого, кому разрешено{% endif %}</dd>
+    {% if k.kind == 'mcp' %}<dt>Кому можно</dt><dd>агентам, у кого в «Доступах» есть MCP-инструменты «{{ k.name }}: *» (или список инструментов)</dd>
+    {% elif k.kind == 'program' %}<dt>Кому можно</dt><dd>агентам, у кого в «Доступах» в «Программах» есть «{{ k.name }}» (или «*»)</dd>{% endif %}
+    <dt>Отдел</dt><dd>{{ k.department or '—' }}</dd>
+    <dt>Владелец</dt><dd>{{ k.owner or '—' }}</dd>
+    <dt>У кого есть</dt><dd>{% for u in k.using %}{{ u.agent }} ({{ u.version }}){{ ', ' if not loop.last }}{% else %}пока ни у кого{% endfor %}</dd>
+    {% if k.picks %}<dt>Взяли по запросу</dt><dd>{% for p in k.picks %}{{ p.agent }}{% if p.why %} — {{ p.why }}{% endif %}{{ '; ' if not loop.last }}{% endfor %}</dd>{% endif %}
+    <dt>Применений</dt><dd>{{ k.uses }}</dd>
+  </dl>
+</div>
+{% endif %}
+
+{% if k.kind != 'skill' %}{% set sp = ((chosen.spec if chosen else k.spec) or {}) %}
+<div class="nx-sec"><h3>Запуск</h3>
+  <dl class="net-kv">
+    {% if sp.url %}<dt>Адрес</dt><dd><code>{{ sp.url }}</code> — сервер в сети, на ПК ничего не ставится</dd>
+    {% else %}<dt>Команда</dt><dd><code>{{ sp.run or '—' }}</code> — из папки инструмента (%SYSAI_HOME%\tools\{{ k.name }})</dd>{% endif %}
+    <dt>ПК</dt><dd>{{ platform_ru.get(sp.platform or 'any', sp.platform) }}</dd>
+    {% if sp.requires %}<dt>Нужно на ПК</dt><dd>{{ sp.requires|join(', ') }}</dd>{% endif %}
+    {% if sp.tools and not k.builtin %}<dt>Инструменты</dt><dd class="nx-tools">{% for t in sp.tools %}<code>{{ t }}</code>{% endfor %}</dd>{% endif %}
+  </dl>
+</div>
+{% endif %}
+
+{% if chosen %}
+<div class="nx-sec" id="version"><h3>Версия {{ chosen.version }} <span class="pill {{ chosen.status_ru[1] }}">{{ chosen.status_ru[0] }}</span>{% if chosen.current %}<span class="pill green">действует</span>{% endif %}</h3>
+  <p class="small muted">{{ 'агент ' if chosen.by_agent }}{{ chosen.author or '—' }} · {{ net_when(chosen.created_at) }} · {{ chosen.size }} байт · sha256 <code>{{ chosen.sha256[:12] }}…</code>{% if chosen.decided_by %} · решение: {{ chosen.decided_by }}, {{ net_when(chosen.decided_at) }}{% endif %}</p>
+  {% if chosen.changelog %}<p><b>Что изменилось:</b> {{ chosen.changelog }}</p>{% endif %}
+  {% if chosen.why %}<p><b>Зачем (от агента):</b> {{ chosen.why }}</p>{% endif %}
+  {% if chosen.decision_note %}<p class="small"><b>Комментарий:</b> {{ chosen.decision_note }}</p>{% endif %}
+  {% if chosen.checks.errors %}<div class="net-err small"><b>Проверка не пройдена:</b><ul>{% for e in chosen.checks.errors %}<li>{{ e.path }}{% if e.line %}:{{ e.line }}{% endif %} — {{ e.what }}</li>{% endfor %}</ul></div>
+  {% else %}<p class="small net-ok">Проверка пройдена: опасных команд, секретов и чужих адресов нет.</p>{% endif %}
+  {% if chosen.checks.warnings %}<details><summary class="small muted">Замечания ({{ chosen.checks.warnings|length }})</summary><ul class="small">{% for e in chosen.checks.warnings %}<li>{{ e.path }}{% if e.line %}:{{ e.line }}{% endif %} — {{ e.what }}</li>{% endfor %}</ul></details>{% endif %}
+  <div class="nx-actions">
+    {% if chosen.status == 'draft' %}<form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/review"><button class="btn">На проверку</button></form>{% endif %}
+    {% if approver and chosen.status in ('draft', 'review') %}
+      <form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/publish"><input name="note" placeholder="комментарий" aria-label="Комментарий"><button class="btn primary" {{ 'disabled' if chosen.checks.errors }}>Опубликовать</button></form>
+      <form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/reject"><input name="note" placeholder="почему" aria-label="Почему отклонено"><button class="btn danger">Отклонить</button></form>
+    {% endif %}
+    {% if approver and chosen.status == 'published' and not chosen.current %}<form method="post" action="/hub/{{ k.name }}/{{ chosen.version }}/rollback"><button class="btn">Откатиться на {{ chosen.version }}</button></form>{% endif %}
+    <a class="btn ghost" href="/hub/{{ k.name }}/{{ chosen.version }}.zip">{{ icon('download') }} Архив</a>
+    <a class="btn ghost" href="/hub/{{ k.name }}?edit=1&v={{ chosen.version }}">{{ icon('edit') }} Новая версия</a>
+  </div>
+  <details style="margin-top:12px"{{ ' open' if chosen.status == 'review' }}><summary class="small">{{ k.doc }} и файлы ({{ chosen.files|length }})</summary>
+    <p class="small muted" style="margin-top:6px">{% for f in chosen.files %}{{ f.path }}{{ ', ' if not loop.last }}{% endfor %}</p>
+    <pre class="net-pre">{{ chosen.skill_md }}</pre></details>
+</div>
+{% endif %}
+
+{% if changes %}
+<div class="nx-sec net-diff" id="diff"><h3>Разница {{ a }} → {{ b }}</h3>
+  {% for c in changes %}<p class="small"><b>{{ c.path }}</b> · {{ {'added': 'добавлен', 'removed': 'удалён', 'changed': 'изменён'}[c.kind] }}</p>
+  <pre class="net-pre">{% for line in c.diff.splitlines() %}<span class="{{ 'add' if line.startswith('+') and not line.startswith('+++') else 'del' if line.startswith('-') and not line.startswith('---') else 'hunk' if line.startswith('@@') else '' }}">{{ line }}</span>
+{% endfor %}</pre>{% endfor %}
+</div>
+{% endif %}
+
+{% if k.versions %}
+<div class="nx-sec"><h3>Версии ({{ k.versions|length }})</h3>
+  <ul class="nx-versions">{% for v in k.versions %}
+    <li class="{{ 'on' if chosen and v.version == chosen.version }}"><div><a href="/hub/{{ k.name }}?v={{ v.version }}" data-nx-open><b>{{ v.version }}</b></a> <span class="pill {{ v.status_ru[1] }}">{{ v.status_ru[0] }}</span>{% if v.current %} <span class="pill green">действует</span>{% endif %}
+      <span class="small muted">· {{ 'агент ' if v.by_agent }}{{ v.author or '—' }} · {{ net_when(v.created_at) }}</span></div>
+      {% if v.changelog %}<div class="small">{{ v.changelog|truncate(160) }}</div>{% endif %}
+      {% if not loop.last %}<a class="small" href="/hub/{{ k.name }}?v={{ v.version }}&a={{ k.versions[loop.index].version }}&b={{ v.version }}#diff" data-nx-open>разница с {{ k.versions[loop.index].version }}</a>{% endif %}</li>
+  {% endfor %}</ul>
+</div>
+{% endif %}
+
+{% if approver and not k.builtin %}
+<div class="nx-sec"><h3>Настройки</h3>
+  <form method="post" action="/hub/{{ k.name }}/settings" class="net-form">
+    <label class="f">Как берут агенты <select name="delivery"><option value="always" {{ 'selected' if k.delivery == 'always' }}>всегда с собой</option><option value="on_demand" {{ 'selected' if k.delivery == 'on_demand' }}>по запросу — агент берёт сам под задачу</option></select></label>
+    <label class="f">Отдел-владелец <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}" {{ 'selected' if d.id == k.department_id }}>{{ d.name }}</option>{% endfor %}</select></label>
+    <label class="f">Владелец <select name="owner_user_id">{% for u in users %}<option value="{{ u.id }}" {{ 'selected' if u.id == k.owner_user_id }}>{{ u.name }} ({{ u.username }})</option>{% endfor %}</select></label>
+    <label class="f">Кому доступен <select name="audience"><option value="all" {{ 'selected' if k.audience.get('all') }}>всем агентам сети</option><option value="departments" {{ 'selected' if not k.audience.get('all') }}>агентам отделов</option></select></label>
+    {% if departments %}<div class="net-checks">{% for d in departments %}<label><input type="checkbox" name="audience_departments" value="{{ d.id }}" {{ 'checked' if d.id in (k.audience.get('departments') or []) }}> {{ d.name }}</label>{% endfor %}</div>{% endif %}
+    <div><button class="btn">Сохранить</button></div>
+  </form>
+  <div class="nx-actions">
+  {% if k.status == 'retired' %}<form method="post" action="/hub/{{ k.name }}/restore"><button class="btn">Вернуть в хаб</button></form>
+  {% else %}<form method="post" action="/hub/{{ k.name }}/retire" onsubmit="return confirm('Снять «{{ k.name }}» с хаба? Агенты уберут это при синхронизации.')"><button class="btn danger">Снять с хаба</button></form>{% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% elif panel == 'upload' %}
+<div class="nx-panel-head">
+  <span class="nx-ic lg" data-kind="skill">{{ icon('upload') }}</span>
+  <div class="nx-panel-title"><h2>Загрузить в хаб</h2><p>Папка навыка или инструмента одним zip-архивом</p></div>
+  <a class="nx-close" href="/hub" data-nx-open aria-label="Закрыть">×</a>
+</div>
+<div class="nx-sec">
+  <form method="post" action="/hub/upload" enctype="multipart/form-data" class="net-form">
+    <label class="f">Архив .zip <input type="file" name="file" accept=".zip" required></label>
+    <label class="f">Отдел-владелец (для нового) <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select></label>
+    <label class="f">Что изменилось <input name="changelog" maxlength="4000" placeholder="Первая версия: входы и выходы из Excel ТО"></label>
+    <div class="net-checks"><label><input type="checkbox" name="review" value="1"> сразу на проверку</label></div>
+    <div><button class="btn primary">{{ icon('upload') }} Загрузить</button></div>
+  </form>
+</div>
+<div class="nx-sec"><h3>Что в архиве</h3>
+  <p><b>Навык</b> — SKILL.md и папки references/, scripts/, assets/, до 2 МБ.</p>
+  <p><b>MCP-сервер или программа</b> — TOOL.md и код, до 10 МБ. В заголовке TOOL.md: <code>kind: mcp</code> или <code>program</code>, <code>run</code> — команда запуска из папки (или <code>url</code> — сервер в сети), <code>platform</code>, <code>tools</code>, <code>requires</code>. Зависимости ставятся на ПК, в архив их не кладут.</p>
+  <p class="small muted">Перед публикацией всё проверяется на опасные команды, секреты и чужие адреса; публикует владелец или руководитель.</p>
+</div>
+
+{% else %}
+<div class="nx-panel-empty">
+  <h2>Как агент берёт из хаба</h2>
+  <ol class="nx-steps">
+    <li><b>Всегда с собой.</b> Опубликованное синхронизатор сам ставит каждому агенту, кому это разрешено: навыки — в папку hub, инструменты — в tools; MCP-серверы сразу подключаются к обвязке.</li>
+    <li><b>По запросу.</b> Редкое не грузит всех: агент ищет (<code>hub_search</code>), читает (<code>hub_get</code>) и берёт под задачу (<code>hub_take</code>), ненужное отдаёт (<code>hub_drop</code>).</li>
+    <li><b>Своё.</b> Чему агент научился сам, он предлагает (<code>hub_propose</code>): это приходит сюда «на проверку», а после публикации достаётся всем.</li>
+    <li><b>Права.</b> Навык — совет, его видят разрешённые отделы. Инструмент запускается на ПК, поэтому только тем, у кого он есть в «Доступах».</li>
+  </ol>
+  <p class="small muted">Выберите навык или инструмент в списке — откроется его карточка.</p>
+</div>
+{% endif %}

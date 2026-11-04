@@ -1,0 +1,47 @@
+{% from "_icons.html" import icon %}{% from "_people_options.html" import employee_options %}
+{% macro who_options(selected, with_same=False) %}
+  {% if with_same %}<option value="same" selected>Тот же: {{ current }}</option>{% endif %}
+  <optgroup label="Говорящие этого совещания">{% for label in labels %}<option value="label:{{ label }}"{% if not with_same and label == selected %} selected{% endif %}>{{ label }}</option>{% endfor %}</optgroup>
+  {% if employees and participant_ids %}{{ employee_options(employees, participant_ids, 'employee:') }}
+  {%- elif employees %}<optgroup label="Сотрудники">{{ employee_options(employees, [], 'employee:') }}</optgroup>{% endif %}
+  <optgroup label="Другое">
+    <option value="new">Новый говорящий — {{ new_label }}</option>
+    <option value="guest">Гость — не сотрудник</option>
+  </optgroup>
+{% endmacro %}
+<div class="seg-editor" data-seg-editor data-seq="{{ seq }}" role="group" aria-label="Правка реплики {{ mmss(sg.start) }}">
+  <div class="seg-editor-head">
+    <b>Реплика {{ mmss(sg.start) }} · {{ current }}</b>
+    <button type="button" class="btn sm ghost seg-close" data-seg-close aria-label="Закрыть правку">×</button>
+  </div>
+  <form method="post" action="/meetings/{{ m.id }}/segments/{{ seq }}/speaker" class="seg-form">
+    <input type="hidden" name="sig" value="{{ sig }}">
+    <label class="f">Кто говорит в этой реплике
+      <select name="who" required data-seg-who>{{ who_options(current) }}</select></label>
+    <input name="guest_name" maxlength="80" placeholder="Имя гостя (необязательно)" aria-label="Имя гостя" data-seg-guest hidden>
+    <button class="btn primary sm">Сменить только здесь</button>
+  </form>
+  {% if words|length > 1 %}
+  <form method="post" action="/meetings/{{ m.id }}/segments/{{ seq }}/split" class="seg-form seg-split">
+    <input type="hidden" name="sig" value="{{ sig }}">
+    <fieldset class="seg-words-box"><legend class="small muted">Разделить: нажмите слово, с которого говорит другой человек</legend>
+      <div class="seg-words">{% for w in words %}<label class="seg-word{{ ' is-first' if loop.first }}">{% if not loop.first %}<input type="radio" name="at" value="{{ w[0] }}" required>{% endif %}<span>{{ w[1] }}</span></label> {% endfor %}</div>
+    </fieldset>
+    <label class="f">Вторая часть
+      <select name="who" data-seg-who>{{ who_options(current, with_same=True) }}</select></label>
+    <input name="guest_name" maxlength="80" placeholder="Имя гостя (необязательно)" aria-label="Имя гостя" data-seg-guest hidden>
+    <button class="btn sm">Разделить</button>
+  </form>
+  {% endif %}
+  {% if prev or next %}
+  <div class="seg-merge">
+    {% if prev %}<form method="post" action="/meetings/{{ m.id }}/segments/{{ seq }}/merge">
+      <input type="hidden" name="sig" value="{{ sig }}"><input type="hidden" name="with" value="prev"><input type="hidden" name="neighbour_sig" value="{{ prev_sig }}">
+      <button class="btn sm ghost" title="Текст этой реплики допишется к предыдущей; говорящий — {{ prev.speaker }}">Присоединить к предыдущей</button></form>{% endif %}
+    {% if next %}<form method="post" action="/meetings/{{ m.id }}/segments/{{ seq }}/merge">
+      <input type="hidden" name="sig" value="{{ sig }}"><input type="hidden" name="with" value="next"><input type="hidden" name="neighbour_sig" value="{{ next_sig }}">
+      <button class="btn sm ghost" title="Следующая реплика допишется к этой; говорящий — {{ current }}">Присоединить следующую</button></form>{% endif %}
+  </div>
+  {% endif %}
+  <p class="small muted seg-note">Меняется только эта реплика. Любую правку можно отменить кнопкой «Отменить последнюю правку».</p>
+</div>

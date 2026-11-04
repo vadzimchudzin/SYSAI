@@ -384,7 +384,7 @@ def test_nothing_is_sent_while_the_account_is_not_connected(tgacc, model, monkey
 def test_quiet_hours_do_not_hold_back_a_reminder_somebody_asked_for(tgacc, model, monkeypatch):
     make_meeting()
     director(model, lambda facts: remind(everyone(facts)), "напомни всем")
-    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None: now() + dt.timedelta(hours=8))
+    monkeypatch.setattr(userbot, "quiet_until", lambda now_utc=None, **k: now() + dt.timedelta(hours=8))
     reminders.run_due()
     assert reminder_rows()[0][1] == "sent"
 

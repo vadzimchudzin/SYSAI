@@ -75,7 +75,7 @@ def test_stt_gets_the_vocabulary_and_the_transcript_is_corrected(monkeypatch, tm
     settings_store.set_many({"glossary": "ВентСнаб"})
     seen = {}
 
-    def fake_stt(data, model, fmt, language, timeout=60, prompt=""):
+    def fake_stt(data, model, fmt, language, timeout=60, prompt="", **extras):
         seen["prompt"] = prompt
         return {"text": "Вадем подписал акт для винсунаба", "segments": [
             {"start": 0.0, "end": 3.0, "text": "Вадем подписал акт для винсунаба", "speaker": "A"}]}
@@ -106,7 +106,7 @@ def test_telegram_voice_goes_through_the_same_improvements(monkeypatch):
     monkeypatch.setattr(audio, "duration", lambda p: 4.0)
     monkeypatch.setattr(audio, "extract", lambda src, dst, start, sec, cleanup=None: open(dst, "wb").write(b"x"))
 
-    def fake_stt(data, model, fmt, language, timeout=60, prompt=""):
+    def fake_stt(data, model, fmt, language, timeout=60, prompt="", **extras):
         seen["prompt"] = prompt
         return {"text": "Передай Игарю что Строймантаж заплатил"}
     monkeypatch.setattr(llm, "transcribe_audio", fake_stt)
@@ -151,15 +151,44 @@ def _anonymous(turns):
     return [{"speaker": labels.setdefault(p, f"Спикер {len(labels) + 1}"), "text": t} for p, t in turns], labels
 
 
-def test_speakers_are_named_from_introductions_and_answers(staff):
-    named = total = 0
-    for turns in MEETINGS:
+INTRODUCED = ["Вадим Чудин", "Пётр Иванов", "Ольга Кузнецова", "Игорь Соколов"]  # in MEETINGS, one per meeting
+
+
+def test_an_introduction_names_and_one_answer_is_a_question_with_the_right_candidate(staff):
+    for turns, introduced in zip(MEETINGS, INTRODUCED):
         segments, labels = _anonymous(turns)
-        _, mapping = speakers.name_speakers(segments, staff, use_model=False)
+        found = speakers.analyse(segments, staff, use_model=False)
         for person, label in labels.items():
-            total += 1
-            named += mapping.get(label) == person
-    assert named == total  # every speaker here has introduced themselves or answered a call by name
+            if person == introduced:
+                assert found["mapping"].get(label) == person
+                assert found["named"][label]["confidence"] >= speakers.DEFAULT_THRESHOLD
+            else:  # answered a call by name once: likely, not sure enough to sign the protocol
+                assert label not in found["mapping"]
+                top = found["ask"][label][0]
+                assert top["name"] == person and 0.4 < top["confidence"] < speakers.DEFAULT_THRESHOLD
+                assert "назвали по имени" in top["reasons"][0]["text"]
+
+
+def test_answering_twice_names_and_a_lower_threshold_names_one_answer(staff):
+    segments = [{"speaker": "Спикер 1", "start": 0, "text": "Анна, что с актом сверки?"},
+                {"speaker": "Спикер 2", "start": 4, "text": "Отправила в пятницу."},
+                {"speaker": "Спикер 1", "start": 8, "text": "Игорь, монтаж закончили?"},
+                {"speaker": "Спикер 3", "start": 11, "text": "Почти, осталось два дня."},
+                {"speaker": "Спикер 1", "start": 15, "text": "Хорошо. Анна, а оригинал?"},
+                {"speaker": "Спикер 2", "start": 19, "text": "Тоже отправила."}]
+    assert speakers.name_speakers(segments, staff, use_model=False)[1] == {"Спикер 2": "Анна Смирнова"}
+    named, mapping = speakers.name_speakers(segments, staff, use_model=False, threshold=0.6)
+    assert mapping == {"Спикер 2": "Анна Смирнова", "Спикер 3": "Игорь Соколов"}
+    assert named[1]["speaker_confidence"] == pytest.approx(0.84) and named[3]["speaker_confidence"] == pytest.approx(0.6)
+
+
+def test_conflicting_evidence_asks_instead_of_naming(staff):
+    segments = [{"speaker": "Спикер 1", "start": 0, "text": "Это Ольга, начинаем."},
+                {"speaker": "Спикер 2", "start": 3, "text": "Анна, что с актом?"},
+                {"speaker": "Спикер 1", "start": 6, "text": "Отправила."}]  # Ольга introduced herself, yet answered «Анна»
+    found = speakers.analyse(segments, staff, use_model=False)
+    assert found["mapping"] == {}
+    assert [c["name"] for c in found["ask"]["Спикер 1"]] == ["Ольга Кузнецова", "Анна Смирнова"]
 
 
 def test_nobody_is_named_without_evidence(staff):
@@ -190,6 +219,8 @@ def test_model_proposal_with_a_real_introduction_is_accepted(staff, monkeypatch)
 def test_names_from_voice_profiles_are_kept_and_not_given_twice(staff):
     segments = [{"speaker": "Вадим Чудин", "text": "Анна, что с актом?"},
                 {"speaker": "Спикер 2", "text": "Отправила."},
+                {"speaker": "Вадим Чудин", "text": "Анна, а оригинал?"},
+                {"speaker": "Спикер 2", "text": "Тоже отправила."},
                 {"speaker": "Спикер 3", "text": "Это Вадим, я тоже здесь."}]
     named, mapping = speakers.name_speakers(segments, staff, use_model=False)
     assert mapping == {"Спикер 2": "Анна Смирнова"}  # Вадим is already the voice-profile label
@@ -199,6 +230,9 @@ def test_names_from_voice_profiles_are_kept_and_not_given_twice(staff):
 def test_the_meeting_pipeline_names_speakers(staff, monkeypatch):
     from app import pipeline
     segments, _ = _anonymous(MEETINGS[2])
+    # Ольга introduced herself; Игорь only answered once — he is asked about in «Кто это?»
+    assert {s["speaker"] for s in pipeline._name_speakers(segments)} == {"Ольга Кузнецова", "Спикер 2"}
+    settings_store.set_many({"speaker_name_threshold": 0.6})
     assert {s["speaker"] for s in pipeline._name_speakers(segments)} == {"Ольга Кузнецова", "Игорь Соколов"}
     settings_store.set_many({"speaker_naming": False})
     assert {s["speaker"] for s in pipeline._name_speakers(segments)} == {"Спикер 1", "Спикер 2"}

@@ -7,9 +7,9 @@ import time
 from urllib.parse import urlparse
 
 from sqlalchemy import (JSON, Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint,
-                        create_engine, text)
+                        create_engine, event, text)
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, deferred, relationship, sessionmaker
 
 from . import config
 
@@ -153,6 +153,7 @@ class Employee(Base):
     telegram_chat_id = Column(String(40), default="")  # bot chat id; in AI-employee mode @username, +phone or id
     telegram_user_id = Column(String(40), default="")  # numeric Telegram id, learned from the first message
     bitrix_user_id = Column(String(40), default="")
+    email = Column(String(200), default="")  # work address: the invited of the company calendar are matched by it
     active = Column(Boolean, default=True)
     org_order = Column(Integer, nullable=False, default=0)
     map_x = Column(Float, nullable=True)
@@ -164,6 +165,21 @@ class Employee(Base):
                               cascade="all, delete-orphan", single_parent=True)
     voice_samples = relationship("EmployeeVoiceSample", back_populates="employee",
                                  cascade="all, delete-orphan", order_by="EmployeeVoiceSample.created_at")
+    # «Запоминать голос между встречами» (voice_memory.py): when and by whom the employee's consent was recorded
+    voice_memory_consent_at = Column(DateTime(timezone=True), nullable=True)
+    voice_memory_consent_by = Column(String(120), default="")
+    # Rights of the AI employee's chat (agent_skills.py): to whom the person may give orders ("" = by the access level,
+    # all | department | self) and which skills the assistant carries out for them (None = all the level allows).
+    order_scope = Column(String(12), default="")
+    skills_allowed = Column(JSON, nullable=True)
+    # When the person does not answer the assistant (cases.silence_rule): whom to tell (an employee; None = the
+    # department's choice, then the reviewers), after how many hours and after how many reminders (None = inherited).
+    silence_contact_id = Column(Integer, nullable=True)
+    silence_hours = Column(Integer, nullable=True)
+    silence_reminders = Column(Integer, nullable=True)
+    # How the assistant addresses the person: the name to use («Анна Сергеевна») and «ты» or «вы» ("" = by the persona).
+    address_as = Column(String(120), default="")
+    address_form = Column(String(3), default="")
 
     def alias_list(self):
         return [a.strip() for a in (self.aliases or "").split(",") if a.strip()]
@@ -176,6 +192,10 @@ class Department(Base):
     description = Column(Text, default="")
     regulations = Column(Text, default="")  # how the department works: rules, procedures, who signs what
     active = Column(Boolean, default=True)
+    # The silence rule of the department's people (see Employee): their own card wins
+    silence_contact_id = Column(Integer, nullable=True)
+    silence_hours = Column(Integer, nullable=True)
+    silence_reminders = Column(Integer, nullable=True)
     map_x = Column(Float, nullable=True)
     map_y = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now)
@@ -223,12 +243,12 @@ class OrgRelation(Base):
 
 
 class EmployeeVoiceprint(Base):
-    """Encrypted provider voiceprint and consent metadata; raw enrollment audio is not stored."""
+    """Templates of the removed pyannoteAI identification. Nothing writes them any more; init_db deletes what is left."""
     __tablename__ = "employee_voiceprints"
     id = Column(Integer, primary_key=True)
     employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     encrypted_voiceprint = Column(LargeBinary, nullable=False)
-    provider = Column(String(40), nullable=False, default="pyannoteAI")
+    provider = Column(String(40), nullable=False, default="legacy")
     sample_duration = Column(Float, nullable=False, default=0.0)
     consent_at = Column(DateTime(timezone=True), nullable=False, default=now)
     consent_version = Column(String(40), nullable=False, default="voiceprint-consent-v1")
@@ -268,12 +288,43 @@ class EmployeeVoiceSample(Base):
     employee = relationship("Employee", back_populates="voice_samples")
 
 
+class EmployeeVoiceMemory(Base):
+    """The voice print of one employee from one meeting where that voice was confirmed (voice_memory.py). No audio:
+    the average print of the person's clear replicas, encrypted. Deleted with the consent, the meeting or its term."""
+    __tablename__ = "employee_voice_memory"
+    id = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=True, index=True)
+    encrypted_embedding = Column(LargeBinary, nullable=False)
+    model_version = Column(String(120), nullable=False, default="")
+    seconds = Column(Float, nullable=False, default=0.0)
+    replicas = Column(Integer, nullable=False, default=0)
+    how = Column(String(16), nullable=False, default="manual")  # manual | context
+    confirmed_by = Column(String(120), nullable=False, default="")
+    consent_version = Column(String(40), nullable=False, default="voice-memory-v1")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class VoiceSampleCleanup(Base):
     """Legacy external-copy cleanup outbox; no audio/embedding or identity evidence."""
     __tablename__ = "voice_sample_cleanup"
     id = Column(Integer, primary_key=True)
     employee_id = Column(Integer, nullable=False)
     storage_path = Column(String(600), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now)
+
+
+class StorageCleanup(Base):
+    """Objects to delete from the recordings storage (a deleted meeting, an expired or removed recording). An outbox: the
+    deletion is committed with the change that needs it and retried until the storage confirms it (audio_archive.py)."""
+    __tablename__ = "storage_cleanup"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(600), nullable=False)
+    reason = Column(String(20), nullable=False, default="")
+    attempts = Column(Integer, nullable=False, default=0)
+    error = Column(String(300), nullable=False, default="")
+    next_at = Column(DateTime(timezone=True), nullable=False, default=now, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=now)
 
 
@@ -290,6 +341,16 @@ class Meeting(Base):
     duration_sec = Column(Float, default=0)
     meeting_date = Column(Date, nullable=True)
     transcript = Column(JSON, nullable=True)  # [{speaker, start, end, text}]
+    # Manual corrections (transcript_edit.py): the automatic transcript as it was before the first one, the undo
+    # history, and the corrected copy frozen as a reference («эталон») for measuring the labelling (diarization_eval.py).
+    # Deferred: the lists of meetings never need them.
+    transcript_auto = deferred(Column(JSON, nullable=True))
+    transcript_edits = deferred(Column(JSON, nullable=True))
+    diarization_reference = deferred(Column(JSON, nullable=True))
+    participants = Column(JSON, nullable=True)  # who was there, see participants.py: {"people": [...], "source": ...}
+    waveform = Column(JSON, nullable=True)  # loudness outline for the voice diagram, see waveform.py
+    recording_status = Column(String(12), default="")  # "" | pending | stored | failed | deleted | expired, see audio_archive.py
+    recording = Column(JSON, nullable=True)  # the kept copy: storage key, size, duration, until when it is kept, last error
     report = Column(JSON, nullable=True)
     options = Column(JSON, nullable=True)  # per-meeting overrides of settings (approval, deadlines, recipients…)
     created_at = Column(DateTime(timezone=True), default=now)
@@ -372,9 +433,24 @@ class Task(Base):
     counterparts = Column(JSON, default=list)  # [{"role": "source|recipient|target", "employee_id": 3, "name": "Аня"}]
     routing_note = Column(String(500), default="")  # why the executor differs from what the model proposed
     bitrix_task_id = Column(String(40), default="")
+    created_at = Column(DateTime(timezone=True), default=now, nullable=True)  # older tasks: unknown (the meeting's date)
+    done_at = Column(DateTime(timezone=True), nullable=True)  # set when the status becomes done (see below)
     meeting = relationship("Meeting", back_populates="tasks")
     assignee = relationship("Employee", foreign_keys=[assignee_id])
     target_employee = relationship("Employee", foreign_keys=[target_employee_id])
+
+
+TASK_DONE = ("done", "assistant_done")
+
+
+@event.listens_for(Task.status, "set")
+def _task_done_at(task, value, old, initiator):
+    """When a task was done: for «выполнено в срок» of the tables (№27). Reopened, it is not done any more."""
+    if value in TASK_DONE:
+        if old not in TASK_DONE or task.done_at is None:
+            task.done_at = now()
+    elif old in TASK_DONE:
+        task.done_at = None
 
 
 class DeadlineRequest(Base):
@@ -507,6 +583,7 @@ class Note(Base):
     archived = Column(Boolean, nullable=False, default=False)  # hidden from memory, kept for the audit trail
     updated_at = Column(DateTime(timezone=True), nullable=True)
     edited_by = Column(String(120), default="")
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)  # a client/object
 
 
 class PersonMemory(Base):
@@ -515,6 +592,34 @@ class PersonMemory(Base):
     chat_id = Column(String(40), primary_key=True)
     employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     summary = Column(Text, default="")
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class ChatOrder(Base):
+    """An order given in the chat («поручи Виктору купить перфоратор до пятницы»), retold to the person and waiting for
+    their «да». Confirmed, it becomes a case (orders.py); a correction replaces it with a new one."""
+    __tablename__ = "chat_orders"
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(String(40), nullable=False, index=True)
+    requested_by = Column(String(120), default="")
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)  # who gave it
+    payload = Column(JSON, nullable=False, default=dict)  # the checked `order` action: kind, to, title, deadline...
+    status = Column(String(12), nullable=False, default="pending", index=True)  # pending | started | cancelled | replaced
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="SET NULL"), nullable=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class DialogMemory(Base):
+    """A short retelling of the older part of one conversation (dialog_memory.py); the fresh part goes to the model word
+    for word. `upto_id` is the last conversation message the retelling covers."""
+    __tablename__ = "dialog_memory"
+    chat_id = Column(String(40), primary_key=True)
+    summary = Column(Text, default="")
+    upto_id = Column(Integer, default=0)
+    messages = Column(Integer, default=0)
+    error = Column(Text, default="")
     updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
 
 
@@ -530,6 +635,59 @@ class Artifact(Base):
     data = Column(LargeBinary, nullable=True)
     svg = Column(Text, default="")
     created_at = Column(DateTime(timezone=True), default=now)
+
+
+class AgentCheckRun(Base):
+    """A run of the checking dialogs (agent_checks.py): which models and ways of asking were compared, how it ended."""
+    __tablename__ = "agent_check_runs"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(12), nullable=False, default="running")  # running | done | stopped | failed | interrupted
+    models = Column(JSON, nullable=False, default=list)
+    transports = Column(JSON, nullable=False, default=list)
+    total = Column(Integer, nullable=False, default=0)
+    by = Column(String(120), default="")
+    note = Column(Text, default="")
+
+
+class AgentCheckResult(Base):
+    """One checking dialog answered by one model in one way: passed or why not, what it cost."""
+    __tablename__ = "agent_check_results"
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("agent_check_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    model = Column(String(120), nullable=False)
+    transport = Column(String(10), nullable=False)
+    case_key = Column(String(60), nullable=False)  # a built-in scenario id or "case:<AgentCheckCase.id>"
+    topic = Column(String(60), default="")
+    ok = Column(Boolean, nullable=False, default=False)
+    reasons = Column(JSON, nullable=False, default=list)
+    reply = Column(Text, default="")
+    actions = Column(JSON, nullable=False, default=list)
+    via = Column(String(10), default="")  # the way that answered (a model without function calls answers in JSON)
+    cost = Column(Float, nullable=False, default=0.0)
+    calls = Column(Integer, nullable=False, default=0)
+    tokens = Column(Integer, nullable=False, default=0)
+    seconds = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
+class AgentCheckCase(Base):
+    """A bad answer from a real conversation kept as a checking dialog, with how it should have been."""
+    __tablename__ = "agent_check_cases"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    title = Column(String(200), default="")
+    text = Column(Text, nullable=False, default="")
+    ctx = Column(JSON, nullable=False, default=dict)      # what the model saw (rebuilt when the answer was marked)
+    person = Column(JSON, nullable=False, default=dict)   # employee_id, employee_name, reviewer, full, director
+    expected = Column(Text, nullable=False, default="")   # «как надо было», in the director's words
+    must = Column(JSON, nullable=False, default=list)     # skills that had to be used
+    must_not = Column(JSON, nullable=False, default=list)  # skills that must not be used
+    bad_reply = Column(Text, default="")
+    source_message_id = Column(Integer, nullable=True)
+    by = Column(String(120), default="")
+    active = Column(Boolean, nullable=False, default=True)
 
 
 class LlmSpend(Base):
@@ -653,6 +811,7 @@ class CaseWait(Base):
     reminders_sent = Column(Integer, nullable=False, default=0)
     escalate_at = Column(DateTime(timezone=True), nullable=True)
     escalated = Column(Boolean, nullable=False, default=False)
+    escalated_to = Column(JSON, nullable=True)   # the chats told about the silence: their answer decides (silence_choice)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     answer = Column(Text, default="")
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
@@ -690,8 +849,61 @@ class Document(Base):
     text = Column(Text, default="")  # extracted text (PDF/DOCX/XLSX, scans through the vision model)
     text_status = Column(String(12), default="pending")  # pending | done | empty | failed
     summary = Column(Text, default="")
+    # What doc_intake.py found in it: the type, the requisites with their quotes, the deadlines, the problems with the
+    # sums, the route by the rules and what was done (see doc_intake.py for the shape)
+    facts = Column(JSON, nullable=True)
+    facts_status = Column(String(12), default="")  # "" not yet | working | done | failed | skipped | old (before №18)
     created_at = Column(DateTime(timezone=True), default=now, index=True)
     employee = relationship("Employee")
+
+
+class DocRule(Base):
+    """«Что кому»: an incoming document of this type (and with these words) goes to the person or to the head of the
+    department; its deadlines become their tasks with reminders (doc_intake.py). The first active rule that fits wins."""
+    __tablename__ = "doc_rules"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(20), default="")          # doc_intake.KINDS key; "" = any type
+    keywords = Column(String(300), default="")     # any of these words in the file (comma-separated); "" = no condition
+    to_employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    to_department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    make_tasks = Column(Boolean, nullable=False, default=True)
+    active = Column(Boolean, nullable=False, default=True)
+    position = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_by = Column(String(120), default="")
+
+
+class Entity(Base):
+    """A client, an object or another organization the company works with (entities.py, №19): one card for «Криница»,
+    «ОАО «Криница»» and «Криницы». A merged duplicate points to the card it went into."""
+    __tablename__ = "entities"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(12), nullable=False, default="org")  # object | client | contractor | org
+    name = Column(String(300), nullable=False)
+    aliases = Column(JSON, nullable=False, default=list)       # other spellings: «ОАО Криница», «Криница-Минск»
+    unp = Column(String(20), default="")
+    address = Column(String(300), default="")
+    contacts = Column(Text, default="")
+    description = Column(Text, default="")
+    sources = Column(JSON, nullable=True)  # where a field came from: {"unp": {"type": "document", "id": 5, "quote": "…"}}
+    source = Column(String(20), default="manual")              # how the card appeared: manual | meeting | document
+    active = Column(Boolean, nullable=False, default=True)
+    merged_into_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+    updated_by = Column(String(120), default="")
+
+
+class EntityLink(Base):
+    """Where a client or an object comes up: a meeting, a task, a document, a message — with the words."""
+    __tablename__ = "entity_links"
+    __table_args__ = (UniqueConstraint("entity_id", "source_type", "source_id"),)
+    id = Column(Integer, primary_key=True)
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type = Column(String(12), nullable=False)  # meeting | task | document | message
+    source_id = Column(Integer, nullable=False)
+    quote = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
 
 
 class DocumentTransfer(Base):
@@ -737,6 +949,220 @@ class Skill(Base):
     updated_by = Column(String(120), default="")
 
 
+class DocTemplate(Base):
+    """A DOCX template of the company (a letter, an act, a memo) with fields {{…}}: the assistant fills it on request
+    (doc_templates.py). fields: [{"name", "hint"}] in the order of the document; output: docx | pdf | both."""
+    __tablename__ = "doc_templates"
+    id = Column(Integer, primary_key=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, default="")  # when to use it, for the assistant
+    filename = Column(String(255), default="")
+    data = Column(LargeBinary, nullable=False)
+    fields = Column(JSON, nullable=False, default=list)
+    output = Column(String(8), nullable=False, default="docx")
+    active = Column(Boolean, nullable=False, default=True)
+    uses = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+    updated_by = Column(String(120), default="")
+
+
+class DocDraft(Base):
+    """A document filled from a template for a person who asked: the draft goes to them first; after their «ок» it is
+    kept in the document library and sent to send_to, if they named somebody."""
+    __tablename__ = "doc_drafts"
+    id = Column(Integer, primary_key=True)
+    template_id = Column(Integer, ForeignKey("doc_templates.id", ondelete="SET NULL"), nullable=True, index=True)
+    chat_id = Column(String(40), nullable=False, index=True)
+    requested_by = Column(String(120), default="")
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    title = Column(String(300), default="")
+    values = Column(JSON, nullable=False, default=dict)
+    send_to_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    # draft | replaced | cancelled | approved (kept, not sent yet) | sent | kept (approved, nobody to send to)
+    status = Column(String(12), nullable=False, default="draft", index=True)
+    docx = Column(LargeBinary, nullable=True)
+    pdf = Column(LargeBinary, nullable=True)
+    shown_at = Column(DateTime(timezone=True), nullable=True)   # the draft file went to the person who asked
+    document_ids = Column(JSON, nullable=True)                  # the library entries after «ок»
+    error = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=now)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class SkillRun(Base):
+    """One use of a built-in skill of the AI employee (the Skills page counts them): done, sent for approval or as a
+    suggestion, cancelled (the request declined, the order answered «нет») or failed."""
+    __tablename__ = "skill_runs"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(40), nullable=False, index=True)
+    outcome = Column(String(12), nullable=False)  # done | approval | suggested | cancelled | error
+    detail = Column(Text, default="")
+    chat = Column(String(64), default="")
+    created_at = Column(DateTime(timezone=True), default=now, index=True)
+
+
+class MailMessage(Base):
+    """One letter of the connected mailbox (mail.py, «Почтальон» №22–25): what came, its attachments in «Документы»,
+    the type, the client or object and the case it belongs to (№23), who it went to and the tasks it gave (№24), the
+    draft of the answer (№25). Our own answers sent through SMTP are kept here too (direction «out»)."""
+    __tablename__ = "mail_messages"
+    __table_args__ = (UniqueConstraint("mailbox", "folder", "uidvalidity", "uid"),)
+    id = Column(Integer, primary_key=True)
+    mailbox = Column(String(320), nullable=False, default="")    # the address of the box
+    folder = Column(String(200), nullable=False, default="INBOX")
+    uidvalidity = Column(String(40), nullable=False, default="")
+    uid = Column(Integer, nullable=False, default=0)               # 0 for our own answers
+    direction = Column(String(4), nullable=False, default="in")   # in | out
+    message_id = Column(String(500), default="", index=True)       # the Message-ID header: the same letter is kept once
+    in_reply_to = Column(String(500), default="")
+    refs = Column(Text, default="")                                # the References header
+    thread = Column(String(500), default="", index=True)           # the first Message-ID of the conversation
+    from_addr = Column(String(320), default="", index=True)
+    from_name = Column(String(300), default="")
+    reply_to = Column(String(320), default="")
+    to_addrs = Column(Text, default="")
+    cc_addrs = Column(Text, default="")
+    subject = Column(String(1000), default="")
+    sent_at = Column(DateTime(timezone=True), nullable=True)       # the Date header
+    text = Column(Text, default="")                                # the body as text (HTML turned into text)
+    size = Column(Integer, nullable=False, default=0)
+    signals = Column(JSON, nullable=True)                          # bulk mail, auto-reply… (headers that tell the kind)
+    attachments = Column(JSON, nullable=True)                      # [{"filename", "mime", "size", "document_id", "skipped"}]
+    kind = Column(String(20), default="")                          # the type (mail.kinds()); "" = not sorted yet
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="SET NULL"), nullable=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    labels = Column(JSON, nullable=True)                           # ["срочно", "ждёт ответа", "срок 05.12"]
+    sort = Column(JSON, nullable=True)                             # what the sorting found and why (mail.py)
+    sort_status = Column(String(12), nullable=False, default="")   # "" not yet | working | done | failed | skipped
+    checked = Column(JSON, nullable=True)                          # the panel: {"ok", "kind", "entity_id", "was", "by", "at"}
+    route = Column(JSON, nullable=True)                            # who it went to and the tasks it gave (№24)
+    draft = Column(JSON, nullable=True)                            # the answer being prepared (№25)
+    place = Column(JSON, nullable=True)                            # the folder of the box it was moved into (mail_folders.py)
+    status = Column(String(12), nullable=False, default="new", index=True)  # new | sorted | routed | answered | done | ignored
+    created_at = Column(DateTime(timezone=True), default=now, index=True)
+
+
+class MailRule(Base):
+    """«Кто чем занимается» (mail_route.py, №24): a letter of this type, about this client or object, from these senders
+    (addresses or @domains) or with these words goes to the person or to the head of the department; its deadlines
+    become their tasks. The first active rule that fits wins."""
+    __tablename__ = "mail_rules"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(20), default="")          # mail.kinds() key; "" = any type
+    entity_id = Column(Integer, ForeignKey("entities.id", ondelete="SET NULL"), nullable=True)
+    senders = Column(String(500), default="")      # «ivanov@krinica.by, @monolit.by» (comma-separated); "" = anybody
+    keywords = Column(String(300), default="")     # any of these words in the subject or the text; "" = no condition
+    to_employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    to_department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    make_tasks = Column(Boolean, nullable=False, default=True)
+    active = Column(Boolean, nullable=False, default=True)
+    position = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_by = Column(String(120), default="")
+
+
+class MailDraft(Base):
+    """An answer to a letter (mail_reply.py, №25): the person who handles the letter reads it in Telegram, asks to
+    change it or says «ок» — only then it goes out through SMTP. A newer draft for the same person replaces the older."""
+    __tablename__ = "mail_drafts"
+    id = Column(Integer, primary_key=True)
+    mail_id = Column(Integer, ForeignKey("mail_messages.id", ondelete="CASCADE"), nullable=False, index=True)
+    chat_id = Column(String(64), default="", index=True)       # the conversation that decides ("" = by the employee)
+    employee_id = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
+    requested_by = Column(String(120), default="")
+    points = Column(Text, default="")                          # what the person asked to say (their words)
+    to_addrs = Column(Text, default="")
+    subject = Column(String(1000), default="")
+    text = Column(Text, default="")                            # the answer as it will go (with the signature)
+    warnings = Column(JSON, nullable=True)                     # numbers and dates found nowhere in the sources
+    missing = Column(JSON, nullable=True)                      # what the model lacked for a full answer
+    version = Column(Integer, nullable=False, default=1)
+    # draft | replaced | cancelled | approved (sent right after the reply) | sending | sent | failed
+    status = Column(String(12), nullable=False, default="draft", index=True)
+    error = Column(Text, default="")
+    shown_at = Column(DateTime(timezone=True), nullable=True)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    sent_id = Column(Integer, nullable=True)                   # the MailMessage of the answer that went
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
+class CalendarEvent(Base):
+    """A meeting of the company calendar (calendars.py, №26), each recurrence on its own: who was invited is who is
+    expected at a recording made at that time. Read again every 15 minutes."""
+    __tablename__ = "calendar_events"
+    id = Column(Integer, primary_key=True)
+    uid = Column(String(300), nullable=False, default="")
+    title = Column(String(300), default="")
+    location = Column(String(300), default="")
+    starts_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    ends_at = Column(DateTime(timezone=True), nullable=True)
+    organizer = Column(JSON, nullable=True)                  # {"name", "email", "status", "kind"}
+    attendees = Column(JSON, nullable=False, default=list)   # [{"name", "email", "status": ACCEPTED | DECLINED…, "kind"}]
+    fetched_at = Column(DateTime(timezone=True), default=now)
+
+
+class BitrixLink(Base):
+    """One task or client card of SYSAI and its twin in Bitrix24 (bitrix_sync.py, №28). `base` keeps the values both
+    sides had at the last sync: a field that differs from it changed on that side, so neither side's change is lost
+    to the other side's old value. kind: task (local_id: Task) | company | contact (local_id: Entity)."""
+    __tablename__ = "bitrix_links"
+    __table_args__ = (UniqueConstraint("kind", "remote_id"),)
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(10), nullable=False)
+    local_id = Column(Integer, nullable=False, index=True)
+    remote_id = Column(String(40), nullable=False)
+    base = Column(JSON, nullable=False, default=dict)   # task: title, deadline, status, responsible; card: name, unp, kind
+    data = Column(JSON, nullable=True)                  # card: phones, e-mails, site, contact persons of the CRM
+    state = Column(String(10), nullable=False, default="ok")  # ok | gone (deleted in Bitrix24)
+    error = Column(String(300), default="")
+    synced_at = Column(DateTime(timezone=True), default=now)
+    created_at = Column(DateTime(timezone=True), default=now)
+
+
+class DriveFile(Base):
+    """A file of the company folder in Google Drive and what it is here (gdrive.py, №28): an incoming file that became
+    a document, a document of SYSAI put there, or a template (kept the same both ways). sig: md5 (or version) of the
+    Drive file at the last sync; local_sha: the template's bytes at the last sync."""
+    __tablename__ = "drive_files"
+    id = Column(Integer, primary_key=True)
+    file_id = Column(String(120), nullable=True, unique=True)
+    kind = Column(String(10), nullable=False)            # inbox | upload | template
+    origin = Column(String(6), nullable=False, default="drive")  # drive | panel: where the file appeared first
+    name = Column(String(300), default="")
+    sig = Column(String(80), default="")
+    local_sha = Column(String(64), default="")
+    version = Column(Integer, nullable=False, default=0)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)
+    template_id = Column(Integer, ForeignKey("doc_templates.id", ondelete="SET NULL"), nullable=True, index=True)
+    status = Column(String(10), nullable=False, default="ok")  # ok | failed | skipped | gone
+    error = Column(String(300), default="")
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=now)
+    updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class ServerRun(Base):
+    """One start of the service process (server_watch.py, №29): its start, its last sign of life (a heartbeat every
+    minute), its clean stop and its memory peak. A gap between one run's last sign of life and the next run's start is
+    downtime; a run that ended without a clean stop was killed (most often for memory)."""
+    __tablename__ = "server_runs"
+    id = Column(Integer, primary_key=True)
+    instance = Column(String(12), nullable=False, unique=True)
+    platform = Column(String(10), default="")             # render | docker | server
+    commit = Column(String(12), default="")
+    started_at = Column(DateTime(timezone=True), nullable=False, default=now, index=True)
+    beat_at = Column(DateTime(timezone=True), nullable=False, default=now)
+    stopped_at = Column(DateTime(timezone=True), nullable=True)
+    limit_mb = Column(Integer, nullable=True)             # the memory the process may use (container limit or RAM)
+    peak_mb = Column(Integer, nullable=True)              # the peak of the process itself
+    child_mb = Column(Integer, nullable=True)             # the peak of its biggest child process (ffmpeg)
+    oom_kills = Column(Integer, nullable=False, default=0)  # processes the kernel killed for memory in the container
+    busy = Column(String(200), default="")                # what it was doing at the last heartbeat
+
+
 class MemoryVector(Base):
     """Embedding of one memory item (key like "note:12"); re-made when the item's text changes (hash)."""
     __tablename__ = "memory_vectors"
@@ -773,8 +1199,27 @@ def init_db():
         engine.dispose()
     wait_for_db()
     log.info("Database ready: %s%s", engine.dialect.name, f" @ {engine.url.host}" if engine.url.host else "")
+    from .net import models as _net_models  # noqa: F401  the net_* tables of the agent network (app/net)
     Base.metadata.create_all(engine)
+    # the agent network: SYSAI_Hub got tools next to skills (a database of an early build of the branch)
+    _add_column_if_missing("net_skills", "kind", "kind VARCHAR(10) DEFAULT 'skill'")
+    _add_column_if_missing("net_skills", "delivery", "delivery VARCHAR(10) DEFAULT 'always'")
+    _add_column_if_missing("net_skill_versions", "spec", "spec JSON")
+    # the trace of agents (ОПО-5.7): every request through the gateway with its time and end; the debug mode
+    for column, ddl in (("cached_tokens", "INTEGER DEFAULT 0"), ("ms", "INTEGER DEFAULT 0"), ("ok", "BOOLEAN DEFAULT TRUE"),
+                        ("error", "VARCHAR(300) DEFAULT ''"), ("role", "VARCHAR(16) DEFAULT ''"),
+                        ("task", "VARCHAR(64) DEFAULT ''"), ("route", "VARCHAR(120) DEFAULT ''")):
+        _add_column_if_missing("net_spend", column, f"{column} {ddl}")
+    _add_column_if_missing("net_agents", "debug_until", "debug_until TIMESTAMP")
+    _add_column_if_missing("net_agents", "debug_by", "debug_by VARCHAR(64) DEFAULT ''")
     _add_column_if_missing("meetings", "options", "options JSON")
+    _add_column_if_missing("meetings", "waveform", "waveform JSON")
+    _add_column_if_missing("meetings", "recording_status", "recording_status VARCHAR(12) DEFAULT ''")
+    _add_column_if_missing("meetings", "recording", "recording JSON")
+    _add_column_if_missing("meetings", "transcript_auto", "transcript_auto JSON")
+    _add_column_if_missing("meetings", "transcript_edits", "transcript_edits JSON")
+    _add_column_if_missing("meetings", "diarization_reference", "diarization_reference JSON")
+    _add_column_if_missing("meetings", "participants", "participants JSON")
     _add_column_if_missing("deliveries", "cycle_attempts", "cycle_attempts INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("tasks", "executor", "executor VARCHAR(12) DEFAULT 'person'")
     _add_column_if_missing("tasks", "target_employee_id", "target_employee_id INTEGER REFERENCES employees(id)")
@@ -784,6 +1229,7 @@ def init_db():
     _add_column_if_missing("tasks", "routing_note", "routing_note VARCHAR(500) DEFAULT ''")
     _add_column_if_missing("employees", "telegram_user_id", "telegram_user_id VARCHAR(40) DEFAULT ''")
     _add_column_if_missing("recordings", "device_label", "device_label VARCHAR(120) NOT NULL DEFAULT ''")
+    _add_column_if_missing("mail_messages", "place", "place JSON")
     _add_column_if_missing("employees", "department", "department VARCHAR(200) DEFAULT ''")
     _add_column_if_missing("employees", "competencies", "competencies TEXT DEFAULT ''")
     _add_column_if_missing("employees", "responsibilities", "responsibilities TEXT DEFAULT ''")
@@ -808,6 +1254,10 @@ def init_db():
     _add_column_if_missing("documents", "text", "text TEXT DEFAULT ''")
     _add_column_if_missing("documents", "text_status", "text_status VARCHAR(12) DEFAULT 'pending'")
     _add_column_if_missing("documents", "summary", "summary TEXT DEFAULT ''")
+    _add_column_if_missing("documents", "facts", "facts JSON")
+    _add_column_if_missing("notes", "entity_id", "entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL")
+    # The files already in the library are not routed by the new rules: they are marked «old» once (new rows get "")
+    _add_column_if_missing("documents", "facts_status", "facts_status VARCHAR(12) DEFAULT 'old'")
     _add_column_if_missing("users", "consent_version", "consent_version VARCHAR(20) DEFAULT ''")
     _add_column_if_missing("employee_voice_samples", "source_kind", "source_kind VARCHAR(32) NOT NULL DEFAULT 'manual'")
     _add_column_if_missing("employee_voice_samples", "source_meeting_id", "source_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL")
@@ -823,7 +1273,31 @@ def init_db():
     _add_column_if_missing("employee_voice_samples", "confirmed_by", "confirmed_by VARCHAR(120) NOT NULL DEFAULT ''")
     _add_column_if_missing("employee_voice_samples", "access_owner", "access_owner VARCHAR(128) NOT NULL DEFAULT ''")
     _add_column_if_missing("employee_voice_samples", "expires_at", "expires_at TIMESTAMP")
+    _add_column_if_missing("employees", "voice_memory_consent_at", "voice_memory_consent_at TIMESTAMP")
+    _add_column_if_missing("employees", "voice_memory_consent_by", "voice_memory_consent_by VARCHAR(120) DEFAULT ''")
+    _add_column_if_missing("employees", "order_scope", "order_scope VARCHAR(12) DEFAULT ''")
+    _add_column_if_missing("employees", "skills_allowed", "skills_allowed JSON")
+    for table in ("employees", "departments"):
+        _add_column_if_missing(table, "silence_contact_id", "silence_contact_id INTEGER")
+        _add_column_if_missing(table, "silence_hours", "silence_hours INTEGER")
+        _add_column_if_missing(table, "silence_reminders", "silence_reminders INTEGER")
+    _add_column_if_missing("employees", "address_as", "address_as VARCHAR(120) DEFAULT ''")
+    _add_column_if_missing("employees", "address_form", "address_form VARCHAR(3) DEFAULT ''")
+    _add_column_if_missing("case_waits", "escalated_to", "escalated_to JSON")
+    _add_column_if_missing("employees", "email", "email VARCHAR(200) DEFAULT ''")
+    _add_column_if_missing("tasks", "created_at", "created_at TIMESTAMP")
+    _add_column_if_missing("tasks", "done_at", "done_at TIMESTAMP")
     _ensure_voice_sample_constraints()
+    _forget_pyannote()
+
+
+def _forget_pyannote():
+    """pyannoteAI is removed: its voice templates and key are of no use and are not kept (they are personal data)."""
+    with engine.begin() as con:
+        gone = con.execute(text("DELETE FROM employee_voiceprints")).rowcount or 0
+        con.execute(text("DELETE FROM settings WHERE key = 'pyannoteai_api_key'"))
+    if gone:
+        log.info("Deleted %s voice templates of the removed pyannoteAI identification", gone)
 
 
 def _ensure_voice_sample_constraints():

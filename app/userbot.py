@@ -7,6 +7,7 @@ The Telegram client itself sits behind a small backend interface; tests plug a f
 """
 import asyncio
 import base64
+import collections
 import datetime as dt
 import hashlib
 import io
@@ -38,6 +39,29 @@ INSTANCE = secrets.token_hex(4)  # this process; during a deploy the old and the
 
 class LoginError(RuntimeError):
     """A problem with signing in that the person can fix; the message is shown in the panel (Russian)."""
+
+
+class NoCodeError(LoginError):
+    """Telegram sends this account no code at all (it wants a login e-mail set up first): the way in is the QR code."""
+
+
+def code_route(code_type) -> str:
+    """Where Telegram says it sent the login code, in words for the panel ("" when it does not say)."""
+    kind = type(code_type).__name__ if code_type is not None else ""
+    if kind == "SentCodeTypeApp":
+        return ("в приложение Telegram — сообщением от «Telegram» с синей галочкой на телефоне или компьютере, где открыт "
+                "этот номер (не SMS)")
+    if kind in ("SentCodeTypeSms", "SentCodeTypeFirebaseSms", "SentCodeTypeSmsWord", "SentCodeTypeSmsPhrase"):
+        return "по SMS"
+    if kind == "SentCodeTypeCall":
+        return "звонком: код продиктуют"
+    if kind in ("SentCodeTypeFlashCall", "SentCodeTypeMissedCall"):
+        return "звонком: код — последние цифры номера, с которого позвонят"
+    if kind == "SentCodeTypeEmailCode":
+        return f"на почту для входа {getattr(code_type, 'email_pattern', '') or 'этого аккаунта'}"
+    if kind == "SentCodeTypeFragmentSms":
+        return "на fragment.com (номер анонимный)"
+    return ""
 
 
 class RefError(ValueError):
@@ -108,6 +132,7 @@ class TelethonBackend:
         self._watch = None
         self.wants = None  # optional pre-filter: only messages from people the app serves are handed over
         self._guard = threading.Lock()
+        self._qr = None  # the login by QR code in progress: its client, the waiting task and what the panel shows
 
     # plumbing
     def _run(self, coro, timeout=90):
@@ -133,7 +158,10 @@ class TelethonBackend:
             try:
                 await client.connect()
                 sent = await client.send_code_request(phone)
-                return {"session": client.session.save(), "phone": phone, "hash": sent.phone_code_hash}
+                if type(sent.type).__name__ == "SentCodeTypeSetUpEmailRequired":
+                    raise NoCodeError("Telegram не присылает код этому аккаунту: он требует сначала привязать почту для входа.")
+                return {"session": client.session.save(), "phone": phone, "hash": sent.phone_code_hash,
+                        "via": code_route(sent.type)}
             except errors.ApiIdInvalidError:
                 raise LoginError("Telegram не принял api_id и api_hash: проверьте, что скопировали их полностью.") from None
             except errors.PhoneNumberInvalidError:
@@ -179,6 +207,68 @@ class TelethonBackend:
             finally:
                 await client.disconnect()
         return self._run(go())
+
+    # login by QR code: no code at all, the phone where the account is open confirms the new device
+    def qr_start(self, api_id, api_hash):
+        TelegramClient, StringSession, errors, *_ = self._telethon()
+
+        async def go():
+            old, self._qr = self._qr, None
+            if old and not old["task"].done():
+                old["task"].cancel()
+            client = TelegramClient(StringSession(), int(api_id), api_hash)
+            await client.connect()
+            try:
+                qr = await client.qr_login()
+            except errors.ApiIdInvalidError:
+                await client.disconnect()
+                raise LoginError("Telegram не принял api_id и api_hash: проверьте, что скопировали их полностью.") from None
+            except BaseException:
+                await client.disconnect()
+                raise
+            state = {"state": "wait", "url": qr.url, "session": "", "phone": "", "error": ""}
+            self._qr = {"state": state, "task": asyncio.ensure_future(self._qr_wait(client, qr, state, errors))}
+        return self._run(go())
+
+    @staticmethod
+    async def _qr_wait(client, qr, state, errors, minutes=5):
+        """Keeps the code fresh (Telegram renews it every 30 s) until the phone confirms or the minutes run out."""
+        deadline = time.monotonic() + minutes * 60
+        try:
+            while True:
+                left = (qr.expires - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                try:
+                    user = await qr.wait(timeout=max(3.0, min(left, deadline - time.monotonic())))
+                except (asyncio.TimeoutError, TimeoutError):
+                    if time.monotonic() >= deadline:
+                        state.update(state="expired")
+                        return
+                    await qr.recreate()
+                    state["url"] = qr.url
+                    continue
+                except errors.SessionPasswordNeededError:
+                    state.update(state="password", session=client.session.save())
+                    return
+                state.update(state="ok", session=client.session.save(), phone=getattr(user, "phone", "") or "")
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Telegram QR login failed")
+            state.update(state="error", error=f"Не удалось войти по QR-коду: {str(exc)[:200]}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def qr_state(self):
+        return dict(self._qr["state"]) if self._qr else None
+
+    def qr_cancel(self):
+        qr, self._qr = self._qr, None
+        if qr and not qr["task"].done() and self._loop is not None:
+            self._loop.call_soon_threadsafe(qr["task"].cancel)
 
     # running connection
     def connect(self, api_id, api_hash, session, on_message):
@@ -372,7 +462,7 @@ class TelethonBackend:
         _, _, _, _, _, types = TelethonBackend._telethon()
         return entity.id if isinstance(entity, types.User) else None
 
-    def send(self, ref, text, reply_to=None, typing=0.0):
+    def send(self, ref, text, reply_to=None, typing=0.0, html=False):
         async def go():
             client = self._online()
             entity = await self._entity(client, ref)
@@ -383,7 +473,8 @@ class TelethonBackend:
             if typing:
                 async with client.action(entity, "typing"):
                     await asyncio.sleep(typing)
-            message = await client.send_message(entity, text, reply_to=reply_to, link_preview=False)
+            message = await client.send_message(entity, text, reply_to=reply_to, link_preview=False,
+                                                **({"parse_mode": "html"} if html else {}))
             return {"message_id": message.id, "user_id": self._user_id(entity)}
         return self._call(go)
 
@@ -418,6 +509,15 @@ class QuietHours(telegram.TelegramError):
         super().__init__("Тихие часы: сообщения уйдут утром", retryable=True, retry_after=max(60, int(seconds_left)))
 
 
+class Busy(QuietHours):
+    """The person got as many messages from the assistant this hour as the limit allows: the next one waits a little
+    (handled everywhere like the quiet hours)."""
+
+    def __init__(self, seconds_left: float):
+        telegram.TelegramError.__init__(self, "Лимит сообщений одному человеку в час: следующее уйдёт позже",
+                                        retryable=True, retry_after=max(60, int(seconds_left)))
+
+
 def _zone():
     try:
         return zoneinfo.ZoneInfo(config.TIMEZONE)
@@ -429,28 +529,82 @@ def local_time(moment) -> str:
     return moment.astimezone(_zone()).strftime("%H:%M %d.%m")
 
 
-def quiet_until(now_utc=None):
-    """When the quiet hours end, if they are on at that moment; otherwise None.
+def quiet_days() -> set:
+    """Days off (0 = Monday … 6 = Sunday): nobody is written to first on them. All seven days mean none."""
+    days = settings_store.get("quiet_days")
+    out = {int(d) for d in days if str(d).isdigit() and 0 <= int(d) <= 6} if isinstance(days, list) else set()
+    return out if len(out) < 7 else set()
 
-    Settings quiet_from_hour and quiet_to_hour are hours of the service time zone; equal hours mean no quiet time.
-    Tests see no quiet hours unless they pass now_utc explicitly."""
+
+def quiet_until(now_utc=None, answering: bool = False):
+    """When the quiet time ends, if it is on at that moment; otherwise None.
+
+    Settings quiet_from_hour and quiet_to_hour are hours of the service time zone; equal hours mean no quiet time at
+    night. On the days off (quiet_days) nobody is written to first: such messages wait for the next working morning.
+    An answer to somebody who has just written (`answering`) is held only at night, not on the days off.
+    Tests see no quiet time unless they pass now_utc explicitly."""
     if now_utc is None and config.TESTING:
         return None
     start, end = settings_store.get("quiet_from_hour"), settings_store.get("quiet_to_hour")
-    if start is None or end is None:
-        return None
-    start, end = int(start), int(end)
-    if start == end:
-        return None
-    now = (now_utc or dt.datetime.now(dt.timezone.utc)).astimezone(_zone())
-    hour = now.hour
-    inside = start <= hour < end if start < end else (hour >= start or hour < end)
-    if not inside:
-        return None
-    opens = now.replace(hour=end, minute=0, second=0, microsecond=0)
-    if opens <= now:
-        opens += dt.timedelta(days=1)
-    return opens.astimezone(dt.timezone.utc)
+    start = int(start) if start is not None else 0
+    end = int(end) if end is not None else 0
+    days = set() if answering else quiet_days()
+    moment = (now_utc or dt.datetime.now(dt.timezone.utc)).astimezone(_zone())
+    opens = None
+    for _ in range(9):
+        hour = moment.hour
+        inside = start != end and (start <= hour < end if start < end else (hour >= start or hour < end))
+        if inside:  # the night: until the morning hour
+            later = moment.replace(hour=end, minute=0, second=0, microsecond=0)
+            moment = later if later > moment else later + dt.timedelta(days=1)
+        elif moment.weekday() in days:  # a day off: until the morning of the next day
+            moment = (moment + dt.timedelta(days=1)).replace(hour=end, minute=0, second=0, microsecond=0)
+        else:
+            break
+        opens = moment
+    return opens.astimezone(dt.timezone.utc) if opens is not None else None
+
+
+def working_after(start, hours: float):
+    """The moment `hours` of working time after `start`: the quiet hours at night and the days off are not counted
+    (setting silence_working_hours; when it is off, plain hours). Used for the silence of a person: a question asked
+    on Friday evening is followed up on Monday, not on Saturday."""
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=dt.timezone.utc)
+    left = dt.timedelta(hours=float(hours or 0))
+    if not settings_store.get("silence_working_hours"):
+        return start + left
+    begin, end = settings_store.get("quiet_from_hour"), settings_store.get("quiet_to_hour")
+    begin = int(begin) if begin is not None else 0
+    end = int(end) if end is not None else 0
+    days, zone, moment = quiet_days(), _zone(), start
+    if begin == end and not days:
+        return start + left
+    for _ in range(200):
+        opens = quiet_until(moment)
+        if opens is not None:  # inside the night or a day off: the count waits for the morning
+            moment = opens
+            continue
+        local = moment.astimezone(zone)
+        closes = []
+        if begin != end:
+            night = local.replace(hour=begin, minute=0, second=0, microsecond=0)
+            closes.append(night if night > local else night + dt.timedelta(days=1))
+        if days:
+            midnight = (local + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            for _ in range(7):
+                if midnight.weekday() in days:
+                    closes.append(midnight)
+                    break
+                midnight += dt.timedelta(days=1)
+        if not closes:
+            break
+        close = min(closes).astimezone(dt.timezone.utc)
+        if moment + left <= close:
+            break
+        left -= close - moment
+        moment = close
+    return moment + left
 
 
 # ----------------------------------------------------------------------------- the account used by the app
@@ -459,6 +613,7 @@ _on_message = None
 _state = {"me": None, "error": "", "connected": False}
 _send_lock = threading.Lock()
 _sent_at: list[float] = []
+_sent_to: collections.defaultdict = collections.defaultdict(list)  # ref -> times of messages started with that person
 _last_send = [0.0]
 _paused_until = [0.0]
 
@@ -498,14 +653,12 @@ def me() -> dict:
 
 def status() -> dict:
     step = pending_step()
-    phone = settings_store.get("userbot_phone") or ""
-    if step:  # the number of the login that is still in progress
-        try:
-            phone = json.loads(unseal(settings_store.get("userbot_pending") or "") or "{}").get("phone", phone)
-        except ValueError:
-            pass
+    phone, via = settings_store.get("userbot_phone") or "", ""
+    if step:  # the number of the login that is still in progress and where Telegram sent its code
+        data = _pending_data()
+        phone, via = data.get("phone") or phone, data.get("via", "")
     return {"configured": configured(), "connected": ready(), "me": me(), "error": _state["error"], "step": step,
-            "phone": phone, "paused": time.time() < _paused_until[0]}
+            "phone": phone, "via": via, "paused": time.time() < _paused_until[0]}
 
 
 def take_lease() -> bool:
@@ -640,37 +793,104 @@ def pending_step():
         return None
 
 
-def _pending() -> dict:
+def _pending_data() -> dict:
     try:
         data = json.loads(unseal(settings_store.get("userbot_pending") or "") or "{}")
     except ValueError:
         data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _pending() -> dict:
+    data = _pending_data()
     if not data:
         raise LoginError("Вход не начат или устарел: начните заново с номера телефона.")
     return data
 
 
-def login_start(api_id: str, api_hash: str, phone: str) -> None:
-    api_id, api_hash = (api_id or "").strip(), (api_hash or "").strip()
-    phone = re.sub(r"[\s()\-]", "", phone or "")
+def _check_keys(api_id: str, api_hash: str) -> None:
     if not re.fullmatch(r"\d{4,12}", api_id):
         raise LoginError("api_id это число из 5-9 цифр со страницы my.telegram.org/apps.")
     if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
         raise LoginError("api_hash это 32 символа (цифры и буквы a-f) со страницы my.telegram.org/apps.")
+
+
+def login_start(api_id: str, api_hash: str, phone: str) -> str:
+    """Asks Telegram for the code (the code step says where it went). Returns what the panel says: that the QR code is
+    shown instead when Telegram sends this account no code at all."""
+    api_id, api_hash = (api_id or "").strip(), (api_hash or "").strip()
+    phone = re.sub(r"[\s()\-]", "", phone or "")
+    _check_keys(api_id, api_hash)
     if not re.fullmatch(r"\+\d{7,15}", phone):
         raise LoginError("Номер телефона нужен в международном формате, например +375291234567.")
-    pending = _backend().login_start(api_id, api_hash, phone)
+    try:
+        pending = _backend().login_start(api_id, api_hash, phone)
+    except NoCodeError as exc:
+        qr_start(api_id, api_hash)
+        return f"{exc} Войдите по QR-коду: код не нужен."
     pending.update(api_id=api_id, api_hash=api_hash, step="code")
     settings_store.set_many({"userbot_pending": seal(json.dumps(pending))})
+    return "Код отправлен."
+
+
+# login by QR code: the phone where the account is open confirms the new device, no code is needed
+_qr_lock = threading.Lock()
+
+
+def qr_start(api_id: str = "", api_hash: str = "") -> None:
+    """Shows a QR code to scan. Without keys («Код не пришёл?», «Показать новый QR-код») takes those of the login in
+    progress, so nobody types them again."""
+    api_id, api_hash = (api_id or "").strip(), (api_hash or "").strip()
+    if not api_id and not api_hash:
+        data = _pending_data()
+        api_id, api_hash = str(data.get("api_id") or ""), str(data.get("api_hash") or "")
+        if not api_id:
+            raise LoginError("Вход не начат или устарел: впишите api_id и api_hash заново.")
+    _check_keys(api_id, api_hash)
+    _backend().qr_start(api_id, api_hash)
+    settings_store.set_many({"userbot_pending": seal(json.dumps({"api_id": api_id, "api_hash": api_hash, "step": "qr"}))})
+
+
+def qr_poll() -> dict:
+    """Where the login by QR code stands: "wait" with the link to show, "ok" (signed in), "password" (the account
+    asks its two-step password next), "expired" (show a new code) or "gone" (no QR login in progress)."""
+    with _qr_lock:
+        if pending_step() != "qr":
+            return {"state": "gone"}
+        state = getattr(_backend(), "qr_state", lambda: None)()
+        if not state:  # the service restarted while the code was on the screen
+            return {"state": "expired", "error": "QR-код устарел."}
+        if state["state"] == "wait":
+            return {"state": "wait", "url": state["url"]}
+        if state["state"] in ("expired", "error"):
+            return {"state": "expired", "error": state.get("error") or "QR-код устарел: за 5 минут его не отсканировали."}
+        pending = _pending()
+        _backend().qr_cancel()
+        if state["state"] == "password":
+            settings_store.set_many({"userbot_pending": seal(json.dumps(dict(pending, session=state["session"],
+                                                                                  step="password")))})
+            return {"state": "password"}
+        phone = str(state.get("phone") or "")
+        _finish(state["session"], dict(pending, phone=("+" + phone.lstrip("+")) if phone else ""))
+        return {"state": "ok"}
+
+
+def qr_picture(url: str) -> str:
+    """The login link as an inline SVG QR code for the panel."""
+    import segno
+    return segno.make(url, error="m").svg_inline(scale=6, border=3, dark="#111111", light="#ffffff", svgclass="tg-qr-svg",
+                                                 omitsize=True)
 
 
 def _finish(session: str, pending: dict) -> None:
     settings_store.set_many({
         "userbot_api_id": seal(pending["api_id"]), "userbot_api_hash": seal(pending["api_hash"]),
-        "userbot_session": seal(session), "userbot_phone": pending["phone"], "userbot_pending": ""})
+        "userbot_session": seal(session), "userbot_phone": pending.get("phone") or "", "userbot_pending": ""})
     _state["error"] = ""
     if not start():
         raise LoginError(_state["error"] or "Вход выполнен, но подключиться к Telegram не удалось.")
+    if not pending.get("phone") and (_state["me"] or {}).get("phone"):  # by QR code the number comes from the account
+        settings_store.set_many({"userbot_phone": "+" + str(_state["me"]["phone"]).lstrip("+")})
 
 
 def login_code(code: str) -> str:
@@ -696,6 +916,10 @@ def logout() -> None:
             _backend().log_out()
     except Exception:  # noqa: BLE001
         log.exception("log out failed")
+    try:
+        getattr(_backend(), "qr_cancel", lambda: None)()  # a QR code still on the screen stops waiting
+    except Exception:  # noqa: BLE001
+        log.exception("could not stop the QR login")
     _state.update(connected=False, me=None, error="")
     settings_store.set_many({key: "" for key in ("userbot_api_id", "userbot_api_hash", "userbot_session",
                                                  "userbot_phone", "userbot_pending")})
@@ -703,13 +927,37 @@ def logout() -> None:
 
 
 # ----------------------------------------------------------------------------- sending
-def _guard_send(urgent: bool = False):
+def person_limit() -> int:
+    """How many messages the assistant may start with one person in an hour (0 = no limit). Answers to somebody who
+    wrote and reminders asked for at a given time are not counted."""
+    try:
+        return max(0, int(settings_store.get("person_hourly_limit") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _busy_for(ref) -> float:
+    """Seconds until one more message may be started with this person (0 = now)."""
+    limit = person_limit()
+    key = str(ref or "").strip().lower()
+    if not limit or not key:
+        return 0.0
+    now = time.time()
+    recent = [t for t in _sent_to.get(key, []) if t > now - 3600]
+    _sent_to[key] = recent
+    return (recent[0] + 3600 - now) if len(recent) >= limit else 0.0
+
+
+def _guard_send(urgent: bool = False, answering: bool = False, ref=None):
     now = time.time()
     if now < _paused_until[0]:
         raise telegram.TelegramError("Telegram ограничил отправку с аккаунта. Сообщения не уходят, пока не закончится пауза.")
-    until = None if urgent else quiet_until()  # a message somebody asked for at a given time is not held back
+    until = None if urgent else quiet_until(answering=answering)  # asked for at a given time: not held back
     if until is not None:
         raise QuietHours((until - dt.datetime.now(dt.timezone.utc)).total_seconds())
+    busy = 0.0 if urgent or answering else _busy_for(ref)
+    if busy:
+        raise Busy(busy)
     if not ready():
         if configured():
             raise telegram.TelegramError("Аккаунт Telegram подключается, подождите минуту", retryable=True, retry_after=20)
@@ -739,23 +987,29 @@ def _flood(exc: PeerFlood):
     log.error("PeerFlood: sending paused for %s hours", PEER_FLOOD_PAUSE // 3600)
 
 
-def send_message(chat_id, text: str, buttons=None, reply_to=None, urgent: bool = False) -> dict:
+def send_message(chat_id, text: str, buttons=None, reply_to=None, urgent: bool = False, answering: bool = False,
+                 html: bool = False) -> dict:
     """Same shape as telegram.send_message. Buttons do not exist for a personal account and are ignored.
-    `urgent` skips the quiet hours (reminders that were asked for at a given time)."""
+    `urgent` skips the quiet time and the hourly limit (reminders that were asked for at a given time); `answering` is
+    the reply to somebody who has just written: held only at night, never counted in the hourly limit. `html`: the
+    text is Telegram HTML (links of the morning brief); otherwise plain text."""
     with _send_lock:
-        _guard_send(urgent)
+        _guard_send(urgent, answering, chat_id)
         try:
-            result = _backend().send(str(chat_id), text, reply_to=reply_to, typing=_pace(len(text)))
+            result = _backend().send(str(chat_id), text, reply_to=reply_to, typing=_pace(len(text)),
+                                     **({"html": True} if html else {}))
         except PeerFlood as exc:
             _flood(exc)
             raise
         _record_send()
+        if not urgent and not answering:
+            _sent_to[str(chat_id).strip().lower()].append(time.time())
         return result
 
 
-def send_document(chat_id, filename: str, content: bytes, caption: str = "") -> dict:
+def send_document(chat_id, filename: str, content: bytes, caption: str = "", answering: bool = False) -> dict:
     with _send_lock:
-        _guard_send()
+        _guard_send(False, answering, None)  # a file follows its message: it is not counted on its own
         _pace()
         try:
             result = _backend().send_file(str(chat_id), filename, content, caption)

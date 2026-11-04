@@ -1,0 +1,187 @@
+{% from "_icons.html" import icon %}{% from "_people_options.html" import employee_options %}
+{% macro plural(n, one, few, many) %}{{ one if n % 10 == 1 and n % 100 != 11 else (few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many) }}{% endmacro %}
+{% macro play(seq, start, end) %}{% if (recording or {}).playable %}<button type="button" class="vd-play-quote" data-vd-play-seq="{{ seq }}" data-from="{{ start }}" data-to="{{ end }}"
+          aria-label="Прослушать фрагмент {{ mmss(start) }}" title="Прослушать фрагмент" hidden><span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span></button>{% endif %}{% endmacro %}
+{% set d = diagram %}
+{% set people = d.speakers|length %}
+{% set rec = recording or {} %}
+<link rel="stylesheet" href="{{ asset('voice-diagram.css') }}">
+<section class="card voice-diagram" id="voice-diagram" aria-labelledby="voice-diagram-title">
+  <div class="vd-head">
+    <div>
+      <h2 id="voice-diagram-title">{{ icon('wave') }}Кто и когда говорил</h2>
+      <p class="small muted vd-meta">{{ people }} {{ plural(people, 'говорящий', 'говорящих', 'говорящих') }}
+        · {% if d.voice_matched %}голос совпал у {{ d.voice_matched }} из {{ people }}{% else %}голоса не сверялись с образцами{% endif %}
+        {% if d.unknown %}· не распознано: {{ d.unknown|length }}{% endif %}
+        · речь {{ mmss(d.speech_seconds) }} из {{ mmss(d.duration) }}</p>
+      {% if diarization_note %}<p class="small muted vd-meta">{% if diarization_note.error %}Разметка «{{ diarization_note.title }}» не сработала: {{ diarization_note.error }} Голоса размечены по кускам записи.
+        {%- else %}Голоса размечены по всей записи: {{ diarization_note.title }}{% if diarization_note.voices %} · {{ diarization_note.voices }} {{ plural(diarization_note.voices, 'голос', 'голоса', 'голосов') }}{% endif %}.{% endif %}</p>{% endif %}
+    </div>
+    <div class="vd-tools" data-vd-tools hidden>
+      <div class="vd-zoom" role="group" aria-label="Масштаб">
+        <button type="button" class="btn sm" data-vd-zoom="-1" aria-label="Уменьшить масштаб">−</button>
+        <span class="vd-zoom-value" data-vd-zoom-value aria-live="polite">×1</span>
+        <button type="button" class="btn sm" data-vd-zoom="1" aria-label="Увеличить масштаб">+</button>
+      </div>
+      {% if rec.playable %}
+      <button type="button" class="btn sm vd-play" data-vd-play aria-label="Слушать" title="Слушать с выбранного места (пробел)">
+        <span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span><span data-vd-play-label>Слушать</span></button>
+      <button type="button" class="btn sm vd-rate" data-vd-rate title="Скорость воспроизведения" aria-label="Скорость воспроизведения 1×">1×</button>
+      {% else %}
+      <button type="button" class="btn sm" disabled title="{{ rec.text or 'Записи нет' }}">{{ icon('play') }}Слушать</button>
+      {% endif %}
+    </div>
+  </div>
+  {% if speaker_msg %}<div class="vd-msg" role="status">{{ speaker_msg }}</div>{% endif %}
+  {% if recording_msg %}<div class="vd-msg" role="status">{{ recording_msg }}</div>{% endif %}
+  <div class="vd-msg is-error" data-vd-play-error role="alert" hidden></div>
+  <ul class="vd-legend" aria-label="Говорящие">
+    {% for sp in d.speakers %}
+    <li><button type="button" class="vd-chip" data-vd-speaker="{{ loop.index0 }}" aria-pressed="false" style="--c: {{ sp.color }}"
+        title="{{ mmss(sp.seconds) }} речи · {{ sp.turns }} {{ plural(sp.turns, 'реплика', 'реплики', 'реплик') }}. Нажмите, чтобы выделить только этого говорящего.">
+      <i class="vd-dot" aria-hidden="true"></i><span class="vd-chip-name">{{ sp.n }} · {{ sp.name }}</span>
+      <span class="vd-chip-share">{{ sp.share }}%</span>
+      <span class="pill {{ sp.status_tone }}" title="{{ sp.status_hint }}">{{ sp.status_label }}{% if sp.confidence is defined %} · {{ sp.confidence }}%{% endif %}</span>
+    </button></li>
+    {% endfor %}
+  </ul>
+  <div class="vd-stage" data-vd-stage>
+    <div class="vd-static" role="img" aria-label="Участки речи по говорящим">
+      {% for t in d.turns %}<i style="left:{{ (t[1] / d.duration * 100)|round(3) }}%;width:{{ ((t[2] - t[1]) / d.duration * 100)|round(3) }}%;--c:{{ d.speakers[t[0]].color }}"></i>{% endfor %}
+    </div>
+    <div class="vd-static-axis small muted"><span>00:00</span><span>{{ mmss(d.duration / 2) }}</span><span>{{ mmss(d.duration) }}</span></div>
+  </div>
+  <div class="vd-detail" data-vd-detail aria-live="polite" hidden></div>
+  <p class="small muted vd-hint">
+    {%- if d.peaks %}Высота — громкость записи{% if d.synthetic %} (в демо волна условная: у демо нет записи){% endif %}, цвет — говорящий по расшифровке.
+    {%- else %}Волна громкости строится для новых записей при обработке. Аудио этого совещания уже удалено, поэтому показаны участки речи по расшифровке.{% endif %}
+    Выноски — начало реплик; при увеличении масштаба их становится больше. Штриховка — говорят одновременно.
+    {% if rec.playable %}Нажмите на выноску или волну, чтобы прочитать реплику и слушать с этого места; ← и → — соседние реплики, пробел — пауза.
+    Если выделен говорящий, звучат только его реплики.
+    {%- else %}Нажмите на выноску или участок, чтобы прочитать реплику; ← и → — соседние реплики.{% endif %}</p>
+  {% if rec.text %}
+  <div class="vd-rec small muted" data-vd-rec="{{ rec.state }}">
+    <span>{{ rec.text }}</span>
+    {% if rec.playable %}
+    <a class="vd-rec-link" href="{{ rec.download }}">{{ icon('download') }}Скачать MP3 · {{ rec.size }}</a>
+    {% if recording_admin %}<form method="post" action="/meetings/{{ m.id }}/recording/delete" class="vd-rec-delete"
+        onsubmit="return confirm('Удалить запись этого совещания из хранилища? Расшифровка, протокол и диаграмма останутся, а слушать и скачивать запись будет нельзя.')">
+      <button class="btn sm ghost danger">Удалить запись</button></form>{% endif %}
+    <noscript><audio class="vd-rec-audio" controls preload="none" src="{{ rec.src }}"></audio></noscript>
+    {% endif %}
+    {% if rec.restorable %}<form method="post" action="/meetings/{{ m.id }}/recording/restore" class="vd-rec-restore">
+      <button class="btn sm" title="Запись есть в облаке TicNote: скачаем её, сожмём и сохраним в хранилище, чтобы слушать фрагменты">{{ icon('download') }}Скачать из TicNote заново</button></form>{% endif %}
+  </div>
+  {% endif %}
+  {% if speakers_editable %}
+  <details class="more vd-fix" {{ 'open' if speaker_msg }}>
+    <summary>Исправить говорящего</summary>
+    <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-form" data-vd-assign>
+      <label class="f">Кто в расшифровке
+        <select name="speaker" required>{% for sp in d.speakers %}<option value="{{ sp.name }}">{{ sp.n }} · {{ sp.name }} — {{ sp.status_label }}</option>{% endfor %}</select></label>
+      <label class="f">Это
+        <select name="employee_id" required data-vd-choice>
+          <option value="">Выберите сотрудника…</option>
+          {{ employee_options(employees, participant_ids) }}
+          <option value="guest">Гость — не сотрудник</option>
+        </select></label>
+      <label class="f" data-vd-guest>Имя гостя <input name="guest_name" maxlength="80" placeholder="Необязательно"></label>
+      <button class="btn primary">Применить ко всем репликам</button>
+    </form>
+    <p class="small muted">Имя заменится во всех репликах этого говорящего в расшифровке и на диаграмме. Протокол и задачи не меняются сами{% if m.status in ('awaiting_approval','rejected','error') %} — чтобы учесть исправление, нажмите «Пересобрать»{% endif %}.</p>
+    {% if d.has_manual %}<form method="post" action="/meetings/{{ m.id }}/speakers/reset" onsubmit="return confirm('Вернуть автоматическую разметку говорящих? Все ручные исправления этого совещания будут отменены.')">
+      <button class="btn sm ghost">Вернуть автоматическую разметку</button></form>{% endif %}
+    {% if relabel and relabel.can and relabel.state not in ('ready',) %}
+    <div class="vd-relabel-start">
+      <form method="post" action="/meetings/{{ m.id }}/speakers/relabel"><button class="btn sm">{{ icon('wave') }}Переразметить голоса</button></form>
+      <p class="small muted">Разметить голоса заново по сохранённой записи способом «{{ relabel.title }}». Меняются только говорящие: текст, протокол, задачи и ручные исправления остаются. Перед сохранением будет видно «было → стало».</p>
+    </div>
+    {% endif %}
+  </details>
+  {% endif %}
+  <script type="application/json" id="voice-diagram-data">{{ diagram_client|tojson }}</script>
+</section>
+{% if relabel and speakers_editable and relabel.state %}{% set r = relabel %}{% set s = r.summary %}
+<section class="card vd-relabel" id="voice-relabel" aria-labelledby="voice-relabel-title"{% if r.state == 'running' %} data-vd-relabel-running="/meetings/{{ m.id }}/speakers/relabel/status"{% endif %}>
+  <div class="row between"><h2 id="voice-relabel-title">{{ icon('wave') }}Переразметка голосов</h2>
+    <span class="pill {{ {'running': 'blue', 'ready': 'amber', 'error': 'red', 'saved': 'green'}.get(r.state, 'gray') }}">{{ {'running': 'идёт', 'ready': 'проверьте', 'error': 'не удалась', 'saved': 'сохранена'}.get(r.state, r.state) }}</span></div>
+  {% if r.state == 'running' %}
+  <p class="small muted" role="status">Способ «{{ r.title }}»: <span data-vd-relabel-progress>{{ r.progress or 'начинаю' }}</span>. Обычно это несколько минут; страница обновится сама.</p>
+  {% elif r.state == 'error' %}
+  <p class="small" role="alert">Переразметка не удалась: {{ r.error }}</p>
+  <div class="vd-relabel-actions">
+    {% if r.can %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel"><button class="btn sm">Попробовать ещё раз</button></form>{% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers/relabel/close"><button class="btn sm ghost">Закрыть</button></form>
+  </div>
+  {% elif r.state == 'ready' %}
+  {% if s.changed %}
+  <p class="small">Способ «{{ s.title }}»: говорящий сменится у <b>{{ s.changed }}</b> из {{ s.replicas }} {{ plural(s.replicas, 'реплики', 'реплик', 'реплик') }} · голосов было {{ s.before }}, станет {{ s.after }}{% if s.remembered %} · узнаны по прошлым совещаниям: {{ s.remembered }}{% endif %}{% if s.named %} · имена из разговора: {{ s.named }}{% endif %}.</p>
+  <p class="small muted">{% if s.manual %}Ручные исправления ({{ s.manual }} {{ plural(s.manual, 'реплика', 'реплики', 'реплик') }}) не тронуты. {% endif %}Текст, время реплик, протокол и задачи не меняются. Пока не сохраните, расшифровка остаётся прежней.</p>
+  <div class="table-wrap"><table class="ref-table small vd-relabel-pairs">
+    <thead><tr><th>Было</th><th>Стало</th><th>Реплик</th></tr></thead>
+    <tbody>{% for p in r.pairs %}<tr><td>{{ p.before }}</td><td>{{ p.after }}</td><td>{{ p.count }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if r.changes %}<details class="more vd-relabel-changes"><summary>Реплики, у которых сменится говорящий{% if s.changed > r.changes|length %} (первые {{ r.changes|length }} из {{ s.changed }}){% endif %}</summary>
+    <ul class="vd-quotes">{% for c in r.changes %}
+      <li><a class="t" href="#voice-diagram" data-vd-seq="{{ c.seq }}" title="Показать на диаграмме">{{ mmss(c.start) }}</a> «{{ c.text }}» — {{ c.before }} → <b>{{ c.after }}</b></li>{% endfor %}</ul>
+  </details>{% endif %}
+  {% else %}
+  <p class="small">Способ «{{ s.title }}» разметил голоса так же, как сейчас — менять нечего.</p>
+  {% endif %}
+  <div class="vd-relabel-actions">
+    {% if r.stale %}<p class="small" role="alert">Расшифровку изменили после переразметки — эту разметку уже не сохранить.</p>
+    {% if r.can %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel"><button class="btn sm">Переразметить заново</button></form>{% endif %}
+    {% elif s.changed %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel/save"><button class="btn primary sm">Сохранить новую разметку</button></form>{% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers/relabel/close"><button class="btn sm ghost">{{ 'Отменить' if s.changed and not r.stale else 'Закрыть' }}</button></form>
+  </div>
+  {% elif r.state == 'saved' %}
+  <p class="small">Новая разметка сохранена{% if r.by %} ({{ r.by }}){% endif %}: способ «{{ s.title }}», говорящий сменился у {{ s.changed }} {{ plural(s.changed or 0, 'реплики', 'реплик', 'реплик') }}. Протокол и задачи не менялись{% if m.status in ('awaiting_approval','rejected','error') %} — чтобы учесть новых говорящих, нажмите «Пересобрать»{% endif %}.</p>
+  <div class="vd-relabel-actions">
+    {% if r.revertable %}<form method="post" action="/meetings/{{ m.id }}/speakers/relabel/revert" onsubmit="return confirm('Вернуть разметку голосов, которая была до переразметки?')"><button class="btn sm">Вернуть прежнюю разметку</button></form>{% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers/relabel/close"><button class="btn sm ghost">Скрыть</button></form>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+{% if d.unknown and speakers_editable %}
+<section class="card vd-ask" id="voice-speakers" aria-labelledby="voice-speakers-title">
+  <div class="row between"><h2 id="voice-speakers-title">Вопрос: кто это?</h2>
+    <span class="pill amber">{{ d.unknown|length }} {{ plural(d.unknown|length, 'говорящий не распознан', 'говорящих не распознаны', 'говорящих не распознаны') }}</span></div>
+  <p class="small muted">Голос не совпал ни с одним образцом, а разговор не доказывает имя достаточно уверенно. {% if rec.playable %}Прослушайте фрагменты кнопкой ▶ или прочитайте их{% else %}Прочитайте фрагменты{% endif %} и укажите, кто это: имя заменится во всех его репликах.</p>
+  {% for sp in d.unknown %}
+  <div class="vd-ask-row">
+    <div class="vd-ask-who"><i class="vd-dot" style="--c: {{ sp.color }}" aria-hidden="true"></i><b>{{ sp.name }}</b>
+      <span class="small muted">{{ mmss(sp.seconds) }} речи · {{ sp.turns }} {{ plural(sp.turns, 'реплика', 'реплики', 'реплик') }} · {{ sp.share }}%</span></div>
+    {% if sp.samples %}<ul class="vd-quotes">{% for q in sp.samples %}
+      <li>{{ play(q.seq, q.start, q.end) }}<a class="t" href="#voice-diagram" data-vd-seq="{{ q.seq }}" title="Показать на диаграмме">{{ mmss(q.start) }}</a> «{{ q.text }}»</li>{% endfor %}</ul>{% endif %}
+    {% if sp.candidates %}
+    <div class="vd-cands" aria-label="Похоже на">
+      <p class="small muted">Похоже на — уверенности не хватило, чтобы подписать без вопроса:</p>
+      {% for c in sp.candidates %}
+      <div class="vd-cand">
+        <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-cand-pick">
+          <input type="hidden" name="speaker" value="{{ sp.name }}"><input type="hidden" name="employee_id" value="{{ c.employee_id }}">
+          <button class="btn sm" title="Применить ко всем репликам {{ sp.name }}">Это {{ c.name }}</button></form>
+        <span class="pill {{ 'amber' if c.percent >= 50 else 'gray' }}" title="Уверенность по разговору: ниже порога, поэтому имя не поставлено само">{{ c.percent }}%</span>
+        {% if c.position %}<span class="small muted">{{ c.position }}</span>{% endif %}
+        {% if c.reasons %}<ul class="vd-cand-why small">{% for r in c.reasons %}
+          <li>{% if r.seq is not none %}{{ play(r.seq, r.start, r.end) }}<a class="t" href="#voice-diagram" data-vd-seq="{{ r.seq }}" title="Показать на диаграмме">{{ mmss(r.at) }}</a>{% else %}<span class="t">{{ mmss(r.at) }}</span>{% endif %} {{ r.text }}</li>{% endfor %}</ul>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <form method="post" action="/meetings/{{ m.id }}/speakers" class="vd-ask-controls" data-vd-assign>
+      <input type="hidden" name="speaker" value="{{ sp.name }}">
+      <select name="employee_id" required data-vd-choice aria-label="Кто это: {{ sp.name }}">
+        <option value="">{{ 'Другой человек…' if sp.candidates else 'Выберите сотрудника…' }}</option>
+        {{ employee_options(employees, participant_ids) }}
+        <option value="guest">Гость — не сотрудник</option>
+      </select>
+      <input name="guest_name" maxlength="80" placeholder="Имя гостя (необязательно)" aria-label="Имя гостя" data-vd-guest>
+      <button class="btn primary">Применить ко всем репликам</button>
+    </form>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+<script src="{{ asset('voice-diagram.js') }}" defer></script>

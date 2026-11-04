@@ -2,6 +2,7 @@
 {% block body %}
 <div class="page-h"><div><h1>Telegram-аккаунт</h1><p>ИИ-сотрудник пишет людям с этого аккаунта, как обычный человек.</p></div></div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
+{% if not ai %}<div class="card note tg-mode-note">Сейчас людям пишет обычный бот. Аккаунт можно подключить заранее: писать с него ИИ-сотрудник начнёт, когда в <a href="/settings">Настройках</a> включите «ИИ-сотрудник» и сохраните.</div>{% endif %}
 <section class="card">
   {% if account.connected %}
   <h2>Подключён</h2>
@@ -11,11 +12,47 @@
   <form method="post" action="/settings/telegram/logout" onsubmit="return confirm('Выйти из аккаунта? Сообщения перестанут отправляться.')"><button class="btn danger">Выйти из аккаунта</button></form>
   {% elif account.step == 'code' %}
   <h2>Введите код</h2>
-  <p class="small muted">Telegram отправил код в приложение на номер {{ account.phone }} (сообщение от «Telegram»). Не пересылайте код никому в чат: Telegram отменит его.</p>
+  <p class="small muted">Номер {{ account.phone }}: код отправлен {{ account.via or 'в приложение Telegram — сообщением от «Telegram» с синей галочкой на телефоне или компьютере, где открыт этот номер (не SMS)' }}. Не пересылайте код никому в чат: Telegram отменит его.</p>
   <form method="post" action="/settings/telegram/code" class="emp-form">
     <label class="f">Код <input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
     <button class="btn primary">Войти</button>
   </form>
+  <div class="tg-alt">
+    <p class="small"><b>Код не пришёл?</b> Войдите по QR-коду: код не нужен, вход подтвердит телефон, где открыт этот аккаунт.</p>
+    <form method="post" action="/settings/telegram/qr"><button class="btn">Войти по QR-коду</button></form>
+  </div>
+  <form method="post" action="/settings/telegram/logout"><button class="btn sm">Начать заново</button></form>
+  {% elif account.step == 'qr' %}
+  <h2>Вход по QR-коду</h2>
+  {% if qr.svg %}
+  <ol class="small tg-steps">
+    <li>Откройте Telegram на телефоне, где открыт этот аккаунт.</li>
+    <li>Настройки → Устройства → «Подключить устройство».</li>
+    <li>Наведите камеру на код. Если на аккаунте облачный пароль — следующим шагом спросим его.</li>
+  </ol>
+  <div class="tg-qr" id="tg-qr" data-v="{{ qr.v }}">{{ qr.svg|safe }}</div>
+  <p class="small muted">Код обновляется сам, держите страницу открытой. Ждём 5 минут.</p>
+  <script>
+  (function () {
+    var box = document.getElementById('tg-qr'), busy = false;
+    var timer = setInterval(function () {
+      if (busy) return;
+      busy = true;
+      fetch('/settings/telegram/qr', {cache: 'no-store', credentials: 'same-origin'}).then(function (r) { return r.json(); }).then(function (j) {
+        if (j.state === 'wait') {
+          if (j.v && j.v !== box.getAttribute('data-v')) { box.innerHTML = j.svg; box.setAttribute('data-v', j.v); }
+          return;
+        }
+        clearInterval(timer);
+        location.replace('/settings/telegram' + (j.msg ? '?msg=' + encodeURIComponent(j.msg) : ''));
+      }).catch(function () {}).then(function () { busy = false; });
+    }, 2000);
+  })();
+  </script>
+  {% else %}
+  <div class="warn small">{{ qr.error or 'QR-код устарел.' }}</div>
+  <form method="post" action="/settings/telegram/qr"><button class="btn primary">Показать новый QR-код</button></form>
+  {% endif %}
   <form method="post" action="/settings/telegram/logout"><button class="btn sm">Начать заново</button></form>
   {% elif account.step == 'password' %}
   <h2>Пароль двухэтапной проверки</h2>
@@ -28,12 +65,20 @@
   {% else %}
   <h2>Войти в аккаунт</h2>
   {% if account.configured %}<div class="warn small">{{ account.error or 'Аккаунт сохранён, но не подключён. Подождите минуту или войдите заново.' }}</div>{% endif %}
-  <p class="small muted">Нужны api_id и api_hash со страницы <a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a> (бесплатно), телефон аккаунта и доступ к приложению Telegram за кодом. Лучше отдельный аккаунт, а не основной.</p>
+  <p class="small muted">Нужны api_id и api_hash от Telegram (бесплатно), телефон аккаунта и доступ к приложению Telegram за кодом. Лучше отдельный аккаунт, а не основной.</p>
+  <ol class="small tg-steps">
+    <li>Откройте <a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a> и войдите номером этого аккаунта: код придёт в приложение Telegram.</li>
+    <li>В «API development tools» заполните App title и Short name (любые, латиницей, 5–32 знака, например sysai2026), Platform — Desktop, и нажмите «Create application».</li>
+    <li>Скопируйте сюда App api_id и App api_hash, укажите тот же номер и нажмите «Получить код».</li>
+    <li>Введите код из сообщения от «Telegram», а если на аккаунте включён облачный пароль — и его.</li>
+    <li>Код не приходит — нажмите «Войти по QR-коду» (номер не нужен) и отсканируйте код телефоном: Настройки → Устройства → «Подключить устройство».</li>
+  </ol>
   <form method="post" action="/settings/telegram/start" class="emp-form">
     <label class="f">api_id <input name="api_id" inputmode="numeric" autocomplete="off" required></label>
     <label class="f">api_hash <input type="password" name="api_hash" autocomplete="off" required></label>
     <label class="f">Телефон <input name="phone" placeholder="+375291234567" autocomplete="tel" required></label>
     <button class="btn primary">Получить код</button>
+    <button class="btn" formaction="/settings/telegram/qr" formnovalidate>Войти по QR-коду</button>
   </form>
   {% endif %}
 </section>

@@ -38,7 +38,6 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-PYANNOTEAI_API_KEY = os.getenv("PYANNOTEAI_API_KEY", "")  # legacy only
 TICNOTE_APPKEY = os.getenv("TICNOTE_APPKEY", "").strip()
 VOICE_SERVICE_URL = os.getenv("SYSAI_VOICE_SERVICE_URL", "").strip().rstrip("/")
 VOICE_SERVICE_TOKEN = os.getenv("SYSAI_VOICE_SERVICE_TOKEN", "").strip()
@@ -65,6 +64,31 @@ NOTION_CLIENT_SECRET = os.getenv("NOTION_CLIENT_SECRET", "").strip()
 NOTION_REDIRECT_URI = os.getenv("NOTION_REDIRECT_URI", "").strip().rstrip("/")
 
 MIC_INBOX_DIR = pathlib.Path(os.getenv("MIC_INBOX_DIR", DATA_DIR / "inbox"))
+
+# Private S3-compatible storage for meeting recordings (Cloudflare R2, Yandex Object Storage, Selectel…), see storage.py.
+# Without all four values recordings are not kept: the original is deleted after processing, as before.
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "").strip()
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+S3_REGION = os.getenv("S3_REGION", "").strip() or "auto"  # R2 signs with "auto"; Yandex: ru-central1
+
+
+def _positive_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
+RECORDING_RETENTION_DAYS = _positive_int("RECORDING_RETENTION_DAYS", 180)
+# A free Render instance sleeps after 15 minutes without requests and loses its disk: while a meeting is processed or a
+# recording uploaded, the service asks its own /health every 10 minutes (keep_awake.py). On by default on Render.
+KEEP_AWAKE = _bool("KEEP_AWAKE", bool(os.getenv("RENDER")))
+# The nightly dumps of the own server (deploy/compose.yaml mounts ./backups here read-only): server_watch.py copies
+# the newest one to the recordings storage. Empty: no dumps here (Render, a plain run).
+BACKUP_DIR = pathlib.Path(os.getenv("BACKUP_DIR")) if os.getenv("BACKUP_DIR") else None
+BACKUP_KEEP_DAYS = _positive_int("BACKUP_KEEP_DAYS", 14)
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Minsk")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 WORKERS = int(os.getenv("WORKERS", "2"))
@@ -99,11 +123,6 @@ def openrouter_key() -> str:
 
 def ticnote_appkey() -> str:
     return _panel("ticnote_appkey") or TICNOTE_APPKEY
-
-
-def pyannoteai_key() -> str:
-    """Deprecated compatibility helper; the active provider is the Vercel microservice."""
-    return _panel("pyannoteai_api_key") or PYANNOTEAI_API_KEY
 
 
 def voice_service_url() -> str:

@@ -1,0 +1,24 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}{{ skill.name if skill else ('Новый инструмент' if doc == 'TOOL.md' else 'Новый навык') }} — SYSAI_Hub{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}{% set is_tool = doc == 'TOOL.md' %}
+<div class="page-h"><div><h1>{{ ('Новая версия: ' ~ skill.name) if skill else ('Новый инструмент' if is_tool else 'Новый навык') }}</h1>
+  <p>{% if is_tool %}TOOL.md: в заголовке name (латиница, дефисы), kind (mcp — MCP-сервер, program — программа), description, version, run — команда запуска из папки инструмента (или url — MCP-сервер в сети), platform, tools, requires; дальше разделы «Когда применять», «Как запускать», «Ошибки». Код инструмента загружается архивом.{% else %}SKILL.md: в заголовке name (латиница, дефисы), description (когда применять), version; дальше разделы «Когда применять», «Как делать», «Ошибки», «Проверка».{% endif %}{% if base %} Остальные файлы берутся из версии {{ base }}.{% endif %}</p></div>
+  <div class="actions"><a class="btn" href="{{ ('/hub/' ~ skill.name) if skill else '/hub' }}">← Назад</a></div></div>
+{% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+{% if not skill %}<div class="nx-chips" style="margin-bottom:14px" role="group" aria-label="Что создать">
+  <a class="nx-chip{{ ' on' if kind == 'skill' }}" href="/hub/new">{{ icon('spark') }} Навык</a>
+  <a class="nx-chip{{ ' on' if kind == 'mcp' }}" href="/hub/new?kind=mcp">{{ icon('plug') }} MCP-сервер</a>
+  <a class="nx-chip{{ ' on' if kind == 'program' }}" href="/hub/new?kind=program">{{ icon('terminal') }} Программа</a></div>{% endif %}
+<section class="card">
+  <form method="post" action="{{ ('/hub/' ~ skill.name ~ '/edit') if skill else '/hub/new' }}" class="net-form">
+    <input type="hidden" name="base" value="{{ base }}"><input type="hidden" name="kind" value="{{ kind }}">
+    <label class="f wide">{{ doc }} <textarea name="skill_md" class="net-editor" spellcheck="false" required>{{ text }}</textarea></label>
+    {% if not skill %}<label class="f">Отдел-владелец <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select></label>{% endif %}
+    <label class="f">Что изменилось <input name="changelog" maxlength="4000"></label>
+    <div class="net-checks wide"><label><input type="checkbox" name="review" value="1"> сразу на проверку</label></div>
+    <div class="wide"><button class="btn primary">Сохранить версию</button>{% if is_tool %} <span class="small muted">Код — архивом в «Загрузить архив» на странице хаба: TOOL.md и файлы одной папкой.</span>{% endif %}</div>
+  </form>
+</section>
+{% if base and files %}<section class="card"><h2>Остальные файлы</h2><p class="small muted">{% for f in files %}{{ f.path }} ({{ f.size }} байт){{ ', ' if not loop.last }}{% endfor %}</p></section>{% endif %}
+{% endblock %}

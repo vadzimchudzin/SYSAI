@@ -18,7 +18,7 @@ def test_stop_aborts_running_transcription_and_retry_restarts(monkeypatch, tmp_p
     monkeypatch.setattr(config, "llm_enabled", lambda: True)
     gate, reached, after = threading.Event(), threading.Event(), []
 
-    def slow_transcribe(path, settings, progress=None, checkpoint=None):
+    def slow_transcribe(path, settings, progress=None, checkpoint=None, **kwargs):
         progress("Расшифровка 1 из 2")
         reached.set()
         gate.wait(5)

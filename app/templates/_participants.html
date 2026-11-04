@@ -1,0 +1,32 @@
+{# Who was at the meeting (participants.py): voices get names only from them, the protocol says «Присутствовали». #}
+{% set pp = attendance %}
+<section class="card meeting-people" id="meeting-participants" aria-labelledby="meeting-participants-title">
+  <div class="people-head">
+    <h2 id="meeting-participants-title">Участники{% if pp.count %} · {{ pp.count }}{% endif %}</h2>
+    <span class="small muted">{{ pp.origin }}</span>
+  </div>
+  {% if people_msg %}<div class="people-msg" role="status">{{ people_msg }}</div>{% endif %}
+  {% if pp.set and pp.count %}
+  <ul class="people-list" aria-label="Кто был на встрече">
+    {% for p in pp.people %}<li>{{ p.name }}{% if p.position %} <span class="muted">· {{ p.position }}</span>{% endif %}{% if not p.active %} <span class="muted">· не работает</span>{% endif %}</li>{% endfor %}
+    {% for g in pp.guests %}<li class="guest">{{ g }} <span class="muted">· гость</span></li>{% endfor %}
+  </ul>
+  {% elif pp.set %}<p class="small muted">В списке никого нет.</p>
+  {% else %}<p class="small muted">Отметьте, кто был на встрече: имена голосам будут подбираться только из участников, их число подскажет разметке, сколько голосов ждать, а в протоколе появится «Присутствовали».</p>{% endif %}
+  <details class="more"{{ ' open' if people_msg == '' and not pp.set and alert_hint }}>
+    <summary>{{ 'Изменить список' if pp.set else 'Отметить участников' }}</summary>
+    <form method="post" action="/meetings/{{ m.id }}/participants" class="people-form">
+      {% if employees %}<fieldset class="people-pick"><legend class="small muted">Сотрудники</legend>
+        {% for e in employees %}<label class="chip"><input type="checkbox" name="ids" value="{{ e.id }}"{{ ' checked' if e.id in pp.ids }}>{{ e.name }}{% if e.position %} <span class="muted">· {{ e.position }}</span>{% endif %}</label>{% endfor %}
+      </fieldset>{% endif %}
+      <label class="f">Гости — каждый с новой строки
+        <textarea name="guests" rows="2" maxlength="4000" placeholder="Иван Петров, подрядчик">{{ pp.guests|join('\n') }}</textarea></label>
+      <div class="row">
+        <button class="btn primary" name="action" value="save">Сохранить участников</button>
+        {% if alert_hint %}<button class="btn" name="action" value="alert">Взять {{ alert_hint }}</button>{% endif %}
+        {% if pp.set %}<button class="btn ghost" name="action" value="clear">Сбросить список</button>{% endif %}
+      </div>
+    </form>
+    <p class="small muted">Расшифровка сама не меняется: список учтут «Пересобрать» и следующая обработка записи. Человек, выбранный в «Кто это?» или у реплики, добавляется в участники.</p>
+  </details>
+</section>

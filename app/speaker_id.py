@@ -1,8 +1,8 @@
-"""Optional pyannoteAI speaker identification using consented, encrypted employee voiceprints.
+"""Voices through our own voice service (speaker-service/, Vercel): ECAPA voice prints, consented employee samples.
 
-Legacy enrollment stores an encrypted reusable template; meeting samples store encrypted DB audio. Reference samples are staged in a temporary
-directory and removed at the end of enrollment; meeting chunks are uploaded only when at least
-one active voiceprint and a provider key are configured.
+The service turns speech into 192-number voice prints; employees, meetings and the matching stay in this database.
+Employee samples are confirmed by a person on the meeting page and kept encrypted; meeting audio goes to the service
+only as short parts, for whole-record speaker labelling (diarize.py) and for matching to confirmed samples.
 """
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import hashlib
 import json
 import logging
 import math
+import operator
 import pathlib
 import subprocess
 import tempfile
 import time
-import uuid
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -23,12 +23,9 @@ from cryptography.fernet import Fernet, InvalidToken
 from . import audio, config
 
 log = logging.getLogger("sysai.speaker_id")
-BASE_URL = "https://api.pyannote.ai/v1"
 CONSENT_VERSION = "voiceprint-consent-v1"
-MATCH_THRESHOLD = 65.0
 MIN_SAMPLE_SECONDS = 5.0
 MAX_SAMPLE_SECONDS = 30.0
-MAX_SAMPLE_BYTES = 16 * 1024 * 1024
 
 
 class SpeakerIdentityError(RuntimeError):
@@ -69,266 +66,10 @@ def profiles_fingerprint(profiles: list[dict]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def enrolled_voiceprints() -> list[dict]:
-    """Fetch active employees' voiceprints only when voice-identification is explicitly configured."""
-    if not config.pyannoteai_key():
-        return []
-    from .db import Employee, EmployeeVoiceprint, SessionLocal
-
-    profiles = []
-    with SessionLocal() as session:
-        rows = (session.query(EmployeeVoiceprint)
-                .join(Employee, Employee.id == EmployeeVoiceprint.employee_id)
-                .filter(Employee.active.is_(True))
-                .order_by(Employee.id)
-                .all())
-        for row in rows:
-            try:
-                template = decrypt_voiceprint(row.encrypted_voiceprint)
-            except SpeakerIdentityError:
-                log.warning("Skipping unreadable voiceprint for employee id %s", row.employee_id)
-                continue
-            profiles.append({
-                "label": f"employee-{row.employee_id}",
-                "employee_id": row.employee_id,
-                "employee_name": row.employee.name,
-                "voiceprint": template,
-            })
-    return profiles
-
-
-def normalize_sample(source_path: str | pathlib.Path, normalized_path: str | pathlib.Path) -> float:
-    """Convert one clean speaker sample to mono 16 kHz WAV and enforce the 5–30 s window."""
-    source, target = pathlib.Path(source_path), pathlib.Path(normalized_path)
-    try:
-        duration = audio.duration(str(source))
-    except Exception as exc:
-        raise SpeakerIdentityError("Не удалось прочитать длительность аудио образца") from exc
-    if duration < MIN_SAMPLE_SECONDS:
-        raise SpeakerIdentityError("Нужен образец речи не короче 5 секунд")
-    if duration > MAX_SAMPLE_SECONDS:
-        raise SpeakerIdentityError("Образец должен быть не длиннее 30 секунд")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-             "-i", str(source), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
-             "-c:a", "pcm_s16le", str(target)],
-            capture_output=True, text=True, check=True, timeout=45,
-        )
-        normalized_duration = audio.duration(str(target))
-    except Exception as exc:
-        raise SpeakerIdentityError("Не удалось нормализовать образец. Попробуйте WAV или MP3.") from exc
-    if not MIN_SAMPLE_SECONDS <= normalized_duration <= MAX_SAMPLE_SECONDS + 0.1:
-        raise SpeakerIdentityError("После конвертации длительность образца должна быть 5–30 секунд")
-    return round(normalized_duration, 2)
-
-
-def _headers() -> dict:
-    key = config.pyannoteai_key()
-    if not key:
-        raise SpeakerIdentityError("Ключ pyannoteAI не задан")
-    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-
-
-def _json_response(response: httpx.Response, action: str) -> dict:
-    try:
-        response.raise_for_status()
-    except httpx.HTTPStatusError:
-        # Never include authorization headers or raw audio/template material in an error message.
-        detail = response.text[:250]
-        key = config.pyannoteai_key()
-        if key:
-            detail = detail.replace(key, "[hidden]")
-        raise SpeakerIdentityError(
-            f"pyannoteAI: операция «{action}» завершилась с HTTP {response.status_code}: {detail}"
-        ) from None
-    try:
-        payload = response.json()
-    except ValueError:
-        raise SpeakerIdentityError(f"pyannoteAI: некорректный JSON при операции «{action}»") from None
-    if not isinstance(payload, dict):
-        raise SpeakerIdentityError(f"pyannoteAI: некорректный ответ при операции «{action}»")
-    return payload
-
-
-def _upload_media(path: str | pathlib.Path, purpose: str) -> str:
-    """Upload bytes to the provider's temporary media area and return its media:// reference."""
-    media_url = f"media://sysai-{purpose}-{uuid.uuid4().hex}"
-    headers = _headers()
-    try:
-        response = httpx.post(
-            f"{BASE_URL}/media/input", headers=headers, json={"url": media_url}, timeout=30
-        )
-        payload = _json_response(response, "подготовка загрузки аудио")
-        upload_url = payload.get("url")
-        if not isinstance(upload_url, str) or not upload_url.startswith("https://"):
-            raise SpeakerIdentityError("pyannoteAI не выдал временный URL для загрузки аудио")
-        with pathlib.Path(path).open("rb") as audio_file:
-            upload = httpx.put(
-                upload_url, content=audio_file.read(),
-                headers={"Content-Type": "application/octet-stream"}, timeout=60,
-            )
-        try:
-            upload.raise_for_status()
-        except httpx.HTTPStatusError:
-            raise SpeakerIdentityError(
-                f"pyannoteAI не принял аудио (HTTP {upload.status_code})"
-            ) from None
-    except httpx.TimeoutException:
-        raise SpeakerIdentityError("Истекло время ожидания при передаче аудио в pyannoteAI") from None
-    except httpx.HTTPError as exc:
-        raise SpeakerIdentityError(f"Не удалось связаться с pyannoteAI: {str(exc)[:160]}") from None
-    return media_url
-
-
-def _wait_for_job(job_id: str, action: str, timeout_seconds: float = 150.0) -> dict:
-    deadline = time.monotonic() + timeout_seconds
-    headers = _headers()
-    while time.monotonic() < deadline:
-        try:
-            response = httpx.get(f"{BASE_URL}/jobs/{job_id}", headers=headers, timeout=20)
-            job = _json_response(response, f"проверка {action}")
-        except httpx.TimeoutException:
-            time.sleep(2)
-            continue
-        except httpx.HTTPError as exc:
-            raise SpeakerIdentityError(f"Связь с pyannoteAI прервалась при операции «{action}»: {str(exc)[:150]}") from None
-        status = job.get("status")
-        if status == "succeeded":
-            output = job.get("output")
-            if isinstance(output, dict):
-                return output
-            raise SpeakerIdentityError(f"pyannoteAI: операция «{action}» завершилась без результата")
-        if status == "failed":
-            error = job.get("error") or {}
-            message = str(error.get("message") or error.get("type") or "ошибка провайдера") if isinstance(error, dict) else str(error)
-            raise SpeakerIdentityError(f"pyannoteAI: операция «{action}» не выполнена: {message[:200]}")
-        time.sleep(2)
-    raise SpeakerIdentityError(f"Истекло время ожидания pyannoteAI при операции «{action}»")
-
-
-def _job_id(payload: dict, action: str) -> str:
-    job_id = payload.get("jobId") or payload.get("job_id")
-    if not isinstance(job_id, str) or not job_id:
-        raise SpeakerIdentityError(f"pyannoteAI не вернул ID задачи для операции «{action}»")
-    return job_id
-
-
-def create_voiceprint(sample_path: str | pathlib.Path, employee_id: int) -> str:
-    """Create the reusable voiceprint after the caller has captured explicit consent."""
-    media_url = _upload_media(sample_path, f"employee-{employee_id}")
-    try:
-        response = httpx.post(
-            f"{BASE_URL}/voiceprint", headers=_headers(), json={"url": media_url}, timeout=30
-        )
-        payload = _json_response(response, "создание голосового шаблона")
-    except httpx.TimeoutException:
-        raise SpeakerIdentityError("Истекло время ожидания при создании голосового шаблона") from None
-    result = _wait_for_job(_job_id(payload, "создание голосового шаблона"), "создание голосового шаблона")
-    template = result.get("voiceprint")
-    if not isinstance(template, str) or not template.strip():
-        raise SpeakerIdentityError("pyannoteAI не вернул голосовой шаблон")
-    return template
-
-
-def _identify_audio(path: str | pathlib.Path, profiles: list[dict]) -> dict:
-    if not profiles:
-        return {}
-    media_url = _upload_media(path, "meeting-chunk")
-    api_voiceprints = [
-        {"label": str(profile["label"]), "voiceprint": str(profile["voiceprint"])}
-        for profile in profiles
-    ]
-    try:
-        response = httpx.post(
-            f"{BASE_URL}/identify",
-            headers=_headers(),
-            json={
-                "url": media_url,
-                "voiceprints": api_voiceprints,
-                "matching": {"threshold": MATCH_THRESHOLD, "exclusive": True},
-            },
-            timeout=30,
-        )
-        payload = _json_response(response, "идентификация говорящих")
-    except httpx.TimeoutException:
-        raise SpeakerIdentityError("Истекло время ожидания при идентификации говорящих") from None
-    except httpx.HTTPError as exc:
-        raise SpeakerIdentityError(f"Не удалось связаться с pyannoteAI: {str(exc)[:150]}") from None
-    return _wait_for_job(_job_id(payload, "идентификация говорящих"), "идентификация говорящих")
-
-
-def identify_segments(path: str | pathlib.Path, segments: list[dict], profiles: list[dict],
-                      offset: float = 0.0, duration: float | None = None) -> list[dict]:
-    """Rename only spans explicitly matched to one enrolled template with a score >= threshold."""
-    if not segments or not profiles or not config.pyannoteai_key():
-        return segments
-    result = _identify_audio(path, profiles)
-    identified = result.get("identification")
-    if not isinstance(identified, list):
-        raise SpeakerIdentityError("pyannoteAI не вернул список идентификаций")
-    profile_by_label = {str(profile["label"]): profile for profile in profiles}
-    confidence_by_label = {}
-    voiceprint_rows = result.get("voiceprints")
-    for row in voiceprint_rows if isinstance(voiceprint_rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        matched = row.get("match")
-        scores = row.get("confidence")
-        if isinstance(matched, str) and isinstance(scores, dict):
-            try:
-                confidence_by_label[matched] = float(scores.get(matched))
-            except (TypeError, ValueError):
-                pass
-    spans = []
-    for item in identified:
-        if not isinstance(item, dict):
-            continue
-        label = item.get("match")
-        if not isinstance(label, str) or label not in profile_by_label:
-            continue
-        try:
-            start, end = float(item["start"]), float(item["end"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if end <= start:
-            continue
-        profile = profile_by_label[label]
-        score = confidence_by_label.get(label)
-        if score is None or score < MATCH_THRESHOLD:
-            continue
-        spans.append((start, end, profile, score))
-    if len(segments) == 1 and duration is not None and duration > 0:
-        # If ASR returned one fallback segment for an entire chunk, do not label
-        # the whole chunk from a short voice match near its start.
-        minimum_coverage = float(duration) * 0.8
-        spans = [span for span in spans if span[1] - span[0] >= minimum_coverage]
-    updated_segments = []
-    for segment in segments:
-        local_start = float(segment.get("start", 0) or 0) - float(offset or 0)
-        matches = [span for span in spans if span[0] - 0.35 <= local_start <= span[1] + 0.35]
-        employee_ids = {span[2]["employee_id"] for span in matches}
-        if len(employee_ids) != 1:
-            updated_segments.append(segment)
-            continue
-        selected = max(matches, key=lambda item: item[3])
-        profile, score = selected[2], selected[3]
-        renamed = dict(segment)
-        renamed.update({
-            "speaker": profile["employee_name"],
-            "speaker_employee_id": profile["employee_id"],
-            "speaker_source": "voiceprint",
-            "speaker_confidence": round(max(0.0, min(100.0, score)), 1),
-        })
-        updated_segments.append(renamed)
-    return updated_segments
-
-
 # -----------------------------------------------------------------------------
-# Local ECAPA embeddings through the isolated Vercel API. The legacy pyannote
-# helpers above are retained only for backward-compatible data/tests; new SYSAI
-# flows use the Vercel methods below and do not call pyannoteAI.
+# ECAPA voice prints through our own voice service (speaker-service/ on Vercel).
 VOICE_SERVICE_MAX_BYTES = 4 * 1024 * 1024
+VOICE_SERVICE_MAX_SEGMENTS = 150  # speech intervals in one /v1/identify request
 
 
 def _normalise_embedding(values) -> list[float]:
@@ -516,6 +257,43 @@ def _local_segments_with_end(segments: list[dict], offset: float, duration: floa
     return [item for item in prepared if item["speaker"]]
 
 
+def embed_speakers(path: str | pathlib.Path, segments: list[dict], min_seconds: float | None = None) -> dict:
+    """One voice print per label of this audio part: {"model_version": ..., "speakers": {label: {"embedding", ...}}}.
+
+    segments are [{"speaker", "start", "end"}] in seconds of this part; the service joins up to 30 s of each label and
+    skips labels with less than a second of speech (min_seconds asks for shorter ones, down to 0.3 s: a short reply;
+    a service that does not know the field keeps its one second)."""
+    audio_path = pathlib.Path(path)
+    raw = audio_path.read_bytes()
+    if not raw or len(raw) > VOICE_SERVICE_MAX_BYTES:
+        raise SpeakerIdentityError("Аудиофрагмент пуст или слишком большой для сервиса голосов")
+    try:
+        response = httpx.post(
+            _voice_service_request_url("/v1/identify"),
+            headers=_voice_service_headers(),
+            data={"segments_json": json.dumps({"segments": segments}, ensure_ascii=False),
+                  **({"min_seconds": f"{min(1.0, max(0.3, float(min_seconds))):.2f}"} if min_seconds else {})},
+            files={"audio": (audio_path.name, raw, "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav")},
+            timeout=110,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+        try:
+            detail = str(exc.response.json().get("detail") or "")
+        except Exception:
+            pass
+        raise SpeakerIdentityError(
+            "Сервис голосов не смог сравнить голоса" + (f": {detail[:180]}" if detail else f" (HTTP {exc.response.status_code})")
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SpeakerIdentityError("Не удалось связаться с сервисом голосов") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("speakers"), dict):
+        raise SpeakerIdentityError("Сервис голосов вернул некорректный ответ")
+    return payload
+
+
 def identify_embedded_segments(
     path: str | pathlib.Path,
     segments: list[dict],
@@ -534,37 +312,8 @@ def identify_embedded_segments(
     payload_segments = _local_segments_with_end(segments, offset, duration)
     if not payload_segments:
         return segments
-    audio_path = pathlib.Path(path)
-    raw = audio_path.read_bytes()
-    if not raw or len(raw) > VOICE_SERVICE_MAX_BYTES:
-        raise SpeakerIdentityError("Аудиофрагмент слишком большой для сервиса идентификации")
-    try:
-        response = httpx.post(
-            _voice_service_request_url("/v1/identify"),
-            headers=_voice_service_headers(),
-            data={"segments_json": json.dumps({"segments": payload_segments}, ensure_ascii=False)},
-            files={"audio": (audio_path.name, raw, "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav")},
-            timeout=110,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except httpx.HTTPStatusError as exc:
-        detail = ""
-        try:
-            detail = str(exc.response.json().get("detail") or "")
-        except Exception:
-            pass
-        raise SpeakerIdentityError(
-            "Vercel не смог сравнить голоса" + (f": {detail[:180]}" if detail else f" (HTTP {exc.response.status_code})")
-        ) from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        raise SpeakerIdentityError("Не удалось связаться с сервисом идентификации Vercel") from exc
-
-    if not isinstance(payload, dict):
-        raise SpeakerIdentityError("Некорректный ответ сервиса голоса")
-    speaker_embeddings = payload.get("speakers")
-    if not isinstance(speaker_embeddings, dict):
-        raise SpeakerIdentityError("Vercel вернул некорректный ответ идентификации")
+    payload = embed_speakers(path, payload_segments)
+    speaker_embeddings = payload["speakers"]
     by_employee: dict[int, list[dict]] = {}
     for profile in profiles:
         try:
@@ -940,22 +689,33 @@ def identification_readiness(samples_by_employee):
     details = []
     valid_by_employee = {eid: [r for r in rows if sample_has_usable_embedding(r)]
                          for eid, rows in samples_by_employee.items()}
+    # Every embedding is decrypted and measured once: the directory recomputes this on each card open
+    # and save. similarity() gives exactly _cosine_similarity() (same sums in the same order).
+    def prepared(row):
+        vector = _normalise_embedding(json.loads(decrypt_voiceprint(row.encrypted_embedding)))
+        return vector, math.sqrt(sum(value ** 2 for value in vector))
+
+    def similarity(first, second):
+        (left, left_norm), (right, right_norm) = first, second
+        if left_norm < 1e-8 or right_norm < 1e-8:
+            return -1.0
+        return sum(map(operator.mul, left, right)) / (left_norm * right_norm)
+
+    vectors_by_employee = {eid: [prepared(r) for r in rows] for eid, rows in valid_by_employee.items()}
     for eid, rows in valid_by_employee.items():
         count = independent_sample_count(rows)
         models = {r.model_version for r in rows}
-        vectors = [_normalise_embedding(json.loads(decrypt_voiceprint(r.encrypted_embedding))) for r in rows]
+        vectors = vectors_by_employee[eid]
         consistent = len(models) == 1 and all(
-            _cosine_similarity(a, b) >= 0.75 for i, a in enumerate(vectors) for b in vectors[i+1:])
+            similarity(a, b) >= 0.75 for i, a in enumerate(vectors) for b in vectors[i+1:])
         separated = True
         for other_id, other_rows in valid_by_employee.items():
-            if other_id == eid:
+            if other_id == eid or not separated:
                 continue
-            for other in other_rows:
-                if other.model_version not in models:
-                    continue
-                other_vector = _normalise_embedding(json.loads(decrypt_voiceprint(other.encrypted_embedding)))
-                if any(_cosine_similarity(v, other_vector) > 0.60 for v in vectors):
+            for other, other_vector in zip(other_rows, vectors_by_employee[other_id]):
+                if other.model_version in models and any(similarity(v, other_vector) > 0.60 for v in vectors):
                     separated = False
+                    break
         enough = count >= READY_INDEPENDENT_SAMPLES and consistent and separated
         details.append({"employee_id": eid, "independent_samples": count, "ready": enough})
     enough = bool(details) and all(p["ready"] for p in details)
@@ -1022,8 +782,10 @@ def embed_pending_sample(session, row):
 
 
 def revoke_employee_voice_data(session, employee_id):
-    """Local revocation is immediate; failed legacy remote cleanup remains queued separately."""
-    from .db import EmployeeVoiceprint, EmployeeVoiceSample, VoiceSampleCleanup
+    """Local revocation is immediate; failed legacy remote cleanup remains queued separately. The voice remembered
+    between meetings (voice_memory.py) is deleted too; the consent to remember it stays as it was."""
+    from .db import EmployeeVoiceMemory, EmployeeVoiceprint, EmployeeVoiceSample, VoiceSampleCleanup
+    session.query(EmployeeVoiceMemory).filter_by(employee_id=employee_id).delete(synchronize_session=False)
     rows = session.query(EmployeeVoiceSample).filter_by(employee_id=employee_id).all()
     for row in rows:
         pathname = row.sample_blob_path or ""
@@ -1037,12 +799,14 @@ def revoke_employee_voice_data(session, employee_id):
 
 
 def purge_expired_samples(session):
-    from .db import EmployeeVoiceSample, VoiceSampleCleanup, now
+    from .db import EmployeeVoiceMemory, EmployeeVoiceSample, VoiceSampleCleanup, now
     rows = session.query(EmployeeVoiceSample).filter(EmployeeVoiceSample.expires_at <= now()).all()
     for row in rows:
         if row.sample_blob_path:
             session.add(VoiceSampleCleanup(employee_id=row.employee_id, storage_path=row.sample_blob_path))
         session.delete(row)
+    # voices remembered between meetings (voice_memory.py) have the same term
+    session.query(EmployeeVoiceMemory).filter(EmployeeVoiceMemory.expires_at <= now()).delete(synchronize_session=False)
     return len(rows)
 
 

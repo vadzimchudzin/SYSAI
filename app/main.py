@@ -1,6 +1,8 @@
 """SYSAI web app: upload form, meetings, draft editing/approval, settings, employees, Telegram webhook."""
 import datetime as dt
+import hashlib
 import hmac
+import json
 import logging
 import math
 import mimetypes
@@ -19,17 +21,18 @@ from urllib.parse import quote, urlencode
 
 from sqlalchemy import func
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, bitrix, cases, doctext, memory, transcribe, config, llm, deadlines, meeting_alerts, pipeline, progress, progress_board, render, report_archive,
-               settings_store, speaker_id, telegram, userbot, notion)
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_folders, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+               progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel, gdrive,
+               server_watch, storage, stt_compare, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
 from .transcript_sections import group_transcript
 from .ui_icons import ICONS
-from .db import (Artifact, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceprint, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
+from .db import (AgentCheckCase, Artifact, BitrixLink, Case, ConversationEscalation, Delivery, Document, DocumentTransfer, Note, PersonMemory, Skill, Department, Employee, EmployeeDepartment, OrgRelation, EmployeeVoiceSample, Meeting, Recording, ReportVersion, SessionLocal, Task, TelegramChat, User,
                  init_db, now)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -58,6 +61,18 @@ STATUS.update(delivery_queued=("В очереди отправки", "blue"), de
               delivery_failed=("Ошибка доставки", "red"), ready=("Отчёт готов", "green"))
 tpl.env.globals.update(STATUS=STATUS, ICONS=ICONS)
 
+
+def stamp_seconds(stamp) -> int | None:
+    """A task quote's «19:39» or «1:02:03» in seconds: where its ▶ starts the kept recording."""
+    match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})", str(stamp or "").strip())
+    if not match:
+        return None
+    hours, minutes, seconds = (int(x or 0) for x in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+tpl.env.globals.update(stamp_seconds=stamp_seconds)
+
 _ASSET_VERSIONS: dict = {}
 
 
@@ -83,6 +98,30 @@ def legal_info() -> dict:
 tpl.env.globals.update(legal_info=legal_info, POLICY_DATE="12.10.2026")
 
 
+def plural(count, one: str, few: str, many: str) -> str:
+    """The Russian word form for a number: plural(5, 'реплика', 'реплики', 'реплик') → 'реплик'."""
+    try:
+        number = abs(int(count or 0))
+    except (TypeError, ValueError):
+        number = 0
+    return _plural_ru(number, (one, few, many))
+
+
+tpl.env.globals.update(plural=plural)
+
+
+def action_line(action) -> str:
+    """An action the model asked for, in one line: remind(to="me", topic="акт") — for the checking dialogs."""
+    if not isinstance(action, dict):
+        return str(action)[:200]
+    rest = ", ".join(f"{k}={json.dumps(v, ensure_ascii=False, default=str)}" for k, v in action.items() if k != "type")
+    line = f"{action.get('type')}({rest})"
+    return line if len(line) <= 200 else line[:199] + "…"
+
+
+tpl.env.filters["action_line"] = action_line
+
+
 def startup():
     init_db()
     accounts.ensure_superuser()
@@ -94,6 +133,7 @@ def startup():
     config.MIC_INBOX_DIR.mkdir(parents=True, exist_ok=True)
     if config.TESTING:
         return
+    server_watch.start()
     pipeline.start_background()
     notion.start_worker()
     if userbot.ai_mode():
@@ -117,6 +157,7 @@ def shutdown():
     new instance can take it at once instead of waiting for the lease to run out."""
     if config.TESTING:
         return
+    server_watch.stop()  # first: a clean stop is told apart from a killed process even if the rest takes too long
     notion.stop_worker()
     try:
         userbot.stop()
@@ -163,12 +204,16 @@ def guard_admin(request: Request):
 
 def page(request: Request, name: str, **ctx):
     me = current_user(request)
-    pending_users = accounts.pending_count() if me and me["role"] == "superuser" else 0
+    boss = bool(me and me["role"] == "superuser")
+    pending_users = accounts.pending_count() if boss else 0
+    mail_on = bool(settings_store.get("mail_enabled")) if boss else False  # the dot of «Секретарь» at the bottom of the menu
+    net_on = bool(me and settings_store.get("agents_on"))  # «Агенты» and «SYSAI_Hub» in the menu (app/net)
     ai = userbot.ai_mode()
     return tpl.TemplateResponse(request, name, {"request": request, "llm": config.llm_enabled(), "ai": ai,
                                                 "tg": userbot.ready() if ai else config.telegram_enabled(),
                                                 "ephemeral": EPHEMERAL,
-                                                "me": me, "pending_users": pending_users, **ctx})
+                                                "me": me, "pending_users": pending_users, "mail_on": mail_on,
+                                                "net_on": net_on, **ctx})
 
 
 EPHEMERAL = config.DATABASE_URL.startswith("sqlite") and bool(os.getenv("RENDER"))
@@ -480,27 +525,616 @@ async def demo(request: Request):
 
 
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
-def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False):
+def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False, speakers: str = "",
+                 changed: str = "", recording: str = "", seg: str = "", ref: str = "", people: str = "",
+                 relabel: str = ""):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
         employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
         artifacts = [{"id": a.id, "title": a.title, "filename": a.filename, "svg": a.svg or ""} for a in
                      s.query(Artifact).filter_by(meeting_id=mid).order_by(Artifact.id.desc()).all()]
+    diagram = voice_diagram.build(m.transcript, m.duration_sec, m.waveform, employees) if m.transcript else None
+    speaker_hints.attach(diagram, m, employees)
+    sections = group_transcript([dict(sg, seq=i) for i, sg in enumerate(m.transcript or []) if isinstance(sg, dict)],
+                                (m.report or {}).get("topics") or [])
+    count = int(changed) if changed.isascii() and changed.isdigit() and len(changed) < 7 else 0
+    speaker_msg = (SPEAKER_MESSAGES.get(speakers, "") or RELABEL_MESSAGES.get(relabel, "")).format(n=count)
     with SessionLocal() as s:
         loaded = pipeline.load(s, mid)
         plan = (pipeline.review_plan(loaded, settings_store.for_meeting(loaded.options))
                 if userbot.ai_mode() and loaded.status in ("awaiting_approval", "rejected") else None)
-        voice_admin = current_user(request)["role"] == "superuser" and user_may_access_meeting_audio(request, loaded)
+        may_listen = user_may_access_meeting_audio(request, loaded)
+        voice_admin = current_user(request)["role"] == "superuser" and may_listen
         voice_clips, voice_debug, voice_ready = ([], False, {})
         if voice_admin:
             voice_clips, voice_debug, voice_ready = _meeting_voice_enrollment_context(s, loaded, manual=voice_enroll)
+        kept = audio_archive.view(loaded)
+        edits = transcript_edit.history(loaded)
+        reference_admin = current_user(request)["role"] == "superuser"
+        reference = diarization_eval.summary(loaded) if reference_admin else None
+        if reference is not None:
+            reference["runs"] = diarization_runs.brief(loaded.diarization_reference,
+                                                       diarize.threshold_of(settings_store.all_settings()))
+        present = participants.view(s, loaded)
+        hint = participants.suggestion(s, loaded)
+    if not may_listen:  # recorded in someone else's browser: the same rule as for the voice clips
+        kept = {"state": "none", "text": "Запись этого совещания доступна только тому, кто его записал."}
+    client = voice_diagram.client_payload(diagram) if diagram else None
+    if client is not None and kept.get("playable"):
+        client["audio"] = {"src": kept["src"]}
     until = userbot.quiet_until()
+    relabel_view = voice_relabel.view(m, settings_store.for_meeting(m.options)) if diagram and may_listen else None
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
                 plan=plan, quiet_at=userbot.local_time(until) if until is not None else "",
                 case_by_task=cases.for_meeting(mid),
                 voice_clips=voice_clips, voice_debug_mode=voice_debug, voice_readiness=voice_ready,
-                voice_msg=voice_msg, voice_admin=voice_admin)
+                voice_msg=voice_msg, voice_admin=voice_admin, diagram=diagram, transcript_sections=sections,
+                diagram_client=client, speaker_msg=speaker_msg, recording_msg=RECORDING_MESSAGES.get(recording, ""),
+                recording=kept, recording_admin=voice_admin,
+                speakers_editable=bool(m.transcript) and m.status not in ("queued", "transcribing"),
+                edits=edits, seg_msg=SEGMENT_MESSAGES.get(seg, ""), local_time=userbot.local_time,
+                reference=reference, reference_admin=reference_admin, ref_msg=REFERENCE_MESSAGES.get(ref, ""),
+                pct=diarization_eval.pct, label_list=diarization_eval.label_list,
+                attendance=present, participant_ids=present["ids"], alert_hint=hint,
+                people_msg=PARTICIPANT_MESSAGES.get(people, ""), diarization_note=_diarization_note(m),
+                relabel=relabel_view, recognition_note=_recognition_note(m))
+
+
+def _plural_count(n, one: str, few: str, many: str) -> str:
+    n = int(n)
+    form = one if n % 10 == 1 and n % 100 != 11 else few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
+    return f"{n} {form}"
+
+
+def _recognition_note(meeting) -> str:
+    """What the checks of the recognition found (pipeline._note_recognition), in one line for the transcript."""
+    note = (meeting.options or {}).get("recognition") if isinstance(meeting.options, dict) else None
+    if not isinstance(note, dict) or not note.get("engine"):
+        return ""
+    number = lambda key: int(note.get(key) or 0) if isinstance(note.get(key), (int, float)) else 0
+    parts = [f"Распознавание: {note['engine']}"]
+    if note.get("detector"):
+        found = number("gaps")
+        if found:
+            heard = f"детектор речи нашёл {_plural_count(found, 'место', 'места', 'мест')} с голосом без слов"
+            if number("recovered"):
+                heard += f", дослышано {_plural_count(number('recovered'), 'фраза', 'фразы', 'фраз')}"
+            if number("unclear"):
+                heard += f", «неразборчиво» — {number('unclear')}"
+            parts.append(heard)
+        else:
+            parts.append("детектор речи: пропусков нет")
+    if number("doubts"):
+        parts.append(f"сомнительных слов {number('doubts')}: перепроверено на слух {number('checked')}, "
+                     f"исправлено {number('fixed')}")
+    if number("phantoms"):
+        parts.append(f"убрано выдуманных фраз: {number('phantoms')}")
+    if number("errors"):
+        parts.append(f"не удалось проверить: {number('errors')}")
+    return " · ".join(parts) + "."
+
+
+def _diarization_note(meeting) -> dict | None:
+    """How the voices of this meeting were labelled, when it is worth saying: another way than the parts, or a failure."""
+    note = (meeting.options or {}).get("diarization") if isinstance(meeting.options, dict) else None
+    if not isinstance(note, dict) or (note.get("method") == "chunks" and not note.get("error")):
+        return None
+    error = str(note.get("error") or "").strip()
+    if error and error[-1] not in ".!?…":
+        error += "."
+    name = str(note.get("wanted") or note.get("method")) if error else str(note.get("method"))
+    return {"title": diarize.METHODS.get(name, diarize.METHODS["chunks"]), "voices": note.get("voices"), "error": error,
+            "seconds": note.get("seconds")}
+
+
+PARTICIPANT_MESSAGES = {
+    "saved": "Участники сохранены. Имена голосам теперь подбираются только из них; протокол учтёт список после «Пересобрать».",
+    "alert": "Участники взяты из напоминания.",
+    "calendar": "Участники взяты из календаря: приглашённые на встречу в это время.",
+    "cleared": "Список участников сброшен: имена голосам подбираются из всех сотрудников.",
+    "noalert": "Для этой встречи не нашлось ни встречи в календаре, ни напоминания с участниками.",
+}
+
+
+@app.post("/meetings/{mid}/participants")
+async def meeting_participants(request: Request, mid: int):
+    """«Участники»: who was at the meeting. Names for its voices come only from them; the protocol lists them."""
+    guard(request)
+    form = await request.form()
+    action = str(form.get("action") or "save")
+    with SessionLocal() as s:
+        meeting = s.get(Meeting, mid)
+        if meeting is None:
+            raise HTTPException(404, "Совещание не найдено.")
+        if action == "save":
+            guests = str(form.get("guests") or "")[:4000].splitlines()
+            participants.set_people(s, meeting, form.getlist("ids"), guests, by=current_user(request)["username"])
+            code = "saved"
+        elif action == "clear":
+            meeting.participants, code = None, "cleared"
+        elif action == "alert":
+            previous, meeting.participants = meeting.participants, None
+            code = "alert" if participants.ensure(s, meeting) else "noalert"
+            if code == "noalert":
+                meeting.participants = previous
+            elif (meeting.participants or {}).get("source") == "calendar":
+                code = "calendar"
+        else:
+            raise HTTPException(400, "Неизвестное действие со списком участников.")
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?people={code}#meeting-participants", 303)
+
+
+def _named_present(meeting, who, by: str = "") -> None:
+    """A person or a named guest chosen for a voice was at the meeting: the list of participants grows."""
+    if not who:
+        return
+    name, employee_id, guest = who
+    if employee_id is not None:
+        participants.add(meeting, employee_id=employee_id, by=by)
+    elif guest and not re.fullmatch(voice_diagram.GUEST + r"( \d+)?", str(name or "")):
+        participants.add(meeting, guest=name, by=by)
+
+
+RECORDING_MESSAGES = {
+    "deleted": "Запись удалена из хранилища. Расшифровка, протокол и диаграмма остались.",
+    "restoring": "Скачиваем запись из TicNote заново — через несколько минут её можно будет слушать. Обновите страницу чуть позже.",
+    "unavailable": "Запись сейчас не взять из TicNote: нет ключа TicNote, совещание старше срока хранения записей "
+                   "или запись уже скачивается.",
+}
+
+
+@app.get("/meetings/{mid}/recording")
+def meeting_recording(request: Request, mid: int, download: bool = False):
+    """The player's source: a short-lived presigned link to the private copy, never the keys or a public address."""
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _voice_meeting(s, request, mid)
+        try:
+            url = audio_archive.link(meeting, download=download)
+        except storage.StorageError as exc:
+            raise HTTPException(503, f"Хранилище записей недоступно: {exc}")
+    if not url:
+        raise HTTPException(404, "Записи этого совещания нет.")
+    return RedirectResponse(url, 302, headers={"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"})
+
+
+@app.post("/meetings/{mid}/recording/delete")
+def meeting_recording_delete(request: Request, mid: int):
+    """«Удалить запись»: the meeting, its transcript and report stay."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        _voice_meeting(s, request, mid)
+    audio_archive.remove(mid)
+    return RedirectResponse(f"/meetings/{mid}?recording=deleted#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/recording/restore")
+def meeting_recording_restore(request: Request, mid: int):
+    """«Скачать из TicNote заново»: a TicNote meeting whose recording was not kept takes it from the TicNote cloud again."""
+    guard(request)
+    with SessionLocal() as s:
+        _voice_meeting(s, request, mid)
+    state = "restoring" if audio_archive.restore(mid) else "unavailable"
+    return RedirectResponse(f"/meetings/{mid}?recording={state}#voice-diagram", 303)
+
+
+SPEAKER_MESSAGES = {
+    "assigned": "Готово: говорящий исправлен во всех его репликах ({n}). Протокол и задачи не пересобираются сами.",
+    "reset": "Автоматическая разметка говорящих восстановлена ({n} реплик).",
+}
+RELABEL_MESSAGES = {
+    "started": "Переразметка голосов запущена — обычно это несколько минут. Расшифровка не изменится, пока вы не сохраните результат.",
+    "saved": "Новая разметка голосов сохранена ({n} реплик сменили говорящего). Протокол и задачи не пересобираются сами.",
+    "reverted": "Прежняя разметка голосов возвращена ({n} реплик).",
+}
+
+
+def _speaker_meeting(session, mid):
+    meeting = session.get(Meeting, mid)
+    if meeting is None:
+        raise HTTPException(404, "Совещание не найдено.")
+    if not meeting.transcript or meeting.status in ("queued", "transcribing"):
+        raise HTTPException(409, "Расшифровка ещё не готова.")
+    return meeting
+
+
+@app.post("/meetings/{mid}/speakers")
+async def meeting_speaker_assign(request: Request, mid: int):
+    """«Кто это?»: every replica of one diarization label goes to a person from the directory or to a guest."""
+    guard(request)
+    form = await request.form()
+    label = str(form.get("speaker") or "").strip()
+    choice = str(form.get("employee_id") or "").strip()
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        if label not in {voice_diagram.label_of(seg) for seg in meeting.transcript if isinstance(seg, dict)}:
+            raise HTTPException(400, "Такого говорящего нет в расшифровке.")
+        if choice == "guest":
+            name, employee_id, guest = voice_diagram.guest_name(meeting.transcript, form.get("guest_name"), label), None, True
+        else:
+            employee = s.get(Employee, int(choice)) if choice.isascii() and choice.isdigit() and len(choice) < 10 else None
+            if employee is None or not employee.active:
+                raise HTTPException(400, "Выберите сотрудника из справочника или «Гость».")
+            name, employee_id, guest = employee.name, employee.id, False
+        by = current_user(request)["username"]
+        before = meeting.transcript
+        after, count = voice_diagram.assign(before, label, name, employee_id, guest, by=by)
+        if count:
+            transcript_edit.record(meeting, after, transcript_edit.assigned(before, after, label, name, by))
+            _named_present(meeting, (name, employee_id, guest), by)
+        s.commit()
+    if count and employee_id is not None:
+        voice_memory.remember_soon(mid, by=by)  # a confirmed voice, for the next meetings (with consent)
+    return RedirectResponse(f"/meetings/{mid}?speakers=assigned&changed={count}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/relabel")
+def meeting_speaker_relabel(request: Request, mid: int):
+    """«Переразметить голоса»: label the voices again from the kept recording; nothing changes until it is saved."""
+    guard(request)
+    with SessionLocal() as s:
+        _voice_meeting(s, request, mid)
+        _speaker_meeting(s, mid)
+    try:
+        voice_relabel.start(mid, by=current_user(request)["username"])
+    except voice_relabel.RelabelError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return RedirectResponse(f"/meetings/{mid}?relabel=started#voice-relabel", 303)
+
+
+@app.get("/meetings/{mid}/speakers/relabel/status")
+def meeting_speaker_relabel_status(request: Request, mid: int):
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _voice_meeting(s, request, mid)
+        data = voice_relabel.state(meeting)
+    return {"state": data.get("state") or "", "progress": data.get("progress") or ""}
+
+
+def _relabel_decision(request: Request, mid: int, act) -> int:
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _voice_meeting(s, request, mid)
+        try:
+            count = act(meeting)
+        except voice_relabel.RelabelError as exc:
+            raise HTTPException(409, str(exc)) from None
+        s.commit()
+    return count
+
+
+@app.post("/meetings/{mid}/speakers/relabel/save")
+def meeting_speaker_relabel_save(request: Request, mid: int):
+    guard(request)
+    by = current_user(request)["username"]
+    count = _relabel_decision(request, mid, lambda meeting: voice_relabel.save(meeting, by=by))
+    voice_memory.remember_soon(mid, by=by)
+    return RedirectResponse(f"/meetings/{mid}?relabel=saved&changed={count}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/relabel/revert")
+def meeting_speaker_relabel_revert(request: Request, mid: int):
+    count = _relabel_decision(request, mid, voice_relabel.revert)
+    return RedirectResponse(f"/meetings/{mid}?relabel=reverted&changed={count}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/relabel/close")
+def meeting_speaker_relabel_close(request: Request, mid: int):
+    _relabel_decision(request, mid, voice_relabel.close)
+    return RedirectResponse(f"/meetings/{mid}#voice-diagram", 303)
+
+
+@app.post("/meetings/{mid}/speakers/reset")
+def meeting_speaker_reset(request: Request, mid: int):
+    """Undo every manual speaker correction of the meeting: the automatic labels come back."""
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        count = transcript_edit.reset(meeting)
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?speakers=reset&changed={count}#voice-diagram", 303)
+
+
+SEGMENT_MESSAGES = {
+    "speaker": "Готово: говорящий изменён только у этой реплики.",
+    "split": "Готово: реплика разделена на две.",
+    "merge": "Готово: реплики объединены.",
+    "undo": "Последняя правка отменена.",
+}
+
+
+def _segment_seq(seq: str) -> int:
+    if not (seq.isascii() and seq.isdigit() and len(seq) < 7):
+        raise HTTPException(404, "Такой реплики нет в расшифровке.")
+    return int(seq)
+
+
+def _segment_choice(session, transcript, form, field="who"):
+    """The speaker chosen in a correction form: (name, employee id, guest?) or None for «как было»."""
+    choice = str(form.get(field) or "").strip()
+    employee = None
+    if choice.startswith("employee:"):
+        raw = choice[len("employee:"):]
+        employee = session.get(Employee, int(raw)) if raw.isascii() and raw.isdigit() and len(raw) < 10 else None
+        if employee is None or not employee.active:
+            raise transcript_edit.EditError("Выберите сотрудника из справочника.")
+    return transcript_edit.resolve(transcript, choice, form.get("guest_name"), employee)
+
+
+def _segment_redirect(mid: int, op: str, seq: int):
+    return RedirectResponse(f"/meetings/{mid}?seg={op}#seg-{max(0, seq)}", 303)
+
+
+def _segment_error(exc: transcript_edit.EditError):
+    return HTTPException(409 if isinstance(exc, transcript_edit.Stale) else 400, str(exc))
+
+
+@app.get("/meetings/{mid}/segments/{seq}", response_class=HTMLResponse)
+def segment_editor(request: Request, mid: int, seq: str, fragment: bool = False):
+    """One replica: another speaker only for it, a split in two, a merge with a neighbour. Opens under the replica on
+    the meeting page (fragment) or as a page of its own without JavaScript."""
+    guard(request)
+    index = _segment_seq(seq)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        transcript = meeting.transcript
+        if not 0 <= index < len(transcript) or not isinstance(transcript[index], dict):
+            raise HTTPException(404, "Такой реплики нет в расшифровке.")
+        employees = s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()
+        neighbour = lambda i: transcript[i] if 0 <= i < len(transcript) and isinstance(transcript[i], dict) else None
+        segment = transcript[index]
+        ctx = dict(m=meeting, seq=index, sg=segment, sig=transcript_edit.signature(segment),
+                   labels=transcript_edit.labels(transcript), new_label=transcript_edit.new_label(transcript),
+                   current=voice_diagram.label_of(segment), words=transcript_edit.words(segment.get("text")),
+                   prev=neighbour(index - 1), next=neighbour(index + 1),
+                   prev_sig=transcript_edit.signature(neighbour(index - 1)) if neighbour(index - 1) else "",
+                   next_sig=transcript_edit.signature(neighbour(index + 1)) if neighbour(index + 1) else "",
+                   employees=employees, participant_ids=participants.employee_ids(meeting))
+        if fragment:
+            return tpl.TemplateResponse(request, "_segment_editor.html", ctx)
+        return page(request, "segment_edit.html", **ctx)
+
+
+async def _segment_change(request: Request, mid: int, seq: str, change):
+    guard(request)
+    index = _segment_seq(seq)
+    form = await request.form()
+    by = current_user(request)["username"]
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        chosen = []
+        try:
+            transcript, entry = change(s, meeting.transcript, index, form, by, chosen)
+        except transcript_edit.EditError as exc:
+            raise _segment_error(exc)
+        transcript_edit.record(meeting, transcript, entry)
+        for who in chosen:
+            _named_present(meeting, who, by)
+        s.commit()
+    if any(who and who[1] is not None for who in chosen):
+        voice_memory.remember_soon(mid, by=by)
+    return _segment_redirect(mid, entry["op"], entry["seq"])
+
+
+@app.post("/meetings/{mid}/segments/{seq}/speaker")
+async def segment_speaker(request: Request, mid: int, seq: str):
+    def change(s, transcript, index, form, by, chosen):
+        who = _segment_choice(s, transcript, form)
+        chosen.append(who)
+        return transcript_edit.set_speaker(transcript, index, form.get("sig"), who, by)
+    return await _segment_change(request, mid, seq, change)
+
+
+@app.post("/meetings/{mid}/segments/{seq}/split")
+async def segment_split(request: Request, mid: int, seq: str):
+    def change(s, transcript, index, form, by, chosen):
+        who = _segment_choice(s, transcript, form) if str(form.get("who") or transcript_edit.SAME) != transcript_edit.SAME else None
+        chosen.append(who)
+        return transcript_edit.split(transcript, index, form.get("sig"), form.get("at"), who, by)
+    return await _segment_change(request, mid, seq, change)
+
+
+@app.post("/meetings/{mid}/segments/{seq}/merge")
+async def segment_merge(request: Request, mid: int, seq: str):
+    def change(s, transcript, index, form, by, chosen):
+        return transcript_edit.merge(transcript, index, form.get("sig"), str(form.get("with") or ""),
+                                     form.get("neighbour_sig"), by)
+    return await _segment_change(request, mid, seq, change)
+
+
+@app.post("/meetings/{mid}/transcript/undo")
+def transcript_undo(request: Request, mid: int):
+    """«Отменить последнюю правку» of the transcript, one at a time, newest first."""
+    guard(request)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        try:
+            entry = transcript_edit.undo(meeting)
+        except transcript_edit.EditError as exc:
+            raise _segment_error(exc)
+        s.commit()
+    return _segment_redirect(mid, "undo", int(entry.get("seq") or 0))
+
+
+REFERENCE_MESSAGES = {
+    "saved": "Эталон сохранён: точность автоматической разметки посчитана по нему.",
+    "deleted": "Эталон удалён. Расшифровка и правки остались.",
+}
+
+
+@app.post("/meetings/{mid}/reference")
+def meeting_reference_save(request: Request, mid: int):
+    """«Сохранить как эталон»: the corrected transcript becomes the answer key the automatic labelling is measured by."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        meeting = _speaker_meeting(s, mid)
+        try:
+            diarization_eval.save(meeting, by=current_user(request)["username"])
+        except transcript_edit.EditError as exc:
+            raise HTTPException(400, str(exc))
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?ref=saved#diarization-reference", 303)
+
+
+@app.post("/meetings/{mid}/reference/delete")
+def meeting_reference_delete(request: Request, mid: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        meeting = s.get(Meeting, mid)
+        if meeting is None:
+            raise HTTPException(404, "Совещание не найдено.")
+        diarization_eval.remove(meeting)
+        s.commit()
+    return RedirectResponse(f"/meetings/{mid}?ref=deleted#diarization-reference", 303)
+
+
+@app.get("/diarization", response_class=HTMLResponse)
+def diarization_overview(request: Request, msg: str = ""):
+    """«Точность разметки голосов»: every reference, its metrics and the totals."""
+    guard_admin(request)
+    rows = []
+    with SessionLocal() as s:
+        meetings = s.query(Meeting).filter(Meeting.diarization_reference.isnot(None)).order_by(Meeting.id.desc()).all()
+        for meeting in meetings:
+            info = diarization_eval.summary(meeting)
+            if info is not None:
+                rows.append({"id": meeting.id, "title": meeting.title or f"Совещание {meeting.id}",
+                             "date": meeting.meeting_date, "duration": meeting.duration_sec, **info})
+        references = [meeting.diarization_reference for meeting in meetings]
+    total = diarization_eval.combine([row["metrics"] for row in rows])
+    settings = settings_store.all_settings()
+    method, threshold = diarize.method_of(settings), diarize.threshold_of(settings)
+    return page(request, "diarization.html", rows=rows, total=total, pct=diarization_eval.pct,
+                label_list=diarization_eval.label_list, local_time=userbot.local_time,
+                compare=diarization_runs.overview(references, method, threshold), run=diarization_runs.status(),
+                method=method, threshold=threshold, methods=diarize.METHODS,
+                unavailable={name: diarize.unavailable(name) for name in diarize.METHODS},
+                msg=DIARIZATION_MESSAGES.get(msg, ""), when=_when)
+
+
+def _when(value) -> str:
+    try:
+        return userbot.local_time(dt.datetime.fromisoformat(str(value)))
+    except (TypeError, ValueError):
+        return ""
+
+
+DIARIZATION_MESSAGES = {
+    "started": "Сравнение запущено: способы по очереди размечают записи эталонов. Страница обновляется сама.",
+    "busy": "Сравнение уже идёт.",
+    "empty": "Нет эталонов: сначала сохраните хотя бы одну исправленную расшифровку как эталон.",
+    "applied": "Способ разметки сохранён: он сработает на следующих записях.",
+}
+
+
+@app.get("/speech-compare", response_class=HTMLResponse)
+def speech_compare_page(request: Request, msg: str = ""):
+    """«Сравнение движков распознавания»: the STT engines side by side on one of the company's recordings."""
+    guard_admin(request)
+    settings = settings_store.all_settings()
+    result = stt_compare.last()
+    return page(request, "speech_compare.html", result=result, run=stt_compare.status(),
+                meetings=stt_compare.candidates(), engines="\n".join(stt_compare.ENGINES),
+                main_model=settings.get("transcribe_model"), verify_model=settings.get("verify_model"),
+                msg=SPEECH_COMPARE_MESSAGES.get(msg, ""), when=_when, pct=diarization_eval.pct)
+
+
+SPEECH_COMPARE_MESSAGES = {
+    "started": "Сравнение запущено: движки по очереди слушают отрывки записи. Страница обновляется сама.",
+    "busy": "Сравнение уже идёт.",
+    "nomeeting": "Выберите совещание с записью.",
+    "noengines": "Укажите хотя бы один движок.",
+    "main": "Основной движок сохранён: он распознает следующие записи.",
+    "verify": "Второй движок сохранён: он будет дослушивать пропуски и сомнительные слова.",
+}
+
+
+@app.post("/speech-compare/run")
+async def speech_compare_run(request: Request):
+    guard_admin(request)
+    form = await request.form()
+    try:
+        meeting_id = int(str(form.get("meeting_id") or ""))
+    except ValueError:
+        return RedirectResponse("/speech-compare?msg=nomeeting", 303)
+    engines = stt_compare.engines_from(form.get("engines"))
+    if not engines:
+        return RedirectResponse("/speech-compare?msg=noengines", 303)
+    code = "started" if stt_compare.start(meeting_id, engines) else "busy"
+    return RedirectResponse(f"/speech-compare?msg={code}", 303)
+
+
+@app.post("/speech-compare/apply")
+async def speech_compare_apply(request: Request):
+    """«Сделать основным» / «Сделать вторым»: the engine the next recordings are recognised or checked by."""
+    guard_admin(request)
+    form = await request.form()
+    model = str(form.get("model") or "").strip()
+    role = str(form.get("role") or "main")
+    if not stt_compare.engines_from(model) or len(model) > 200 or role not in ("main", "verify"):
+        raise HTTPException(400, "Некорректный идентификатор модели")
+    settings_store.set_many({"transcribe_model" if role == "main" else "verify_model": model})
+    return RedirectResponse(f"/speech-compare?msg={role}#results", 303)
+
+
+@app.post("/diarization/compare")
+def diarization_compare(request: Request):
+    """«Сравнить способы»: every way runs on the recording of every reference, in the background."""
+    guard_admin(request)
+    if diarization_runs.status()["running"]:
+        code = "busy"
+    else:
+        code = "started" if diarization_runs.start() else "empty"
+    return RedirectResponse(f"/diarization?msg={code}#compare", 303)
+
+
+@app.post("/diarization/method")
+async def diarization_method(request: Request):
+    """«Применить»: the way (and, for the voice service, the threshold) the next recordings are labelled by."""
+    guard_admin(request)
+    form = await request.form()
+    name = str(form.get("method") or "")
+    if name not in diarize.METHODS:
+        raise HTTPException(400, "Выберите способ разметки из списка.")
+    updates = {"diarization_method": name}
+    if form.get("threshold"):
+        updates["diarization_voice_threshold"] = _voice_threshold(form.get("threshold"))
+    settings_store.set_many(updates)
+    return RedirectResponse("/diarization?msg=applied#compare", 303)
+
+
+def _name_threshold(raw) -> float:
+    """The confidence a name from the conversation needs: a percentage 50–95 (stored as a share)."""
+    try:
+        value = float(str(raw).strip().rstrip("%").strip().replace(",", "."))
+    except ValueError:
+        raise HTTPException(400, "Уверенность для имени укажите числом от 50 до 95 %.") from None
+    if not 50 <= value <= 95:
+        raise HTTPException(400, "Уверенность для имени укажите числом от 50 до 95 %.")
+    return round(value / 100, 2)
+
+
+def _memory_threshold(raw) -> float:
+    """How alike a voice must be to the voice of a person remembered from past meetings: 0,4–0,95."""
+    try:
+        value = float(str(raw).strip().replace(",", "."))
+    except ValueError:
+        raise HTTPException(400, "Порог узнавания по прошлым встречам укажите числом от 0,4 до 0,95.") from None
+    if not 0.4 <= value <= 0.95:
+        raise HTTPException(400, "Порог узнавания по прошлым встречам укажите числом от 0,4 до 0,95.")
+    return round(value, 2)
+
+
+def _voice_threshold(raw) -> float:
+    try:
+        value = float(str(raw).strip().replace(",", "."))
+    except ValueError:
+        raise HTTPException(400, "Порог сходства голосов укажите числом от 0,2 до 0,95.") from None
+    if not 0.2 <= value <= 0.95:
+        raise HTTPException(400, "Порог сходства голосов укажите числом от 0,2 до 0,95.")
+    return round(value, 2)
 
 
 @app.post("/cases/{case_id}/{action}")
@@ -573,6 +1207,13 @@ async def progress_case_action(request: Request, case_id: int, action: str):
         ok = cases.hand_over(case_id, employee_id, who)
     elif action == "close":
         ok = cases.close_manually(case_id, who, str(form.get("note") or ""))
+    elif action == "remind":  # «Напомнить ещё»: one more reminder now
+        try:
+            ok = cases.remind_again(case_id, who)
+        except (cases.CaseError, cases.Retry, telegram.TelegramError) as exc:  # quiet hours and limits included
+            raise HTTPException(409, f"Напоминание не ушло: {exc}") from None
+    elif action == "take_over":  # «Займусь сам»: the assistant stops reminding
+        ok = cases.take_over(case_id, who)
     elif action == "link":
         try:
             ok = cases.link_document(case_id, int(str(form.get("document_id") or "")), who)
@@ -705,7 +1346,9 @@ def memory_person(request: Request, eid: int):
         notes = [_note_view(n, people, departments) for n in
                  s.query(Note).filter(Note.employee_id == eid, Note.archived.is_(False)).order_by(Note.id.desc()).limit(300)]
         archived = s.query(Note).filter(Note.employee_id == eid, Note.archived.is_(True)).count()
-        summaries = [m.summary for m in s.query(PersonMemory).filter_by(employee_id=eid).all() if m.summary]
+        memories = s.query(PersonMemory).filter_by(employee_id=eid).all()
+        summaries = [m.summary for m in memories if m.summary]
+        dialogs = dialog_memory.view(s, {m.chat_id for m in memories} | {e.telegram_user_id})
         card = {"id": e.id, "name": e.name, "aliases": e.aliases or "", "position": e.position or "",
                 "departments": [f"{m.department.name}" + (f" — {m.role}" if m.role else "") for m in e.department_memberships
                                 if m.department is not None],
@@ -715,7 +1358,7 @@ def memory_person(request: Request, eid: int):
         documents = [{"id": d.id, "filename": d.filename, "at": d.created_at} for d in
                      s.query(Document).filter_by(employee_id=eid).order_by(Document.id.desc()).limit(20)]
     return page(request, "memory_person.html", card=card, notes=notes, archived=archived, summaries=summaries,
-                documents=documents)
+                dialogs=dialogs, documents=documents)
 
 
 @app.post("/memory/people/{eid}")
@@ -736,23 +1379,246 @@ async def memory_person_save(request: Request, eid: int):
 
 @app.post("/memory/people/{eid}/forget-summary")
 def memory_person_forget(request: Request, eid: int):
-    """The assistant's own rolling summary about the person is erased (the person asked, or it is wrong)."""
+    """The assistant's own rolling summary about the person and the retelling of the older conversation are erased (the
+    person asked, or it is wrong)."""
     guard_admin(request)
     with SessionLocal() as s:
-        for m in s.query(PersonMemory).filter_by(employee_id=eid).all():
+        memories = s.query(PersonMemory).filter_by(employee_id=eid).all()
+        for m in memories:
             m.summary = ""
+        e = s.get(Employee, eid)
+        dialog_memory.forget(s, {m.chat_id for m in memories} | {e.telegram_user_id if e else None})
         s.commit()
     return RedirectResponse(f"/memory/people/{eid}", 303)
 
 
+def _ago(moment) -> str:
+    """«сегодня», «вчера», «5 дней назад» in the company's time zone (when a skill was last used)."""
+    if moment is None:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(config.TIMEZONE)
+    except Exception:  # noqa: BLE001 - an unknown zone name must not break the page
+        zone = dt.timezone.utc
+    days = (dt.datetime.now(zone).date() - moment.astimezone(zone).date()).days
+    if days <= 0:
+        return "сегодня"
+    if days == 1:
+        return "вчера"
+    return f"{days} {plural(days, 'день', 'дня', 'дней')} назад"
+
+
+def _builtin_skills() -> list:
+    """The built-in skills with their switches and the uses of the last 30 days (companion skills follow their main one)."""
+    from . import skill_stats
+    modes, off, limits = agent_skills.modes(), agent_skills.switched_off(), agent_skills.limits()
+    used, last = skill_stats.stats(30), skill_stats.last_used(30)
+    director_set = bool(settings_store.get("director_chat_ids"))
+    rows = []
+    for k in agent_skills.SKILLS.values():
+        if k.name in agent_skills.PAIRED:
+            continue
+        counts = dict(used.get(k.name) or {})
+        moments = [last.get(k.name)]
+        companions = [c for c, m in agent_skills.PAIRED.items() if m == k.name]
+        for companion in companions:
+            moments.append(last.get(companion))
+            for key, value in (used.get(companion) or {}).items():
+                if key != "last_error":
+                    counts[key] = counts.get(key, 0) + value
+                elif value and not counts.get("last_error"):
+                    counts["last_error"] = value
+        limit_options = [x for x in agent_skills.LIMITS if not (x == "leaders" and k.who in ("reviewer", "assign"))]
+        # the mode of a pair is the mode of the step that does the work (an order starts after «да»: confirm_order)
+        mode_name = k.name if k.modes else next((c for c in companions if agent_skills.SKILLS[c].modes), "")
+        done, cancelled, errors = counts.get("done", 0), counts.get("cancelled", 0), counts.get("error", 0)
+        waiting = counts.get("approval", 0) + counts.get("suggested", 0)
+        moments = [m if m.tzinfo else m.replace(tzinfo=dt.timezone.utc) for m in moments if m is not None]
+        rows.append({"name": k.name, "title": k.title, "hint": k.hint, "who": agent_skills.WHO_RU[k.who],
+                     "who_short": agent_skills.WHO_SHORT.get(k.who, agent_skills.WHO_RU[k.who]),
+                     "who_note": agent_skills.WHO_NOTE.get(k.who, ""),
+                     "modes": bool(mode_name), "mode_name": mode_name, "mode": modes.get(mode_name, "auto"),
+                     "on": k.name not in off, "limit": limits.get(k.name, ""), "limits": limit_options, "stats": counts,
+                     "companions": [agent_skills.SKILLS[c].title for c in companions],
+                     "total": done + waiting + cancelled + errors, "done": done, "waiting": waiting,
+                     "cancelled": cancelled, "errors": errors, "last_error": counts.get("last_error") or "",
+                     "last": _ago(max(moments)) if moments else "",
+                     "no_director": limits.get(k.name) == "director" and not director_set})
+    return rows
+
+
+def _skill_groups(rows: list) -> list:
+    """The built-in skills by the groups of the Skills page; a skill missing from agent_skills.GROUPS goes to «Другое»."""
+    by_name, groups, seen = {r["name"]: r for r in rows}, [], set()
+    for title, names in agent_skills.GROUPS:
+        items = [by_name[n] for n in names if n in by_name]
+        seen.update(r["name"] for r in items)
+        if items:
+            groups.append({"title": title, "skills": items})
+    rest = [r for r in rows if r["name"] not in seen]
+    if rest:
+        groups.append({"title": "Другое", "skills": rest})
+    for g in groups:
+        g["on"] = sum(1 for r in g["skills"] if r["on"])
+    return groups
+
+
+def _skills_summary(rows: list) -> dict:
+    """The tiles above the built-in skills: how many are on, worked, waited for an approval and failed in 30 days."""
+    busiest = max(rows, key=lambda r: r["total"], default=None)
+    return {"count": len(rows), "on": sum(1 for r in rows if r["on"]), "off": sum(1 for r in rows if not r["on"]),
+            "done": sum(r["done"] for r in rows), "waiting": sum(r["waiting"] for r in rows),
+            "cancelled": sum(r["cancelled"] for r in rows), "errors": sum(r["errors"] for r in rows),
+            "failing": sum(1 for r in rows if r["errors"]), "unused": sum(1 for r in rows if not r["total"]),
+            "guarded": sum(1 for r in rows if r["modes"] and r["mode"] != "auto"),
+            "busiest": busiest["title"] if busiest and busiest["total"] else ""}
+
+
 @app.get("/skills", response_class=HTMLResponse)
-def skills_view(request: Request, edit: int = 0):
+def skills_view(request: Request, edit: int = 0, saved: int = 0):
     guard_admin(request)
     with SessionLocal() as s:
         rows = [{"id": k.id, "title": k.title, "kind": k.kind, "when": k.when_to_use or "", "body": k.body, "active": k.active,
                  "uses": k.uses, "updated": k.updated_at, "by": k.updated_by or ""}
                 for k in s.query(Skill).order_by(Skill.active.desc(), Skill.title)]
-    return page(request, "skills.html", skills=rows, edit=edit)
+    builtin = _builtin_skills()
+    return page(request, "skills.html", skills=rows, edit=edit, builtin=builtin, saved=saved,
+                groups=_skill_groups(builtin), summary=_skills_summary(builtin),
+                modes_ru=agent_skills.MODE_RU, modes_short=agent_skills.MODE_SHORT, mode_hints=agent_skills.MODE_HINT,
+                transport=agent_skills.transport(), transports=agent_skills.TRANSPORT_RU, agent_model=voice.model(),
+                limit_ru=agent_skills.LIMIT_RU, limit_short=agent_skills.LIMIT_SHORT,
+                director_set=bool(settings_store.get("director_chat_ids")))
+
+
+@app.post("/skills/agent")
+async def skills_agent_save(request: Request):
+    """The modes of the built-in skills (at once / with the director's approval / only a suggestion) and the way the
+    model asks for them."""
+    guard_admin(request)
+    f = await request.form()
+    chosen, off, limits = {}, [], {}
+    for name, skill in agent_skills.SKILLS.items():
+        value = str(f.get(f"mode_{name}") or "auto")
+        if skill.modes and value in agent_skills.MODES and value != "auto":
+            chosen[name] = value
+        if name in agent_skills.PAIRED:
+            continue  # a companion skill follows the one it belongs to
+        if f.get("present_switches") == "1" and not f.get(f"on_{name}"):
+            off.append(name)
+        limit = str(f.get(f"who_{name}") or "")
+        if limit in agent_skills.LIMITS:
+            limits[name] = limit
+    way = str(f.get("transport") or "")
+    updates = {"agent_skill_modes": chosen,
+               "agent_transport": way if way in agent_skills.TRANSPORTS else agent_skills.transport()}
+    if f.get("present_switches") == "1":  # an older form without the switches leaves them as they are
+        updates.update({"agent_skills_off": off, "agent_skill_who": limits})
+    settings_store.set_many(updates)
+    return RedirectResponse("/skills?saved=1#agent-skills", 303)
+
+
+CHECK_MESSAGES = {"started": "Прогон начался: модели отвечают на проверочные диалоги. Страница обновляется сама.",
+                  "stopped": "Прогон останавливается: начатые ответы допишутся.",
+                  "picked": "Модель и способ выбраны: ИИ-сотрудник отвечает так со следующего сообщения.",
+                  "budget": "Бюджет сохранён.", "marked": "Ответ добавлен в проверочные диалоги — он войдёт в следующий прогон.",
+                  "deleted": "Случай удалён.", "toggled": "Готово.",
+                  "questions": "Вопросы добавлены — они войдут в следующий прогон (тема «Вопросы по компании»)."}
+
+
+def _telegram_people() -> list:
+    """People who can get a message from the assistant (they have Telegram)."""
+    with SessionLocal() as s:
+        return [{"id": e.id, "name": e.name, "position": e.position or ""} for e in
+                s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name)
+                if (e.telegram_chat_id or "").strip()]
+
+
+def _active_people() -> list:
+    with SessionLocal() as s:
+        return [{"id": e.id, "name": e.name} for e in
+                s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name)]
+
+
+@app.get("/skills/checks", response_class=HTMLResponse)
+def skill_checks_view(request: Request, run: int = 0, msg: str = "", error: str = ""):
+    """Checking dialogs: about fifty situations sent to several models; quality and the price a month side by side."""
+    guard_admin(request)
+    history = agent_checks.runs()
+    shown = run or next((r["id"] for r in history if r["done"]), 0)
+    data = agent_checks.summary(shown) if shown else {}
+    defaults = list(dict.fromkeys([voice.model(), *agent_checks.DEFAULT_MODELS]))
+    return page(request, "skill_checks.html", data=data, history=history, running=agent_checks.running_id(),
+                scenarios=agent_checks.scenarios(), cases=agent_checks.custom_cases(),
+                questions=agent_checks.questions(), people=_active_people(),
+                answers=agent_checks.recent_answers(), defaults=defaults, budget=agent_checks.budget(),
+                month=agent_checks.monthly_messages(), model=voice.model(), transport=agent_skills.transport(),
+                transports=agent_skills.TRANSPORT_RU, skills=agent_skills.SKILLS, role_ru=agent_checks.ROLE_RU,
+                msg=CHECK_MESSAGES.get(msg, ""), error=error[:300], key=bool(config.openrouter_key()))
+
+
+@app.post("/skills/checks")
+async def skill_checks_action(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    do = str(f.get("do") or "")
+    try:
+        if do == "run":
+            models = re.split(r"[\s,;]+", str(f.get("models") or ""))
+            agent_checks.start(models, f.getlist("transport"), _who(request))
+            return RedirectResponse("/skills/checks?msg=started", 303)
+        if do == "stop":
+            agent_checks.stop()
+            return RedirectResponse("/skills/checks?msg=stopped", 303)
+        if do == "pick":
+            model, way = str(f.get("model") or "").strip(), str(f.get("transport") or "")
+            if not re.fullmatch(r"[\w.\-]+/[\w.:\-]+", model) or way not in agent_skills.TRANSPORTS:
+                raise agent_checks.CheckError("Неизвестная модель или способ")
+            settings_store.set_many({"agent_model": model, "agent_transport": way})
+            return RedirectResponse(f"/skills/checks?msg=picked&run={int(f.get('run') or 0)}", 303)
+        if do == "budget":
+            raw = str(f.get("budget") or "0").strip().replace(",", ".") or "0"
+            try:
+                value = float(raw)
+            except ValueError:
+                raise agent_checks.CheckError("Бюджет — число долларов в месяц, например 20") from None
+            if not 0 <= value <= 100000:
+                raise agent_checks.CheckError("Бюджет — от 0 до 100 000 долларов в месяц")
+            settings_store.set_many({"agent_budget_month_usd": round(value, 2)})
+            return RedirectResponse("/skills/checks?msg=budget#compare", 303)
+        if do == "mark":
+            agent_checks.add_case(int(str(f.get("message_id") or "0")), str(f.get("expected") or ""),
+                                  [str(f.get("must") or "")], [str(f.get("must_not") or "")], _who(request))
+            return RedirectResponse("/skills/checks?msg=marked#own", 303)
+        if do == "questions":
+            agent_checks.add_questions(str(f.get("lines") or ""), str(f.get("who") or "director"), _who(request))
+            return RedirectResponse("/skills/checks?msg=questions#questions", 303)
+        if do in ("delete", "toggle"):
+            with SessionLocal() as s:
+                case = s.get(AgentCheckCase, int(str(f.get("case_id") or "0")))
+                if case is None:
+                    raise agent_checks.CheckError("Случай не найден")
+                if do == "delete":
+                    s.delete(case)
+                else:
+                    case.active = not case.active
+                s.commit()
+            back = "questions" if str(f.get("back") or "") == "questions" else "own"
+            return RedirectResponse(f"/skills/checks?msg={'deleted' if do == 'delete' else 'toggled'}#{back}", 303)
+    except (agent_checks.CheckError, ValueError) as exc:
+        return RedirectResponse("/skills/checks?error=" + quote(str(exc)[:300]), 303)
+    raise HTTPException(404, "Неизвестное действие")
+
+
+@app.get("/skills/checks/export")
+def skill_checks_export(request: Request, days: int = 90):
+    """The conversations as JSON lines: to pick the worst answers or to share them with the developer."""
+    guard_admin(request)
+    name = f"sysai-dialogs-{dt.date.today().isoformat()}.jsonl"
+    return StreamingResponse(agent_checks.export_lines(max(1, min(days, 365))), media_type="application/x-ndjson",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.post("/skills")
@@ -771,9 +1637,11 @@ async def skill_save(request: Request):
             s.add(k)
         k.title, k.body, k.kind = title, body, kind
         k.when_to_use = str(f.get("when_to_use") or "").strip()[:2000]
-        k.active, k.updated_by = f.get("active", "on") == "on", _who(request)
+        # the page sends active_shown with its switch: unticked means off (a form without it keeps the old default «on»)
+        k.active = f.get("active") == "on" if f.get("active_shown") else f.get("active", "on") == "on"
+        k.updated_by = _who(request)
         s.commit()
-    return RedirectResponse("/skills", 303)
+    return RedirectResponse("/skills#company-skills", 303)
 
 
 @app.post("/skills/{sid}/{action}")
@@ -790,7 +1658,7 @@ def skill_action(request: Request, sid: int, action: str):
         else:
             raise HTTPException(404, "Неизвестное действие")
         s.commit()
-    return RedirectResponse("/skills", 303)
+    return RedirectResponse("/skills#company-skills", 303)
 
 
 @app.get("/documents/{doc_id}/view", response_class=HTMLResponse)
@@ -806,17 +1674,24 @@ def document_view(request: Request, doc_id: int, q: str = ""):
                              else t.to_ref), "status": t.status, "at": t.sent_at or t.created_at, "by": t.approved_by or ""}
                      for t in s.query(DocumentTransfer).filter_by(document_id=d.id).order_by(DocumentTransfer.id)]
         doc = {"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256, "at": d.created_at,
-               "sender": d.employee.name if d.employee else d.chat_id, "caption": d.caption or "", "sensitive": d.sensitive,
+               "sender": _document_sender(d), "caption": d.caption or "", "sensitive": d.sensitive,
+               "mail_id": (d.facts or {}).get("mail_id") if d.chat_id == "mail" else None,
                "status": d.text_status or "pending", "summary": d.summary or "", "text": (d.text or "")[:20000],
                "truncated": len(d.text or "") > 20000,
                "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None}
+        intake = doc_intake.card(d)
+        cards = [{"id": e.id, "name": e.name} for e in s.query(entities.Entity).join(
+            entities.EntityLink, entities.EntityLink.entity_id == entities.Entity.id).filter(
+            entities.EntityLink.source_type == "document", entities.EntityLink.source_id == d.id)]
     answer = None
     if q.strip():
         try:
             answer = memory.answer_about_document(doc_id, q.strip()[:500])
         except llm.LLMError as exc:
             answer = {"answer": f"Модель недоступна: {exc}", "pieces": []}
-    return page(request, "document.html", doc=doc, transfers=transfers, q=q, answer=answer)
+    return page(request, "document.html", doc=doc, transfers=transfers, q=q, answer=answer, intake=intake, cards=cards,
+                intake_on=doc_intake.enabled(), msg=INTAKE_MESSAGES.get(request.query_params.get("msg", ""), ""),
+                error=str(request.query_params.get("error", ""))[:300])
 
 
 @app.post("/documents/{doc_id}/reread")
@@ -832,8 +1707,790 @@ def document_reread(request: Request, doc_id: int):
     return RedirectResponse(f"/documents/{doc_id}/view", 303)
 
 
+INTAKE_MESSAGES = {"analyzing": "Разбираю заново — обновите страницу через полминуты.", "analyzed": "Разобран заново.",
+                   "routed": "Готово: передан по правилам.", "rule": "Правило сохранено.", "rule_done": "Готово.",
+                   "intake": "Готово.", "checked": "Отмечено — счёт проверенных виден на странице «Документы» в разделе «Разбор входящих»."}
+
+
+@app.post("/documents/{doc_id}/analyze")
+def document_analyze(request: Request, doc_id: int):
+    """«Разобрать заново»: the requisites, the sums and the deadlines again (what was already sent stays as it was)."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        if s.get(Document, doc_id) is None:
+            raise HTTPException(404, "Документ не найден")
+    if config.TESTING:
+        doc_intake.analyze(doc_id, force=True)
+        return RedirectResponse(f"/documents/{doc_id}/view?msg=analyzed", 303)
+    pipeline.POOL.submit(doc_intake.analyze, doc_id, True)
+    return RedirectResponse(f"/documents/{doc_id}/view?msg=analyzing", 303)
+
+
+@app.post("/documents/{doc_id}/route")
+def document_route(request: Request, doc_id: int):
+    """«Передать по правилам»: after a rule was added for a document nobody got."""
+    guard_admin(request)
+    try:
+        route = doc_intake.route_again(doc_id, by=_who(request))
+    except doc_intake.RuleError as exc:
+        return RedirectResponse(f"/documents/{doc_id}/view?error=" + quote(str(exc)), 303)
+    if route.get("status") not in ("sent", "self", "late"):
+        reason = route.get("why") or doc_intake.ROUTE_RU.get(route.get("status") or "", "не передан")
+        return RedirectResponse(f"/documents/{doc_id}/view?error=" + quote(reason), 303)
+    return RedirectResponse(f"/documents/{doc_id}/view?msg=routed", 303)
+
+
+@app.post("/documents/{doc_id}/check")
+async def document_check(request: Request, doc_id: int):
+    """«Да, всё верно» / «Есть ошибка» under the analysis: the Documents page counts how many are right."""
+    guard_admin(request)
+    f = await request.form()
+    try:
+        doc_intake.mark(doc_id, f.get("ok") == "1", str(f.get("note") or ""), by=_who(request))
+    except doc_intake.RuleError as exc:
+        return RedirectResponse(f"/documents/{doc_id}/view?error=" + quote(str(exc)), 303)
+    return RedirectResponse(f"/documents/{doc_id}/view?msg=checked#intake", 303)
+
+
+@app.post("/documents/rules")
+async def doc_rule_save(request: Request):
+    """A «что кому» rule: the type of the document and/or its words → a person or a department."""
+    guard_admin(request)
+    f = await request.form()
+    raw_id = str(f.get("rule_id") or "").strip()
+    try:
+        doc_intake.save_rule(rule_id=int(raw_id) if raw_id.isdigit() else None, kind=str(f.get("kind") or ""),
+                             keywords=str(f.get("keywords") or ""), to=str(f.get("to") or ""),
+                             make_tasks=f.get("make_tasks") == "on", by=_who(request))
+    except doc_intake.RuleError as exc:
+        return RedirectResponse("/documents?error=" + quote(str(exc)) + "#rules", 303)
+    return RedirectResponse("/documents?msg=rule#rules", 303)
+
+
+@app.post("/documents/rules/{rule_id}/{action}")
+def doc_rule_action(request: Request, rule_id: int, action: str):
+    guard_admin(request)
+    try:
+        doc_intake.rule_action(rule_id, action)
+    except doc_intake.RuleError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return RedirectResponse("/documents?msg=rule_done#rules", 303)
+
+
+@app.post("/documents/intake")
+def doc_intake_switch(request: Request):
+    guard_admin(request)
+    settings_store.set_many({"doc_intake": not doc_intake.enabled()})
+    return RedirectResponse("/documents?msg=intake#rules", 303)
+
+
+# ----------------------------------------------------------------------------- objects and clients (entities.py)
+ENTITY_MESSAGES = {"saved": "Карточка сохранена; упоминания в истории ищутся сами.", "merged": "Объединено.",
+                   "deleted": "Карточка удалена.", "fact": "Факт добавлен.", "scanned": "Упоминания найдены заново.",
+                   "archived": "Факт убран в архив."}
+
+
+def _entity_form(f) -> dict:
+    return {k: str(f.get(k) or "") for k in ("name", "kind", "aliases", "unp", "address", "contacts", "description")}
+
+
+@app.get("/entities", response_class=HTMLResponse)
+def entities_view(request: Request, q: str = "", kind: str = "", msg: str = "", error: str = "", added: int = 0,
+                  found: int = 0):
+    """Objects and clients: the cards, possible duplicates, a new card."""
+    guard_admin(request)
+    with SessionLocal() as s:
+        rows, dups = entities.listing(s, q, kind if kind in entities.KINDS else ""), entities.duplicates(s)
+    text = (f"Новых карточек: {added}, уже были: {found}. Упоминания в истории ищутся сами." if msg == "bulk"
+            else ENTITY_MESSAGES.get(msg, ""))
+    return page(request, "entities.html", rows=rows, dups=dups, q=q, kind=kind, kinds=entities.KINDS,
+                source_types=entities.SOURCE_TYPES, msg=text, error=error[:300])
+
+
+@app.post("/entities")
+async def entity_create(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        entity_id = entities.save(None, **_entity_form(f), by=_who(request))
+    except entities.EntityError as exc:
+        return RedirectResponse("/entities?error=" + quote(str(exc)), 303)
+    return RedirectResponse(f"/entities/{entity_id}?msg=saved", 303)
+
+
+@app.post("/entities/bulk")
+async def entity_bulk(request: Request):
+    """The list of the main objects and clients pasted at once: one per line."""
+    guard_admin(request)
+    f = await request.form()
+    added, found = entities.bulk_add(str(f.get("text") or ""), str(f.get("kind") or "client"), by=_who(request))
+    return RedirectResponse(f"/entities?msg=bulk&added={added}&found={found}", 303)
+
+
+@app.post("/entities/scan")
+def entity_scan(request: Request):
+    guard_admin(request)
+    entities.rescan()
+    return RedirectResponse("/entities?msg=scanned", 303)
+
+
+@app.get("/entities/{entity_id}", response_class=HTMLResponse)
+def entity_view(request: Request, entity_id: int, msg: str = "", error: str = ""):
+    guard_admin(request)
+    with SessionLocal() as s:
+        try:
+            e = entities.card(s, entity_id)
+        except entities.EntityError:
+            raise HTTPException(404, "Карточка не найдена") from None
+    return page(request, "entity.html", e=e, kinds=entities.KINDS, source_types=entities.SOURCE_TYPES,
+                msg=ENTITY_MESSAGES.get(msg, ""), error=error[:300])
+
+
+@app.post("/entities/{entity_id}")
+async def entity_save(request: Request, entity_id: int):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        entities.save(entity_id, **_entity_form(f), by=_who(request))
+    except entities.EntityError as exc:
+        return RedirectResponse(f"/entities/{entity_id}?error=" + quote(str(exc)), 303)
+    return RedirectResponse(f"/entities/{entity_id}?msg=saved", 303)
+
+
+@app.post("/entities/{entity_id}/merge")
+async def entity_merge(request: Request, entity_id: int):
+    """The card `gone` is a duplicate of this one: everything moves here."""
+    guard_admin(request)
+    f = await request.form()
+    gone = str(f.get("gone") or "")
+    try:
+        if not gone.isdigit():
+            raise entities.EntityError("выберите карточку-дубль")
+        entities.merge(entity_id, int(gone), by=_who(request))
+    except entities.EntityError as exc:
+        back = "/entities" if f.get("back") == "list" else f"/entities/{entity_id}"
+        return RedirectResponse(back + "?error=" + quote(str(exc)), 303)
+    return RedirectResponse("/entities?msg=merged" if f.get("back") == "list" else f"/entities/{entity_id}?msg=merged", 303)
+
+
+@app.post("/entities/{entity_id}/delete")
+def entity_delete(request: Request, entity_id: int):
+    guard_admin(request)
+    try:
+        entities.delete(entity_id)
+    except entities.EntityError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return RedirectResponse("/entities?msg=deleted", 303)
+
+
+@app.post("/entities/{entity_id}/facts")
+async def entity_fact(request: Request, entity_id: int):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        entities.add_fact(entity_id, str(f.get("text") or ""), by=_who(request))
+    except entities.EntityError as exc:
+        return RedirectResponse(f"/entities/{entity_id}?error=" + quote(str(exc)) + "#facts", 303)
+    return RedirectResponse(f"/entities/{entity_id}?msg=fact#facts", 303)
+
+
+@app.post("/entities/{entity_id}/facts/{note_id}/archive")
+def entity_fact_archive(request: Request, entity_id: int, note_id: int):
+    guard_admin(request)
+    with SessionLocal() as s:
+        note = s.get(Note, note_id)
+        if note is None or note.entity_id != entity_id:
+            raise HTTPException(404, "Факт не найден")
+    memory.edit_note(note_id, archived=True, by=_who(request))
+    return RedirectResponse(f"/entities/{entity_id}?msg=archived#facts", 303)
+
+
+def _document_sender(d) -> str:
+    if d.chat_id == "generated":  # made from a template for the person who asked
+        return f"{d.employee.name} (по шаблону)" if d.employee else "по шаблону"
+    if d.chat_id == "mail":  # an attachment of a letter (mail.py)
+        return "почта" + (": " + d.caption.split(":", 1)[0].replace("Письмо от ", "") if d.caption else "")
+    if d.chat_id == "drive":  # put into «Входящие» of the company folder (gdrive.py)
+        return "Google Drive"
+    return d.employee.name if d.employee else d.chat_id
+
+
+# ----------------------------------------------------------------------------- the mailbox (mail.py, «Почтальон»)
+MAIL_MESSAGES = {"saved": "Сохранено.", "kinds": "Типы писем сохранены — новые письма сортируются по ним.",
+                 "checking": "Смотрю почту — новые письма появятся здесь через минуту-другую.", "marked": "Отмечено.",
+                 "sorting": "Разбираю письмо заново — обновите страницу через полминуты.",
+                 "rule": "Правило сохранено — новые письма передаются по нему.", "rule_done": "Готово.",
+                 "route": "Пересылка писем настроена.", "reply": "Настройки ответов сохранены.",
+                 "passed": "Письмо передано — получатель увидит его в Telegram.",
+                 "back": "Письмо ждёт решения, кому передать.", "route_ok": "Отмечено: передано верно.",
+                 "departments": "Отделы сохранены — новые письма передаются и раскладываются по ним.",
+                 "folders": "Сохранено.", "folder_rule": "Особая папка добавлена — она проверяется первой.",
+                 "folder_rule_done": "Готово.",
+                 "applying": "Раскладываю письма за 30 дней по папкам ящика — обновите страницу через минуту-другую."}
+MAIL_ROUTE_KEYS = ("mail_forward", "mail_hints_auto", "mail_drafts_auto")
+MAIL_REPLY_KEYS = ("mail_sender_name", "mail_signature", "mail_reply_examples")
+
+
+def _mail_msg(msg: str) -> str:
+    """A known message key, or the text of a check of the connection («подключено…», «отправка работает…»)."""
+    return MAIL_MESSAGES.get(msg, msg[:300] if msg.startswith(("подключено", "отправка работает", "папки в ящике")) else "")
+
+
+def _mail_cards(s) -> list:
+    return [{"id": e.id, "name": e.name} for e in s.query(entities.Entity).filter(
+        entities.Entity.merged_into_id.is_(None)).order_by(entities.Entity.name).limit(1000)]
+MAIL_FORM_KEYS = ("mail_enabled", "mail_service", "mail_address", "mail_imap_host", "mail_imap_port", "mail_smtp_host",
+                  "mail_smtp_port", "mail_folder", "mail_poll_minutes", "mail_history_days", "mail_labels")
+
+
+@app.get("/mail", response_class=HTMLResponse)
+def mail_view(request: Request, kind: str = "", q: str = "", only: str = "", msg: str = "", error: str = "",
+              limit: int = 100):
+    """The mailbox: the letters with their type, client or object, case and labels; the connection; the types."""
+    guard_admin(request)
+    kinds = mail.kinds()
+    with SessionLocal() as s:
+        rows = mail.listing(s, kind if kind in kinds else "", q,
+                            only if only in ("unsorted", "unchecked", "unrouted") else "", max(20, min(int(limit or 100), 500)))
+        score = mail.accuracy(s)
+        rules, targets, hints = mail_route.rules_view(s), mail_route.targets(s), mail_route.suggestions(s)
+        route_score, waiting = mail_route.accuracy(s), len(mail_route.waiting(s))
+        drafts, cards = mail_reply.recent(s, 10), _mail_cards(s)
+        departments, staff, folders = mail_folders.departments(s), mail_folders.people(s), mail_folders.view(s)
+    stored = settings_store.all_settings()
+    form = {k: stored.get(k) for k in MAIL_FORM_KEYS}
+    return page(request, "mail.html", rows=rows, score=score, st=mail.status(), kinds=kinds, kinds_text=mail.kinds_text(),
+                presets=mail.PRESETS, form=form, has_password=bool(stored.get("mail_password")), kind=kind, q=q,
+                only=only, limit=limit, msg=_mail_msg(msg), error=error[:300], rules=rules, targets=targets,
+                suggestions=hints, route_score=route_score, waiting=waiting, drafts=drafts, cards=cards,
+                route_form={k: stored.get(k) for k in MAIL_ROUTE_KEYS},
+                reply_form={k: stored.get(k) for k in MAIL_REPLY_KEYS}, smtp_ready=mail_reply.ready(),
+                departments=departments, staff=staff, folders=folders, dep_auto=bool(stored.get("mail_departments_auto")))
+
+
+@app.post("/mail/rules")
+async def mail_rule_save(request: Request):
+    """«Кто чем занимается»: a rule — a type, a client or object, senders, words → a person or a department."""
+    guard_admin(request)
+    f = await request.form()
+    raw_id, raw_entity = str(f.get("rule_id") or "").strip(), str(f.get("entity_id") or "").strip()
+    try:
+        mail_route.save_rule(rule_id=int(raw_id) if raw_id.isdigit() else None, kind=str(f.get("kind") or ""),
+                             entity_id=int(raw_entity) if raw_entity.isdigit() else None,
+                             senders=str(f.get("senders") or ""), keywords=str(f.get("keywords") or ""),
+                             to=str(f.get("to") or ""), make_tasks=bool(f.get("make_tasks")), by=_who(request))
+    except mail_route.RouteError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#rules", 303)
+    return RedirectResponse("/mail?msg=rule#rules", 303)
+
+
+@app.post("/mail/rules/{rule_id}/{action}")
+def mail_rule_action(request: Request, rule_id: int, action: str):
+    guard_admin(request)
+    try:
+        mail_route.rule_action(rule_id, action)
+    except mail_route.RouteError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#rules", 303)
+    return RedirectResponse("/mail?msg=rule_done#rules", 303)
+
+
+@app.post("/mail/departments")
+async def mail_departments_save(request: Request):
+    """«Отделы»: who of each department gets its letters, its folder in the box, what letters it gets."""
+    guard_admin(request)
+    try:
+        mail_folders.save_departments(await request.form())
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#departments", 303)
+    return RedirectResponse("/mail?msg=departments#departments", 303)
+
+
+@app.post("/mail/folders")
+async def mail_folders_save(request: Request):
+    """«Папки в ящике»: on and where; switched on — the folders are made in the box right away."""
+    guard_admin(request)
+    try:
+        text = mail_folders.save_settings(await request.form())
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=" + quote(text or "folders") + "#folders", 303)
+
+
+@app.post("/mail/folders/create")
+def mail_folders_create(request: Request):
+    guard_admin(request)
+    try:
+        text = mail_folders.create_now()
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=" + quote(text) + "#folders", 303)
+
+
+@app.post("/mail/folders/apply")
+def mail_folders_apply(request: Request):
+    guard_admin(request)
+    if not settings_store.get("mail_folders_on") or not mail.configured():
+        return RedirectResponse("/mail?error=" + quote("включите «раскладывать письма по папкам» и подключите почту") +
+                                "#folders", 303)
+    mail_folders.apply_soon()
+    return RedirectResponse("/mail?msg=applying#folders", 303)
+
+
+@app.post("/mail/folder-rules")
+async def mail_folder_rule_save(request: Request):
+    guard_admin(request)
+    try:
+        mail_folders.save_folder_rule(await request.form())
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=folder_rule#folders", 303)
+
+
+@app.post("/mail/folder-rules/{index}/{action}")
+def mail_folder_rule_action(request: Request, index: int, action: str):
+    guard_admin(request)
+    try:
+        mail_folders.folder_rule_action(index, action)
+    except mail_folders.FolderError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#folders", 303)
+    return RedirectResponse("/mail?msg=folder_rule_done#folders", 303)
+
+
+@app.post("/mail/route-settings")
+async def mail_route_settings(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    settings_store.set_many({k: bool(f.get(k)) for k in MAIL_ROUTE_KEYS})
+    return RedirectResponse("/mail?msg=route#rules", 303)
+
+
+@app.post("/mail/reply-settings")
+async def mail_reply_settings(request: Request):
+    guard_admin(request)
+    mail_reply.save_settings(await request.form())
+    return RedirectResponse("/mail?msg=reply#replies", 303)
+
+
+@app.post("/mail/smtp-test")
+def mail_smtp_test(request: Request):
+    """«Проверить отправку»: sign in to the SMTP server (nothing is sent)."""
+    guard_admin(request)
+    try:
+        text = mail_reply.test_smtp()
+    except mail_reply.ReplyError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#replies", 303)
+    return RedirectResponse("/mail?msg=" + quote(text) + "#replies", 303)
+
+
+@app.post("/mail/settings")
+async def mail_settings_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        mail.save_settings(f)
+    except mail.MailError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#connect", 303)
+    return RedirectResponse("/mail?msg=saved#connect", 303)
+
+
+@app.post("/mail/test")
+def mail_test(request: Request):
+    """«Проверить подключение»: sign in and open the folder."""
+    guard_admin(request)
+    try:
+        text = mail.test_connection()
+    except mail.MailError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#connect", 303)
+    return RedirectResponse("/mail?msg=" + quote(text) + "#connect", 303)
+
+
+@app.post("/mail/check")
+def mail_check_now(request: Request):
+    guard_admin(request)
+    if not mail.configured():
+        return RedirectResponse("/mail?error=" + quote("почта не подключена") + "#connect", 303)
+    mail.check_soon()
+    return RedirectResponse("/mail?msg=checking", 303)
+
+
+@app.post("/mail/kinds")
+async def mail_kinds_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        mail.save_kinds(str(f.get("text") or ""))
+    except mail.MailError as exc:
+        return RedirectResponse("/mail?error=" + quote(str(exc)) + "#kinds", 303)
+    return RedirectResponse("/mail?msg=kinds#kinds", 303)
+
+
+@app.get("/mail/{mail_id}", response_class=HTMLResponse)
+def mail_letter_view(request: Request, mail_id: int, msg: str = "", error: str = ""):
+    guard_admin(request)
+    with SessionLocal() as s:
+        try:
+            letter = mail.letter(s, mail_id)
+        except mail.MailError:
+            raise HTTPException(404, "Письмо не найдено") from None
+        cards = _mail_cards(s)
+        people = [t for t in mail_route.targets(s) if t["value"].startswith("e:")]
+    return page(request, "mail_letter.html", m=letter, kinds=mail.kinds(), cards=cards, people=people,
+                msg=MAIL_MESSAGES.get(msg, ""), error=error[:300])
+
+
+@app.post("/mail/{mail_id}/route")
+async def mail_letter_route(request: Request, mail_id: int):
+    """«Передать»: the letter goes to this person (or waits for a decision again); «запомнить» makes a rule."""
+    guard_admin(request)
+    f = await request.form()
+    to = str(f.get("to") or "")
+    m = re.fullmatch(r"e:(\d+)", to)
+    try:
+        if to == "none":
+            mail_route.pass_on(mail_id, None, by=_who(request), note=str(f.get("note") or ""), tell=False)
+        elif m:
+            mail_route.pass_on(mail_id, int(m.group(1)), by=_who(request), note=str(f.get("note") or ""),
+                               remember=bool(f.get("remember")))
+        else:
+            raise mail_route.RouteError("выберите, кому передать письмо")
+    except mail_route.RouteError as exc:
+        return RedirectResponse(f"/mail/{mail_id}?error=" + quote(str(exc)) + "#route", 303)
+    return RedirectResponse(f"/mail/{mail_id}?msg=" + ("back" if to == "none" else "passed") + "#route", 303)
+
+
+@app.post("/mail/{mail_id}/route-check")
+def mail_letter_route_check(request: Request, mail_id: int):
+    """«Верно»: the letter went to the right person (the accuracy of the routing)."""
+    guard_admin(request)
+    try:
+        mail_route.mark(mail_id, True, by=_who(request))
+    except mail_route.RouteError as exc:
+        return RedirectResponse(f"/mail/{mail_id}?error=" + quote(str(exc)) + "#route", 303)
+    return RedirectResponse(f"/mail/{mail_id}?msg=route_ok#route", 303)
+
+
+@app.post("/mail/{mail_id}/check")
+async def mail_letter_check(request: Request, mail_id: int):
+    """«Верно» or the right type and client: the accuracy of the sorting."""
+    guard_admin(request)
+    f = await request.form()
+    back = "/mail" if f.get("back") == "list" else f"/mail/{mail_id}"
+    try:
+        if f.get("ok") == "1":
+            mail.check(mail_id, True, by=_who(request))
+        else:
+            raw = str(f.get("entity_id") or "").strip()
+            entity_id = int(raw) if raw.isdigit() else (0 if raw == "none" else None)
+            mail.check(mail_id, False, kind=str(f.get("kind") or ""), entity_id=entity_id, by=_who(request))
+    except mail.MailError as exc:
+        return RedirectResponse(back + "?error=" + quote(str(exc)), 303)
+    return RedirectResponse(back + "?msg=marked" + (f"#m{mail_id}" if back == "/mail" else ""), 303)
+
+
+@app.post("/mail/{mail_id}/sort")
+def mail_letter_sort(request: Request, mail_id: int):
+    guard_admin(request)
+    if config.TESTING:
+        mail.sort_letter(mail_id, force=True)
+    else:
+        threading.Thread(target=mail.sort_letter, args=(mail_id,), kwargs={"force": True}, daemon=True).start()
+    return RedirectResponse(f"/mail/{mail_id}?msg=sorting", 303)
+
+
+# ----------------------------------------------------------------------------- the calendar (calendars.py, №26)
+CALENDAR_MESSAGES = {
+    "saved": "Адрес календаря сохранён и прочитан.", "synced": "Календарь прочитан.",
+    "forgot": "Календарь компании отключён: встречи из него удалены.", "feed": "Готово.",
+    "reset": "Ссылки сменены: старые больше не работают — разошлите новые.",
+}
+
+
+def _calendar_base(request: Request) -> str:
+    return calendars.base_url(str(request.base_url))
+
+
+@app.get("/calendar", response_class=HTMLResponse)
+def calendar_view(request: Request, msg: str = "", error: str = ""):
+    """«Календарь»: the addresses of the employees for subscription and the company calendar for the participants."""
+    guard_admin(request)
+    base = _calendar_base(request)
+    with SessionLocal() as s:
+        rows, coming = calendars.links(s, base), calendars.upcoming(s)
+        no_email = s.query(Employee).filter(Employee.active.is_(True), (Employee.email == "") | Employee.email.is_(None)).count()
+    text = CALENDAR_MESSAGES.get(msg, msg[:300])
+    return page(request, "calendar.html", rows=rows, coming=coming, st=calendars.status(), msg=text, error=error[:300],
+                all_url=calendars.link("all", base), feed_on=calendars.feed_on(), no_email=no_email,
+                howto=calendars.HOWTO, public=bool(config.PUBLIC_URL))
+
+
+@app.post("/calendar/address")
+async def calendar_address(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        calendars.save_address(str(f.get("url") or ""), by=_who(request))
+        calendars.sync()
+    except calendars.CalendarError as exc:
+        return RedirectResponse("/calendar?error=" + quote(str(exc)) + "#company", 303)
+    return RedirectResponse("/calendar?msg=saved#company", 303)
+
+
+@app.post("/calendar/sync")
+def calendar_sync(request: Request):
+    guard_admin(request)
+    try:
+        state = calendars.sync()
+    except calendars.CalendarError as exc:
+        return RedirectResponse("/calendar?error=" + quote(str(exc)) + "#company", 303)
+    text = f"Календарь прочитан: встреч на 60 дней назад и 90 вперёд — {state.get('events', 0)}."
+    return RedirectResponse("/calendar?msg=" + quote(text) + "#company", 303)
+
+
+@app.post("/calendar/forget")
+def calendar_forget(request: Request):
+    guard_admin(request)
+    calendars.forget()
+    return RedirectResponse("/calendar?msg=forgot#company", 303)
+
+
+@app.post("/calendar/feed-settings")
+async def calendar_feed_settings(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    settings_store.set_many({"calendar_feed_on": bool(f.get("calendar_feed_on"))})
+    return RedirectResponse("/calendar?msg=feed#links", 303)
+
+
+@app.post("/calendar/send-links")
+async def calendar_send_links(request: Request):
+    """«Разослать ссылки»: everyone with Telegram gets their own address (one person: employee_id)."""
+    guard_admin(request)
+    f = await request.form()
+    raw = str(f.get("employee_id") or "").strip()
+    only = {int(raw)} if raw.isdigit() else None
+    sent, failed, skipped = calendars.send_links(_calendar_base(request), only=only)
+    text = f"Ссылки отправлены: {sent}." + (f" Не дошло: {failed}." if failed else "") + (
+        f" Без Telegram: {skipped} — им ссылку передайте сами." if skipped else "")
+    return RedirectResponse("/calendar?msg=" + quote(text) + "#links", 303)
+
+
+@app.post("/calendar/reset-links")
+def calendar_reset_links(request: Request):
+    guard_admin(request)
+    calendars.reset_links()
+    return RedirectResponse("/calendar?msg=reset#links", 303)
+
+
+@app.get("/calendar/feed/{value}.ics")
+def calendar_feed(value: str, request: Request):
+    """The address a calendar subscribes to: secret, no sign-in (calendars cannot sign in)."""
+    if not calendars.feed_on():
+        raise HTTPException(404, "Календарь выключен.")
+    with SessionLocal() as s:
+        who = calendars.owner(s, value)
+        if who is None:
+            raise HTTPException(404, "Нет такого календаря.")
+        body = calendars.feed(s, who, _calendar_base(request))
+    return Response(body, media_type="text/calendar; charset=utf-8",
+                    headers={"Cache-Control": "private, max-age=300", "Content-Disposition": 'inline; filename="sysai.ics"'})
+
+
+# ----------------------------------------------------------------------------- the tables (tables.py, №27)
+@app.get("/tables", response_class=HTMLResponse)
+def tables_view(request: Request):
+    """«Таблицы»: the filters, the pivots at a glance and one button for the whole workbook."""
+    guard_admin(request)
+    f = tables.filters(request.query_params)
+    with SessionLocal() as s:
+        view = tables.page_data(s, f)
+        people = [{"id": e.id, "name": e.name} for e in
+                  s.query(Employee).filter(Employee.active.is_(True)).order_by(Employee.name).all()]
+        departments = [{"id": d.id, "name": d.name} for d in s.query(Department).order_by(Department.name).all()]
+        places = [{"id": e.id, "name": e.name} for e in
+                  s.query(entities.Entity).filter(entities.Entity.active.is_(True), entities.Entity.merged_into_id.is_(None))
+                  .order_by(entities.Entity.name).all()]
+    return page(request, "tables.html", f=f, view=view, people=people, departments=departments, places=places,
+                presets=tables.PRESETS, states=tables.STATES, query=tables.query_string(f))
+
+
+@app.get("/tables/export.xlsx")
+def tables_export(request: Request):
+    guard_admin(request)
+    f = tables.filters(request.query_params)
+    with SessionLocal() as s:
+        body = tables.export(s, f)
+    return Response(body, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{tables.filename(f)}"'})
+
+
+# ----------------------------------------------------------------------------- integrations (bitrix_sync.py, gdrive.py, №28)
+INTEGRATION_MESSAGES = {"saved": "Сохранено.", "forgot": "Отключено.", "people": "Сопоставление сохранено."}
+
+
+def _integrations_back(section: str, msg: str = "", error: str = "") -> RedirectResponse:
+    query = ("msg=" + quote(INTEGRATION_MESSAGES.get(msg, msg)[:300])) if msg else ("error=" + quote(error[:300]))
+    return RedirectResponse(f"/integrations?{query}#{section}", 303)
+
+
+@app.get("/integrations", response_class=HTMLResponse)
+def integrations_view(request: Request, msg: str = "", error: str = ""):
+    """«Интеграции»: Битрикс24 (tasks, clients) and Google Drive (documents, templates)."""
+    guard_admin(request)
+    st = {k: settings_store.get(k) for k in bitrix_sync.TOGGLES + gdrive.TOGGLES}
+    return page(request, "integrations.html", s=st, bx=bitrix_sync.status(), gd=gdrive.status(), msg=msg[:300],
+                error=error[:300])
+
+
+@app.post("/integrations/bitrix")
+async def integrations_bitrix_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    url = str(f.get("webhook") or "").strip().rstrip("/")
+    if url:
+        if not re.match(r"https://[^\s/]+/rest/\d+/[A-Za-z0-9]+$", url):
+            return _integrations_back("bitrix", error="Адрес вебхука выглядит так: https://портал.bitrix24.by/rest/1/xxxxxxxx/")
+        settings_store.set_many({"bitrix_webhook_url": url})
+    if f.get("present") == "1":
+        bitrix_sync.switched({k: bool(f.get(k)) for k in bitrix_sync.TOGGLES})
+    if url:
+        try:
+            return _integrations_back("bitrix", msg="Битрикс24 подключён: " + bitrix_sync.check())
+        except bitrix.BitrixError as exc:
+            return _integrations_back("bitrix", error=f"Вебхук сохранён, но портал ответил: {exc}")
+    return _integrations_back("bitrix", msg="saved")
+
+
+@app.post("/integrations/bitrix/check")
+def integrations_bitrix_check(request: Request):
+    guard_admin(request)
+    try:
+        return _integrations_back("bitrix", msg="Битрикс24 отвечает: " + bitrix_sync.check())
+    except bitrix.BitrixError as exc:
+        return _integrations_back("bitrix", error=str(exc))
+
+
+@app.post("/integrations/bitrix/sync")
+def integrations_bitrix_sync(request: Request):
+    guard_admin(request)
+    try:
+        state = bitrix_sync.sync()
+    except bitrix.BitrixError as exc:
+        return _integrations_back("bitrix", error=str(exc))
+    if state.get("ok") is False:
+        return _integrations_back("bitrix", error=state.get("error") or "сверка не удалась")
+    return _integrations_back("bitrix", msg="Сверено: " + (state.get("summary") or "изменений нет") + ".")
+
+
+@app.post("/integrations/bitrix/match")
+def integrations_bitrix_match(request: Request):
+    guard_admin(request)
+    try:
+        users = bitrix_sync.refresh_users()
+    except bitrix.BitrixError as exc:
+        return _integrations_back("bitrix", error=str(exc))
+    matched = bitrix_sync.match_employees(users)
+    text = (f"Пользователей портала: {len(users)}. " +
+            (f"ID подставлен: {', '.join(matched[:15])}." if matched else "Новых совпадений нет — выберите вручную."))
+    return _integrations_back("bitrix", msg=text)
+
+
+@app.post("/integrations/bitrix/people")
+async def integrations_bitrix_people(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    pairs = {int(k[4:]): str(v) for k, v in f.items() if k.startswith("emp_") and k[4:].isdigit()}
+    bitrix_sync.save_matching(pairs)
+    return _integrations_back("bitrix", msg="people")
+
+
+@app.post("/integrations/bitrix/forget")
+def integrations_bitrix_forget(request: Request):
+    guard_admin(request)
+    settings_store.set_many({"bitrix_webhook_url": "", "bitrix_state": {}, "bitrix_users": [],
+                             **{k: False for k in bitrix_sync.TOGGLES}})
+    with SessionLocal() as s:
+        s.query(BitrixLink).delete()
+        s.commit()
+    return _integrations_back("bitrix", msg="forgot")
+
+
+@app.post("/integrations/drive")
+async def integrations_drive_save(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    try:
+        gdrive.save(str(f.get("key") or ""), str(f.get("folder") or ""), by=_who(request))
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=str(exc))
+    if f.get("present") == "1":
+        gdrive.switched({k: bool(f.get(k)) for k in gdrive.TOGGLES})
+    try:
+        state = gdrive.check()
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=f"Сохранено, но папка не открылась: {exc}")
+    text = f"Google Drive подключён: папка «{state.get('root_name')}»." + (
+        " Класть файлы в неё нельзя — см. ниже." if state.get("upload_blocked") else "")
+    return _integrations_back("drive", msg=text)
+
+
+@app.post("/integrations/drive/check")
+def integrations_drive_check(request: Request):
+    guard_admin(request)
+    try:
+        state = gdrive.check()
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=str(exc))
+    return _integrations_back("drive", msg=f"Папка «{state.get('root_name')}» открывается." + (
+        " Класть файлы нельзя — см. ниже." if state.get("upload_blocked") else " Читать и класть файлы можно."))
+
+
+@app.post("/integrations/drive/sync")
+def integrations_drive_sync(request: Request):
+    guard_admin(request)
+    try:
+        state = gdrive.sync()
+    except gdrive.DriveError as exc:
+        return _integrations_back("drive", error=str(exc))
+    if state.get("ok") is False:
+        return _integrations_back("drive", error=state.get("error") or "сверка не удалась")
+    return _integrations_back("drive", msg="Сверено: " + (state.get("summary") or "изменений нет") + ".")
+
+
+@app.post("/integrations/drive/forget")
+def integrations_drive_forget(request: Request):
+    guard_admin(request)
+    gdrive.forget()
+    return _integrations_back("drive", msg="forgot")
+
+
+# ----------------------------------------------------------------------------- «Сервер» (server_watch.py, №29)
+@app.get("/server", response_class=HTMLResponse)
+def server_view(request: Request, msg: str = "", error: str = ""):
+    """Downtime, crashes, memory, disk, database and nightly dumps: is the place good enough, did the move help."""
+    guard_admin(request)
+    return page(request, "server.html", w=server_watch.summary(), msg=msg[:300], error=error[:300])
+
+
+@app.post("/server/backup")
+async def server_backup(request: Request):
+    guard_admin(request)
+    f = await request.form()
+    if f.get("action") == "copy":
+        done = server_watch.copy_backups(force=True)
+        state = settings_store.get("backup_state") or {}
+        if state.get("error"):
+            return RedirectResponse("/server?error=" + quote(state["error"][:300]) + "#backups", 303)
+        return RedirectResponse("/server?msg=" + quote((done or "Дампов нет.")[:300]) + "#backups", 303)
+    settings_store.set_many({"backup_copy": bool(f.get("backup_copy"))})
+    return RedirectResponse("/server?msg=" + quote("Сохранено.") + "#backups", 303)
+
+
+DOC_TEMPLATE_MESSAGES = {"saved": "Шаблон сохранён: ИИ-сотрудник видит его со следующего сообщения.",
+                         "toggled": "Готово.", "deleted": "Шаблон удалён."}
+
+
 @app.get("/documents", response_class=HTMLResponse)
-def documents_view(request: Request, q: str = ""):
+def documents_view(request: Request, q: str = "", msg: str = "", error: str = ""):
     """The library of files people sent to the AI employee, with the case and where each file was passed on."""
     guard_admin(request)
     with SessionLocal() as s:
@@ -850,12 +2507,90 @@ def documents_view(request: Request, q: str = ""):
             rows.append({"id": d.id, "filename": d.filename, "kind": d.kind, "size": d.size, "sha": d.sha256[:12],
                          "sensitive": d.sensitive, "caption": d.caption, "at": d.created_at,
                          "summary": d.summary or "", "status": d.text_status or "pending",
-                         "sender": d.employee.name if d.employee else d.chat_id,
+                         "sender": _document_sender(d), "intake": doc_intake.brief(d),
                          "case": {"id": case.id, "title": case.title, "meeting_id": case.meeting_id} if case else None,
                          "transfers": [{"to": (s.get(Employee, t.to_employee_id).name if t.to_employee_id and
                                                s.get(Employee, t.to_employee_id) else t.to_ref), "status": t.status,
                                         "at": t.sent_at} for t in transfers]})
-    return page(request, "documents.html", docs=rows, q=q)
+        templates, made = doc_templates.panel_list(s), doc_templates.recent(s, 15)
+        rules, targets, checked = doc_intake.rules_view(s), doc_intake.targets(s), doc_intake.checked(s)
+    return page(request, "documents.html", docs=rows, q=q, templates=templates, made=made,
+                outputs=doc_templates.OUTPUTS, msg=DOC_TEMPLATE_MESSAGES.get(msg, "") or INTAKE_MESSAGES.get(msg, ""),
+                error=error[:300], draft_ru=DRAFT_RU, rules=rules, targets=targets, doc_kinds=doc_intake.KINDS,
+                intake_on=doc_intake.enabled(), checked=checked)
+
+
+DRAFT_RU = {"draft": "ждёт «ок»", "replaced": "заменён исправленным", "cancelled": "отменён", "approved": "сохранён, отправляется",
+            "sent": "сохранён и отправлен", "kept": "сохранён"}
+
+
+@app.post("/documents/templates")
+async def doc_template_save(request: Request):
+    """A DOCX template with fields {{…}}: a new one, or the title, the hints and the file of an existing one."""
+    guard_admin(request)
+    me = current_user(request) or {}
+    f = await request.form()
+    upload = f.get("file")
+    data = await upload.read() if upload is not None and hasattr(upload, "read") else b""
+    raw_id = str(f.get("template_id") or "").strip()
+    template_id = int(raw_id) if raw_id.isdigit() else 0
+    hints = {}
+    for key, value in f.multi_items():
+        if key.startswith("field_"):
+            hints[str(value)] = str(f.get("hint_" + key[len("field_"):]) or "")
+    try:
+        doc_templates.save_template(template_id=template_id or None, title=str(f.get("title") or ""),
+                                    description=str(f.get("description") or ""),
+                                    filename=getattr(upload, "filename", "") or "", data=data,
+                                    output=str(f.get("output") or "docx"), hints=hints,
+                                    by=me.get("name") or me.get("username") or "")
+    except doc_templates.TemplateError as exc:
+        return RedirectResponse("/documents?error=" + quote(str(exc)) + "#templates", 303)
+    return RedirectResponse("/documents?msg=saved#templates", 303)
+
+
+@app.post("/documents/templates/{template_id}/{action}")
+def doc_template_action(request: Request, template_id: int, action: str):
+    guard_admin(request)
+    try:
+        if action == "toggle":
+            doc_templates.toggle(template_id)
+        elif action == "delete":
+            doc_templates.delete(template_id)
+        else:
+            raise HTTPException(404, "Неизвестное действие")
+    except doc_templates.TemplateError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return RedirectResponse(f"/documents?msg={'deleted' if action == 'delete' else 'toggled'}#templates", 303)
+
+
+@app.get("/documents/templates/{template_id}/{what}")
+def doc_template_file(request: Request, template_id: int, what: str):
+    """The uploaded template (file) or the template with the names of its fields filled in (sample)."""
+    guard_admin(request)
+    try:
+        if what == "sample":
+            name, data = doc_templates.sample(template_id)
+        elif what == "file":
+            name, data = doc_templates.original(template_id)
+        else:
+            raise HTTPException(404, "Неизвестный файл")
+    except doc_templates.TemplateError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return Response(data, media_type=doc_templates.DOCX_MIME,
+                    headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name)})
+
+
+@app.get("/documents/drafts/{draft_id}/{kind}")
+def doc_draft_file(request: Request, draft_id: int, kind: str):
+    guard_admin(request)
+    if kind not in ("docx", "pdf"):
+        raise HTTPException(404, "Неизвестный файл")
+    try:
+        name, mime, data = doc_templates.draft_file(draft_id, kind)
+    except doc_templates.TemplateError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return Response(data, media_type=mime, headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name)})
 
 
 @app.get("/documents/{doc_id}")
@@ -923,7 +2658,7 @@ def _apply_form(mid: int, form, approve=False):
             if form.get(f"del_{t.id}"):
                 m.tasks.remove(t)
                 continue
-            t.title = (form.get(f"title_{t.id}") or t.title).strip()
+            t.title = " ".join(str(form.get(f"title_{t.id}") or "").split())[:500] or t.title  # the field wraps: no line breaks
             t.description = form.get(f"desc_{t.id}", t.description)
             a = form.get(f"assignee_{t.id}", "")
             if a or t.executor != "assistant":  # an empty choice keeps a task the assistant does itself
@@ -938,7 +2673,8 @@ def _apply_form(mid: int, form, approve=False):
         if (form.get("new_title") or "").strip():
             a = form.get("new_assignee", "")
             dl = form.get("new_deadline", "")
-            m.tasks.append(Task(title=form["new_title"].strip(), assignee_id=int(a) if a else None,
+            m.tasks.append(Task(title=" ".join(form["new_title"].split())[:500], description=(form.get("new_desc") or "").strip(),
+                                assignee_id=int(a) if a else None,
                                 deadline=dt.date.fromisoformat(dl) if dl else None,
                                 deadline_source="manual" if dl else "none", priority=form.get("new_priority", "medium")))
         s.query(Delivery).filter_by(meeting_id=mid, phase="draft", status="pending").update(
@@ -1114,6 +2850,8 @@ def meeting_delete(request: Request, mid: int):
                 if sample.sample_blob_path:
                     s.add(VoiceSampleCleanup(employee_id=sample.employee_id, storage_path=sample.sample_blob_path))
                 s.delete(sample)
+            voice_memory.forget_meeting(s, mid)  # the voices remembered from this meeting go with it
+            audio_archive.forget(s, m, "meeting")
             s.delete(m)
             s.commit()
     return RedirectResponse("/meetings", 303)
@@ -1167,7 +2905,7 @@ def settings_view(request: Request, msg: str = ""):
     guard_admin(request)
     st = settings_store.all_settings()
     masked = {k: bool(st.get(k)) for k in settings_store.SECRET_KEYS}
-    env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY), "pyannoteai_api_key": bool(config.PYANNOTEAI_API_KEY),
+    env = {"openrouter_api_key": bool(config.OPENROUTER_API_KEY),
            "telegram_bot_token": bool(config.TELEGRAM_BOT_TOKEN), "bitrix_webhook_url": bool(config.BITRIX_WEBHOOK_URL),
            "ticnote_appkey": bool(config.TICNOTE_APPKEY)}
     for k in settings_store.SECRET_KEYS + settings_store.HIDDEN_KEYS:
@@ -1175,9 +2913,13 @@ def settings_view(request: Request, msg: str = ""):
     ai = bool(st.get("ai_employee"))
     from . import digest
     return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
-                digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU,
-                account=userbot.status() if ai else None, persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
-                notion=notion.connection_status())
+                digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU, digest_people=_telegram_people(),
+                account=userbot.status(), persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
+                notion=notion.connection_status(), storage=storage.describe(), storage_usage=audio_archive.usage(),
+                retention_days=config.RECORDING_RETENTION_DAYS, diarization_methods=diarize.METHODS,
+                diarization_hints=diarize.HINTS, voice_service=config.voice_service_enabled(),
+                diarization_unavailable={name: diarize.unavailable(name) for name in diarize.METHODS},
+                voice_memory_days=speaker_id.VOICE_SAMPLE_RETENTION_DAYS, voice_memory_meetings=voice_memory.MIN_MEETINGS)
 
 
 def voice_default_persona() -> str:
@@ -1302,7 +3044,9 @@ async def settings_save(request: Request):
     updates = {}
     for k in ("auto_ingest", "approval_required", "send_tasks_to_assignees",
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
-              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode"):
+              "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode", "voice_memory",
+              "silence_working_hours", "speech_detector", "speech_doubts", "stt_keyterms", "stt_diarize",
+              "agents_on", "opo_on"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):
@@ -1312,11 +3056,12 @@ async def settings_save(request: Request):
         if k in f:
             updates[k] = str(f[k]).strip()[:300]
     for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model", "conversation_tone",
-              "company_name", "accent_color", "glossary", "persona"):
+              "company_name", "accent_color", "glossary", "persona", "verify_model", "verify_judge_model"):
         if k in f:
             value = str(f[k]).strip()
             updates[k] = value if k == "glossary" else value or settings_store.DEFAULTS[k]
-    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model"):
+    for k in ("transcribe_model", "diarization_model", "report_model", "agent_model", "conversation_model",
+              "verify_model", "verify_judge_model"):
         if k in updates and (len(updates[k]) > 200 or not re.fullmatch(r"~?[A-Za-z0-9._:/-]+", updates[k])):
             raise HTTPException(400, "Некорректный идентификатор модели")
     if "conversation_tone" in updates:
@@ -1351,6 +3096,16 @@ async def settings_save(request: Request):
             updates[key] = int(value) if key == "case_max_reminders" else value
     if "sensitive_keywords" in f:
         updates["sensitive_keywords"] = str(f["sensitive_keywords"])[:1000]
+    if "diarization_method" in f:
+        if f["diarization_method"] not in diarize.METHODS:
+            raise HTTPException(400, "Выберите способ разметки голосов из списка")
+        updates["diarization_method"] = f["diarization_method"]
+    if "diarization_voice_threshold" in f:
+        updates["diarization_voice_threshold"] = _voice_threshold(f["diarization_voice_threshold"])
+    if "speaker_name_threshold" in f:
+        updates["speaker_name_threshold"] = _name_threshold(f["speaker_name_threshold"])
+    if "voice_memory_threshold" in f:
+        updates["voice_memory_threshold"] = _memory_threshold(f["voice_memory_threshold"])
     # Secrets are never echoed in hidden inputs. A value alone (including a
     # legacy hidden value) is not an instruction to replace a credential.
     # Require the explicit action selected in the visible credential control.
@@ -1364,6 +3119,13 @@ async def settings_save(request: Request):
         if f["digest_frequency"] not in digest.FREQUENCIES:
             raise HTTPException(400, "Сводка: выберите «каждый день», «раз в неделю» или «не присылать»")
         updates["digest_frequency"] = f["digest_frequency"]
+    if "digest_time" in f:  # «09:30» of the time field
+        found = re.fullmatch(r"\s*(\d{1,2})[:.](\d{2})\s*", str(f["digest_time"]))
+        if not found or int(found.group(1)) > 23 or int(found.group(2)) > 59:
+            raise HTTPException(400, "Время сводки — часы и минуты, например 09:00")
+        updates["digest_hour"], updates["digest_minute"] = int(found.group(1)), int(found.group(2))
+    if f.get("present_digest_recipients") == "1":
+        updates["digest_recipients"] = sorted({int(x) for x in f.getlist("digest_recipients") if str(x).isdigit()})
     for k, top, label in (("digest_hour", 23, "час сводки от 0 до 23"), ("digest_weekday", 6, "день недели сводки")):
         if k in f:
             try:
@@ -1373,6 +3135,19 @@ async def settings_save(request: Request):
             if not 0 <= value <= top:
                 raise HTTPException(400, f"Укажите {label}")
             updates[k] = value
+    if f.get("present_quiet_days") == "1":
+        days = sorted({int(x) for x in f.getlist("quiet_days") if str(x).isdigit() and 0 <= int(x) <= 6})
+        if len(days) == 7:
+            raise HTTPException(400, "Выходные: оставьте хотя бы один рабочий день")
+        updates["quiet_days"] = days
+    if "person_hourly_limit" in f:
+        try:
+            limit = int(str(f["person_hourly_limit"]).strip() or 0)
+        except ValueError:
+            raise HTTPException(400, "Лимит сообщений одному человеку: целое число") from None
+        if not 0 <= limit <= 30:
+            raise HTTPException(400, "Лимит сообщений одному человеку: от 0 до 30 в час")
+        updates["person_hourly_limit"] = limit
     for k in ("quiet_from_hour", "quiet_to_hour"):
         if k in f:
             try:
@@ -1450,9 +3225,10 @@ def test_digest(request: Request):
     guard_admin(request)
     from . import digest
     if not digest.recipients():
-        return RedirectResponse("/settings?msg=" + quote("Сводка: нет проверяющих — назначьте их в карточке сотрудника"), 303)
+        return RedirectResponse("/settings?msg=" + quote("Сводка: некому — выберите получателей или назначьте проверяющих "
+                                                         "в карточке сотрудника"), 303)
     got = digest.send(mark=False)
-    return RedirectResponse("/settings?msg=" + quote(f"Сводка отправлена проверяющим: {got} из {len(digest.recipients())}"), 303)
+    return RedirectResponse("/settings?msg=" + quote(f"Сводка отправлена: {got} из {len(digest.recipients())}"), 303)
 
 
 @app.post("/settings/test-ticnote")
@@ -1489,6 +3265,20 @@ def test_telegram(request: Request):
         except Exception as e:  # noqa: BLE001
             bad.append(f"{c}: {e}")
     return RedirectResponse(f"/settings?msg=Бот @{me.get('username')}: отправлено {ok} из {len(chats)}. " + "; ".join(bad)[:300], 303)
+
+
+@app.post("/settings/test-storage")
+def test_storage(request: Request):
+    """«Проверить хранилище»: writes, reads through a presigned link and deletes a small file."""
+    guard_admin(request)
+    try:
+        text = storage.check()
+    except storage.StorageError as e:
+        text = str(e)
+    except Exception as e:  # noqa: BLE001
+        log.warning("storage check failed", exc_info=True)
+        text = f"ошибка {type(e).__name__}"
+    return RedirectResponse("/settings?msg=" + quote("Хранилище записей: " + text[:300]) + "#recording-storage", 303)
 
 
 @app.post("/settings/test-bitrix")
@@ -1598,17 +3388,50 @@ def _tg_step(action, success: str):
         return _tg_redirect(f"Не удалось связаться с Telegram: {str(e)[:200]}")
 
 
+def _tg_qr() -> dict:
+    """The login by QR code as the panel shows it: the picture while it waits for the phone, otherwise what happened."""
+    try:
+        state = userbot.qr_poll()
+    except userbot.LoginError as e:
+        return {"state": "error", "msg": str(e)}
+    except Exception as e:  # noqa: BLE001
+        log.exception("telegram QR login failed")
+        return {"state": "error", "msg": f"Не удалось связаться с Telegram: {str(e)[:200]}"}
+    if state.get("url"):
+        url = state.pop("url")
+        state.update(svg=userbot.qr_picture(url), v=hashlib.sha256(url.encode()).hexdigest()[:12])
+    if state["state"] == "ok":
+        state["msg"] = "Аккаунт подключён."
+    return state
+
+
 @app.get("/settings/telegram", response_class=HTMLResponse)
 def telegram_account_view(request: Request, msg: str = ""):
     guard_admin(request)
-    return page(request, "telegram_account.html", account=userbot.status(), msg=msg)
+    qr = _tg_qr() if userbot.pending_step() == "qr" else {}  # first: a confirmed QR code finishes the login here
+    return page(request, "telegram_account.html", account=userbot.status(), msg=msg or qr.get("msg", ""), qr=qr)
 
 
 @app.post("/settings/telegram/start")
 def telegram_account_start(request: Request, api_id: str = Form(""), api_hash: str = Form(""), phone: str = Form("")):
     guard_admin(request)
-    return _tg_step(lambda: userbot.login_start(api_id, api_hash, phone),
-                    "Код отправлен в Telegram: он придёт сообщением от «Telegram» в приложении.")
+    return _tg_step(lambda: userbot.login_start(api_id, api_hash, phone), "Код отправлен.")
+
+
+@app.post("/settings/telegram/qr")
+def telegram_account_qr(request: Request, api_id: str = Form(""), api_hash: str = Form("")):
+    """Login by QR code: from the first form, or «Код не пришёл?» / «Показать новый QR-код» with the keys entered before."""
+    guard_admin(request)
+    return _tg_step(lambda: userbot.qr_start(api_id, api_hash), "")
+
+
+@app.get("/settings/telegram/qr")
+def telegram_account_qr_state(request: Request):
+    """Polled by the QR page every two seconds: a fresh picture while waiting, else where to go next."""
+    guard_admin(request)
+    state = _tg_qr()
+    return JSONResponse({k: v for k, v in state.items() if k in ("state", "svg", "v", "msg")},
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.post("/settings/telegram/code")
@@ -1631,21 +3454,107 @@ def telegram_account_logout(request: Request):
 
 
 # ----------------------------------------------------------------------------- employees
-@app.get("/employees", response_class=HTMLResponse)
-def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str = ""):
-    guard_admin(request)
+EMPLOYEE_TABS = ("profile", "departments", "contacts", "voice")
+VOICE_STATUS_RU = {"ready": "признаки готовы", "pending": "ждёт сервиса признаков", "failed": "признаки не извлечены"}
+
+
+def _plural_ru(count: int, forms: tuple) -> str:
+    tens, ones = count % 100, count % 10
+    if 11 <= tens <= 14:
+        return forms[2]
+    return forms[0] if ones == 1 else forms[1] if 2 <= ones <= 4 else forms[2]
+
+
+def _initials(name: str) -> str:
+    parts = [part for part in re.split(r"[\s\-]+", name or "") if part]
+    return "".join(part[0] for part in parts[:2]).upper() or "?"
+
+
+def _employee_main_group(employee):
+    """A person is listed under the department they head, otherwise under the first one alphabetically."""
+    memberships = sorted((m for m in employee.department_memberships if m.department),
+                         key=lambda m: (not m.is_primary, m.department.name.lower()))
+    if memberships:
+        return f"d{memberships[0].department_id}", memberships[0].department.name
+    legacy = (employee.department or "").strip()
+    if legacy:
+        return "t:" + legacy.lower(), legacy
+    return "none", "Без подразделения"
+
+
+def _employee_groups(employees):
+    groups = {}
+    for employee in employees:
+        key, name = _employee_main_group(employee)
+        groups.setdefault(key, {"key": key, "name": name, "items": []})["items"].append(employee)
+    ordered = sorted(groups.values(), key=lambda g: (g["key"] == "none", g["name"].lower()))
+    for group in ordered:
+        group["items"].sort(key=lambda e: (not e.active, e.name.lower()))
+    return ordered
+
+
+def _employee_search_text(employee) -> str:
+    parts = [employee.name, employee.aliases, employee.position, employee.department, employee.telegram_chat_id,
+             (employee.competencies or "")[:400]]
+    for membership in employee.department_memberships:
+        parts += [membership.department.name if membership.department else "", membership.role]
+    return " ".join(part for part in parts if part).lower().replace("ё", "е")
+
+
+def _employee_voice_info(employees, readiness):
+    """List badge from the collection heuristic: independent recordings out of the required minimum.
+
+    It shows how far sample collection has got, not a calibrated recognition accuracy."""
+    people = {p["employee_id"]: p for p in readiness.get("people", [])}
+    need = int(readiness.get("min_independent_samples") or speaker_id.READY_INDEPENDENT_SAMPLES)
+    info = {}
+    for employee in employees:
+        person = people.get(employee.id) or {}
+        count = int(person.get("independent_samples") or 0)
+        if not employee.active:
+            state = "off"
+        elif person.get("ready"):
+            state = "ready"
+        elif count >= need:
+            state = "check"  # enough recordings, but they disagree or resemble a colleague
+        elif count:
+            state = "partial"
+        else:
+            state = "none"
+        info[employee.id] = {
+            "state": state, "count": count, "need": need,
+            "pct": 100 if state == "ready" else (min(100, round(100 * count / need)) if need else 0),
+            "samples": len(employee.voice_samples),
+            "seconds": round(sum(float(sample.sample_duration or 0) for sample in employee.voice_samples)),
+            "legacy": employee.voiceprint is not None,
+        }
+    return info
+
+
+def _employee_summary(employees, voice_info) -> str:
+    active = [e for e in employees if e.active]
+    parts = [f"{len(active)} {_plural_ru(len(active), ('человек', 'человека', 'человек'))}",
+             f"{sum(1 for e in active if e.telegram_chat_id)} с Telegram",
+             f"голос готов у {sum(1 for e in active if voice_info[e.id]['state'] == 'ready')}"]
+    inactive = len(employees) - len(active)
+    if inactive:
+        parts.append(f"неактивных: {inactive}")
+    return " · ".join(parts)
+
+
+def _employees_context(request, edit: int = 0, add: bool = False, voice_msg: str = "", tab: str = "",
+                       saved: str = ""):
+    owners = {f"user:{current_user(request)['id']}", request.session.get("recording_owner")}
     with SessionLocal() as s:
         emps = s.query(Employee).order_by(Employee.active.desc(), Employee.name).all()
         departments = s.query(Department).order_by(Department.active.desc(), Department.name).all()
         visible_voice_samples = {}
         for employee in emps:
             visible_voice_samples[employee.id] = [sample for sample in employee.voice_samples
-                if (not sample.access_owner or sample.access_owner in {
-                    f"user:{current_user(request)['id']}", request.session.get("recording_owner")})]
+                                                  if not sample.access_owner or sample.access_owner in owners]
             for membership in employee.department_memberships:
                 _ = membership.department.name if membership.department else ""
             _ = employee.voiceprint.created_at if employee.voiceprint else None
-            _ = list(employee.voice_samples)
         for department in departments:
             _ = len(department.memberships)
     linked = {e.telegram_chat_id for e in emps if e.telegram_chat_id}
@@ -1653,22 +3562,93 @@ def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str
     chats = [] if ai else [c for c in known_chats() if c.kind == "private"]
     from . import access
     rights = {e.id: agent.rights_of(e) for e in emps}
-    return page(request, "employees.html", employees=emps, chats=chats, linked=linked, rights=rights,
-                rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
-                strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS, edit=edit, add=bool(add),
-                voice_msg=voice_msg, voice_identity_enabled=bool(config.pyannoteai_key()),
-                voice_service_enabled=config.voice_service_enabled(), visible_voice_samples=visible_voice_samples,
-                voice_readiness=speaker_id.identification_readiness({e.id: list(e.voice_samples) for e in emps if e.active}))
+    readiness = speaker_id.identification_readiness({e.id: list(e.voice_samples) for e in emps if e.active})
+    voice_info = _employee_voice_info(emps, readiness)
+    panel_employee = next((e for e in emps if e.id == edit), None) if edit else None
+    voice_memory_card = None
+    if panel_employee is not None:
+        with SessionLocal() as s:
+            voice_memory_card = voice_memory.card(s, panel_employee)
+    if tab not in EMPLOYEE_TABS or (tab == "voice" and panel_employee is None):
+        tab = "voice" if voice_msg and panel_employee is not None else "profile"
+    return dict(
+        employees=emps, employee_groups=_employee_groups(emps), chats=chats, linked=linked, rights=rights,
+        rights_ru=agent.RIGHTS_RU, access_levels=access.LEVELS, access_hints=access.LEVEL_HINT,
+        order_scopes=("",) + agent_skills.ORDER_SCOPES, scope_ru=agent_skills.SCOPE_RU, scope_hint=agent_skills.SCOPE_HINT,
+        chat_skills=[x for x in agent_skills.SKILLS.values() if x.name not in agent_skills.PAIRED],
+        skills_off_everywhere=agent_skills.switched_off(), strong_rights=access.STRONG, departments=departments, positions=settings_store.POSITIONS,
+        edit=panel_employee.id if panel_employee else 0, add=bool(add) and panel_employee is None,
+        panel_employee=panel_employee, panel_tab=tab, saved_name=saved[:200], voice_msg=voice_msg,
+        voice_service_enabled=config.voice_service_enabled(),
+        visible_voice_samples=visible_voice_samples, voice_readiness=readiness, voice_info=voice_info,
+        voice_memory=voice_memory_card,
+        voice_status_ru=VOICE_STATUS_RU, initials={e.id: _initials(e.name) for e in emps},
+        search_text={e.id: _employee_search_text(e) for e in emps},
+        employee_summary=_employee_summary(emps, voice_info),
+        silence_people=[e for e in emps if e.active and e.telegram_chat_id], silence_defaults=_silence_defaults(),
+    )
 
 
-@app.post("/employees")
-async def employee_save(request: Request, id: int = Form(0), name: str = Form(...), aliases: str = Form(""),
-                  position: str = Form(""), department: str = Form(""), competencies: str = Form(""),
-                  responsibilities: str = Form(""), context: str = Form(""),
-                  channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
-                  telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
+def _silence_defaults() -> dict:
+    """The settings used when neither the card nor the department says how long to wait (placeholders)."""
+    def number(key, default):
+        try:
+            return int(float(settings_store.get(key) or default))
+        except (TypeError, ValueError):
+            return default
+    return {"hours": number("case_escalate_hours", 24), "reminders": number("case_max_reminders", 2)}
+
+
+def _silence_fields(holder, form, own_id=None) -> None:
+    """Whom to tell and when, if the person (or the department's people) does not answer: from a card form."""
+    def number(key, low, high):
+        raw = str(form.get(key) or "").strip()
+        if not raw:
+            return None
+        try:
+            value = int(float(raw))
+        except ValueError:
+            raise HTTPException(400, "Часы и число напоминаний — целые числа") from None
+        return max(low, min(high, value))
+    raw = str(form.get("silence_contact_id") or "").strip()
+    contact_id = None
+    if raw:
+        try:
+            contact_id = int(raw)
+        except ValueError:
+            raise HTTPException(400, "Некорректный контакт на случай молчания") from None
+        if own_id is not None and contact_id == own_id:
+            raise HTTPException(400, "Нельзя сообщать о молчании самому молчащему")
+    holder.silence_contact_id = contact_id
+    holder.silence_hours = number("silence_hours", 1, 336)
+    holder.silence_reminders = number("silence_reminders", 0, 10)
+
+
+def _render_fragment(request, name: str, **ctx) -> str:
+    return page(request, name, **ctx).body.decode("utf-8")
+
+
+@app.get("/employees", response_class=HTMLResponse)
+def employees_view(request: Request, edit: int = 0, add: int = 0, voice_msg: str = "", tab: str = "",
+                   saved: str = ""):
     guard_admin(request)
-    form = await request.form()
+    return page(request, "employees.html", **_employees_context(request, edit, bool(add), voice_msg, tab, saved))
+
+
+@app.get("/employees/panel", response_class=HTMLResponse)
+def employees_panel(request: Request, edit: int = 0, add: int = 0, tab: str = ""):
+    """The side card alone: the directory swaps it in without reloading the list."""
+    guard_admin(request)
+    ctx = _employees_context(request, edit, bool(add), tab=tab)
+    if edit and ctx["panel_employee"] is None:
+        raise HTTPException(404, "Сотрудник не найден")
+    return page(request, "_employee_panel.html", **ctx)
+
+
+def _employee_store(form, id, name, aliases, position, department, competencies, responsibilities, context,
+                    channel, telegram_chat_id, telegram_manual, bitrix_user_id, active) -> int:
+    if not name.strip():
+        raise HTTPException(400, "Укажите имя и фамилию сотрудника")
     try:
         selected_ids = {int(value) for value in form.getlist("department_ids")}
     except (TypeError, ValueError):
@@ -1692,7 +3672,27 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
             e.telegram_user_id = ""
         e.telegram_chat_id = ref
         e.bitrix_user_id = bitrix_user_id.strip()
+        if "email" in form:  # the full card has it; the quick forms of the org chart do not
+            email = str(form.get("email") or "").strip().lower()[:200]
+            if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise HTTPException(400, "Рабочая почта указана неверно: нужен адрес вида ivan@company.by")
+            e.email = email
         e.active = bool(active) if id else True
+        if form.get("skills_form"):  # whom they may give orders to and which skills are on (not for the director)
+            scope = str(form.get("order_scope") or "").strip()
+            e.order_scope = scope if scope in agent_skills.ORDER_SCOPES else ""
+            on = {str(x) for x in form.getlist("skill_allowed")}
+            names = [n for n in agent_skills.SKILLS if n not in agent_skills.PAIRED]
+            e.skills_allowed = None if all(n in on for n in names) else [n for n in names if n in on]
+        if form.get("talk_form"):  # how to address the person, and whom to tell when they do not answer
+            e.address_as = str(form.get("address_as") or "").strip()[:120]
+            address_form = str(form.get("address_form") or "").strip()
+            e.address_form = address_form if address_form in voice.ADDRESS_FORMS else ""
+            _silence_fields(e, form, own_id=e.id if id else None)
+            if e.silence_contact_id is not None:
+                contact = s.get(Employee, e.silence_contact_id)
+                if contact is None or not contact.active or not contact.telegram_chat_id:
+                    raise HTTPException(400, "Сообщать о молчании можно только активному сотруднику с Telegram")
         s.add(e)
         s.flush()
         departments = s.query(Department).filter(Department.id.in_(selected_ids)).all() if selected_ids else []
@@ -1717,7 +3717,43 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
         saved_employee_id = e.id
     if level and level != access.level_of(e):
         access.set_level(e, level)  # after the card is saved: the settings are written in their own transaction
+    return saved_employee_id
+
+
+@app.post("/employees")
+async def employee_save(request: Request, id: int = Form(0), name: str = Form(""), aliases: str = Form(""),
+                  position: str = Form(""), department: str = Form(""), competencies: str = Form(""),
+                  responsibilities: str = Form(""), context: str = Form(""),
+                  channel: str = Form("telegram"), telegram_chat_id: str = Form(""),
+                  telegram_manual: str = Form(""), bitrix_user_id: str = Form(""), active: str = Form("")):
+    guard_admin(request)
+    form = await request.form()
+    # The directory saves the card in place (fetch) and gets the refreshed list and card back;
+    # without JavaScript the same form posts normally and is redirected.
+    wants_json = request.headers.get("x-requested-with") == "fetch"
+    add_next = str(form.get("next") or "") == "add"
+    try:
+        saved_employee_id = _employee_store(form, id, name, aliases, position, department, competencies,
+                                            responsibilities, context, channel, telegram_chat_id, telegram_manual,
+                                            bitrix_user_id, active)
+    except HTTPException as exc:
+        if wants_json:
+            return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+        raise
     agent.invalidate_roster()
+    if wants_json:
+        ctx = _employees_context(request, 0 if add_next else saved_employee_id, add_next,
+                                 tab=str(form.get("tab") or ""), saved=name.strip() if add_next else "")
+        message = (f"Сохранено: {name.strip()}. Можно заполнять следующую карточку." if add_next
+                   else "Сотрудник добавлен." if not id else "Изменения сохранены.")
+        return JSONResponse({
+            "ok": True, "id": saved_employee_id, "created": not id, "next": "add" if add_next else "",
+            "message": message, "summary": ctx["employee_summary"],
+            "list_html": _render_fragment(request, "_employee_list.html", **ctx),
+            "panel_html": _render_fragment(request, "_employee_panel.html", **ctx),
+        })
+    if add_next:
+        return RedirectResponse(f"/employees?add=1&saved={quote(name.strip()[:200], safe='')}#employee-create", 303)
     target = (
         f"/employees?edit={saved_employee_id}#employee-{saved_employee_id}"
         if id else f"/employees#employee-{saved_employee_id}"
@@ -1726,7 +3762,8 @@ async def employee_save(request: Request, id: int = Form(0), name: str = Form(..
 
 
 def _voice_redirect(employee_id: int, message: str):
-    return RedirectResponse(f"/employees?edit={employee_id}&voice_msg={quote(message, safe='')}", 303)
+    # Back to the same card with the voice tab open, not to the top of the directory.
+    return RedirectResponse(f"/employees?edit={employee_id}&tab=voice&voice_msg={quote(message, safe='')}#voice", 303)
 
 
 def _meeting_redirect(mid: int, message: str):
@@ -1934,6 +3971,42 @@ def employee_voice_sample_delete(request: Request, eid: int):
     return _voice_redirect(eid, f"Образцы и признаки отозваны ({removed}). Старые внешние копии при ошибке остаются в очереди очистки.")
 
 
+@app.post("/employees/{eid}/voice-memory")
+async def employee_voice_memory(request: Request, eid: int):
+    """The employee's consent to remember the voice between meetings: given (the latest confirmed meetings are
+    remembered at once) or withdrawn (every print is deleted)."""
+    _voice_write_guard(request)
+    form = await request.form()
+    agreed = str(form.get("consent") or "") == "yes"
+    by = _who(request)
+    with SessionLocal() as session:
+        employee = session.query(Employee).filter_by(id=eid).with_for_update().one_or_none()
+        if employee is None:
+            return _voice_redirect(eid, "Сотрудник не найден.")
+        if agreed and not employee.active:
+            return _voice_redirect(eid, "Сотрудник не активен — голос не запоминается.")
+        removed = voice_memory.set_consent(session, employee, agreed, by=by)
+        session.commit()
+    if not agreed:
+        return _voice_redirect(eid, f"Согласие отозвано, запомненный голос удалён ({removed}).")
+    if not voice_memory.enabled():
+        return _voice_redirect(eid, "Согласие отмечено. Голос начнёт запоминаться, когда в настройках включат "
+                                    "«Запоминать голоса между встречами» и подключат свой сервис голосов.")
+    voice_memory.remember_history(eid, by=by)
+    return _voice_redirect(eid, "Согласие отмечено. Голос запоминается по последним подтверждённым совещаниям "
+                                "и дальше — после каждого «Кто это?».")
+
+
+@app.post("/employees/{eid}/voice-memory/forget")
+def employee_voice_memory_forget(request: Request, eid: int):
+    _voice_write_guard(request)
+    with SessionLocal() as session:
+        removed = voice_memory.forget(session, eid)
+        session.commit()
+    return _voice_redirect(eid, f"Запомненный голос удалён ({removed}). Согласие осталось: голос снова начнёт "
+                                "запоминаться с подтверждённых совещаний.")
+
+
 @app.post("/employees/voice-samples/cleanup")
 def employee_voice_samples_cleanup(request: Request):
     _voice_write_guard(request)
@@ -1942,70 +4015,6 @@ def employee_voice_samples_cleanup(request: Request):
         speaker_id.retry_sample_cleanup(session)
         session.commit()
     return RedirectResponse("/employees", 303)
-
-
-@app.post("/employees/{eid}/voice-sample")
-def employee_voice_sample(request: Request, eid: int, sample: UploadFile = File(...), consent: str = Form("")):
-    guard_admin(request)
-    if consent not in ("yes", "1", "on", "true"):
-        return _voice_redirect(eid, "Нужно отдельное подтверждённое согласие сотрудника на голосовой шаблон.")
-    if not config.pyannoteai_key():
-        return _voice_redirect(eid, "Сначала добавьте ключ pyannoteAI в Настройки → Идентификация по голосу.")
-    if config.weak_secret_key():
-        return _voice_redirect(eid, "Перед сохранением голосового шаблона задайте надёжный SECRET_KEY на сервере.")
-    extension = pathlib.Path(sample.filename or "").suffix.lower()
-    if extension not in {".wav", ".mp3", ".m4a", ".webm", ".ogg", ".flac", ".aac", ".mp4"}:
-        return _voice_redirect(eid, "Поддерживаются WAV, MP3, M4A, WEBM, OGG, FLAC, AAC или MP4.")
-    with SessionLocal() as session:
-        employee = session.get(Employee, eid)
-        if employee is None or not employee.active:
-            return _voice_redirect(eid, "Активный сотрудник не найден.")
-        employee_name = employee.name
-    try:
-        with tempfile.TemporaryDirectory(prefix="sysai_voice_sample_") as tmp:
-            source_path = pathlib.Path(tmp) / ("upload" + extension)
-            normalized_path = pathlib.Path(tmp) / "voice-sample.wav"
-            total = 0
-            with source_path.open("wb") as destination:
-                while True:
-                    block = sample.file.read(1024 * 1024)
-                    if not block:
-                        break
-                    total += len(block)
-                    if total > speaker_id.MAX_SAMPLE_BYTES:
-                        raise speaker_id.SpeakerIdentityError("Файл образца превышает 16 МБ.")
-                    destination.write(block)
-            if total == 0:
-                raise speaker_id.SpeakerIdentityError("Файл образца пуст.")
-            duration = speaker_id.normalize_sample(source_path, normalized_path)
-            template = speaker_id.create_voiceprint(normalized_path, eid)
-            encrypted = speaker_id.encrypt_voiceprint(template)
-        with SessionLocal() as session:
-            employee = session.get(Employee, eid)
-            if employee is None:
-                raise speaker_id.SpeakerIdentityError("Сотрудник был удалён во время регистрации.")
-            profile = session.query(EmployeeVoiceprint).filter_by(employee_id=eid).one_or_none()
-            if profile is None:
-                profile = EmployeeVoiceprint(employee_id=eid)
-            profile.encrypted_voiceprint = encrypted
-            profile.provider = "pyannoteAI"
-            profile.sample_duration = duration
-            profile.consent_at = now()
-            profile.consent_version = speaker_id.CONSENT_VERSION
-            profile.updated_at = now()
-            session.add(profile)
-            session.commit()
-        return _voice_redirect(eid, f"Голосовой шаблон для «{employee_name}» создан. Исходный файл образца не сохранялся в SYSAI.")
-    except speaker_id.SpeakerIdentityError as exc:
-        return _voice_redirect(eid, str(exc)[:300])
-    except Exception:
-        log.exception("Could not enroll voiceprint for employee id %s", eid)
-        return _voice_redirect(eid, "Не удалось создать голосовой шаблон. Проверьте ключ pyannoteAI и логи сервера.")
-    finally:
-        try:
-            sample.file.close()
-        except Exception:
-            pass
 
 
 @app.get("/departments", response_class=HTMLResponse)
@@ -2206,6 +4215,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
         map_root_x=map_root_x, map_root_y=map_root_y, map_member_count=len(map_employees),
         available_employees_by_department=available_employees_by_department,
         department_heads=department_heads,
+        silence_people=[{"id": e.id, "name": e.name} for e in employees if e.telegram_chat_id],
+        silence_defaults=_silence_defaults(),
     )
 
 
@@ -2398,7 +4409,9 @@ def department_map_relation_delete(request: Request, relation_id: int):
 @app.post("/departments")
 def department_save(request: Request, id: int = Form(0), name: str = Form(...),
                     description: str = Form(""), active: str = Form(""), regulations: str = Form(None),
-                    return_view: str = Form("list")):
+                    return_view: str = Form("list"), silence_form: str = Form(""),
+                    silence_contact_id: str = Form(""), silence_hours: str = Form(""),
+                    silence_reminders: str = Form("")):
     guard_admin(request)
     clean_name = name.strip()[:100]
     if not clean_name:
@@ -2417,6 +4430,13 @@ def department_save(request: Request, id: int = Form(0), name: str = Form(...),
         if regulations is not None:
             department.regulations = regulations.strip()[:10000]
         department.active = bool(active) if id else True
+        if silence_form:  # whom to tell when somebody of the department does not answer (their own card wins)
+            _silence_fields(department, {"silence_contact_id": silence_contact_id, "silence_hours": silence_hours,
+                                         "silence_reminders": silence_reminders})
+            if department.silence_contact_id is not None:
+                contact = s.get(Employee, department.silence_contact_id)
+                if contact is None or not contact.active or not contact.telegram_chat_id:
+                    raise HTTPException(400, "Сообщать о молчании можно только активному сотруднику с Telegram")
         s.add(department)
         s.commit()
     safe_view = "map" if return_view == "map" else "list"
@@ -2739,6 +4759,13 @@ async def telegram_webhook(request: Request):
     except Exception:  # never make Telegram retry forever
         log.exception("update failed")
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------- the agent network (app/net)
+from .net.routes import router as net_router, when as net_when  # noqa: E402  after the helpers it uses
+
+app.include_router(net_router)
+tpl.env.globals["net_when"] = net_when
 
 
 @app.exception_handler(HTTPException)

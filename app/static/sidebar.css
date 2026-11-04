@@ -1,0 +1,59 @@
+/* Left menu: groups that fold, the rail with icons only. When the items do not fit the screen only the sections scroll:
+   the logo with «Новое совещание» on top and «Секретарь» with the account at the bottom always stay in sight.
+   Loaded by base.html after style.css, so these rules override the pinned 100vh column there. */
+.side { height: 100vh; height: 100dvh; overflow: hidden; padding: 18px 12px 12px; gap: 2px; }
+.side .side-logo { display: block; flex: none; padding: 2px 8px 0; }
+.side .new { flex: none; margin: 14px 2px 12px; justify-content: center; gap: 8px; }
+.side-nav { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+.side .sp { flex: none; }
+.side a.nav { gap: 10px; padding: 7px 10px; font-size: 14px; line-height: 1.35; }
+.side a.nav .nav-t { min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side a.nav .pill { margin-left: auto; font-size: 11px; padding: 1px 7px; }
+.side a.nav .side-dot { margin-left: auto; }
+/* the secretary pinned at the bottom, above the account */
+.side a.nav.side-agent { flex: none; margin-top: 12px; }
+.side .side-agent-t { flex: 1; min-width: 0; }
+
+/* a group: a quiet heading that folds its items */
+.nav-group { display: flex; flex-direction: column; margin-top: 8px; }
+.nav-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 10px; border: 0; border-radius: 8px; background: none;
+  color: var(--muted); font: 600 11px/1.3 var(--sans); letter-spacing: .07em; text-transform: uppercase; text-align: left; cursor: pointer; }
+.nav-head:hover { color: var(--soft); background: rgba(255,255,255,.025); }
+.nav-head:focus-visible { outline: 2px solid var(--clay); outline-offset: 1px; }
+.nav-head svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2.2; flex: none; transition: transform .15s; }
+.nav-group.open > .nav-head svg { transform: rotate(90deg); }
+.nav-head-t { flex: 1; min-width: 0; }
+.nav-head .nav-badge { font-size: 10.5px; padding: 0 6px; letter-spacing: 0; }
+.nav-group.open > .nav-head .nav-badge { display: none; }
+.nav-items { display: none; flex-direction: column; gap: 2px; margin-top: 2px; }
+.nav-group.open > .nav-items { display: flex; }
+
+.side .me { flex: none; gap: 8px; padding: 10px 6px 2px; }
+.side .me-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-fold { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; }
+.side-fold:hover, .side .side-out:hover { color: var(--text); background: var(--card); }
+.side-fold svg, .side .side-out svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+.side .side-out { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; }
+
+/* the rail: icons only, every item at hand, names in the tooltips */
+@media (min-width: 861px) {
+  html.side-mini .shell { grid-template-columns: 64px 1fr; }
+  html.side-mini .side { padding: 16px 8px 10px; align-items: stretch; }
+  html.side-mini .side .side-logo { padding: 2px 0 0; display: flex; justify-content: center; }
+  html.side-mini .side .side-logo .word { display: none; }
+  html.side-mini .side .new { margin: 12px 0 10px; padding: 9px 0; }
+  html.side-mini .side .nav-t, html.side-mini .side .side-agent-t, html.side-mini .side .me-name, html.side-mini .side a.nav .pill { display: none; }
+  html.side-mini .side a.nav { justify-content: center; padding: 9px 0; position: relative; }
+  html.side-mini .side a.nav .side-dot { position: absolute; top: 7px; right: 9px; margin: 0; }
+  html.side-mini .nav-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+  html.side-mini .nav-head { display: none; }
+  html.side-mini .nav-items { display: flex; }
+  html.side-mini .side .me { flex-direction: column; padding: 10px 0 0; }
+  html.side-mini .side-fold svg { transform: scaleX(-1); }
+}
+@media (max-width: 860px) {
+  /* The drawer takes the visible screen height from its inset: 100vh is taller than the screen in mobile browsers. */
+  .side { height: auto; }
+  .side-fold { display: none; }
+}

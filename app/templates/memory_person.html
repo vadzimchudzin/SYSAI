@@ -21,8 +21,9 @@
     <select name="confidence"><option value="high">высокая</option><option value="medium">средняя</option><option value="low">низкая</option></select>
     <button class="btn sm">Добавить</button></form>
 </section>
-{% if summaries %}<section class="card"><h2>Что ассистент помнит из переписки</h2>
+{% if summaries or dialogs %}<section class="card"><h2>Что ассистент помнит из переписки</h2>
   {% for t in summaries %}<p class="small">{{ t }}</p>{% endfor %}
+  {% for d in dialogs %}<p class="small"><b>Пересказ давней переписки</b> <span class="muted">({{ d.messages }} сообщ.{{ ', обновлён ' ~ d.updated_at.strftime('%d.%m.%Y') if d.updated_at }})</span><br>{{ d.summary }}</p>{% endfor %}
   <form method="post" action="/memory/people/{{ card.id }}/forget-summary" onsubmit="return confirm('Стереть эту сводку?')"><button class="btn sm ghost">Стереть сводку</button></form></section>{% endif %}
 {% if documents %}<section class="card"><h2>Документы от {{ card.name }}</h2>
   {% for d in documents %}<div class="small"><a href="/documents/{{ d.id }}/view">{{ d.filename }}</a> <span class="muted">{{ d.at.strftime('%d.%m.%Y') if d.at }}</span></div>{% endfor %}</section>{% endif %}

@@ -1,0 +1,60 @@
+{% extends "base.html" %}{% block title %}Сравнение движков распознавания — SYSAI{% endblock %}
+{% block head %}{% if run.running %}<meta http-equiv="refresh" content="15">{% endif %}{% endblock %}
+{% macro share(value) %}{% if value is none %}—{% else %}{{ ('%.1f' % (value * 100))|replace('.', ',') }}%{% endif %}{% endmacro %}
+{% block body %}
+<h1>Сравнение движков распознавания</h1>
+<p class="muted">Все движки получают одни и те же отрывки записи и один и тот же список имён и терминов. Если у совещания есть эталон — исправленная человеком расшифровка, — главная цифра — доля ошибок в словах (WER) против него. Без эталона движки сверяются друг с другом: тот, кто теряет или придумывает слова, расходится со всеми остальными.</p>
+<section class="card">
+  <h2>Запустить</h2>
+  {% if msg %}<div class="people-msg" role="status">{{ msg }}</div>{% endif %}
+  <form method="post" action="/speech-compare/run">
+    <label class="f">Совещание
+      <select name="meeting_id" required>
+        {% for m in meetings %}<option value="{{ m.id }}" {{ 'selected' if result.meeting_id == m.id }}>{{ m.title }}{% if m.date %} · {{ m.date.strftime('%d.%m.%Y') }}{% endif %} · {{ mmss(m.duration or 0) }}{% if m.reference %} · есть эталон{% endif %}</option>{% endfor %}
+      </select></label>
+    {% if not meetings %}<p class="small warn">Нет совещаний с сохранённой записью.</p>{% endif %}
+    <label class="f">Движки (по одному в строке, как в каталоге OpenRouter)
+      <textarea name="engines" rows="8" spellcheck="false">{{ engines }}</textarea></label>
+    <p class="small muted">4 отрывка примерно по минуте из разных частей записи, края — в паузах. Это платные запросы OpenRouter: около $0,01–0,05 на движок. Сейчас основной: <b>{{ main_model }}</b>, второй: <b>{{ verify_model }}</b>.</p>
+    <button class="btn primary"{{ ' disabled' if run.running or not meetings }}>{{ 'Сравнение идёт…' if run.running else 'Сравнить движки' }}</button>
+  </form>
+  {% if run.running %}<p class="small" role="status"><span class="pill blue">Идёт</span> {{ run.step or 'готовлю запись' }}. Страница обновляется сама.</p>
+  {% elif run.error %}<p class="small warn" role="alert">Сравнение не получилось: {{ run.error }}</p>{% endif %}
+</section>
+{% if result.engines %}
+<section class="card" id="results">
+  <h2>{{ result.title }}</h2>
+  <p class="small muted">{{ when(result.at) }} · {{ result.windows|length }} отрывков · речи {{ mmss(result.speech_seconds or 0) }} · имён и терминов в списке: {{ result.keyterms }}{% if result.reference %} · сверено с эталоном{% else %} · эталона нет: сравнение движков между собой{% endif %}</p>
+  <div class="table-wrap"><table class="ref-table small method-table">
+    <thead><tr><th>Движок</th>{% if result.reference %}<th title="Доля ошибок в словах против эталона: замены, пропуски и лишние слова">WER</th>{% endif %}<th title="Средний WER против текстов других движков">Расхождение с другими</th><th title="Секунды, где детектор слышит голос, а у движка нет слов (только для движков со временем слов)">Пропущено речи</th><th>Слов</th><th>Имён и терминов</th><th>Время</th><th>Цена</th><th></th></tr></thead>
+    <tbody>{% for e in result.engines %}
+      <tr{% if e.model == main_model %} class="is-current"{% endif %}><td><b>{{ e.model }}</b>{% if e.model == result.best %} <span class="pill green">лучший</span>{% endif %}{% if e.model == main_model %} <span class="pill clay">основной</span>{% endif %}{% if e.model == verify_model %} <span class="pill blue">второй</span>{% endif %}
+          {% for err in (e.errors|unique|list)[:2] %}<br><span class="muted">{{ err }}</span>{% endfor %}</td>
+        {% if result.reference %}<td><b>{{ share(e.wer) }}</b></td>{% endif %}
+        <td>{{ share(e.disagreement) }}</td>
+        <td>{% if e.missed is none %}<span class="muted" title="Движок не вернул время слов">—</span>{% else %}{{ ('%.1f' % e.missed)|replace('.', ',') }} с{% endif %}</td>
+        <td>{{ e.words }}</td><td>{{ e.terms }}</td><td>{{ ('%.0f' % e.seconds) }} с</td><td>${{ ('%.3f' % e.cost)|replace('.', ',') }}</td>
+        <td class="row">{% if e.model != main_model and not e.errors %}<form method="post" action="/speech-compare/apply"><input type="hidden" name="model" value="{{ e.model }}"><input type="hidden" name="role" value="main"><button class="btn sm">Сделать основным</button></form>{% endif %}
+          {% if e.model != verify_model and e.model != main_model and not e.errors %}<form method="post" action="/speech-compare/apply"><input type="hidden" name="model" value="{{ e.model }}"><input type="hidden" name="role" value="verify"><button class="btn sm">Сделать вторым</button></form>{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  <p class="small muted">Лучший — с наименьшим WER против эталона, без эталона — с наименьшим расхождением с остальными. Второй движок лучше брать другой архитектуры, чем основной: тогда он слышит то, что основной пропустил.</p>
+  {% for w in result.windows %}{% set k = loop.index0 %}
+  <details class="more"><summary>Отрывок {{ loop.index }}: {{ mmss(w[0]) }}–{{ mmss(w[1]) }}</summary>
+    {% if result.reference %}<p class="small"><b>Эталон:</b> {{ result.references[k] }}</p>{% endif %}
+    {% for e in result.engines %}<p class="small"><b>{{ e.model }}:</b> {{ e.texts[k] if e.texts|length > k and e.texts[k] else '—' }}</p>{% endfor %}
+  </details>
+  {% endfor %}
+</section>
+{% endif %}
+<section class="card">
+  <h2>Как читать</h2>
+  <ul class="small">
+    <li><b>WER</b> — доля ошибок в словах против эталона: (замены + пропуски + лишние слова) / слов в эталоне. Регистр, «ё» и знаки препинания не считаются; числа словами и цифрами равны.</li>
+    <li><b>Расхождение с другими</b> — средний WER движка против текста каждого другого движка. Тот, кто теряет фразы, расходится со всеми.</li>
+    <li><b>Пропущено речи</b> — секунды голоса (по детектору речи), над которыми у движка нет ни одного слова, кусками от секунды.</li>
+    <li><b>Имён и терминов</b> — сколько слов из списка (сотрудники, клиенты, словарь) встретилось в тексте.</li>
+  </ul>
+  <p class="small muted">Как устроено распознавание и почему выбраны эти движки — в README, раздел «Как распознаётся речь».</p>
+</section>
+{% endblock %}
