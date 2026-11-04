@@ -458,7 +458,7 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None) -> dict:
         "model": {"provider": "custom", "base_url": f"{server}/v1", "default": f"sysai/{main}",
                   "api_key": "${SYSAI_AGENT_TOKEN}"},
         "delegation": {"model": f"sysai/{workers}", "base_url": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}",
-                       "max_concurrent_children": 3},
+                       "max_concurrent_children": 3, "max_spawn_depth": 1},  # flat: workers do not delegate further
         "auxiliary": {"vision": {"provider": "custom", "base_url": f"{server}/v1",
                                  "model": "sysai/vision" if "vision" in tiers else f"sysai/{main}"},
                       "compression": {"provider": "custom", "base_url": f"{server}/v1",

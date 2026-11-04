@@ -23,6 +23,7 @@ def test_builtin_profiles_and_the_hermes_configuration(client, net_agent):
     assert set(access.ALWAYS_DENY) <= set(hermes["approvals"]["deny"])
     assert hermes["model"]["base_url"] == "https://sysai.example/v1" and hermes["model"]["default"] == "sysai/mid"
     assert hermes["mcp_servers"]["sysai"]["url"] == "https://sysai.example/mcp"
+    assert hermes["delegation"]["model"] == "sysai/cheap" and hermes["delegation"]["max_spawn_depth"] == 1
     assert set(hermes["mcp_servers"]) == {"sysai", "plc-kit", "machine-expert", "cad"}
     assert hermes["skills"]["external_dirs"] and hermes["skills"]["create_dir"]
     assert "sya_" not in str(hermes)  # the token never sits in the configuration
