@@ -160,3 +160,23 @@ def test_sysai_auto_in_a_profile(client, net_agent):
     assert alone["tiers"] == ["vision"] and alone["auto_cost"] == "low"
     page = client.get("/agents/access").text
     assert "sysai/auto" in page and 'name="auto_cost"' in page and 'name="model_auto"' not in page
+
+
+def test_the_character_of_the_agents_soul(client, net_agent):
+    from app.net import access, soul
+    doc = access.document(net_agent["id"], "https://sysai.example")
+    text = doc["doc"]["soul"]
+    assert text.startswith("# opo-sysai") and "Ты — opo-sysai, агент сети SYSAI" in text and "## Отдел ОПО" in text
+    page = client.get("/agents/access").text
+    assert 'id="soul"' in page and 'name="common"' in page and "ОПО" in page
+    r = client.post("/agents/access/soul", data={"common": "Отвечай коротко.", "dept_name_0": "ОПО",
+                                                 "dept_0": "Сначала сверяй адреса."}, follow_redirects=False)
+    assert r.headers["location"].startswith("/agents/access?msg=") and r.headers["location"].endswith("#soul")
+    after = access.document(net_agent["id"], "https://sysai.example")
+    assert "Отвечай коротко." in after["doc"]["soul"] and "Сначала сверяй адреса." in after["doc"]["soul"]
+    assert after["rev"] != doc["rev"] and soul.texts()["common"] == "Отвечай коротко."
+    page = client.get(f"/agents/{net_agent['id']}").text
+    assert "SOUL.md" in page and "Отвечай коротко." in page
+    # without a department addition the section is not there
+    client.post("/agents/access/soul", data={"common": "Отвечай коротко.", "dept_name_0": "ОПО", "dept_0": ""})
+    assert "## Отдел" not in access.document(net_agent["id"])["doc"]["soul"]

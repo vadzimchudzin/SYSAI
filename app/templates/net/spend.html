@@ -1,0 +1,67 @@
+{% extends "base.html" %}{% block title %}Расходы агентов — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% macro usd(v) %}${{ ('%.4f' if v and v < 0.01 else '%.2f')|format(v or 0) }}{% endmacro %}
+{% macro day(iso) %}{{ iso[8:10] }}.{{ iso[5:7] }}{% endmacro %}
+{% block body %}
+{% set q = ('&agent=%d'|format(chosen)) if chosen else '' %}
+{% set period_ru = {1: 'сегодня', 7: '7 дней', 30: '30 дней', 90: '90 дней'} %}
+{% set head_ru = {'agent': 'Агент', 'project': 'Проект', 'skill': 'Навык', 'tier': 'Уровень', 'model': 'Модель, что ответила', 'role': 'Кто спросил'} %}
+<div class="page-h"><div><h1>Расходы агентов</h1>
+  <p>На что ушли деньги на нейронки: по агентам, проектам, навыкам, уровням, моделям и тем, кто спрашивал (главная модель, исполнители, сжатие, зрение). Отказы и сбои — с причиной, они ничего не стоят. Цены — от OpenRouter, сутки — по UTC.{% if not boss %} Видны только ваши агенты.{% endif %}</p></div>
+  <div class="actions"><a class="btn" href="/agents">← Агенты</a><a class="btn" href="/agents/spend.csv?days={{ r.days }}{{ q }}">{{ icon('download') }} CSV для Excel</a></div></div>
+
+<div class="sp-filter">
+  <div class="nx-chips" role="group" aria-label="Период">{% for d in periods %}<a class="nx-chip{{ ' on' if r.days == d }}" href="?days={{ d }}{{ q }}">{{ period_ru[d] }}</a>{% endfor %}</div>
+  {% if agents|length > 1 %}
+  <form method="get" class="sp-agent"><input type="hidden" name="days" value="{{ r.days }}">
+    <label>Агент <select name="agent"><option value="">все</option>{% for a in agents %}<option value="{{ a.id }}" {{ 'selected' if chosen == a.id }}>{{ a.name }}{% if boss %} · {{ a.user }}{% endif %}</option>{% endfor %}</select></label>
+    <button class="btn sm">Показать</button></form>
+  {% elif chosen %}<a class="nx-chip" href="?days={{ r.days }}">все агенты</a>{% endif %}
+</div>
+
+<div class="stats">
+  <div class="stat accent"><b>{{ usd(r.total.cost) }}</b><span>{% if r.days == 1 %}сегодня, {{ day(r.until) }}{% else %}с {{ day(r.since) }} по {{ day(r.until) }}{% endif %}</span></div>
+  <div class="stat"><b>{{ r.total.requests }}</b><span>запросов{% if r.total.errors %} · <a class="warn" href="#failures">{{ r.total.errors }} с ошибкой</a>{% endif %}</span></div>
+  <div class="stat"><b>{{ fmt_tokens(r.total.tokens) }}</b><span>токенов{% if r.total.prompt %} · из кэша {{ r.total.cache_pct }}% входа{% endif %}</span></div>
+  <div class="stat"><b>{{ usd(r.avg) }}</b><span>в среднем за запрос</span></div>
+</div>
+
+{% if not r.total.requests %}
+<section class="card"><p class="muted">За этот период запросов к нейронкам не было.</p></section>
+{% else %}
+{% if r.days > 1 %}
+<section class="card"><h2>По дням</h2>
+  <div class="sp-days" role="img" aria-label="Расход по дням: больше всего {{ usd(r.daily|map(attribute='cost')|max) }} за день">{% for d in r.daily %}<div class="sp-day{{ ' bad' if d.errors }}" title="{{ day(d.key) }} · {{ usd(d.cost) }} · {{ d.requests }} запросов{{ (' · %d с ошибкой'|format(d.errors)) if d.errors }}"><i style="height: {{ d.bar if d.bar or not d.requests else 1 }}%"></i></div>{% endfor %}</div>
+  <div class="sp-axis small muted"><span>{{ day(r.daily[0].key) }}</span><span>{{ day(r.daily[-1].key) }}</span></div>
+</section>
+{% endif %}
+
+<div class="grid2 sp-grid">
+{% for key, title in groups %}{% set rows = r.groups[key] %}{% if rows %}
+<section class="card" id="by-{{ key }}"><h2>{{ title }}</h2>
+  <div class="table-wrap"><table class="sp-table">
+    <thead><tr><th>{{ head_ru[key] }}</th><th class="num">Сумма</th><th class="num">Доля</th><th class="num">Запросов</th><th class="num">Токенов</th></tr></thead>
+    <tbody>{% for x in rows[:30] %}
+      <tr><td>{% if x.href %}<a href="{{ x.href }}">{{ x.label }}</a>{% else %}{{ x.label }}{% endif %}{% if x.owner and boss %}<span class="small muted"> · {{ x.owner }}</span>{% endif %}
+        <div class="sp-bar" aria-hidden="true"><i style="width: {{ x.bar }}%"></i></div>
+        {% if x.limit is defined %}<div class="small {{ 'warn' if x.limit and x.budget_pct >= 80 else 'muted' }}">сегодня {{ usd(x.today) }}{% if x.limit %} из {{ usd(x.limit) }} в день · {{ x.budget_pct }}%{% else %} · без дневного лимита{% endif %}</div>{% endif %}</td>
+        <td class="num">{{ usd(x.cost) }}</td><td class="num">{{ x.share }}%</td>
+        <td class="num">{{ x.requests }}{% if x.errors %}<div class="small warn">{{ x.errors }} с ошибкой</div>{% endif %}</td>
+        <td class="num">{{ fmt_tokens(x.tokens) }}{% if x.cache_pct %}<div class="small muted">кэш {{ x.cache_pct }}%</div>{% endif %}</td></tr>
+    {% endfor %}</tbody></table></div>
+  {% if rows|length > 30 %}<p class="small muted">Показаны 30 из {{ rows|length }} — остальное в CSV.</p>{% endif %}
+</section>
+{% endif %}{% endfor %}
+</div>
+
+{% if r.failures %}
+<section class="card" id="failures"><div class="row between"><h2>Отказы и сбои</h2>
+  {% if chosen %}<a class="btn sm" href="/agents/{{ chosen }}/trace?days={{ [r.days, 7]|min }}&errors=1">В трассе →</a>{% endif %}</div>
+  <p class="small muted">Отказ SYSAI (бюджет, уровень не разрешён) и сбой OpenRouter или модели ничего не стоят. По шагам — в трассе агента.</p>
+  <div class="table-wrap"><table class="sp-table">
+    <thead><tr><th>Причина</th><th class="num">Сколько</th><th>Пример</th></tr></thead>
+    <tbody>{% for f in r.failures %}<tr><td>{{ f.ru }}<div class="small muted">{{ f.code }}</div></td><td class="num">{{ f.count }}</td><td class="small sp-example">{{ f.example }}</td></tr>{% endfor %}</tbody></table></div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

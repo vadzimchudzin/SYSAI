@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from .. import config, settings_store, storage
 from ..db import Department, Employee, SessionLocal, User
-from . import access, agents, enabled, files, gateway, hub, journal, mcp, trace
+from . import access, agents, enabled, files, gateway, hub, installer, journal, mcp, soul, spend, trace
 from .models import NetAgent, NetAgentToken, NetSkill
 
 router = APIRouter()
@@ -36,12 +36,14 @@ def _page(request: Request, name: str, **ctx):
 
 
 def _back(url: str, msg: str = "", error: str = "") -> RedirectResponse:
+    """Back to a page with a message; the message goes before the #anchor, otherwise the browser keeps it in the anchor."""
+    url, mark, anchor = url.partition("#")
     sep = "&" if "?" in url else "?"
     if msg:
         url += f"{sep}msg={quote(msg)}"
     elif error:
         url += f"{sep}error={quote(error)}"
-    return RedirectResponse(url, 303)
+    return RedirectResponse(url + mark + anchor, 303)
 
 
 def _server(request: Request) -> str:
@@ -146,6 +148,36 @@ def agents_page(request: Request, msg: str = "", error: str = ""):
                  can_create=boss or len(agents.listing(me)) < MAX_OWN_AGENTS, **_choices())
 
 
+# ============================================================================= pages: spend
+def _spend_scope(me: dict, agent: str):
+    """The agents of the report a person may choose from and the ids to sum (None — every agent, for a superuser)."""
+    mine = agents.listing(me)
+    chosen = _int(agent)
+    if chosen is not None:
+        if chosen not in {a["id"] for a in mine}:
+            raise HTTPException(404, "Нет такого агента")
+        return mine, chosen, [chosen]
+    return mine, None, (None if me["role"] == "superuser" else [a["id"] for a in mine])
+
+
+@router.get("/agents/spend", response_class=HTMLResponse)
+def spend_page(request: Request, days: str = "7", agent: str = ""):
+    me = _person(request)
+    mine, chosen, ids = _spend_scope(me, agent)
+    return _page(request, "net/spend.html", r=spend.report(ids, spend.period(days)), agents=mine, chosen=chosen,
+                 boss=me["role"] == "superuser", periods=spend.PERIODS, groups=spend.GROUPS, fmt_tokens=trace.tokens)
+
+
+@router.get("/agents/spend.csv")
+def spend_csv(request: Request, days: str = "7", agent: str = ""):
+    me = _person(request)
+    _, chosen, ids = _spend_scope(me, agent)
+    days = spend.period(days)
+    name = f"sysai-spend-{days}d" + (f"-{chosen}" if chosen else "") + ".csv"
+    return Response(spend.csv_rows(ids, days), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
+
+
 @router.post("/agents/create")
 def agents_create(request: Request, user_id: str = Form(""), name: str = Form(""), department_id: str = Form(""),
                   employee_id: str = Form(""), harness: str = Form("hermes"), profile: str = Form("")):
@@ -190,7 +222,7 @@ def _agent_view(request: Request, me: dict, agent_id: int, msg: str = "", error:
                  overrides=json.dumps(doc["overrides"] or {}, ensure_ascii=False, indent=2),
                  sections=access.SECTION_RU, tier_ru=access.TIER_RU, scope_ru=access.SCOPE_RU, level_ru=access.LEVEL_RU,
                  internet_ru=access.INTERNET_RU, harnesses=agents.HARNESSES, ttl=int(agents.CODE_TTL.total_seconds() // 60),
-                 **_choices())
+                 sync_version=installer.version(), **_choices())
 
 
 @router.get("/agents/{agent_id:int}", response_class=HTMLResponse)
@@ -287,6 +319,7 @@ async def agent_action(request: Request, agent_id: int, action: str):
 def access_page(request: Request, msg: str = "", error: str = "", edit: str = ""):
     _person(request, admin=True)
     models = settings_store.get("agents_models") or {}
+    spare = settings_store.get("agents_fallback")
     return _page(request, "net/access.html", profiles=access.profiles(), msg=msg, error=error, edit=edit,
                  sections=access.SECTION_RU, tiers=access.TIERS, tier_ru=access.TIER_RU, model_tiers=access.MODEL_TIERS,
                  cost_tiers=access.COST_TIERS, cost_ru=access.COST_RU, scopes=access.SCOPES,
@@ -295,26 +328,52 @@ def access_page(request: Request, msg: str = "", error: str = "", edit: str = ""
                  files_common=access.FILES_COMMON, files_own=access.FILES_OWN,
                  models={t: (models.get(t) if isinstance(models, dict) else "") or gateway.DEFAULT_MODELS.get(t, "")
                          for t in access.MODEL_TIERS},
+                 fallbacks={t: str(spare.get(t) or "") if isinstance(spare, dict) and t in spare else
+                            gateway.DEFAULT_FALLBACK.get(t, "") for t in access.MODEL_TIERS},
                  vision_default=settings_store.get("vision_model"), mcp_per_minute=mcp.rate_limit(),
                  hub_hosts="\n".join(settings_store.get("agents_hub_hosts") or hub.DEFAULT_HOSTS),
+                 soul=soul.texts(), soul_departments=_soul_departments(), soul_max=soul.MAX_TEXT,
                  events=journal.feed(None, 20, "profile:"))
+
+
+def _soul_departments() -> list:
+    """Departments for the additions of the character: the active ones and any that already has an addition."""
+    names = [d["name"] for d in _choices()["departments"]]
+    for name in soul.texts()["departments"]:
+        if not any(n.lower() == name.lower() for n in names):
+            names.append(name)
+    return names
+
+
+@router.post("/agents/access/soul")
+async def access_soul(request: Request):
+    me = _person(request, admin=True)
+    form = await request.form()
+    additions = {}
+    for key, name in form.items():
+        if key.startswith("dept_name_") and str(name).strip():
+            additions[str(name).strip()] = str(form.get("dept_" + key[10:]) or "")
+    soul.save(str(form.get("common") or ""), additions, by=me["username"])
+    return _back("/agents/access#soul", msg="Характер сохранён: агенты получат новый SOUL.md при следующей синхронизации")
 
 
 @router.post("/agents/access/settings")
 async def access_settings(request: Request):
     me = _person(request, admin=True)
     form = await request.form()
-    models = {}
+    models, spare = {}, {}
     for tier in access.MODEL_TIERS:  # sysai/auto has no model of its own: Jev picks among these
-        value = str(form.get("model_" + tier) or "").strip()
-        if value and (len(value) > 200 or not all(ch.isalnum() or ch in "._:/-~" for ch in value)):
-            return _back("/agents/access#models", error=f"Некорректный идентификатор модели: {value}")
-        models[tier] = value
+        for prefix, table in (("model_", models), ("fallback_", spare)):
+            value = str(form.get(prefix + tier) or "").strip()
+            if value and (len(value) > 200 or not all(ch.isalnum() or ch in "._:/-~" for ch in value)):
+                return _back("/agents/access#models", error=f"Некорректный идентификатор модели: {value}")
+            table[tier] = value
     hosts = [h.strip().lower() for h in str(form.get("hub_hosts") or "").replace(",", "\n").splitlines() if h.strip()][:100]
     per_minute = _int(form.get("mcp_per_minute")) or 120
-    before = {"agents_models": settings_store.get("agents_models"), "agents_hub_hosts": settings_store.get("agents_hub_hosts"),
-              "agents_mcp_per_minute": settings_store.get("agents_mcp_per_minute")}
-    after = {"agents_models": models, "agents_hub_hosts": hosts, "agents_mcp_per_minute": max(1, min(10000, per_minute))}
+    keys = ("agents_models", "agents_fallback", "agents_hub_hosts", "agents_mcp_per_minute")
+    before = {k: settings_store.get(k) for k in keys}
+    after = {"agents_models": models, "agents_fallback": spare, "agents_hub_hosts": hosts,
+             "agents_mcp_per_minute": max(1, min(10000, per_minute))}
     settings_store.set_many(after)
     journal.log("net.settings", "settings", journal.changes(before, after), actor=me["username"])
     return _back("/agents/access#models", msg="Сохранено: новые модели уровней действуют для всех агентов сразу")
@@ -692,6 +751,27 @@ def api_public_key():
     if not enabled():
         return _api_error(404, "Not Found", "not_found")
     return access.public_key()
+
+
+@router.get("/agents/api/install.ps1")
+def api_install_script(request: Request):
+    """The installer for the employee's PC: «$env:SYSAI_CODE='…'; irm <server>/agents/api/install.ps1 | iex»."""
+    if not enabled():
+        return _api_error(404, "Not Found", "not_found")
+    return Response(installer.script(_server(request)), media_type="text/plain; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
+@router.get("/agents/api/sync/{filename}")
+def api_sync_wheel(filename: str):
+    """The synchronizer as a wheel (uv tool install takes it by this address)."""
+    if not enabled():
+        return _api_error(404, "Not Found", "not_found")
+    name, blob, sha = installer.wheel()
+    if filename != name:
+        return _api_error(404, f"Нет такой сборки синхронизатора: сейчас {name}", "not_found")
+    return Response(blob, media_type="application/zip", headers={"X-SHA256": sha, "Cache-Control": "no-store",
+                                                                 "Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.post("/agents/api/connect")

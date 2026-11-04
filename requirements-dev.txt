@@ -1,2 +1,3 @@
 -r requirements.txt
 pytest==8.3.5
+PyYAML==6.0.3  # the tests of the synchronizer (agents/sync); on the PCs it comes with the wheel

@@ -97,6 +97,8 @@ DEFAULTS = {
     "agents_models": {},             # tier → model behind sysai/cheap|mid|strong|vision ("" = the default of gateway.py)
     "agents_hub_hosts": ["sysat.by", "se.com", "schneider-electric.com", "localhost", "127.0.0.1"],  # sites scripts of skills may call
     "agents_mcp_per_minute": 120,    # MCP calls of one agent per minute
+    "agents_fallback": None,         # tier → the spare model ("" = none); None — the defaults of gateway.py
+    "agents_soul": None,             # the character of the agents (SOUL.md): {"common", "departments"}; None — soul.py
     # «Сервер» (server_watch.py, №29)
     "backup_copy": True,             # copy the newest nightly dump of the own server to the recordings storage
     "backup_state": {},              # the dumps copied there [{"name", "size", "at"}], the last error, when checked

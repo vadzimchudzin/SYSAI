@@ -46,7 +46,8 @@
     {% endif %}
     {% if net_on %}
     {% call group('net', 'Сеть агентов', on_net, nav_open) %}
-      {{ nav('/agents', 'bot', 'Агенты' if boss else 'Мой агент', path.startswith('/agents') and not path.startswith('/agents/access')) }}
+      {{ nav('/agents', 'bot', 'Агенты' if boss else 'Мой агент', path.startswith('/agents') and not path.startswith('/agents/access') and not path.startswith('/agents/spend')) }}
+      {{ nav('/agents/spend', 'coins', 'Расходы', path.startswith('/agents/spend'), 'Сколько стоили нейронки агентов и на что') }}
       {{ nav('/hub', 'box', 'Хаб', path.startswith('/hub'), 'SYSAI_Hub: навыки и инструменты, которые берут агенты') }}
       {{ nav('/files', 'folder', 'Хранилище', path.startswith('/files'), 'Общие файлы людей и агентов') }}
       {% if boss %}{{ nav('/agents/access', 'shield', 'Доступы', path.startswith('/agents/access'), 'Что можно агентам: профили доступа') }}{% endif %}

@@ -11,10 +11,13 @@
 <section class="card" id="connect-code"><h2>Подключение компьютера</h2>
   <p>Код действует {{ ttl }} минут и только один раз. Установщик меняет его на токен агента; в SYSAI хранится только хэш токена, на ПК — защищённое хранилище Windows.</p>
   <p><span class="net-code">{{ code }}</span></p>
+  <p>На ПК сотрудника откройте PowerShell (обычный, не от администратора) и вставьте одну строку:</p>
+  <pre class="net-pre">$env:SYSAI_CODE='{{ code }}'; irm {{ server }}/agents/api/install.ps1 | iex</pre>
+  <p class="small muted">Установщик ставит uv, синхронизатор SYSAI и Hermes (чего нет), создаёт профиль Hermes «{{ a.name }}», применяет доступы, характер и навыки из SYSAI_Hub и включает синхронизацию при входе в Windows. Повторный запуск (с новым кодом) ничего не ломает: обновляет то же самое.</p>
   <dl class="net-kv"><dt>Сервер</dt><dd>{{ server }}</dd>
-    <dt>Установщик</dt><dd><code>sysai-agent connect --server {{ server }} --code {{ code }}</code></dd></dl>
-  <p class="small muted">Пока установщика нет (следующий шаг), код можно обменять вручную:</p>
-  <pre class="net-pre">curl -X POST {{ server }}/agents/api/connect -H "Content-Type: application/json" -d "{\"code\":\"{{ code }}\",\"host\":\"%COMPUTERNAME%\",\"harness\":\"{{ agent.harness }}\"}"</pre>
+    <dt>Синхронизатор уже стоит</dt><dd><code>sysai-agent connect --server {{ server }} --code {{ code }}</code>, затем <code>sysai-agent sync</code></dd></dl>
+  <details><summary class="small muted">Обменять код вручную, без установщика</summary>
+  <pre class="net-pre">curl -X POST {{ server }}/agents/api/connect -H "Content-Type: application/json" -d "{\"code\":\"{{ code }}\",\"host\":\"%COMPUTERNAME%\",\"harness\":\"{{ agent.harness }}\"}"</pre></details>
 </section>
 {% endif %}
 
@@ -29,7 +32,7 @@
 <section class="card"><h2>Компьютер</h2>
   <dl class="net-kv">
     <dt>Компьютер</dt><dd>{{ a.host or '—' }}</dd>
-    <dt>Версии</dt><dd>{% for k, v in a.versions.items() %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
+    <dt>Версии</dt><dd>{% for k, v in a.versions.items() %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}{% set sv = (a.versions or {}).get('sync') %}{% if sv and sv != sync_version %}<div class="small warn">на сервере синхронизатор {{ sync_version }}: получите код и запустите строку установки на ПК снова</div>{% endif %}</dd>
     <dt>Из хаба на ПК</dt><dd>{% set hs = (agent.hub_state or {}).get('skills') or {} %}{% set ht = (agent.hub_state or {}).get('tools') or {} %}навыков: {{ hs|length }} · инструментов: {{ ht|length }}{% set cf = (agent.hub_state or {}).get('conflicts') or [] %}{% if cf %} · <span class="net-err">конфликт имён: {{ cf|join(', ') }}</span>{% endif %}</dd>
     <dt>Последняя ошибка</dt><dd class="{{ 'net-err' if a.last_error }}">{{ a.last_error or '—' }}</dd>
   </dl>
@@ -80,6 +83,9 @@
 <section class="card"><h2>Настройки Hermes из доступов</h2>
   <p class="small muted">SYSAI собирает их из профиля и подписывает (Ed25519); синхронизатор на ПК проверяет подпись, применяет и перезапускает агента. MCP-серверы сверяются с теми же подписанными правилами сами.</p>
   <pre class="net-pre">{{ harness_yaml }}</pre>
+  {% if doc.doc.soul %}<details id="soul"><summary class="net-more"><b>SOUL.md</b> — характер агента: кто он, как работает и говорит, чего не делает никогда</summary>
+  <pre class="net-pre">{{ doc.doc.soul }}</pre>
+  <p class="small muted">Синхронизатор кладёт его в профиль Hermes вместо своего (прежний сохраняет рядом).{% if boss %} <a href="/agents/access#soul">Изменить общий текст и тексты отделов →</a>{% endif %}</p></details>{% endif %}
 </section>
 {% endif %}
 
@@ -91,7 +97,7 @@
 </section>
 
 <div class="grid2">
-<section class="card"><h2>Расход за 7 дней</h2>
+<section class="card"><div class="row between"><h2>Расход за 7 дней</h2><a class="btn sm" href="/agents/spend?agent={{ a.id }}">Подробно →</a></div>
   {% if not spend.requests %}<p class="muted">Запросов к нейронкам ещё не было.</p>{% else %}
   <dl class="net-kv">
     <dt>По уровням</dt><dd>{% for k, v in spend.by_tier.items() %}{{ k }} ${{ '%.2f'|format(v) }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>

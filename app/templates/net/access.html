@@ -76,14 +76,28 @@
 </section>
 <section class="card" id="models"><h2>Модели и ограничения сети</h2>
   <form method="post" action="/agents/access/settings" class="net-form">
-    {% for t in model_tiers %}<label class="f">sysai/{{ t }} — {{ tier_ru[t] }} <input name="model_{{ t }}" value="{{ models[t] }}" placeholder="{{ vision_default if t == 'vision' else '' }}"></label>{% endfor %}
-    <p class="small muted wide">sysai/auto своей модели не имеет: под каждый запрос её выбирает Jev Router среди моделей уровней, разрешённых агенту.</p>
+    {% for t in model_tiers %}<label class="f">sysai/{{ t }} — {{ tier_ru[t] }} <input name="model_{{ t }}" value="{{ models[t] }}" placeholder="{{ vision_default if t == 'vision' else '' }}"></label>
+    <label class="f">запасная для sysai/{{ t }} <input name="fallback_{{ t }}" value="{{ fallbacks[t] }}" placeholder="нет запасной"></label>{% endfor %}
+    <p class="small muted wide">sysai/auto своей модели не имеет: под каждый запрос её выбирает Jev Router среди моделей уровней, разрешённых агенту.
+      Запасная — лучше другого поставщика: сбой у поставщика модели — OpenRouter сам переключается на запасную; OpenRouter всё равно ответил ошибкой (модели нет, перегружена) — шлюз спрашивает запасную ещё раз. В трассе видно: «ответила запасная», «mid→запасная: HTTP 503 …». Пусто — без запасной.</p>
+    <p class="small muted wide">Кэш подсказок: Gemini, OpenAI и DeepSeek кэшируют сами; Claude и Kimi — по меткам Hermes: стоит такая модель за уровнем — SYSAI сам объявляет Hermes кэш для этого уровня, шлюз пропускает метки как есть. Сколько пришло из кэша — в трассе и в расходах.</p>
     <label class="f">Вызовов MCP в минуту на агента <input name="mcp_per_minute" type="number" min="1" value="{{ mcp_per_minute }}"></label>
     <label class="f">Сайты, к которым могут обращаться скрипты навыков <textarea name="hub_hosts" spellcheck="false">{{ hub_hosts }}</textarea></label>
     <div class="wide"><button class="btn primary">Сохранить</button> <span class="small muted">Сменили модель уровня — сменилась у всех агентов сразу.</span></div>
   </form>
 </section>
 </div>
+<section class="card" id="soul"><h2>Характер агентов (SOUL.md)</h2>
+  <p class="small muted">Кто агент, как говорит и чего не делает никогда. Hermes читает SOUL.md в начале каждого нового разговора; синхронизатор кладёт его в профиль агента. Агент получает: «кто ты и чей» (имя, человек, отдел — SYSAI подставит сам) + общий текст + добавку своего отдела.</p>
+  <form method="post" action="/agents/access/soul" class="net-form">
+    <label class="f wide">Общий для сети <textarea name="common" rows="16" maxlength="{{ soul_max }}" spellcheck="false">{{ soul.common }}</textarea></label>
+    {% for name in soul_departments %}
+    <input type="hidden" name="dept_name_{{ loop.index0 }}" value="{{ name }}">
+    <label class="f wide">Добавка отдела «{{ name }}» <textarea name="dept_{{ loop.index0 }}" rows="{{ 10 if (soul.departments.get(name) or '') else 3 }}" maxlength="{{ soul_max }}" spellcheck="false" placeholder="Пусто — только общий текст">{{ soul.departments.get(name) or '' }}</textarea></label>
+    {% endfor %}
+    <div class="wide"><button class="btn primary">Сохранить характер</button> <span class="small muted">Изменения — в журнале; у агентов — при следующей синхронизации (до 5 минут), в новом разговоре.</span></div>
+  </form>
+</section>
 <section class="card"><h2>Изменения профилей</h2>
   <ul class="net-list">{% for e in events %}<li><span class="small muted">{{ net_when(e.at) }}</span> <b>{{ e.target }}</b> · {{ e.actor }}{% if e.summary %} <span class="small muted">{{ e.summary }}</span>{% endif %}</li>{% else %}<li class="muted">Пока пусто.</li>{% endfor %}</ul>
 </section>

@@ -272,8 +272,9 @@ def heartbeat(ctx: AgentCtx, data: dict) -> dict:
             row.applied_rev = applied
             row.applied_at = stamp
         s.commit()
+    from . import installer
     return {"ok": True, "access_rev": access.document(ctx.agent_id)["rev"], "hub_rev": hub.manifest(ctx)["rev"],
-            "server_time": now().isoformat(timespec="seconds")}
+            "sync_version": installer.version(), "server_time": now().isoformat(timespec="seconds")}
 
 
 def listing(user: dict | None = None) -> list:

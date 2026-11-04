@@ -3,7 +3,7 @@
 {% block body %}
 <div class="page-h"><div><h1>{{ 'Агенты' if boss else 'Мой агент' }}</h1>
   <p>У каждого сотрудника свой агент на его ПК: своя память, свои доступы. Доступы — только здесь, в настройках SYSAI: агент ничего не спрашивает в Telegram, что не разрешено — запрещено.</p></div>
-  {% if boss %}<div class="actions"><a class="btn" href="/agents/access">Доступы</a><a class="btn" href="/hub">SYSAI_Hub</a></div>{% endif %}</div>
+  <div class="actions"><a class="btn" href="/agents/spend">Расходы</a>{% if boss %}<a class="btn" href="/agents/access">Доступы</a><a class="btn" href="/hub">SYSAI_Hub</a>{% endif %}</div></div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
 <section class="card"><h2>{{ 'Все агенты' if boss else 'Мои агенты' }} ({{ agents|length }})</h2>

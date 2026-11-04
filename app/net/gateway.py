@@ -8,6 +8,10 @@ sysai/auto (ОПО-5.8): Jev Router of OpenRouter picks the model and the reason
 the models of the agent's other tiers, and never one dearer than the dearest of them (every dearer model of the
 OpenRouter catalog is in the router's hard exclusions). Jev unavailable — the request goes to «mid».
 
+A spare model behind every tier (ОПО-5.5), from another provider: OpenRouter switches to it by itself when the provider
+of the tier's model fails (`models`), and the gateway asks it once more when OpenRouter still answers with a failure
+(the model is gone, overloaded, down). Prompt-cache marks of the harness pass through as they are.
+
 Every request, refused or failed ones too, is in net_spend with its time, its end and who asked (the main model,
 workers, compression, vision): the model part of the trace (ОПО-5.7); in the debug mode also its texts."""
 import dataclasses
@@ -30,6 +34,10 @@ log = logging.getLogger("sysai.net.gateway")
 TIERS = access.TIERS
 DEFAULT_MODELS = {"cheap": "google/gemini-2.5-flash-lite", "mid": "google/gemini-2.5-flash", "strong": "google/gemini-2.5-pro",
                   "vision": ""}
+# the spare model of each tier: another provider, about the same price and strength, pictures too
+DEFAULT_FALLBACK = {"cheap": "openai/gpt-4.1-nano", "mid": "openai/gpt-4.1-mini", "strong": "openai/gpt-5",
+                    "vision": "openai/gpt-4.1-mini"}
+RETRY_ON = (404, 408, 429, 500, 502, 503, 504)  # OpenRouter failed the model: the spare one may answer
 DROP = ("models", "route", "user", "sysai")  # no way around the tier: no own model lists or routing
 JEV_ROUTER = "typesafe/jev-router"
 JEV_EXCLUDE_MAX = (1024, 65_536)    # patterns and characters the router takes in excluded_models
@@ -62,6 +70,7 @@ class Plan:
     route: str = ""
     fallback: str = ""        # sysai/auto: the tier when Jev cannot route
     includes: tuple = ()      # sysai/auto: the models of the agent's tiers
+    backup: str = ""          # the spare model of the tier (ОПО-5.5); "" — none or already asked
     stream: bool = False
     debug: dict | None = None  # the debug mode: the end of the request
 
@@ -78,6 +87,22 @@ class Plan:
         else:
             self.out.pop("plugins", None)
         self.route = f"jev→{self.fallback}: {why}"[:120]
+        self.spare(backup_for(self.fallback))
+
+    def spare(self, backup: str) -> None:
+        """The spare model behind the one asked: OpenRouter takes it by itself when the provider fails."""
+        self.backup = backup if backup and backup != self.model else ""
+        if self.backup:
+            self.out["models"] = [self.model, self.backup]
+        else:
+            self.out.pop("models", None)
+
+    def use_backup(self, why: str) -> None:
+        """OpenRouter still failed: the same request once more, to the spare model alone."""
+        self.model, self.backup = self.backup, ""
+        self.out = {k: v for k, v in self.out.items() if k != "models"} | {"model": self.model}
+        note = f"{self.tier}→запасная: {why}"
+        self.route = (f"{self.route} · {note}" if self.route else note)[:120]
 
 
 def tier_of(model) -> str:
@@ -93,6 +118,23 @@ def model_for(tier: str) -> str:
     if tier == "vision" and not name:
         name = str(settings_store.get("vision_model") or "google/gemini-2.5-flash")
     return name
+
+
+def backup_for(tier: str) -> str:
+    """The spare model of a tier: the settings («» there — none), otherwise the default; never the model itself."""
+    table = settings_store.get("agents_fallback")
+    if isinstance(table, dict) and tier in table:
+        name = str(table.get(tier) or "").strip()
+    else:
+        name = DEFAULT_FALLBACK.get(tier, "")
+    return "" if not name or name == model_for(tier) else name
+
+
+def cache_marks(model: str) -> bool:
+    """Models that cache a prompt only by the marks of the harness (cache_control), as Hermes knows them for
+    OpenRouter: Claude and Kimi. Gemini, OpenAI and DeepSeek cache by themselves."""
+    name = str(model or "").lower()
+    return "claude" in name or "kimi" in name or "moonshot" in name
 
 
 def _today() -> str:
@@ -260,6 +302,8 @@ def prepare(ctx: AgentCtx, body, plan: Plan) -> Plan:
     else:
         plan.model = model_for(tier)
     out["model"] = plan.model
+    if not plan.jev:  # sysai/auto that went straight to its tier gets that tier's spare model
+        plan.spare(backup_for(plan.fallback or tier))
     if trace.debug_on(ctx.agent_id):
         plan.debug = trace.request_excerpt(body)
     return plan
@@ -320,6 +364,20 @@ def _jev_failed(plan: Plan, status: int, text: str) -> bool:
     return True
 
 
+def _backup_failed(plan: Plan, status: int, text: str) -> bool:
+    """OpenRouter failed the model even with the spare one in `models`: once more to the spare one alone."""
+    if plan.jev or not plan.backup or status not in RETRY_ON:
+        return False
+    why = f"HTTP {status} {_message(text)}"
+    log.warning("sysai/%s failed (%s): asking the spare model %s", plan.tier, why[:200], plan.backup)
+    plan.use_backup(why)
+    return True
+
+
+def _again(plan: Plan, status: int, text: str) -> bool:
+    return _jev_failed(plan, status, text) or _backup_failed(plan, status, text)
+
+
 def _ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
@@ -339,6 +397,8 @@ def record(ctx: AgentCtx, plan: Plan, usage=None, served: str = "", ms: int = 0,
     route = plan.route
     if plan.jev and served and plan.includes and not any(str(served).startswith(m) for m in plan.includes):
         route = (route + " · не из уровней агента")[:120]
+    elif plan.backup and served and not str(served).startswith(plan.model) and str(served).startswith(plan.backup):
+        route = ((route + " · ") if route else "") + "ответила запасная"  # OpenRouter switched by itself
     try:
         with SessionLocal() as s:
             row = NetSpend(day=_today(), agent_id=ctx.agent_id, user_id=ctx.user_id, tier=plan.tier, model=model,
@@ -367,7 +427,7 @@ def complete(ctx: AgentCtx, body, project: str = "", skill: str = "", task: str 
         url = f"{config.OPENROUTER_BASE_URL}/chat/completions"
         try:
             r = _post(url, plan.out, _headers())
-            if r.status_code != 200 and _jev_failed(plan, r.status_code, r.text):
+            while r.status_code != 200 and _again(plan, r.status_code, r.text):  # Jev, then the spare model: twice at most
                 r = _post(url, plan.out, _headers())
         except httpx.HTTPError as exc:
             raise GatewayError(502, "upstream_error", f"OpenRouter недоступен: {exc}") from exc
@@ -400,8 +460,8 @@ def _open_stream(plan: Plan):
     finally:
         resp.close()
         client.close()
-    if _jev_failed(plan, resp.status_code, text):
-        return _open_stream(plan)  # once: after falling back the request is not Jev's any more
+    if _again(plan, resp.status_code, text):
+        return _open_stream(plan)  # Jev falls back once, the spare model is asked once: two more tries at most
     raise _upstream_error(resp.status_code, text)
 
 

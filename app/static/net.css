@@ -155,3 +155,24 @@
 .tr-list { list-style: none; padding: 0; margin: 8px 0 0; } .tr-list li { padding: 8px 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; font-size: 13.5px; }
 .tr-list li:last-child { border-bottom: 0; }
 .tr-msg { margin: 10px 0; } .tr-role { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+/* the spend report (ОПО-5.6) */
+.sp-filter { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 18px; margin: 0 0 14px; }
+.sp-agent { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sp-agent label { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); }
+.sp-days { display: flex; align-items: flex-end; gap: 2px; height: 120px; padding-top: 6px; border-bottom: 1px solid var(--line); }
+.sp-day { flex: 1 1 0; height: 100%; display: flex; align-items: flex-end; }
+.sp-day i { display: block; width: 100%; background: var(--clay); border-radius: 3px 3px 0 0; opacity: .8; }
+.sp-day.bad i { background: linear-gradient(to top, var(--red) 0 3px, var(--clay) 3px); }
+.sp-day:hover i { opacity: 1; }
+.sp-axis { display: flex; justify-content: space-between; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.sp-bar { height: 4px; max-width: 260px; margin-top: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
+.sp-bar i { display: block; height: 100%; background: var(--clay); border-radius: 99px; }
+.sp-table td, .sp-table th { padding: 8px; font-size: 13.5px; }
+.grid2.sp-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
+.sp-table td:first-child { min-width: 170px; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .sp-table td:first-child { min-width: 120px; } .sp-table td, .sp-table th { padding: 7px 6px; } }
+.sp-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sp-example { max-width: 480px; overflow-wrap: anywhere; color: var(--soft); }
+.net-more::after { content: " · показать"; color: var(--muted); font-size: 13px; }
+details[open] > .net-more::after { content: " · скрыть"; }
+details[open] > .net-more { margin-bottom: 8px; }

@@ -442,13 +442,18 @@ def to_yaml(obj, indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-def render_hermes(agent: str, rules: dict, server: str, tools=None) -> dict:
+def render_hermes(agent: str, rules: dict, server: str, tools=None, cache=()) -> dict:
     """The Hermes configuration made of the rules. Native keys where Hermes has them; the rest (schedule, internet,
     folders, programs) is in «sysai» and applied by the synchronizer. Checked against Hermes in the bake-off (6.1).
 
     The main model thinks, plans and hands parts of a task to sub-agents (delegate_task) on the «workers» model —
     that is how a strong model leads cheap ones inside one agent. MCP servers from the hub (tools) are started by the
-    synchronizer's wrapper «sysai-agent mcp <name>», which checks the same signed rules."""
+    synchronizer's wrapper «sysai-agent mcp <name>», which checks the same signed rules.
+
+    `cache` — the tiers whose model caches a prompt only by marks (Claude, Kimi): Hermes puts the marks only for the
+    addresses it knows, so the SYSAI provider declares `prompt_caching` for them (ОПО-5.5). Hermes never falls back to
+    providers of its own (`fallback_providers: []`): every request goes through SYSAI, the spare models are its own.
+    Memory is the profile's own, built in (ОПО-6.5)."""
     server = (server or "").rstrip("/")
     tiers = rules["models"]["tiers"] or ["cheap"]
     main, workers = _main_and_workers(tiers, rules["models"].get("main"), rules["models"].get("workers"))
@@ -476,8 +481,10 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None) -> dict:
         "model": {"provider": "custom", "base_url": f"{server}/v1", "default": f"sysai/{main}",
                   "api_key": "${SYSAI_AGENT_TOKEN}"},
         # «sysai» in the body tells the gateway who asks (the trace); the gateway takes it out before OpenRouter
+        "fallback_providers": [],
         "delegation": {"model": f"sysai/{workers}", "base_url": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}",
                        "max_concurrent_children": 3, "max_spawn_depth": 1,  # flat: workers do not delegate further
+                       "fallback_providers": [],
                        "request_overrides": {"extra_body": {"sysai": {"role": "workers"}}}},
         "auxiliary": {"vision": {"provider": "custom", "base_url": f"{server}/v1",
                                  "model": "sysai/" + _plain(tiers, ("vision", "mid", "strong", "cheap"), main),
@@ -486,6 +493,8 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None) -> dict:
                                       "model": "sysai/" + _plain(tiers, ("cheap", "mid", "strong"), main),
                                       "extra_body": {"sysai": {"role": "compression"}}}},
         "approvals": {"mode": "off", "deny": deny},
+        "memory": {"memory_enabled": True, "user_profile_enabled": True, "provider": ""},
+        "security": {"redact_secrets": True},
         "mcp_servers": mcp,
         "skills": {"external_dirs": ["${SYSAI_HOME}/hub"],
                    **({"create_dir": "${SYSAI_HOME}/proposals"} if rules["skills"]["propose"] else {})},
@@ -493,7 +502,22 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None) -> dict:
                   "programs": rules["programs"], "internet": rules["internet"], "schedule": rules["schedule"],
                   "chat": rules["chat"], "hub_tools": hub_tools, "files": rules["files"]},
     }
+    marked = [t for t in TIERS if t in cache and t in tiers]
+    if marked:
+        cfg["providers"] = {"sysai": {"api": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}", "transport": "openai_chat",
+                                      "discover_models": False,
+                                      "models": {f"sysai/{t}": {"prompt_caching": True} for t in marked}}}
     return cfg
+
+
+def cache_tiers(rules: dict) -> list:
+    """The agent's tiers whose model caches by marks; sysai/auto too when Jev may pick one of them."""
+    from . import gateway
+    tiers = rules["models"]["tiers"]
+    out = [t for t in MODEL_TIERS if t in tiers and gateway.cache_marks(gateway.model_for(t))]
+    if "auto" in tiers and any(t in TEXT_TIERS for t in out):
+        out.append("auto")
+    return out
 
 
 def _profile_of(s, row):
@@ -520,17 +544,22 @@ def document(agent_id: int, server: str = "", session=None) -> dict:
         from . import hub
         ctx = SimpleNamespace(agent_id=agent.id, department_id=agent.department_id, name=agent.name,
                               role=user.role if user else "user")
+        from . import soul
         tools = hub.delivered_tools(ctx, rules)
+        cache = cache_tiers(rules)
+        character = soul.for_agent(agent.name, (user.display_name or user.username) if user else "",
+                                   user.username if user else "", dept.name if dept else "")
         rev = hashlib.sha256(_canonical({"agent": agent.name, "harness": agent.harness, "rules": rules,
-                                         "tools": [(t["name"], t["version"]) for t in tools]})).hexdigest()[:12]
+                                         "tools": [(t["name"], t["version"]) for t in tools], "cache": cache,
+                                         "soul": soul.digest(character)})).hexdigest()[:12]
         server = (server or config.PUBLIC_URL or "").rstrip("/")
         doc = {"agent": agent.name, "agent_id": agent.id, "user": user.username if user else "", "role": user.role if user else "",
                "department": dept.name if dept else "", "harness": agent.harness, "rev": rev, "server": server,
                "profile": {"code": profile.code, "name": profile.name, "version": profile.version} if profile else
                {"code": "", "name": "без профиля", "version": 0},
                "rules": rules,
-               "harness_config": render_hermes(agent.name, rules, server, tools) if agent.harness == "hermes" else None,
-               "issued_at": now().isoformat(timespec="seconds")}
+               "harness_config": render_hermes(agent.name, rules, server, tools, cache) if agent.harness == "hermes" else None,
+               "soul": character, "issued_at": now().isoformat(timespec="seconds")}
         return {"rev": rev, "rules": rules, "profile": doc["profile"], "doc": doc,
                 "overrides": row.overrides if row else {}, "applied_rev": row.applied_rev if row else "",
                 "applied_at": row.applied_at if row else None}

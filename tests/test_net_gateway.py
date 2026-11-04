@@ -44,7 +44,9 @@ def test_a_request_goes_to_the_tier_model_and_is_counted(client, net_agent, monk
     assert r.json()["choices"][0]["message"]["content"] == "ok"
     body = up.bodies[0]
     assert body["model"] == "anthropic/claude-sonnet-4.5" and body["usage"] == {"include": True}
-    assert "models" not in body and "route" not in body and body["user"] == "opo-sysai" and body["temperature"] == 0.2
+    # the agent's own list of models is dropped: SYSAI gives OpenRouter its spare model of the tier instead (ОПО-5.5)
+    assert body["models"] == ["anthropic/claude-sonnet-4.5", gateway.DEFAULT_FALLBACK["mid"]]
+    assert "route" not in body and body["user"] == "opo-sysai" and body["temperature"] == 0.2
     assert up.headers[0]["Authorization"] == "Bearer test-openrouter-key"
     with SessionLocal() as s:
         spend = s.query(NetSpend).one()
@@ -302,3 +304,75 @@ def test_a_stream_the_agent_leaves_is_closed_and_counted(client, net_agent, monk
     with SessionLocal() as s:
         spend = s.query(NetSpend).one()
         assert spend.ok is False and spend.error.startswith("client_closed") and spend.model == "google/gemini-2.5-flash"
+
+
+# ----------------------------------------------------------------------------- spare models (ОПО-5.5)
+class Flaky(Upstream):
+    """Fails the first `fails` requests with `fail_status`, then answers."""
+    def __init__(self, fails=1, fail_status=503):
+        super().__init__()
+        self.fails, self.fail_status = fails, fail_status
+
+    def post(self, url, body, headers):
+        if len(self.bodies) < self.fails:
+            self.bodies.append(body)
+            self.headers.append(headers)
+            return httpx.Response(self.fail_status, json={"error": {"message": "provider is down"}})
+        return super().post(url, body, headers)
+
+
+def test_a_failed_model_is_asked_once_more_on_the_spare_one(client, net_agent, monkeypatch):
+    up = Flaky(fails=1, fail_status=503)
+    monkeypatch.setattr(gateway, "_post", up.post)
+    r = _ask(client, net_agent)
+    assert r.status_code == 200, r.text
+    first, second = up.bodies
+    mid, spare = gateway.DEFAULT_MODELS["mid"], gateway.DEFAULT_FALLBACK["mid"]
+    assert first["model"] == mid and first["models"] == [mid, spare]
+    assert second["model"] == spare and "models" not in second
+    with SessionLocal() as s:
+        row = s.query(NetSpend).one()
+        assert row.ok and row.model == spare and row.route.startswith("mid→запасная: HTTP 503")
+    # the request's own fault (400) is not retried
+    up = Flaky(fails=1, fail_status=400)
+    monkeypatch.setattr(gateway, "_post", up.post)
+    assert _ask(client, net_agent).status_code >= 400 and len(up.bodies) == 1
+
+
+def test_openrouter_switching_to_the_spare_by_itself_is_seen(client, net_agent, monkeypatch):
+    spare = gateway.DEFAULT_FALLBACK["mid"]
+    up = Upstream(data={"id": "gen-2", "model": spare, "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001}})
+    monkeypatch.setattr(gateway, "_post", up.post)
+    assert _ask(client, net_agent).status_code == 200
+    with SessionLocal() as s:
+        row = s.query(NetSpend).one()
+        assert row.model == spare and row.route == "ответила запасная"
+
+
+def test_spare_models_are_set_in_the_settings_and_can_be_turned_off(client, net_agent, monkeypatch):
+    page = client.get("/agents/access").text
+    assert 'name="fallback_mid"' in page and gateway.DEFAULT_FALLBACK["mid"] in page and "нет запасной" in page
+    r = client.post("/agents/access/settings", data={"model_mid": "", "fallback_mid": "", "fallback_cheap": "openai/gpt-4o-mini",
+                                                     "mcp_per_minute": "120"}, follow_redirects=False)
+    assert "msg=" in r.headers["location"]
+    assert settings_store.get("agents_fallback")["mid"] == "" and gateway.backup_for("cheap") == "openai/gpt-4o-mini"
+    assert gateway.backup_for("mid") == ""
+    up = Flaky(fails=5, fail_status=503)
+    monkeypatch.setattr(gateway, "_post", up.post)
+    r = _ask(client, net_agent)
+    assert r.status_code >= 500 and len(up.bodies) == 1 and "models" not in up.bodies[0]  # no spare: one try
+    # the spare model is never the model itself
+    settings_store.set_many({"agents_models": {"cheap": "openai/gpt-4o-mini"}})
+    assert gateway.backup_for("cheap") == ""
+
+
+def test_claude_tiers_get_prompt_cache_marks_in_the_hermes_config(client, net_agent):
+    before = access.document(net_agent["id"], "https://sysai.example")
+    assert "providers" not in before["doc"]["harness_config"]  # the default models cache by themselves
+    settings_store.set_many({"agents_models": {"strong": "anthropic/claude-sonnet-4.5"}})
+    after = access.document(net_agent["id"], "https://sysai.example")
+    provider = after["doc"]["harness_config"]["providers"]["sysai"]
+    assert provider["api"] == "https://sysai.example/v1" and provider["api_key"] == "${SYSAI_AGENT_TOKEN}"
+    assert provider["models"]["sysai/strong"] == {"prompt_caching": True} and "sysai/mid" not in provider["models"]
+    assert after["rev"] != before["rev"]  # the computer re-applies the configuration
