@@ -27,7 +27,7 @@
 
     <label class="f">{{ sections.programs }} (по строке) <textarea name="programs">{{ r.programs|join('\n') }}</textarea></label>
     <label class="f">{{ sections.mcp }} («сервер: инструмент, инструмент» или «сервер: *») <textarea name="mcp" spellcheck="false">{% for srv, tools in r.mcp.items() %}{{ srv }}: {{ tools|join(', ') }}
-{% endfor %}</textarea><small class="muted">sysai: whoami, departments, people, hub_search, hub_get, hub_propose, notify_me, log_event · plc-kit, machine-expert, cad</small></label>
+{% endfor %}</textarea><small class="muted">sysai: {{ sysai_tools|join(', ') }} · plc-kit, machine-expert, cad · MCP-серверы из хаба — по их имени</small></label>
 
     <h3 class="wide">{{ sections.data }}</h3>
     <label class="f">Проекты <select name="data_projects">{% for s in scopes %}<option value="{{ s }}" {{ 'selected' if r.data.projects == s }}>{{ scope_ru[s] }}</option>{% endfor %}</select></label>
@@ -42,6 +42,8 @@
 
     <h3 class="wide">{{ sections.models }}</h3>
     <div class="net-checks wide">{% for t in tiers %}<label><input type="checkbox" name="tier_{{ t }}" {{ 'checked' if t in r.models.tiers }}> sysai/{{ t }} — {{ tier_ru[t] }}</label>{% endfor %}</div>
+    <label class="f">Главная модель — думает, планирует, раздаёт подзадачи <select name="model_main">{% for t in tiers if t != 'vision' %}<option value="{{ t }}" {{ 'selected' if r.models.main == t }}>sysai/{{ t }} — {{ tier_ru[t] }}</option>{% endfor %}</select></label>
+    <label class="f">Для подзадач (delegate_task в Hermes) <select name="model_workers">{% for t in tiers if t != 'vision' %}<option value="{{ t }}" {{ 'selected' if r.models.workers == t }}>sysai/{{ t }} — {{ tier_ru[t] }}</option>{% endfor %}</select><small class="muted">Только из отмеченных уровней; иначе SYSAI возьмёт ближайший разрешённый.</small></label>
     <label class="f">Бюджет агента в день, $ (0 — без лимита) <input name="budget_day_usd" type="number" min="0" step="0.5" value="{{ r.models.budget_day_usd }}"></label>
     <label class="f">Бюджет проекта, $ (0 — без лимита) <input name="budget_project_usd" type="number" min="0" step="1" value="{{ r.models.budget_project_usd }}"></label>
 
@@ -49,8 +51,12 @@
 {% endfor %}</textarea></label>
     <div class="net-checks"><label><input type="checkbox" name="chat_owner" {{ 'checked' if r.chat.owner }}> агенту пишет его человек</label></div>
     <label class="f">Ещё могут писать (логины, по строке) <textarea name="chat_others">{{ r.chat.others|join('\n') }}</textarea></label>
-    <label class="f">{{ sections.skills }}: отделы хаба («*» — все) <textarea name="skills_departments">{{ r.skills.departments|join('\n') }}</textarea></label>
-    <div class="net-checks"><label><input type="checkbox" name="skills_propose" {{ 'checked' if r.skills.propose }}> может предлагать свои навыки</label></div>
+    <label class="f">{{ sections.skills }}: отделы хаба («*» — все) <textarea name="skills_departments">{{ r.skills.departments|join('\n') }}</textarea><small class="muted">Навыки — по отделам; MCP-серверы и программы хаба — ещё и только те, что есть выше в «MCP-инструментах» и «Программах».</small></label>
+    <div class="net-checks"><label><input type="checkbox" name="skills_propose" {{ 'checked' if r.skills.propose }}> может предлагать свои навыки и инструменты</label></div>
+
+    <h3 class="wide">{{ sections.files }}</h3>
+    <label class="f">Читать разделы (по строке: «{{ files_common }}», «{{ files_own }}», название отдела или «*» — все) <textarea name="files_read" spellcheck="false">{{ r.files.read|join('\n') }}</textarea></label>
+    <label class="f">Писать в разделы <textarea name="files_write" spellcheck="false">{{ r.files.write|join('\n') }}</textarea><small class="muted">Пусто — хранилище агенту закрыто. Не больше своего человека: агент сотрудника открывает только «{{ files_common }}» и свой отдел, агент руководителя — любые разделы.</small></label>
     <div class="wide actions"><button class="btn primary">Сохранить профиль</button>
       {% if not p.builtin %}<button class="btn danger" name="delete" value="1" onclick="return confirm('Удалить профиль {{ p.name }}?')">Удалить</button>{% endif %}</div>
   </form>

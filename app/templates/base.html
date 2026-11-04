@@ -1,38 +1,70 @@
 {% from "_logo.html" import logo %}{% from "_icons.html" import icon %}<!doctype html>
-<html lang="ru"><head>{% include "_head.html" %}<link rel="stylesheet" href="{{ asset('sidebar.css') }}"><title>{% block title %}SYSAI{% endblock %}</title>{% block head %}{% endblock %}</head>
+<html lang="ru" class="{{ 'side-mini' if request.cookies.get('sysai_side') == 'mini' }}"><head>{% include "_head.html" %}<link rel="stylesheet" href="{{ asset('sidebar.css') }}"><title>{% block title %}SYSAI{% endblock %}</title>{% block head %}{% endblock %}</head>
 {% set path = request.url.path %}
 {% set is_org_map = path == '/departments' and request.query_params.get('view') != 'list' %}
+{% set boss = me and me.role == 'superuser' %}
+{# the left menu: groups that fold; the open ones are kept in a cookie, the group of the open page is always open #}
+{% set nav_cookie = request.cookies.get('sysai_nav') %}
+{% set nav_open = (nav_cookie if nav_cookie else 'work').split('.') %}
+{% set on_work = path.startswith('/meetings') or path.startswith('/progress') or path.startswith('/calendar') or path.startswith('/reminders') or path == '/app/new' %}
+{% set on_company = path.startswith('/employees') or path.startswith('/departments') or path.startswith('/entities') or path.startswith('/documents') or path.startswith('/tables') %}
+{% set on_ai = path.startswith('/mail') or path.startswith('/skills') or path.startswith('/memory') %}
+{% set on_net = path.startswith('/agents') or path.startswith('/hub') or path.startswith('/files') %}
+{% set on_admin = path.startswith('/admin') or path.startswith('/integrations') or path.startswith('/settings') %}
+{% macro nav(href, ic, label, on, tip='') %}<a class="nav{{ ' on' if on }}" href="{{ href }}" title="{{ tip or label }}"{% if on %} aria-current="page"{% endif %}>{{ icon(ic) }}<span class="nav-t">{{ label }}</span>{% if caller is defined %}{{ caller() }}{% endif %}</a>{% endmacro %}
+{% macro group(key, label, active, opened, badge=0) %}{% set open = active or key in opened %}
+    <div class="nav-group{{ ' open' if open }}" data-nav-group="{{ key }}">
+      <button type="button" class="nav-head" data-nav-toggle aria-expanded="{{ 'true' if open else 'false' }}">{{ icon('chev') }}<span class="nav-head-t">{{ label }}</span>{% if badge %}<span class="pill red nav-badge" title="Ждут решения">{{ badge }}</span>{% endif %}</button>
+      <div class="nav-items">{{ caller() }}</div>
+    </div>{% endmacro %}
 <body class="{{ 'org-map-page' if is_org_map else '' }}"><div class="aura soft" aria-hidden="true"><i></i><i></i><i></i></div>
 <div class="shell {{ 'map-fullscreen-shell' if is_org_map else '' }}">
   <aside class="side" id="side">
-    <a href="/app">{{ logo('md') }}</a>
-    <a href="/app/new" class="btn primary new">{{ icon('plus') }} Новое совещание</a>
-    <a class="nav {{ 'on' if path == '/app' }}" href="/app">{{ icon('home') }} Обзор</a>
-    <a class="nav {{ 'on' if path.startswith('/meetings') }}" href="/meetings">{{ icon('list') }} Совещания</a>
-    <a class="nav {{ 'on' if path.startswith('/progress') }}" href="/progress">{{ icon('home') }} Прогресс</a>
+    <a href="/app" class="side-logo" title="SYSAI">{{ logo('md') }}</a>
+    <a href="/app/new" class="btn primary new" title="Новое совещание">{{ icon('plus') }}<span class="nav-t">Новое совещание</span></a>
+    <nav class="side-nav" aria-label="Разделы SYSAI">
+    {{ nav('/app', 'home', 'Обзор', path == '/app') }}
+    {% call group('work', 'Работа', on_work, nav_open) %}
+      {{ nav('/meetings', 'list', 'Совещания', path.startswith('/meetings')) }}
+      {{ nav('/progress', 'chart', 'Прогресс', path.startswith('/progress')) }}
+      {% if boss %}
+      {{ nav('/calendar', 'calendar', 'Календарь', path.startswith('/calendar')) }}
+      {{ nav('/reminders', 'bell', 'Напоминания', path.startswith('/reminders')) }}
+      {% endif %}
+    {% endcall %}
+    {% if boss %}
+    {% call group('company', 'Компания', on_company, nav_open) %}
+      {{ nav('/employees', 'users', 'Сотрудники', path.startswith('/employees') or path.startswith('/departments')) }}
+      {{ nav('/entities', 'building', 'Объекты и клиенты', path.startswith('/entities')) }}
+      {{ nav('/documents', 'doc', 'Документы', path.startswith('/documents')) }}
+      {{ nav('/tables', 'table', 'Таблицы', path.startswith('/tables')) }}
+    {% endcall %}
+    {% call group('ai', 'ИИ-сотрудник', on_ai, nav_open) %}
+      {% call nav('/mail', 'mail', 'Секретарь', path.startswith('/mail'), 'Почта компании: письма, кто чем занимается, ответы и все настройки') %}<i class="side-dot {{ 'on' if mail_on }}" title="{{ 'читает почту' if mail_on else 'почта не подключена или чтение выключено' }}"></i>{% endcall %}
+      {{ nav('/skills', 'spark', 'Навыки', path.startswith('/skills'), 'Что ИИ-сотрудник делает сам в чатах') }}
+      {{ nav('/memory', 'brain', 'Память', path.startswith('/memory')) }}
+    {% endcall %}
+    {% endif %}
     {% if net_on %}
-    <a class="nav {{ 'on' if path.startswith('/agents') }}" href="/agents">{{ icon('link') }} {{ 'Агенты' if me.role == 'superuser' else 'Мой агент' }}</a>
-    <a class="nav {{ 'on' if path.startswith('/hub') }}" href="/hub">{{ icon('list') }} SYSAI_Hub</a>
+    {% call group('net', 'Сеть агентов', on_net, nav_open) %}
+      {{ nav('/agents', 'bot', 'Агенты' if boss else 'Мой агент', path.startswith('/agents') and not path.startswith('/agents/access')) }}
+      {{ nav('/hub', 'box', 'Хаб', path.startswith('/hub'), 'SYSAI_Hub: навыки и инструменты, которые берут агенты') }}
+      {{ nav('/files', 'folder', 'Хранилище', path.startswith('/files'), 'Общие файлы людей и агентов') }}
+      {% if boss %}{{ nav('/agents/access', 'shield', 'Доступы', path.startswith('/agents/access'), 'Что можно агентам: профили доступа') }}{% endif %}
+    {% endcall %}
     {% endif %}
-    {% if me and me.role == 'superuser' %}
-    <a class="nav {{ 'on' if path.startswith('/employees') }}" href="/employees">{{ icon('users') }} Сотрудники</a>
-    <a class="nav {{ 'on' if path.startswith('/memory') }}" href="/memory">{{ icon('users') }} Память</a>
-    <a class="nav {{ 'on' if path.startswith('/skills') }}" href="/skills">{{ icon('gear') }} Навыки</a>
-    <a class="nav {{ 'on' if path.startswith('/documents') }}" href="/documents">{{ icon('list') }} Документы</a>
-    <a class="nav {{ 'on' if path.startswith('/entities') }}" href="/entities">{{ icon('home') }} Объекты и клиенты</a>
-    <a class="nav {{ 'on' if path.startswith('/reminders') }}" href="/reminders">{{ icon('bell') }} Напоминания</a>
-    <a class="nav {{ 'on' if path.startswith('/calendar') }}" href="/calendar">{{ icon('calendar') }} Календарь</a>
-    <a class="nav {{ 'on' if path.startswith('/tables') }}" href="/tables">{{ icon('table') }} Таблицы</a>
-    <a class="nav {{ 'on' if path.startswith('/integrations') }}" href="/integrations">{{ icon('link') }} Интеграции</a>
-    <a class="nav {{ 'on' if path.startswith('/admin/users') }}" href="/admin/users">{{ icon('key') }} Пользователи{% if pending_users %} <span class="pill red">{{ pending_users }}</span>{% endif %}</a>
-    <a class="nav {{ 'on' if path.startswith('/settings') }}" href="/settings">{{ icon('gear') }} Настройки</a>
+    {% if boss %}
+    {% call group('admin', 'Управление', on_admin, nav_open, pending_users) %}
+      {% call nav('/admin/users', 'key', 'Пользователи', path.startswith('/admin/users')) %}{% if pending_users %}<span class="pill red">{{ pending_users }}</span>{% endif %}{% endcall %}
+      {{ nav('/integrations', 'link', 'Интеграции', path.startswith('/integrations')) }}
+      {{ nav('/settings', 'gear', 'Настройки', path.startswith('/settings')) }}
+    {% endcall %}
     {% endif %}
+    </nav>
     <div class="sp"></div>
-    {% if me and me.role == 'superuser' %}
-    <a class="nav side-agent {{ 'on' if path.startswith('/mail') }}" href="/mail" title="Почта компании: письма, кто чем занимается, ответы и все настройки">{{ icon('mail') }}<span class="side-agent-t">Секретарь<small>почта компании</small></span><i class="side-dot {{ 'on' if mail_on }}" title="{{ 'читает почту' if mail_on else 'почта не подключена или чтение выключено' }}"></i></a>
-    {% endif %}
-    <div class="me"><span class="ava">{{ (request.session.get('user') or 'S')[:2]|upper }}</span><span>{{ request.session.get('user') or 'SYSAI' }}</span>
-      <a href="/logout" class="muted" title="Выйти" style="margin-left:auto">{{ icon('logout') }}</a></div>
+    <div class="me"><span class="ava" title="{{ request.session.get('user') or 'SYSAI' }}">{{ (request.session.get('user') or 'S')[:2]|upper }}</span><span class="me-name">{{ request.session.get('user') or 'SYSAI' }}</span>
+      <button type="button" class="side-fold" data-side-mini title="Свернуть или развернуть меню" aria-label="Свернуть или развернуть меню">{{ icon('rail') }}</button>
+      <a href="/logout" class="muted side-out" title="Выйти">{{ icon('logout') }}</a></div>
   </aside>
   <div class="main">
     <div class="topbar"><a href="/app">{{ logo('sm') }}</a><button class="btn sm ghost" onclick="document.getElementById('side').classList.toggle('open')">{{ icon('menu') }}</button></div>
@@ -45,4 +77,5 @@
   </div>
 </div>
 <script src="{{ asset('app.js') }}"></script>
+<script src="{{ asset('sidebar.js') }}" defer></script>
 </body></html>

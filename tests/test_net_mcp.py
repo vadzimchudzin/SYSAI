@@ -97,7 +97,7 @@ def test_hub_tools_and_skill_usage(client, net_agent):
     with SessionLocal() as s:
         use = s.query(NetSkillUsage).one()
         assert use.skill == "st-style" and use.tokens == 1200 and use.ok is True
-    assert "применений" in client.get("/hub/st-style").text
+    assert "<dt>Применений</dt><dd>1</dd>" in client.get("/hub/st-style").text
 
 
 def test_calls_are_limited_per_minute(client, net_agent):

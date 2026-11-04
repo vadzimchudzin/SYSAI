@@ -18,7 +18,7 @@ class NetAgent(Base):
     host = Column(String(120), default="")                             # the computer, as the installer reported it
     status = Column(String(12), default="pending")                     # pending | active | disabled
     versions = Column(JSON, nullable=True)                             # {"harness": "…", "sync": "…", "plc-kit": "…"}
-    hub_state = Column(JSON, nullable=True)                            # {"skills": {name: version}, "conflicts": [names]}
+    hub_state = Column(JSON, nullable=True)                            # {"skills"|"tools": {name: version}, "conflicts": [names]}
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, default="")
     created_at = Column(DateTime(timezone=True), default=now)
@@ -68,10 +68,13 @@ class NetAgentAccess(Base):
 
 
 class NetSkill(Base):
-    """A skill of SYSAI_Hub: one hub for every agent of the network."""
+    """An item of SYSAI_Hub — one hub for every agent of the network: a skill (SKILL.md: how to do it our way) or a
+    tool (TOOL.md: an MCP server or a program the agent runs)."""
     __tablename__ = "net_skills"
     id = Column(Integer, primary_key=True)
     name = Column(String(64), nullable=False, unique=True)             # the folder name, like the SKILL.md name
+    kind = Column(String(10), default="skill")                         # skill | mcp | program
+    delivery = Column(String(10), default="always")                    # always: every allowed agent | on_demand: taken
     title = Column(String(200), default="")
     description = Column(Text, default="")
     department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)  # owner department
@@ -94,7 +97,8 @@ class NetSkillVersion(Base):
     sha256 = Column(String(64), nullable=False)
     size = Column(Integer, default=0)
     files = Column(JSON, nullable=True)                                # [{"path", "size"}]
-    skill_md = Column(Text, default="")
+    skill_md = Column(Text, default="")                                # SKILL.md or TOOL.md of the version
+    spec = Column(JSON, nullable=True)                                 # a tool: how to run it (TOOL.md frontmatter)
     changelog = Column(Text, default="")
     why = Column(Text, default="")                                     # the agent's explanation of a proposal
     checks = Column(JSON, nullable=True)                               # {"errors": [...], "warnings": [...]}
@@ -105,6 +109,57 @@ class NetSkillVersion(Base):
     decided_by = Column(String(64), default="")
     decided_at = Column(DateTime(timezone=True), nullable=True)
     decision_note = Column(Text, default="")
+
+
+class NetHubPick(Base):
+    """An item «on demand» the agent took itself (hub_take): the synchronizer installs it like the «always» ones."""
+    __tablename__ = "net_hub_picks"
+    __table_args__ = (UniqueConstraint("agent_id", "name", name="uq_net_hub_pick"),)
+    id = Column(Integer, primary_key=True)
+    agent_id = Column(Integer, ForeignKey("net_agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    why = Column(String(300), default="")
+    at = Column(DateTime(timezone=True), default=now)
+
+
+class NetFile(Base):
+    """A file or a folder of the shared storage. Sections: «Общее» and one per department; inside — any folders.
+    A file keeps every version; the bytes are in the S3 storage of SYSAI (or on the disk when it is not set up)."""
+    __tablename__ = "net_files"
+    __table_args__ = (UniqueConstraint("path", name="uq_net_file_path"), Index("ix_net_files_folder", "folder"))
+    id = Column(Integer, primary_key=True)
+    path = Column(String(600), nullable=False)                         # «ОПО/24-017/IO.xlsx»: section/folders/name
+    folder = Column(String(600), nullable=False, default="")           # «ОПО/24-017»
+    name = Column(String(255), nullable=False)
+    is_folder = Column(Boolean, default=False)
+    size = Column(Integer, default=0)
+    sha256 = Column(String(64), default="")
+    mime = Column(String(120), default="")
+    version = Column(Integer, default=0)                               # the current version (files)
+    note = Column(String(500), default="")                             # what it is (the folder or the file)
+    created_at = Column(DateTime(timezone=True), default=now)
+    created_by = Column(String(64), default="")
+    updated_at = Column(DateTime(timezone=True), default=now)
+    updated_by = Column(String(64), default="")                        # a person (login) or an agent (its name)
+    updated_by_agent = Column(Boolean, default=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)        # in the trash: hidden, the bytes kept
+    deleted_by = Column(String(64), default="")
+
+
+class NetFileVersion(Base):
+    __tablename__ = "net_file_versions"
+    __table_args__ = (UniqueConstraint("file_id", "version", name="uq_net_file_version"),)
+    id = Column(Integer, primary_key=True)
+    file_id = Column(Integer, ForeignKey("net_files.id", ondelete="CASCADE"), nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    size = Column(Integer, default=0)
+    sha256 = Column(String(64), nullable=False)
+    mime = Column(String(120), default="")
+    key = Column(String(300), nullable=False)                          # «s3:net/…» or «disk:net/…»
+    note = Column(String(500), default="")                             # what changed
+    at = Column(DateTime(timezone=True), default=now)
+    by = Column(String(64), default="")
+    by_agent = Column(Boolean, default=False)
 
 
 class NetSkillUsage(Base):

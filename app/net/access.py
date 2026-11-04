@@ -11,6 +11,7 @@ import fnmatch
 import hashlib
 import json
 import re
+from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -20,10 +21,10 @@ from ..db import Department, SessionLocal, User, now
 from . import journal
 from .models import NetAccessProfile, NetAgent, NetAgentAccess
 
-SECTIONS = ("commands", "folders", "programs", "mcp", "data", "internet", "models", "schedule", "chat", "skills")
+SECTIONS = ("commands", "folders", "programs", "mcp", "data", "internet", "models", "schedule", "chat", "skills", "files")
 SECTION_RU = {"commands": "Команды на ПК", "folders": "Папки", "programs": "Программы", "mcp": "MCP-инструменты",
               "data": "Данные SYSAI", "internet": "Интернет", "models": "Нейронки", "schedule": "Дела по расписанию",
-              "chat": "Кто может писать агенту", "skills": "Навыки"}
+              "chat": "Кто может писать агенту", "skills": "Хаб: навыки и инструменты", "files": "Хранилище"}
 TIERS = ("cheap", "mid", "strong", "vision")
 TIER_RU = {"cheap": "дешёвая", "mid": "средняя", "strong": "сильная", "vision": "зрение (сканы, фото)"}
 SCOPES = ("own", "department", "all")
@@ -33,7 +34,12 @@ LEVEL_RU = {"none": "нет", "read": "чтение", "write": "чтение и 
 INTERNET = ("off", "list", "all")
 INTERNET_RU = {"off": "выключен", "list": "только список сайтов", "all": "весь"}
 MCP_SERVERS = ("sysai", "plc-kit", "machine-expert", "cad")
-SYSAI_TOOLS = ("whoami", "departments", "people", "hub_search", "hub_get", "hub_propose", "notify_me", "log_event")
+SYSAI_TOOLS = ("whoami", "departments", "people", "hub_search", "hub_get", "hub_take", "hub_drop", "hub_propose",
+               "files_list", "files_find", "files_read", "files_write", "notify_me", "log_event")
+# Sections of the shared storage (files.py): «Общее» and one per department; «свой отдел» is the agent's department.
+# Nothing by default: the storage is opened to an agent only here, in its profile or personal exceptions.
+FILES_COMMON = "Общее"
+FILES_OWN = "свой отдел"
 
 # Never allowed, whatever the profile says (on top of the harness's own hard blocklist).
 ALWAYS_DENY = ("format *:*", "diskpart*", "bcdedit*", "vssadmin delete*", "cipher /w*", "rm -rf /*", "rm -rf ~*",
@@ -51,6 +57,7 @@ EMPTY = {
     "schedule": [],
     "chat": {"owner": True, "others": []},
     "skills": {"departments": ["*"], "propose": False},
+    "files": {"read": [], "write": []},
 }
 
 _ENGINEER = {
@@ -143,7 +150,8 @@ def normalize(rules) -> dict:
     out["internet"] = {"mode": i.get("mode") if i.get("mode") in INTERNET else "off", "sites": _lines(i.get("sites"), 100, 120)}
     mo = rules.get("models") if isinstance(rules.get("models"), dict) else {}
     tiers = [t for t in TIERS if t in (mo.get("tiers") or [])]
-    out["models"] = {"tiers": tiers, "budget_day_usd": _money(mo.get("budget_day_usd"), 1.0),
+    main, workers = _main_and_workers(tiers, mo.get("main"), mo.get("workers"))
+    out["models"] = {"tiers": tiers, "main": main, "workers": workers, "budget_day_usd": _money(mo.get("budget_day_usd"), 1.0),
                      "budget_project_usd": _money(mo.get("budget_project_usd"), 0.0)}
     sched = []
     for item in (rules.get("schedule") or [])[:30] if isinstance(rules.get("schedule"), list) else []:
@@ -154,7 +162,21 @@ def normalize(rules) -> dict:
     out["chat"] = {"owner": bool(ch.get("owner", True)), "others": _lines(ch.get("others"), 50, 64)}
     sk = rules.get("skills") if isinstance(rules.get("skills"), dict) else {}
     out["skills"] = {"departments": _lines(sk.get("departments"), 50, 100) or ["*"], "propose": bool(sk.get("propose", False))}
+    fi = rules.get("files") if isinstance(rules.get("files"), dict) else {}
+    out["files"] = {k: _lines(fi.get(k), 50, 100) for k in ("read", "write")}
     return out
+
+
+def _main_and_workers(tiers: list, main=None, workers=None) -> tuple[str, str]:
+    """The model the agent thinks and plans with (Hermes «model») and the one its sub-agents get for the parts of a
+    task (Hermes «delegation», delegate_task). Only levels the profile allows; by default the middle one plans and the
+    cheap one does the parts."""
+    usable = [t for t in tiers if t != "vision"] or list(tiers) or ["cheap"]
+    if main not in usable:
+        main = next((t for t in ("mid", "strong", "cheap") if t in usable), usable[0])
+    if workers not in usable:
+        workers = "cheap" if "cheap" in usable else main
+    return main, workers
 
 
 def merge(base: dict, over) -> dict:
@@ -170,11 +192,16 @@ def merge(base: dict, over) -> dict:
     return normalize(out)
 
 
-def cap_by_person(rules: dict, role: str) -> dict:
-    """Never more than the person: only a superuser sees every project of the company."""
+def cap_by_person(rules: dict, role: str, department: str = "") -> dict:
+    """Never more than the person: only a superuser sees every project of the company and opens any section of the
+    storage; the agent of anyone else reads and writes at most «Общее» and its own department."""
     out = copy.deepcopy(rules)
     if role != "superuser" and out["data"]["projects"] == "all":
         out["data"]["projects"] = "department"
+    if role != "superuser":
+        mine = {FILES_COMMON.lower(), FILES_OWN.lower()} | ({department.lower()} if department else set())
+        for part in ("read", "write"):
+            out["files"][part] = [w for w in out["files"][part] if w.lower() in mine]
     deny = list(out["commands"]["deny"])
     for pattern in ALWAYS_DENY:
         if pattern not in deny:
@@ -397,12 +424,16 @@ def to_yaml(obj, indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-def render_hermes(agent: str, rules: dict, server: str) -> dict:
+def render_hermes(agent: str, rules: dict, server: str, tools=None) -> dict:
     """The Hermes configuration made of the rules. Native keys where Hermes has them; the rest (schedule, internet,
-    folders, programs) is in «sysai» and applied by the synchronizer. Checked against Hermes in the bake-off (6.1)."""
+    folders, programs) is in «sysai» and applied by the synchronizer. Checked against Hermes in the bake-off (6.1).
+
+    The main model thinks, plans and hands parts of a task to sub-agents (delegate_task) on the «workers» model —
+    that is how a strong model leads cheap ones inside one agent. MCP servers from the hub (tools) are started by the
+    synchronizer's wrapper «sysai-agent mcp <name>», which checks the same signed rules."""
     server = (server or "").rstrip("/")
     tiers = rules["models"]["tiers"] or ["cheap"]
-    main = next((t for t in ("mid", "strong", "cheap") if t in tiers), tiers[0])
+    main, workers = _main_and_workers(tiers, rules["models"].get("main"), rules["models"].get("workers"))
     deny = rules["commands"]["deny"] if rules["commands"]["run"] else ["*"]
     mcp = {}
     for name in rules["mcp"]:
@@ -411,9 +442,23 @@ def render_hermes(agent: str, rules: dict, server: str) -> dict:
         else:
             mcp[name] = {"command": "sysai-agent", "args": ["mcp", name],
                          "env": {"SYSAI_ACCESS_FILE": "${SYSAI_HOME}/access.json", "SYSAI_URL": server}}
+    hub_tools = []
+    for tool in tools or []:
+        spec = tool.get("spec") or {}
+        hub_tools.append({"name": tool["name"], "kind": tool["kind"], "version": tool["version"],
+                          "platform": spec.get("platform", "any")})
+        if tool["kind"] == "mcp" and tool["name"] in rules["mcp"]:
+            if spec.get("url"):
+                mcp[tool["name"]] = {"url": spec["url"]}
+            else:
+                mcp[tool["name"]] = {"command": "sysai-agent", "args": ["mcp", tool["name"]],
+                                     "env": {"SYSAI_ACCESS_FILE": "${SYSAI_HOME}/access.json", "SYSAI_URL": server,
+                                             "SYSAI_TOOL_DIR": "${SYSAI_HOME}/tools/" + tool["name"]}}
     cfg = {
         "model": {"provider": "custom", "base_url": f"{server}/v1", "default": f"sysai/{main}",
                   "api_key": "${SYSAI_AGENT_TOKEN}"},
+        "delegation": {"model": f"sysai/{workers}", "base_url": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}",
+                       "max_concurrent_children": 3},
         "auxiliary": {"vision": {"provider": "custom", "base_url": f"{server}/v1",
                                  "model": "sysai/vision" if "vision" in tiers else f"sysai/{main}"},
                       "compression": {"provider": "custom", "base_url": f"{server}/v1",
@@ -424,7 +469,7 @@ def render_hermes(agent: str, rules: dict, server: str) -> dict:
                    **({"create_dir": "${SYSAI_HOME}/proposals"} if rules["skills"]["propose"] else {})},
         "sysai": {"agent": agent, "terminal": rules["commands"]["run"], "folders": rules["folders"],
                   "programs": rules["programs"], "internet": rules["internet"], "schedule": rules["schedule"],
-                  "chat": rules["chat"]},
+                  "chat": rules["chat"], "hub_tools": hub_tools, "files": rules["files"]},
     }
     return cfg
 
@@ -446,17 +491,23 @@ def document(agent_id: int, server: str = "", session=None) -> dict:
         row = s.query(NetAgentAccess).filter(NetAgentAccess.agent_id == agent_id).first()
         profile = _profile_of(s, row)
         user = s.get(User, agent.user_id)
-        base = normalize(profile.rules) if profile else normalize(EMPTY)
-        rules = cap_by_person(merge(base, row.overrides if row else {}), user.role if user else "user")
         dept = s.get(Department, agent.department_id) if agent.department_id else None
-        rev = hashlib.sha256(_canonical({"agent": agent.name, "harness": agent.harness, "rules": rules})).hexdigest()[:12]
+        base = normalize(profile.rules) if profile else normalize(EMPTY)
+        rules = cap_by_person(merge(base, row.overrides if row else {}), user.role if user else "user",
+                              dept.name if dept else "")
+        from . import hub
+        ctx = SimpleNamespace(agent_id=agent.id, department_id=agent.department_id, name=agent.name,
+                              role=user.role if user else "user")
+        tools = hub.delivered_tools(ctx, rules)
+        rev = hashlib.sha256(_canonical({"agent": agent.name, "harness": agent.harness, "rules": rules,
+                                         "tools": [(t["name"], t["version"]) for t in tools]})).hexdigest()[:12]
         server = (server or config.PUBLIC_URL or "").rstrip("/")
         doc = {"agent": agent.name, "agent_id": agent.id, "user": user.username if user else "", "role": user.role if user else "",
                "department": dept.name if dept else "", "harness": agent.harness, "rev": rev, "server": server,
                "profile": {"code": profile.code, "name": profile.name, "version": profile.version} if profile else
                {"code": "", "name": "без профиля", "version": 0},
                "rules": rules,
-               "harness_config": render_hermes(agent.name, rules, server) if agent.harness == "hermes" else None,
+               "harness_config": render_hermes(agent.name, rules, server, tools) if agent.harness == "hermes" else None,
                "issued_at": now().isoformat(timespec="seconds")}
         return {"rev": rev, "rules": rules, "profile": doc["profile"], "doc": doc,
                 "overrides": row.overrides if row else {}, "applied_rev": row.applied_rev if row else "",
@@ -502,8 +553,10 @@ def rules_from_form(form) -> dict:
         "data": {"projects": get("data_projects"), "to_base": get("data_to_base"), "tags": get("data_tags"),
                  "questions": bool(get("data_questions")), "people": bool(get("data_people"))},
         "internet": {"mode": get("internet_mode"), "sites": lines("internet_sites")},
-        "models": {"tiers": tiers, "budget_day_usd": get("budget_day_usd"), "budget_project_usd": get("budget_project_usd")},
+        "models": {"tiers": tiers, "main": get("model_main"), "workers": get("model_workers"),
+                   "budget_day_usd": get("budget_day_usd"), "budget_project_usd": get("budget_project_usd")},
         "schedule": schedule,
         "chat": {"owner": bool(get("chat_owner")), "others": lines("chat_others")},
         "skills": {"departments": lines("skills_departments"), "propose": bool(get("skills_propose"))},
+        "files": {"read": lines("files_read"), "write": lines("files_write")},
     })

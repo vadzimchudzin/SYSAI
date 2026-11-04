@@ -258,8 +258,10 @@ def heartbeat(ctx: AgentCtx, data: dict) -> dict:
         hub_state = data.get("hub")
         if isinstance(hub_state, dict):
             skills = hub_state.get("skills") if isinstance(hub_state.get("skills"), dict) else {}
+            tools = hub_state.get("tools") if isinstance(hub_state.get("tools"), dict) else {}
             conflicts = hub_state.get("conflicts") if isinstance(hub_state.get("conflicts"), list) else []
             agent.hub_state = {"skills": {str(k)[:64]: str(v)[:20] for k, v in list(skills.items())[:500]},
+                               "tools": {str(k)[:64]: str(v)[:20] for k, v in list(tools.items())[:200]},
                                "conflicts": [str(c)[:64] for c in conflicts[:100]]}
         applied = str(data.get("access_rev") or "")[:16]
         row = s.query(NetAgentAccess).filter(NetAgentAccess.agent_id == ctx.agent_id).first()

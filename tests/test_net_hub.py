@@ -151,7 +151,7 @@ def test_agent_proposals_need_the_owner(client, net_agent):
                     json={"skill_md": improved, "files": {"references/reserve.md": "Резервы — отдельной строкой"},
                           "changelog": "резервы", "why": "В трёх пакетах резервы терялись"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"skill": "plc-io-from-excel", "version": "1.0.1", "status": "review"}  # the version is bumped
+    assert r.json() == {"skill": "plc-io-from-excel", "kind": "skill", "version": "1.0.1", "status": "review"}  # the version is bumped
     manifest = client.get("/agents/api/hub/manifest", headers=net_agent["headers"]).json()
     assert manifest["skills"][0]["version"] == "1.0.0"  # nothing changes before the owner approves
     hub_page = client.get("/hub").text
@@ -218,3 +218,130 @@ def test_the_editor_of_a_new_version_keeps_the_other_files(client, net_agent):
     client.post("/hub/plc-io-from-excel/1.0.5/reject", data={"note": "рано"})
     card = hub.card("plc-io-from-excel")
     assert [v["status"] for v in card["versions"]] == ["rejected", "draft"]
+
+
+# ----------------------------------------------------------------------------- tools: MCP servers and programs
+TOOL = """---
+name: plc-kit
+kind: mcp
+description: MCP-сервер ПЛК: теги из Excel и проверка адресов.
+version: 1.0.0
+run: python server.py
+platform: windows
+tools: read_tags, check_addresses
+requires: python>=3.11
+---
+# ПЛК-кит
+
+## Когда применять
+Нужны теги проекта.
+
+## Как запускать
+Синхронизатор запускает python server.py из папки инструмента.
+
+## Ошибки
+Нет Python — поставить 3.11.
+"""
+
+
+def _overrides(client, agent, overrides: dict, profile: str = "opo-engineer"):
+    """Personal exceptions of the agent on top of its profile (the form of the agent page)."""
+    import json
+    from app.net.models import NetAccessProfile
+    with SessionLocal() as s:
+        profile_id = s.query(NetAccessProfile).filter(NetAccessProfile.code == profile).one().id
+    r = client.post(f"/agents/{agent['id']}/access", data={"profile_id": profile_id, "overrides": json.dumps(overrides),
+                                                            "department_id": agent["department_id"]}, follow_redirects=False)
+    assert "msg=" in r.headers["location"], r.headers["location"]
+
+
+def _mcp(client, agent, name, args=None):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args or {}}}
+    r = client.post("/mcp", json=body, headers={**agent["headers"], "Accept": "application/json, text/event-stream"})
+    assert r.status_code == 200, r.text
+    return r.json()["result"]
+
+
+def test_tools_live_in_the_hub_too(client, net_agent):
+    r = client.post("/hub/upload", files={"file": ("plc-kit.zip", _zip({"TOOL.md": TOOL, "server.py": "print('ok')\n"}),
+                                                    "application/zip")}, follow_redirects=False)
+    assert r.status_code == 303 and "/hub/plc-kit?v=1.0.0" in r.headers["location"]
+    with SessionLocal() as s:
+        k = s.query(NetSkill).filter(NetSkill.name == "plc-kit").one()
+        v = s.query(NetSkillVersion).filter(NetSkillVersion.skill_id == k.id).one()
+        assert k.kind == "mcp" and v.checks["errors"] == []
+        assert v.spec["run"] == "python server.py" and v.spec["tools"] == ["read_tags", "check_addresses"]
+    page = client.get("/hub/plc-kit").text
+    assert "MCP-сервер" in page and "python server.py" in page and "read_tags" in page
+    client.post("/hub/plc-kit/1.0.0/publish")
+    manifest = client.get("/agents/api/hub/manifest", headers=net_agent["headers"]).json()
+    assert manifest["skills"] == [] and [t["name"] for t in manifest["tools"]] == ["plc-kit"]
+    tool = manifest["tools"][0]
+    assert tool["url"] == "/agents/api/hub/tools/plc-kit/1.0.0.zip" and tool["spec"]["platform"] == "windows"
+    blob = client.get(tool["url"], headers=net_agent["headers"])
+    assert blob.status_code == 200 and hashlib.sha256(blob.content).hexdigest() == tool["sha256"]
+    assert set(zipfile.ZipFile(io.BytesIO(blob.content)).namelist()) == {"TOOL.md", "server.py"}
+    # the harness starts it through the synchronizer's wrapper, and the revision of the access changes with it
+    from app.net import access
+    hermes = access.document(net_agent["id"], "https://sysai.example")["doc"]["harness_config"]
+    assert hermes["mcp_servers"]["plc-kit"]["env"]["SYSAI_TOOL_DIR"] == "${SYSAI_HOME}/tools/plc-kit"
+    assert [t["name"] for t in hermes["sysai"]["hub_tools"]] == ["plc-kit"]
+    listing = client.get("/hub").text
+    assert "MCP-серверы" in listing and "ПЛК-кит" in listing and "SYSAI" in listing  # the built-in server is listed too
+
+
+def test_tool_checks_names_and_kinds(client, net_agent):
+    def report(text, extra=None):
+        _, checked = hub.check({"TOOL.md": text.encode(), **(extra or {})})
+        return " | ".join(e["what"] for e in checked["errors"])
+    assert "url бывает только у MCP-сервера" in report(TOOL.replace("kind: mcp", "kind: program")
+                                                      .replace("run: python server.py", "url: https://sysat.by/mcp"))
+    assert "MCP-серверу нужен run" in report(TOOL.replace("run: python server.py\n", ""))
+    assert "только https" in report(TOOL.replace("run: python server.py", "url: http://tools.example/mcp"))
+    assert "не в списке разрешённых" in report(TOOL.replace("run: python server.py", "url: https://evil.example/mcp"))
+    assert report(TOOL.replace("run: python server.py", "url: https://sysat.by/mcp")) == ""
+    assert report(TOOL, {"server.py": b"# docs: https://evil.example\n"}) == ""  # an address in a comment only warns
+    assert "внешний адрес evil.example" in report(TOOL, {"server.py": b"requests.get('https://evil.example/x')\n"})
+    with pytest.raises(hub.HubError, match="занято"):
+        hub.submit({"TOOL.md": TOOL.replace("name: plc-kit", "name: sysai")}, user={"id": 1, "username": "sysai"})
+    hub.submit({"TOOL.md": TOOL}, user={"id": 1, "username": "sysai"})
+    with pytest.raises(hub.HubError, match="уже есть"):
+        hub.submit({"SKILL.md": SKILL.replace("name: plc-io-from-excel", "name: plc-kit")}, user={"id": 1, "username": "sysai"})
+    with pytest.raises(hub.HubError, match="либо SKILL.md"):
+        hub.submit({"TOOL.md": TOOL, "SKILL.md": SKILL}, user={"id": 1, "username": "sysai"})
+
+
+def test_a_program_needs_the_access_and_on_demand_items_are_taken_for_a_task(client, net_agent):
+    program = (TOOL.replace("name: plc-kit", "name: tag-export").replace("kind: mcp", "kind: program")
+               .replace("run: python server.py", "run: python main.py").replace("tools: read_tags, check_addresses\n", ""))
+    hub.submit({"TOOL.md": program, "main.py": "print(1)\n"}, user={"id": 1, "username": "sysai"})
+    client.post("/hub/tag-export/1.0.0/publish")
+    manifest = client.get("/agents/api/hub/manifest", headers=net_agent["headers"]).json()
+    assert manifest["tools"] == []  # «Программы» of the engineer do not name it
+    _overrides(client, net_agent, {"programs": ["Excel", "tag-export"]})
+    manifest = client.get("/agents/api/hub/manifest", headers=net_agent["headers"]).json()
+    assert [t["name"] for t in manifest["tools"]] == ["tag-export"]
+    # «по запросу»: not on the computer until the agent takes it for a task
+    _upload(client, {"SKILL.md": SKILL})
+    client.post("/hub/plc-io-from-excel/1.0.0/publish")
+    client.post("/hub/plc-io-from-excel/settings", data={"delivery": "on_demand", "audience": "all"})
+    manifest = client.get("/agents/api/hub/manifest", headers=net_agent["headers"]).json()
+    assert manifest["skills"] == []
+    found = _mcp(client, net_agent, "hub_search", {"query": "excel"})["structuredContent"]
+    skill = next(k for k in found["skills"] if k["name"] == "plc-io-from-excel")
+    assert skill["delivery"] == "on_demand" and skill["with_agent"] is False
+    taken = _mcp(client, net_agent, "hub_take", {"name": "plc-io-from-excel", "why": "пакет ТО 24-017"})
+    assert not taken["isError"] and taken["structuredContent"]["status"] == "taken"
+    manifest = client.get("/agents/api/hub/manifest", headers=net_agent["headers"]).json()
+    assert [k["name"] for k in manifest["skills"]] == ["plc-io-from-excel"]
+    assert "пакет ТО 24-017" in client.get("/hub/plc-io-from-excel").text  # who took it and why
+    assert not _mcp(client, net_agent, "hub_drop", {"name": "plc-io-from-excel"})["isError"]
+    assert client.get("/agents/api/hub/manifest", headers=net_agent["headers"]).json()["skills"] == []
+    assert _mcp(client, net_agent, "hub_take", {"name": "nope"})["isError"]
+
+
+def test_agents_propose_tools_through_the_api(client, net_agent):
+    r = client.post("/agents/api/hub/proposals", headers=net_agent["headers"],
+                    json={"tool_md": TOOL, "files": {"server.py": "print('ok')\n"}, "why": "теги вручную — долго"})
+    assert r.status_code == 200 and r.json()["kind"] == "mcp" and r.json()["status"] == "review"
+    assert "На проверке (1)" in client.get("/hub").text

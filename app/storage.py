@@ -219,6 +219,17 @@ def put_bytes(key: str, data: bytes, content_type: str = "application/octet-stre
         raise _failure(response, "запись")
 
 
+def get_bytes(key: str, limit: int = 0) -> bytes:
+    """An object's bytes (only the first `limit` of them when a limit is given: a Range request)."""
+    t = target()
+    route = object_path(t, key)
+    extra = {"range": f"bytes=0-{limit - 1}"} if limit else None
+    response = _send("GET", t.endpoint + route, signed_headers(t, "GET", route, headers=extra), timeout=60.0, action="чтение")
+    if response.status_code not in (200, 206):
+        raise _failure(response, "чтение")
+    return response.content[:limit] if limit else response.content
+
+
 def head(key: str) -> dict | None:
     """{"size", "type"} of an object, None when there is no such object."""
     t = target()

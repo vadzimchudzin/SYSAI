@@ -1,0 +1,102 @@
+{% from "_icons.html" import icon %}
+{% if item %}
+<div class="nx-panel-head">
+  <span class="nx-ic lg" data-kind="{{ item.kind }}">{{ icon(item.icon) }}</span>
+  <div class="nx-panel-title"><h2>{{ item.name }}</h2>
+    <p><span>{{ item.folder }}</span>{% if item.deleted_at %}<span class="pill red">в корзине</span>{% elif not item.is_folder %}<span class="pill gray">v{{ item.version }}</span>{% endif %}</p></div>
+  <a class="nx-close" href="{{ files_url(found.path, q=found.q, trash='1' if found.trash else '') }}" data-nx-open aria-label="Закрыть">×</a>
+</div>
+{% if item.kind == 'image' and not item.deleted_at %}<div class="nx-sec nx-preview"><img src="/files/raw?path={{ item.path|urlencode }}&inline=1" alt="{{ item.name }}" loading="lazy"></div>{% endif %}
+<div class="nx-sec">
+  <dl class="net-kv">
+    <dt>Тип</dt><dd>{{ item.kind_ru }}{% if item.mime and not item.is_folder %} <span class="small muted">{{ item.mime }}</span>{% endif %}</dd>
+    {% if item.is_folder %}<dt>Внутри</dt><dd>{{ item.files }} {{ plural(item.files, 'файл', 'файла', 'файлов') }}, {{ item.folders }} {{ plural(item.folders, 'папка', 'папки', 'папок') }} · {{ item.size_ru }}</dd>
+    {% else %}<dt>Размер</dt><dd>{{ item.size_ru }}</dd>{% endif %}
+    {% if item.note %}<dt>Описание</dt><dd>{{ item.note }}</dd>{% endif %}
+    <dt>Изменил</dt><dd>{{ item.updated_by or '—' }}{% if item.by_agent %} <span class="pill blue">агент</span>{% endif %} · {{ net_when(item.updated_at) }}</dd>
+    <dt>Создал</dt><dd>{{ item.created_by or '—' }} · {{ net_when(item.created_at) }}</dd>
+    {% if item.deleted_at %}<dt>Удалил</dt><dd>{{ item.deleted_by or '—' }} · {{ net_when(item.deleted_at) }}</dd>{% endif %}
+    {% if item.sha256 %}<dt>sha256</dt><dd><code>{{ item.sha256[:16] }}…</code></dd>{% endif %}
+  </dl>
+  <div class="nx-actions">
+    {% if not item.is_folder %}<a class="btn primary" href="/files/raw?path={{ item.path|urlencode }}">{{ icon('download') }} Скачать</a>
+      {% if item.kind in ('image',) or item.mime.startswith('application/pdf') or item.mime.startswith('text/plain') %}<a class="btn ghost" href="/files/raw?path={{ item.path|urlencode }}&inline=1" target="_blank" rel="noopener">Открыть</a>{% endif %}{% endif %}
+    {% if item.deleted_at %}
+      {% if item.can_write %}<form method="post" action="/files/restore"><input type="hidden" name="path" value="{{ item.path }}"><button class="btn">{{ icon('undo') }} Вернуть</button></form>{% endif %}
+      {% if boss %}<form method="post" action="/files/purge" onsubmit="return confirm('Удалить «{{ item.name }}» навсегда, со всеми версиями?')"><input type="hidden" name="path" value="{{ item.path }}"><button class="btn danger">Удалить навсегда</button></form>{% endif %}
+    {% elif item.can_write %}
+      <form method="post" action="/files/delete" onsubmit="return confirm('Убрать «{{ item.name }}» в корзину?')"><input type="hidden" name="path" value="{{ item.path }}"><button class="btn danger">{{ icon('trash') }} В корзину</button></form>
+    {% endif %}
+  </div>
+</div>
+{% if item.can_write and not item.deleted_at and not item.is_folder %}
+<div class="nx-sec"><h3>Новая версия</h3>
+  <form method="post" action="/files/upload" enctype="multipart/form-data" class="net-form">
+    <input type="hidden" name="folder" value="{{ item.folder }}"><input type="hidden" name="as_name" value="{{ item.name }}">
+    <label class="f">Файл (сохранится как «{{ item.name }}») <input type="file" name="files" required></label>
+    <label class="f">Что изменилось <input name="note" maxlength="500" placeholder="Добавлены резервы шкафа 2"></label>
+    <div><button class="btn">{{ icon('upload') }} Загрузить версию</button></div>
+  </form>
+</div>
+{% endif %}
+{% if item.versions %}
+<div class="nx-sec"><h3>Версии ({{ item.versions|length }})</h3>
+  <ul class="nx-versions">{% for v in item.versions %}
+    <li class="{{ 'on' if v.current }}"><div><a href="/files/raw?path={{ item.path|urlencode }}&v={{ v.version }}" title="Скачать эту версию"><b>v{{ v.version }}</b></a>{% if v.current %} <span class="pill green">текущая</span>{% endif %} <span class="small muted">· {{ v.size_ru }} · {{ v.by or '—' }}{{ ' (агент)' if v.by_agent }} · {{ net_when(v.at) }}</span></div>
+      {% if v.note %}<div class="small">{{ v.note }}</div>{% endif %}</li>
+  {% endfor %}</ul>
+</div>
+{% endif %}
+
+{% elif found.path and not found.trash and not found.q %}{% set here = folder %}
+<div class="nx-panel-head">
+  <span class="nx-ic lg" data-kind="{{ 'folder' if '/' in found.path else 'section' }}">{{ icon('folder' if '/' in found.path else 'building') }}</span>
+  <div class="nx-panel-title"><h2>{{ found.crumbs[-1].name }}</h2>
+    <p>{% if '/' in found.path %}<span>{{ parent(found.path) }}</span>{% else %}<span>{{ 'раздел всей компании' if found.path == 'Общее' else 'раздел отдела' }}</span>{% endif %}{% if found.can_write %}<span class="pill green">можно писать</span>{% else %}<span class="pill gray">только чтение</span>{% endif %}</p></div>
+  {% if panel_open %}<a class="nx-close" href="{{ files_url(found.path) }}" data-nx-open aria-label="Закрыть">×</a>{% endif %}
+</div>
+{% if here %}<div class="nx-sec"><dl class="net-kv">
+  <dt>Внутри</dt><dd>{{ here.files }} {{ plural(here.files, 'файл', 'файла', 'файлов') }}, {{ here.folders }} {{ plural(here.folders, 'папка', 'папки', 'папок') }} · {{ here.size_ru }}</dd>
+  {% if here.note %}<dt>Описание</dt><dd>{{ here.note }}</dd>{% endif %}
+  <dt>Создал</dt><dd>{{ here.created_by or '—' }} · {{ net_when(here.created_at) }}</dd></dl></div>{% endif %}
+{% if found.can_write %}
+<div class="nx-sec"><h3>Загрузить сюда</h3>
+  <form method="post" action="/files/upload" enctype="multipart/form-data" class="net-form">
+    <input type="hidden" name="folder" value="{{ found.path }}">
+    <label class="f">Файлы (до {{ max_mb }} МБ каждый) <input type="file" name="files" multiple></label>
+    <label class="f">Или папку целиком <input type="file" name="files" webkitdirectory multiple></label>
+    <label class="f">Описание или что изменилось <input name="note" maxlength="500" placeholder="Исходные данные ТО по проекту 24-017"></label>
+    <div><button class="btn primary">{{ icon('upload') }} Загрузить</button> <span class="small muted">Тот же файл ещё раз — новая версия, только если содержимое изменилось.</span></div>
+  </form>
+</div>
+<div class="nx-sec"><h3>Новая папка</h3>
+  <form method="post" action="/files/mkdir" class="net-form">
+    <input type="hidden" name="folder" value="{{ found.path }}">
+    <label class="f">Название <input name="name" required maxlength="255" placeholder="24-017 Насосная станция"></label>
+    <label class="f">Описание <input name="note" maxlength="500"></label>
+    <div><button class="btn">{{ icon('plus') }} Создать</button></div>
+  </form>
+</div>
+{% if '/' in found.path %}<div class="nx-sec"><div class="nx-actions" style="margin:0"><form method="post" action="/files/delete" onsubmit="return confirm('Убрать папку «{{ found.crumbs[-1].name }}» со всем содержимым в корзину?')"><input type="hidden" name="path" value="{{ found.path }}"><button class="btn danger">{{ icon('trash') }} Папку в корзину</button></form></div></div>{% endif %}
+{% else %}
+<div class="nx-sec"><p class="small muted">Здесь можно смотреть и скачивать. Писать в раздел отдела могут люди этого отдела (по их агентам) и руководитель.</p></div>
+{% endif %}
+
+{% else %}
+<div class="nx-panel-empty">
+  <h2>{{ 'Корзина' if found.trash else ('Поиск' if found.q else 'Как устроено хранилище') }}</h2>
+  {% if found.trash %}
+  <p class="small muted">Удалённое лежит здесь со всеми версиями. Выберите файл, чтобы вернуть его{% if boss %} или удалить навсегда{% endif %}.</p>
+  {% elif found.q %}
+  <p class="small muted">Найдено: {{ found['items']|length }}. Выберите файл — откроется его карточка.</p>
+  {% else %}
+  <ol class="nx-steps">
+    <li><b>Разделы.</b> «Общее» — для всей компании, у каждого отдела — свой. Внутри — любые папки.</li>
+    <li><b>Версии.</b> Тот же файл ещё раз — новая версия, если содержимое изменилось; старые остаются, их можно скачать.</li>
+    <li><b>Корзина.</b> Удалённое не пропадает: его возвращают из «Корзины».</li>
+    <li><b>Агенты.</b> Доступ — только из «Доступов» агента (раздел «Хранилище»): что читать и куда писать, «свой отдел» — отдел агента. Агент сотрудника видит не больше, чем сам сотрудник: «Общее» и свой отдел. Работает через MCP: <code>files_list</code>, <code>files_find</code>, <code>files_read</code>, <code>files_write</code>.</li>
+  </ol>
+  <p class="small muted">{% if rights.superuser %}Вам доступны все разделы.{% else %}Вам доступны «Общее» и разделы отделов ваших агентов.{% endif %}</p>
+  {% endif %}
+</div>
+{% endif %}

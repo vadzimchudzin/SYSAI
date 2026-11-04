@@ -55,7 +55,8 @@ def test_a_profile_change_reaches_the_agent_as_a_new_revision(client, net_agent)
     assert after["rev"] != before["rev"] and after["profile"]["version"] == before["profile"]["version"] + 1
     rules = after["rules"]
     assert rules["mcp"] == {"sysai": ["whoami", "hub_search"], "plc-kit": ["*"]}
-    assert rules["models"] == {"tiers": ["cheap", "mid"], "budget_day_usd": 2.0, "budget_project_usd": 0.0}
+    assert rules["models"] == {"tiers": ["cheap", "mid"], "budget_day_usd": 2.0, "budget_project_usd": 0.0,
+                              "main": "mid", "workers": "cheap"}
     assert rules["schedule"] == [{"when": "каждые 15 минут", "task": "Новые пакеты ТО"}]
     assert rules["internet"]["mode"] == "off"
     assert client.post("/agents/api/heartbeat", headers=net_agent["headers"], json={}).json()["access_rev"] == after["rev"]

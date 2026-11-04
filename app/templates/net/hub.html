@@ -1,46 +1,71 @@
-{% extends "base.html" %}{% block title %}SYSAI_Hub — SYSAI{% endblock %}
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}{{ (k.title ~ ' — ') if k else '' }}SYSAI_Hub — SYSAI{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
 {% block body %}
-<div class="page-h"><div><h1>SYSAI_Hub</h1>
-  <p>Один хаб навыков для всех агентов сети. Опубликованные навыки сами приходят агентам, кому разрешены; чему агент научился сам — приходит сюда предложением и после утверждения становится общим. Формат — открытый SKILL.md: Hermes, OpenClaw, Claude Code, Codex.</p></div>
-  <div class="actions"><a class="btn primary" href="/hub/new">{{ icon('plus') }} Новый навык</a></div></div>
+{% macro row(k) %}
+<article class="nx-row{{ ' selected' if selected == k.name }}" data-nx-row data-key="{{ k.name }}" data-tags="{{ k.kind }} {{ k.status }}{{ ' on_demand' if k.delivery == 'on_demand' }}{{ ' review' if k.review }}" data-dept="{{ k.department_id or '' }}" data-search="{{ (k.name ~ ' ' ~ k.title ~ ' ' ~ k.description ~ ' ' ~ ((k.spec or {}).get('tools') or [])|join(' ') ~ ' ' ~ k.department)|lower }}">
+  <a class="nx-row-link" href="/hub/{{ k.name }}" data-nx-open{% if selected == k.name %} aria-current="true"{% endif %}>
+    <span class="nx-ic" data-kind="{{ k.kind }}">{{ icon(k.icon) }}</span>
+    <span class="nx-main">
+      <span class="nx-title"><b>{{ k.title }}</b><span class="pill {{ k.status_ru[1] }}">{{ k.status_ru[0] }}</span>{% if k.delivery == 'on_demand' %}<span class="pill blue" title="Агент берёт сам, когда нужно (hub_take)">по запросу</span>{% endif %}{% if k.review %}<span class="pill amber" title="Новые версии ждут решения">на проверке: {{ k.review }}</span>{% endif %}</span>
+      <span class="nx-sub" title="{{ k.description }}">{{ k.name }}{% if k.description %} · {{ k.description }}{% endif %}</span>
+    </span>
+    <span class="nx-meta">{% if k.department %}<span class="pill gray">{{ k.department }}</span>{% endif %}<span title="Действующая версия">{{ k.version or k.latest or '—' }}</span><span title="Агентов, у которых это есть">{{ icon('bot') }} {{ k.agents }}</span></span>
+  </a>
+</article>
+{% endmacro %}
+<div class="page-h">
+  <div><h1>SYSAI_Hub</h1>
+    <p class="nx-sum"><b>{{ summary.skills }}</b> {{ plural(summary.skills, 'навык', 'навыка', 'навыков') }} · <b>{{ summary.mcp }}</b> {{ plural(summary.mcp, 'MCP-сервер', 'MCP-сервера', 'MCP-серверов') }} · <b>{{ summary.programs }}</b> {{ plural(summary.programs, 'программа', 'программы', 'программ') }}{% if summary.on_demand %} · по запросу <b>{{ summary.on_demand }}</b>{% endif %}{% if summary.review %} · на проверке <b>{{ summary.review }}</b>{% endif %}</p></div>
+  <div class="actions">
+    <a class="btn" href="/hub?upload=1" data-nx-open>{{ icon('upload') }} Загрузить архив</a>
+    <a class="btn" href="/hub/new?kind=mcp" title="MCP-сервер или программа: TOOL.md">{{ icon('plug') }} Инструмент</a>
+    <a class="btn primary" href="/hub/new" title="Навык: SKILL.md">{{ icon('plus') }} Навык</a>
+  </div>
+</div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+<div class="card note nx-hint">Всё, чем работают агенты сети, — в одном месте. <b>Навык</b> (SKILL.md) — как делать работу; <b>MCP-сервер</b> и <b>программа</b> (TOOL.md) — чем её делать на ПК. «Всегда с собой» синхронизатор держит у каждого агента, кому это разрешено; «по запросу» агент находит сам и берёт под задачу. Что агент придумал сам, приходит сюда на проверку.</div>
 
-{% if queue %}
-<section class="card"><h2>На проверке ({{ queue|length }})</h2>
-  <ul class="net-list">{% for item in queue %}
-    <li><a href="/hub/{{ item.name }}?v={{ item.version }}"><b>{{ item.name }}</b> {{ item.version }}</a>
-      <span class="small muted">· {{ 'агент ' if item.by_agent }}{{ item.author }} · {{ net_when(item.created_at) }}</span>
-      {% if item.errors %}<span class="pill red">ошибок: {{ item.errors }}</span>{% endif %}
-      {% if item.why %}<div class="small">{{ item.why|truncate(240) }}</div>{% elif item.changelog %}<div class="small">{{ item.changelog|truncate(240) }}</div>{% endif %}</li>
-  {% endfor %}</ul>
-</section>
-{% endif %}
-
-<section class="card"><h2>Навыки ({{ skills|length }})</h2>
-  <form method="get" action="/hub" class="row" style="gap:10px;margin-bottom:10px">
-    <input name="q" value="{{ q }}" placeholder="Поиск по имени и описанию" style="flex:2">
-    <select name="department" style="flex:1"><option value="">все отделы</option>{% for d in departments %}<option value="{{ d.id }}" {{ 'selected' if department == d.id }}>{{ d.name }}</option>{% endfor %}</select>
-    <button class="btn">{{ icon('search') }} Найти</button>
-  </form>
-  {% if not skills %}<p class="muted">Навыков пока нет. Загрузите папку навыка архивом или напишите SKILL.md в редакторе.</p>{% else %}
-  <div class="table-wrap"><table class="list"><thead><tr><th>Навык</th><th>Отдел</th><th>Версия</th><th>Статус</th><th>Владелец</th></tr></thead><tbody>
-  {% for k in skills %}
-    <tr onclick="location.href='/hub/{{ k.name }}'"><td><a href="/hub/{{ k.name }}"><b>{{ k.title }}</b></a><div class="small muted">{{ k.name }} · {{ k.description|truncate(160) }}</div></td>
-      <td>{{ k.department or '—' }}</td><td>{{ k.version or '—' }}</td>
-      <td><span class="pill {{ k.status_ru[1] }}">{{ k.status_ru[0] }}</span>{% if k.review %} <span class="pill amber">предложений: {{ k.review }}</span>{% endif %}</td>
-      <td>{{ k.owner or '—' }}</td></tr>
-  {% endfor %}</tbody></table></div>{% endif %}
-</section>
-
-<section class="card"><h2>Загрузить навык архивом</h2>
-  <form method="post" action="/hub/upload" enctype="multipart/form-data" class="net-form">
-    <label class="f">Папка навыка (.zip, до 2 МБ): SKILL.md + references/, scripts/, assets/ <input type="file" name="file" accept=".zip" required></label>
-    <label class="f">Отдел-владелец (для нового навыка) <select name="department_id"><option value="">—</option>{% for d in departments %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select></label>
-    <label class="f wide">Что изменилось <input name="changelog" maxlength="4000" placeholder="Первая версия: входы/выходы из Excel ТО"></label>
-    <div class="net-checks wide"><label><input type="checkbox" name="review" value="1"> сразу на проверку</label></div>
-    <div class="wide"><button class="btn primary">{{ icon('upload') }} Загрузить</button> <span class="small muted">Перед публикацией навык проверяется на опасные команды, секреты и внешние адреса.</span></div>
-  </form>
-</section>
+<div class="nx-layout{{ ' panel-open' if panel_open }}" data-nx-root>
+  <section class="card nx-list-card" aria-label="Навыки и инструменты">
+    <div class="nx-toolbar">
+      <label class="nx-search"><span class="sr-only">Поиск</span><input type="search" data-nx-search placeholder="Поиск: имя, описание, инструмент MCP…" autocomplete="off" value="{{ q }}"></label>
+      <div class="nx-chips" role="group" aria-label="Фильтр">
+        {% for key, label in chips %}<button type="button" class="nx-chip{{ ' on' if key == 'all' }}" data-nx-chip="{{ key }}">{{ label }} <span class="nx-chip-count"></span></button>{% endfor %}
+        {% if departments %}<select class="nx-select" data-nx-dept aria-label="Отдел"><option value="">Все отделы</option>{% for d in departments %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select>{% endif %}
+      </div>
+    </div>
+    <div class="nx-list">
+      {% if queue %}
+      <section class="nx-group" data-nx-group="review">
+        <h3 class="nx-group-head" data-nx-label="На проверке">На проверке ({{ queue|length }})</h3>
+        {% for item in queue %}{% set key = item.name ~ '@' ~ item.version %}
+        <article class="nx-row{{ ' selected' if selected == key }}" data-nx-row data-key="{{ key }}" data-item="{{ item.name }}" data-tags="{{ item.kind }} review" data-dept="" data-search="{{ (item.name ~ ' ' ~ item.title ~ ' ' ~ (item.why or '') ~ ' ' ~ (item.changelog or '') ~ ' ' ~ item.author)|lower }}">
+          <a class="nx-row-link" href="/hub/{{ item.name }}?v={{ item.version }}" data-nx-open>
+            <span class="nx-ic" data-kind="{{ item.kind }}">{{ icon(item.icon) }}</span>
+            <span class="nx-main"><span class="nx-title"><b>{{ item.title }}</b><span class="pill amber">{{ item.version }}</span>{% if item.errors %}<span class="pill red">ошибок: {{ item.errors }}</span>{% endif %}</span>
+              <span class="nx-sub" title="{{ item.why or item.changelog }}">{{ 'агент ' if item.by_agent }}{{ item.author or '—' }} · {{ item.why or item.changelog or item.kind_ru }}</span></span>
+            <span class="nx-meta">{{ net_when(item.created_at) }}</span>
+          </a>
+        </article>
+        {% endfor %}
+      </section>
+      {% endif %}
+      {% for g in groups %}
+      <section class="nx-group" data-nx-group="{{ g.key }}">
+        <h3 class="nx-group-head" data-nx-label="{{ g.name }}">{{ g.name }} ({{ g['items']|length }})</h3>
+        {% if not g['items'] %}<p class="nx-group-note">{{ g.empty }}</p>{% endif %}
+        {% for k in g['items'] %}{{ row(k) }}{% endfor %}
+      </section>
+      {% endfor %}
+      <p class="nx-no-results muted" data-nx-none hidden>Ничего не нашли. Измените поиск или фильтр.</p>
+    </div>
+  </section>
+  <a class="nx-backdrop" href="/hub" data-nx-open tabindex="-1" aria-hidden="true"></a>
+  <aside class="card nx-panel" id="nx-panel" data-open="{{ '1' if panel_open else '0' }}" data-selected="{{ selected }}" aria-label="Карточка" aria-live="polite">
+    {% include "net/_hub_panel.html" %}
+  </aside>
+</div>
+<script src="{{ asset('net.js') }}" defer></script>
 {% endblock %}

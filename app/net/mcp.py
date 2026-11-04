@@ -7,19 +7,23 @@ import collections
 import json
 import threading
 import time
+from urllib.parse import quote
 
 from .. import settings_store, telegram, userbot
 from ..db import Department, Employee, EmployeeDepartment, SessionLocal
-from . import access, hub, journal
+from . import access, files, hub, journal
 from .agents import AgentCtx
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "sysai", "title": "SYSAI", "version": "0.1.0"}
 MAX_BODY = 1024 * 1024
 NOTIFY_PER_HOUR = 20
-INSTRUCTIONS = ("SYSAI — сервер компании. Здесь: кто ты и что тебе можно (whoami), отделы и люди, общий хаб навыков "
-                "SYSAI_Hub (hub_search, hub_get, hub_propose), сообщение своему человеку в Telegram (notify_me) и журнал "
-                "(log_event). Подтверждений не бывает: что не разрешено в доступах, то запрещено.")
+INSTRUCTIONS = ("SYSAI — сервер компании. Здесь: кто ты и что тебе можно (whoami), отделы и люди; хаб SYSAI_Hub — навыки, "
+                "MCP-серверы и программы всей сети: hub_search ищет, hub_get читает, hub_take берёт нужное «по запросу» "
+                "(синхронизатор поставит его на ПК), hub_drop отдаёт обратно, hub_propose — своё на проверку владельцу; "
+                "общее хранилище файлов людей и агентов — files_list, files_find, files_read, files_write (только "
+                "открытые тебе разделы); сообщение своему человеку в Telegram (notify_me) и журнал (log_event). "
+                "Подтверждений не бывает: что не разрешено в доступах, то запрещено.")
 
 _calls = collections.defaultdict(collections.deque)
 _notes = collections.defaultdict(collections.deque)
@@ -94,50 +98,152 @@ def _people(ctx, rules, args):
         return {"people": out, "shown": len(out)}
 
 
+def _brief(item: dict) -> dict:
+    out = {"name": item["name"], "kind": item["kind"], "title": item["title"], "description": item["description"][:300],
+           "version": item["version"], "department": item["department"], "delivery": item["delivery"],
+           "with_agent": item["with_agent"]}
+    if item["kind"] != "skill":
+        spec = item.get("spec") or {}
+        out.update(platform=spec.get("platform", "any"), tools=(spec.get("tools") or [])[:30], remote=bool(spec.get("url")))
+    return out
+
+
 def _hub_search(ctx, rules, args):
     query = str(args.get("query") or "").strip().lower()
     dept = str(args.get("department") or "").strip().lower()
+    kind = str(args.get("kind") or "").strip().lower()
     limit = max(1, min(20, int(args.get("limit") or 10)))
     found = []
-    for k in hub.visible_skills(ctx):
-        if query and query not in f"{k['name']} {k['title']} {k['description']}".lower():
+    for k in hub.catalog(ctx, rules):
+        if kind and k["kind"] != kind:
+            continue
+        spec = k.get("spec") or {}
+        if query and query not in f"{k['name']} {k['title']} {k['description']} {' '.join(spec.get('tools') or [])}".lower():
             continue
         if dept and dept not in (k["department"] or "").lower():
             continue
-        found.append({"name": k["name"], "title": k["title"], "description": k["description"][:300], "version": k["version"],
-                      "department": k["department"]})
-    return {"skills": found[:limit], "total": len(found)}
+        found.append(_brief(k))
+    return {"skills": [k for k in found if k["kind"] == "skill"][:limit],
+            "tools": [k for k in found if k["kind"] != "skill"][:limit], "total": len(found),
+            "hint": "with_agent=false — «по запросу»: hub_get покажет, hub_take возьмёт для задачи"}
 
 
 def _hub_get(ctx, rules, args):
     name = str(args.get("name") or "").strip()
-    item = next((k for k in hub.visible_skills(ctx) if k["name"] == name), None)
+    if name in hub.RESERVED:
+        allowed = [t for t in TOOLS if access.tool_allowed(rules, "sysai", t)]
+        return {"name": name, "kind": "mcp", "builtin": True, "version": SERVER_INFO["version"], "with_agent": True,
+                "description": hub.builtin()["description"], "tools": allowed}
+    item = next((k for k in hub.catalog(ctx, rules) if k["name"] == name), None)
     if item is None:
-        raise ToolError("Нет такого навыка среди доступных агенту")
-    files = hub.files_of(name, item["version"])
-    text = (files.get("SKILL.md") or b"").decode("utf-8", errors="replace")
-    return {"name": name, "version": item["version"], "sha256": item["sha256"], "skill_md": text[:20000],
-            "truncated": len(text) > 20000, "files": [{"path": p, "size": len(v)} for p, v in sorted(files.items())],
-            "download": f"/agents/api/hub/skills/{name}/{item['version']}.zip"}
+        raise ToolError("Этого нет среди доступного агенту в хабе")
+    files_ = hub.files_of(name, item["version"])
+    doc = hub.SKILL_DOC if item["kind"] == "skill" else hub.TOOL_DOC
+    text = (files_.get(doc) or b"").decode("utf-8", errors="replace")
+    part = "skills" if item["kind"] == "skill" else "tools"
+    out = {"name": name, "kind": item["kind"], "version": item["version"], "sha256": item["sha256"],
+           "delivery": item["delivery"], "with_agent": item["with_agent"], "doc": doc,
+           ("skill_md" if item["kind"] == "skill" else "tool_md"): text[:20000], "truncated": len(text) > 20000,
+           "files": [{"path": p, "size": len(v)} for p, v in sorted(files_.items())][:300],
+           "download": f"/agents/api/hub/{part}/{name}/{item['version']}.zip"}
+    if item["kind"] != "skill":
+        out["spec"] = item.get("spec") or {}
+    return out
+
+
+def _hub_take(ctx, rules, args):
+    try:
+        return hub.take(ctx, str(args.get("name") or "").strip(), str(args.get("why") or ""))
+    except hub.HubError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _hub_drop(ctx, rules, args):
+    return hub.drop(ctx, str(args.get("name") or "").strip())
 
 
 def _hub_propose(ctx, rules, args):
-    skill_md = str(args.get("skill_md") or "")
-    if not skill_md.strip():
-        raise ToolError("Нужен текст SKILL.md")
-    files = {"SKILL.md": skill_md}
+    skill_md, tool_md = str(args.get("skill_md") or ""), str(args.get("tool_md") or "")
+    if bool(skill_md.strip()) == bool(tool_md.strip()):
+        raise ToolError("Нужен текст SKILL.md (навык) или TOOL.md (MCP-сервер, программа) — одно из двух")
+    doc = hub.SKILL_DOC if skill_md.strip() else hub.TOOL_DOC
+    files_ = {doc: skill_md or tool_md}
     extra = args.get("files") or {}
     if not isinstance(extra, dict):
         raise ToolError("files: объект {путь: текст}")
-    files.update({str(p): str(v) for p, v in extra.items() if str(p) != "SKILL.md"})
+    files_.update({str(p): str(v) for p, v in extra.items() if str(p) not in (hub.SKILL_DOC, hub.TOOL_DOC)})
     try:
-        name, version = hub.propose(ctx, files, str(args.get("changelog") or ""), str(args.get("why") or ""))
+        name, version = hub.propose(ctx, files_, str(args.get("changelog") or ""), str(args.get("why") or ""))
     except hub.HubError as exc:
         raise ToolError(str(exc)) from exc
     card = hub.card(name)
     checks = next((v["checks"] for v in card["versions"] if v["version"] == version), {})
-    return {"skill": name, "version": version, "status": "review",
-            "message": "Предложение отправлено владельцу навыка в SYSAI_Hub", "checks": checks}
+    return {"skill": name, "kind": card["kind"], "version": version, "status": "review",
+            "message": "Предложение отправлено владельцу в SYSAI_Hub", "checks": checks}
+
+
+# ----------------------------------------------------------------------------- the shared storage
+def _rights(ctx, rules) -> files.Rights:
+    rights = files.for_agent(ctx, rules)
+    if rights.nothing:
+        raise ToolError("Хранилище агенту не открыто: разделы открывают в SYSAI → «Доступы» (раздел «Хранилище»)")
+    return rights
+
+
+def _file_brief(item: dict) -> dict:
+    out = {"path": item["path"], "name": item["name"], "type": item["kind"], "folder": item["is_folder"]}
+    if item["kind"] == "section":
+        out.update(files=item.get("files", 0), size=item["size"], can_write=item["can_write"])
+    elif not item["is_folder"]:
+        out.update(size=item["size"], version=item["version"], updated_at=item["updated_at"], updated_by=item["updated_by"])
+    if item.get("note"):
+        out["note"] = item["note"][:200]
+    return out
+
+
+def _files_list(ctx, rules, args):
+    rights = _rights(ctx, rules)
+    try:
+        found = files.listing(rights, str(args.get("path") or ""), trash=bool(args.get("trash")), limit=200)
+    except files.FilesError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"path": found["path"], "can_write": found["can_write"], "items": [_file_brief(i) for i in found["items"]],
+            "shown": len(found["items"])}
+
+
+def _files_find(ctx, rules, args):
+    rights = _rights(ctx, rules)
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ToolError("Нужен query: часть имени, пути или описания")
+    limit = max(1, min(100, int(args.get("limit") or 30)))
+    try:
+        found = files.listing(rights, str(args.get("path") or ""), q=query, limit=limit)
+    except files.FilesError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"items": [_file_brief(i) for i in found["items"]], "shown": len(found["items"])}
+
+
+def _files_read(ctx, rules, args):
+    rights = _rights(ctx, rules)
+    version = int(args.get("version") or 0) or None
+    try:
+        out = files.read_text(rights, str(args.get("path") or ""), version)
+    except files.FilesError as exc:
+        raise ToolError(str(exc)) from exc
+    out["download"] = f"/agents/api/files/raw?path={quote(out['path'])}&v={out['version']}"
+    return out
+
+
+def _files_write(ctx, rules, args):
+    rights = _rights(ctx, rules)
+    try:
+        item = files.put_inline(rights, str(args.get("path") or ""), args.get("text"), args.get("base64"),
+                                str(args.get("note") or ""))
+    except files.FilesError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"path": item["path"], "version": item["version"], "size": item["size"], "changed": item["changed"],
+            "message": "Сохранено: новая версия" if item["changed"] else "Содержимое то же — версия не менялась"}
 
 
 def _notify_me(ctx, rules, args):
@@ -187,14 +293,32 @@ TOOLS = {
     "people": ("Люди компании: имя, должность, отделы. Поиск по имени, должности, отделу.",
                _schema({"query": _STR, "department": _STR, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
                _people, True),
-    "hub_search": ("Поиск навыков SYSAI_Hub, доступных агенту (навыки всех отделов).",
-                   _schema({"query": _STR, "department": _STR, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
+    "hub_search": ("Поиск в SYSAI_Hub среди доступного агенту: навыки, MCP-серверы, программы всех отделов. "
+                   "with_agent=false — «по запросу»: берётся через hub_take.",
+                   _schema({"query": _STR, "kind": {"type": "string", "enum": ["skill", "mcp", "program"]},
+                            "department": _STR, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
                    _hub_search, True),
-    "hub_get": ("Навык SYSAI_Hub: текст SKILL.md, файлы, ссылка на архив.", _schema({"name": _STR}, ["name"]), _hub_get, True),
-    "hub_propose": ("Предложить новый навык или улучшение в SYSAI_Hub: SKILL.md, файлы, что изменилось и зачем. "
-                    "Владелец навыка утверждает — и навык получают все агенты.",
-                    _schema({"skill_md": _STR, "files": {"type": "object", "additionalProperties": _STR},
-                             "changelog": _STR, "why": _STR}, ["skill_md", "why"]), _hub_propose, False),
+    "hub_get": ("Навык или инструмент SYSAI_Hub: текст SKILL.md / TOOL.md, как запускать, файлы, ссылка на архив.",
+                _schema({"name": _STR}, ["name"]), _hub_get, True),
+    "hub_take": ("Взять из хаба навык или инструмент «по запросу» для задачи: синхронизатор поставит его на ПК при "
+                 "следующей синхронизации. why — зачем.", _schema({"name": _STR, "why": _STR}, ["name"]), _hub_take, False),
+    "hub_drop": ("Отдать взятое «по запросу» обратно: синхронизатор уберёт с ПК.", _schema({"name": _STR}, ["name"]),
+                 _hub_drop, False),
+    "hub_propose": ("Предложить в SYSAI_Hub новый навык (skill_md) или инструмент (tool_md: MCP-сервер, программа) или их "
+                    "улучшение: файлы, что изменилось и зачем. Владелец утверждает — и это получают все агенты.",
+                    _schema({"skill_md": _STR, "tool_md": _STR, "files": {"type": "object", "additionalProperties": _STR},
+                             "changelog": _STR, "why": _STR}, ["why"]), _hub_propose, False),
+    "files_list": ("Общее хранилище: разделы (path пустой), папка или корзина (trash). Только открытые агенту разделы.",
+                   _schema({"path": _STR, "trash": {"type": "boolean"}}), _files_list, True),
+    "files_find": ("Поиск файлов и папок хранилища по имени, пути и описанию (во всех открытых разделах или в path).",
+                   _schema({"query": _STR, "path": _STR, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+                           ["query"]), _files_find, True),
+    "files_read": ("Файл хранилища: что это, версия, и сам текст, если файл текстовый и до 200 КБ; иначе ссылка "
+                   "download для скачивания с токеном агента.",
+                   _schema({"path": _STR, "version": {"type": "integer", "minimum": 1}}, ["path"]), _files_read, True),
+    "files_write": ("Положить файл в хранилище (новая версия, если содержимое изменилось): text — текст или base64 — "
+                    "двоичный, до 5 МБ; больше — PUT /agents/api/files/raw. note — что это или что изменилось.",
+                    _schema({"path": _STR, "text": _STR, "base64": _STR, "note": _STR}, ["path"]), _files_write, False),
     "notify_me": ("Сообщение своему человеку в Telegram (сообщение, не подтверждение).", _schema({"text": _STR}, ["text"]),
                   _notify_me, False),
     "log_event": ("Запись в журнал SYSAI: что сделано и над чем. action=skill_used с details.skill — учёт навыка.",
@@ -233,8 +357,13 @@ def call_tool(ctx: AgentCtx, name: str, args: dict) -> dict:
                     actor=ctx.name, actor_kind="agent", agent_id=ctx.agent_id)
     if error is not None:
         return {"content": [{"type": "text", "text": error}], "isError": True}
-    return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, default=str)}],
-            "structuredContent": result, "isError": False}
+    text = json.dumps(result, ensure_ascii=False, default=_plain)
+    return {"content": [{"type": "text", "text": text}], "structuredContent": json.loads(text), "isError": False}
+
+
+def _plain(value):
+    """Dates as ISO strings in the answers of tools (the rest of what JSON does not know — as text)."""
+    return value.isoformat(timespec="seconds") if hasattr(value, "isoformat") else str(value)
 
 
 # ----------------------------------------------------------------------------- JSON-RPC

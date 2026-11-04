@@ -30,7 +30,7 @@
   <dl class="net-kv">
     <dt>Компьютер</dt><dd>{{ a.host or '—' }}</dd>
     <dt>Версии</dt><dd>{% for k, v in a.versions.items() %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
-    <dt>Навыки хаба на ПК</dt><dd>{% set hs = (agent.hub_state or {}).get('skills') or {} %}{{ hs|length }}{% set cf = (agent.hub_state or {}).get('conflicts') or [] %}{% if cf %} · <span class="net-err">конфликт имён: {{ cf|join(', ') }}</span>{% endif %}</dd>
+    <dt>Из хаба на ПК</dt><dd>{% set hs = (agent.hub_state or {}).get('skills') or {} %}{% set ht = (agent.hub_state or {}).get('tools') or {} %}навыков: {{ hs|length }} · инструментов: {{ ht|length }}{% set cf = (agent.hub_state or {}).get('conflicts') or [] %}{% if cf %} · <span class="net-err">конфликт имён: {{ cf|join(', ') }}</span>{% endif %}</dd>
     <dt>Последняя ошибка</dt><dd class="{{ 'net-err' if a.last_error }}">{{ a.last_error or '—' }}</dd>
   </dl>
   <div class="actions" style="margin-top:14px">
@@ -58,10 +58,11 @@
     <div><b>{{ sections.mcp }}</b>{% for srv, tools in rules.mcp.items() %}{{ srv }}: {{ 'все' if '*' in tools else tools|join(', ') }}{{ '; ' if not loop.last }}{% else %}—{% endfor %}</div>
     <div><b>{{ sections.data }}</b>проекты: {{ scope_ru[rules.data.projects] }} · база ТО: {{ level_ru[rules.data.to_base] }} · теги: {{ level_ru[rules.data.tags] }}{{ ' · вопросы в ТО' if rules.data.questions }}{{ ' · справочник людей' if rules.data.people }}</div>
     <div><b>{{ sections.internet }}</b>{{ internet_ru[rules.internet.mode] }}{% if rules.internet.mode == 'list' %}: {{ rules.internet.sites|join(', ') }}{% endif %}</div>
-    <div><b>{{ sections.models }}</b>{% for t in rules.models.tiers %}{{ tier_ru[t] }}{{ ', ' if not loop.last }}{% endfor %} · ${{ rules.models.budget_day_usd }} в день{% if rules.models.budget_project_usd %} · ${{ rules.models.budget_project_usd }} на проект{% endif %}</div>
+    <div><b>{{ sections.models }}</b>{% for t in rules.models.tiers %}{{ tier_ru[t] }}{{ ', ' if not loop.last }}{% endfor %} · думает и планирует: sysai/{{ rules.models.main }}, подзадачи: sysai/{{ rules.models.workers }} · ${{ rules.models.budget_day_usd }} в день{% if rules.models.budget_project_usd %} · ${{ rules.models.budget_project_usd }} на проект{% endif %}</div>
     <div><b>{{ sections.schedule }}</b>{% for item in rules.schedule %}{{ item.when }} — {{ item.task }}<br>{% else %}—{% endfor %}</div>
     <div><b>{{ sections.chat }}</b>{{ 'его человек' if rules.chat.owner }}{% if rules.chat.others %}, {{ rules.chat.others|join(', ') }}{% endif %}</div>
     <div><b>{{ sections.skills }}</b>отделы: {{ 'все' if '*' in rules.skills.departments else rules.skills.departments|join(', ') }} · {{ 'может предлагать свои' if rules.skills.propose else 'без предложений' }}</div>
+    <div><b>{{ sections.files }}</b>{% if rules.files.read or rules.files.write %}чтение: {{ (rules.files.read + rules.files.write)|unique|join(', ') or '—' }}<br>запись: {{ rules.files.write|join(', ') or '—' }}{% else %}не открыто{% endif %}</div>
   </div>
   {% if boss %}
   <form method="post" action="/agents/{{ a.id }}/access" class="net-form" style="margin-top:14px">
