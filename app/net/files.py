@@ -550,6 +550,8 @@ def purge(rights: Rights, path: str) -> dict:
             for v in s.query(NetFileVersion).filter(NetFileVersion.file_id == r.id):
                 stored.append(v.key)
                 s.delete(v)
+        s.flush()  # the versions first: on Postgres the cascade of a file would take them before the ORM gets to them
+        for r in rows:
             s.delete(r)
         _journal(rights, "files.purge", path, {"версий": len(stored)}, session=s)
         s.commit()
