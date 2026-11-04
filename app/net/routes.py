@@ -1,14 +1,17 @@
 """Addresses of the agent network. Pages for people (/agents, /agents/access, /hub, /files) and the API of agents
 (/agents/api/*, /mcp, /v1/*). Every address answers 404 while the setting «agents_on» is off."""
+import asyncio
 import json
+import weakref
 from urllib.parse import quote
 
+import anyio
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from .. import config, settings_store, storage
 from ..db import Department, Employee, SessionLocal, User
-from . import access, agents, enabled, files, gateway, hub, journal, mcp
+from . import access, agents, enabled, files, gateway, hub, journal, mcp, trace
 from .models import NetAgent, NetAgentToken, NetSkill
 
 router = APIRouter()
@@ -60,6 +63,14 @@ def when(value) -> str:
     return value.astimezone(zoneinfo.ZoneInfo(config.TIMEZONE)).strftime("%d.%m.%Y %H:%M")
 
 
+def clock(value) -> str:
+    """The time of a step of the trace, to the second, in the company's time zone."""
+    import zoneinfo
+    if not value:
+        return ""
+    return trace.aware(value).astimezone(zoneinfo.ZoneInfo(config.TIMEZONE)).strftime("%H:%M:%S")
+
+
 def _int(value):
     try:
         return int(value) if str(value or "").strip() else None
@@ -71,6 +82,36 @@ def _api_error(status: int, message: str, code: str = "error", headers=None) -> 
     return JSONResponse({"error": {"message": message, "code": code}}, status, headers=headers)
 
 
+GATEWAY_THREADS = 64  # requests to the models and MCP calls waiting at once; the pages have threads of their own
+_limiters = weakref.WeakKeyDictionary()
+
+
+def _limiter() -> anyio.CapacityLimiter:
+    loop = asyncio.get_running_loop()
+    if loop not in _limiters:
+        _limiters[loop] = anyio.CapacityLimiter(GATEWAY_THREADS)
+    return _limiters[loop]
+
+
+async def _in_thread(func, *args):
+    """A model answers for minutes, a tool waits for the base or Telegram: the wait goes to a thread of the agents, so
+    neither the server nor the pages of SYSAI stand still meanwhile."""
+    return await anyio.to_thread.run_sync(func, *args, limiter=_limiter())
+
+
+async def _relay(chunks):
+    """A stream of a model: each wait for its next piece in a thread of the agents."""
+    end = object()
+    try:
+        while True:
+            piece = await anyio.to_thread.run_sync(next, chunks, end, limiter=_limiter())
+            if piece is end:
+                return
+            yield piece
+    finally:
+        chunks.close()  # the agent went away: the stream to OpenRouter is closed and the request counted
+
+
 def _agent_ctx(request: Request):
     """(AgentCtx, None) or (None, the JSON answer to give)."""
     if not enabled():
@@ -78,6 +119,9 @@ def _agent_ctx(request: Request):
     ctx = agents.authenticate(agents.bearer(request.headers), _ip(request))
     if ctx is None:
         return None, _api_error(401, "Нужен действующий токен агента SYSAI", "unauthorized", {"WWW-Authenticate": "Bearer"})
+    task = "".join(ch for ch in str(request.headers.get("x-sysai-task") or "") if ch.isprintable())[:64].strip()
+    if task:  # the task of the board the agent works on: its steps go into one run of the trace (ОПО-5.7)
+        ctx.extra["task"] = task
     return ctx, None
 
 
@@ -141,6 +185,8 @@ def _agent_view(request: Request, me: dict, agent_id: int, msg: str = "", error:
     return _page(request, "net/agent.html", a=item, agent=agent, doc=doc, rules=doc["rules"], boss=boss, msg=msg,
                  error=error, code=code, server=_server(request), tokens=tokens, harness_yaml=harness_yaml,
                  spend=gateway.summary(agent.id, days=7), events=journal.feed(agent.id, 40), profiles=access.profiles(),
+                 runs=trace.runs(agent.id, days=2)[:3], debug_until=trace.debug_until(agent.id), fmt_tokens=trace.tokens,
+                 fmt_ms=trace.duration, clock=clock, debug_hours=trace.DEBUG_HOURS,
                  overrides=json.dumps(doc["overrides"] or {}, ensure_ascii=False, indent=2),
                  sections=access.SECTION_RU, tier_ru=access.TIER_RU, scope_ru=access.SCOPE_RU, level_ru=access.LEVEL_RU,
                  internet_ru=access.INTERNET_RU, harnesses=agents.HARNESSES, ttl=int(agents.CODE_TTL.total_seconds() // 60),
@@ -166,6 +212,32 @@ def agent_connect(request: Request, agent_id: int):
     return resp
 
 
+@router.get("/agents/{agent_id:int}/trace", response_class=HTMLResponse)
+def agent_trace(request: Request, agent_id: int, days: int = 1, errors: int = 0, msg: str = "", error: str = ""):
+    me = _person(request)
+    agent = _own_agent(me, agent_id)
+    days = max(1, min(trace.DEBUG_KEEP_DAYS, days))
+    runs = trace.runs(agent.id, days=days)
+    if errors:
+        runs = [r for r in runs if r["errors"]]
+    return _page(request, "net/trace.html", agent=agent, runs=runs, days=days, only_errors=bool(errors), msg=msg,
+                 error=error, debug_until=trace.debug_until(agent.id), debug_by=agent.debug_by or "",
+                 debug_hours=trace.DEBUG_HOURS, keep_days=trace.DEBUG_KEEP_DAYS, fmt_tokens=trace.tokens,
+                 fmt_ms=trace.duration, clock=clock)
+
+
+@router.get("/agents/{agent_id:int}/trace/{text_id:int}", response_class=HTMLResponse)
+def agent_trace_text(request: Request, agent_id: int, text_id: int):
+    me = _person(request)
+    agent = _own_agent(me, agent_id)
+    item = trace.text(agent.id, text_id)
+    if item is None:
+        raise HTTPException(404, "Нет такого текста: режим отладки хранит их 7 дней")
+    return _page(request, "net/trace_text.html", agent=agent, item=item,
+                 request_text=json.dumps(item["request"], ensure_ascii=False, indent=2, default=str),
+                 response_text=json.dumps(item["response"], ensure_ascii=False, indent=2, default=str))
+
+
 @router.post("/agents/{agent_id:int}/{action}")
 async def agent_action(request: Request, agent_id: int, action: str):
     me = _person(request)
@@ -179,6 +251,12 @@ async def agent_action(request: Request, agent_id: int, action: str):
         if action == "enable":
             agents.enable(agent_id, by=me["username"])
             return _back(f"/agents/{agent_id}", msg="Агент включён: получите новый код подключения")
+        if action == "debug":
+            on = str(form.get("on") or "") == "1"
+            trace.set_debug(agent_id, on, by=me["username"])
+            return _back(f"/agents/{agent_id}/trace", msg=f"Режим отладки включён на {trace.DEBUG_HOURS} ч: SYSAI сохраняет "
+                                                         "тексты запросов, ответов и вызовов MCP" if on else
+                         "Режим отладки выключен: тексты больше не сохраняются")
         if action == "delete" and boss:
             agents.delete(agent_id, by=me["username"])
             return _back("/agents", msg=f"Агент {agent.name} удалён")
@@ -210,11 +288,13 @@ def access_page(request: Request, msg: str = "", error: str = "", edit: str = ""
     _person(request, admin=True)
     models = settings_store.get("agents_models") or {}
     return _page(request, "net/access.html", profiles=access.profiles(), msg=msg, error=error, edit=edit,
-                 sections=access.SECTION_RU, tiers=access.TIERS, tier_ru=access.TIER_RU, scopes=access.SCOPES,
+                 sections=access.SECTION_RU, tiers=access.TIERS, tier_ru=access.TIER_RU, model_tiers=access.MODEL_TIERS,
+                 cost_tiers=access.COST_TIERS, cost_ru=access.COST_RU, scopes=access.SCOPES,
                  scope_ru=access.SCOPE_RU, levels=access.LEVELS, level_ru=access.LEVEL_RU, internet=access.INTERNET,
                  internet_ru=access.INTERNET_RU, always_deny=access.ALWAYS_DENY, sysai_tools=access.SYSAI_TOOLS,
                  files_common=access.FILES_COMMON, files_own=access.FILES_OWN,
-                 models={t: (models.get(t) if isinstance(models, dict) else "") or gateway.DEFAULT_MODELS.get(t, "") for t in access.TIERS},
+                 models={t: (models.get(t) if isinstance(models, dict) else "") or gateway.DEFAULT_MODELS.get(t, "")
+                         for t in access.MODEL_TIERS},
                  vision_default=settings_store.get("vision_model"), mcp_per_minute=mcp.rate_limit(),
                  hub_hosts="\n".join(settings_store.get("agents_hub_hosts") or hub.DEFAULT_HOSTS),
                  events=journal.feed(None, 20, "profile:"))
@@ -225,7 +305,7 @@ async def access_settings(request: Request):
     me = _person(request, admin=True)
     form = await request.form()
     models = {}
-    for tier in access.TIERS:
+    for tier in access.MODEL_TIERS:  # sysai/auto has no model of its own: Jev picks among these
         value = str(form.get("model_" + tier) or "").strip()
         if value and (len(value) > 200 or not all(ch.isalnum() or ch in "._:/-~" for ch in value)):
             return _back("/agents/access#models", error=f"Некорректный идентификатор модели: {value}")
@@ -786,7 +866,7 @@ async def mcp_post(request: Request):
         payload = json.loads(raw or b"null")
     except ValueError:
         return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, 400)
-    answer = mcp.handle(ctx, payload)
+    answer = await _in_thread(mcp.handle, ctx, payload)
     if answer is None:
         return Response(status_code=202)
     return JSONResponse(answer)
@@ -826,10 +906,12 @@ async def v1_chat(request: Request):
         return JSONResponse(gateway.GatewayError(400, "invalid_request", "Нужен JSON").body(), 400)
     project = request.headers.get("x-sysai-project") or ""
     skill = request.headers.get("x-sysai-skill") or ""
+    task = ctx.extra.get("task") or ""
     try:
         if isinstance(body, dict) and body.get("stream"):
-            return StreamingResponse(gateway.stream(ctx, body, project, skill), media_type="text/event-stream",
+            chunks = await _in_thread(gateway.stream, ctx, body, project, skill, task)
+            return StreamingResponse(_relay(chunks), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-        return JSONResponse(gateway.complete(ctx, body, project, skill))
+        return JSONResponse(await _in_thread(gateway.complete, ctx, body, project, skill, task))
     except gateway.GatewayError as exc:
         return JSONResponse(exc.body(), exc.status)

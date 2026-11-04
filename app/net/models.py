@@ -23,6 +23,8 @@ class NetAgent(Base):
     last_error = Column(Text, default="")
     created_at = Column(DateTime(timezone=True), default=now)
     created_by = Column(String(64), default="")
+    debug_until = Column(DateTime(timezone=True), nullable=True)       # the debug mode: full texts in the trace until then
+    debug_by = Column(String(64), default="")
 
 
 class NetAgentToken(Base):
@@ -189,7 +191,8 @@ class NetEvent(Base):
 
 
 class NetSpend(Base):
-    """What one request of an agent through the gateway cost, with the project and the skill it was for."""
+    """One request of an agent through the gateway: what it cost, the project and the skill it was for, how long it
+    took and how it ended (refused and failed requests too, at no cost) — the model part of the trace (ОПО-5.7)."""
     __tablename__ = "net_spend"
     __table_args__ = (Index("ix_net_spend_agent_day", "agent_id", "day"),)
     id = Column(Integer, primary_key=True)
@@ -204,3 +207,24 @@ class NetSpend(Base):
     prompt_tokens = Column(Integer, default=0)
     completion_tokens = Column(Integer, default=0)
     cost = Column(Float, default=0.0)
+    cached_tokens = Column(Integer, default=0)                         # of prompt_tokens, read from the prompt cache
+    ms = Column(Integer, default=0)                                    # from the request to the last byte of the answer
+    ok = Column(Boolean, default=True)
+    error = Column(String(300), default="")                            # «code: message» of a refused or failed request
+    role = Column(String(16), default="")                              # "" the main model | workers | compression | vision
+    task = Column(String(64), default="")                              # X-SYSAI-Task: the task of the board
+    route = Column(String(120), default="")                            # sysai/auto: «jev:low», «jev→mid: HTTP 503 …»
+
+
+class NetDebug(Base):
+    """Full texts of one step while the debug mode of the agent is on (24 hours), kept for 7 days: the end of the
+    request and the answer of a model call, or the arguments and the result of an MCP call."""
+    __tablename__ = "net_debug"
+    __table_args__ = (Index("ix_net_debug_ref", "kind", "ref_id"),)
+    id = Column(Integer, primary_key=True)
+    at = Column(DateTime(timezone=True), default=now, index=True)
+    agent_id = Column(Integer, ForeignKey("net_agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String(8), nullable=False)                           # model (net_spend.id) | mcp (net_events.id)
+    ref_id = Column(Integer, nullable=False)
+    request = Column(JSON, nullable=True)
+    response = Column(JSON, nullable=True)

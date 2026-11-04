@@ -21,7 +21,12 @@ def test_builtin_profiles_and_the_hermes_configuration(client, net_agent):
     hermes = doc["doc"]["harness_config"]
     assert hermes["approvals"]["mode"] == "off"  # no confirmations: what is not allowed is forbidden
     assert set(access.ALWAYS_DENY) <= set(hermes["approvals"]["deny"])
-    assert hermes["model"]["base_url"] == "https://sysai.example/v1" and hermes["model"]["default"] == "sysai/mid"
+    assert hermes["model"]["base_url"] == "https://sysai.example/v1" and hermes["model"]["default"] == "sysai/auto"
+    # who asks is told to the gateway (the trace); the helpers of Hermes get tiers with models of their own, not Jev
+    assert hermes["delegation"]["request_overrides"]["extra_body"] == {"sysai": {"role": "workers"}}
+    assert hermes["auxiliary"]["compression"]["model"] == "sysai/cheap"
+    assert hermes["auxiliary"]["vision"]["model"] == "sysai/vision"
+    assert hermes["auxiliary"]["vision"]["extra_body"] == {"sysai": {"role": "vision"}}
     assert hermes["mcp_servers"]["sysai"]["url"] == "https://sysai.example/mcp"
     assert hermes["delegation"]["model"] == "sysai/cheap" and hermes["delegation"]["max_spawn_depth"] == 1
     assert set(hermes["mcp_servers"]) == {"sysai", "plc-kit", "machine-expert", "cad"}
@@ -57,7 +62,7 @@ def test_a_profile_change_reaches_the_agent_as_a_new_revision(client, net_agent)
     rules = after["rules"]
     assert rules["mcp"] == {"sysai": ["whoami", "hub_search"], "plc-kit": ["*"]}
     assert rules["models"] == {"tiers": ["cheap", "mid"], "budget_day_usd": 2.0, "budget_project_usd": 0.0,
-                              "main": "mid", "workers": "cheap"}
+                              "main": "mid", "workers": "cheap", "auto_cost": "low"}
     assert rules["schedule"] == [{"when": "каждые 15 минут", "task": "Новые пакеты ТО"}]
     assert rules["internet"]["mode"] == "off"
     assert client.post("/agents/api/heartbeat", headers=net_agent["headers"], json={}).json()["access_rev"] == after["rev"]
@@ -135,3 +140,23 @@ def test_tier_models_are_set_for_the_whole_network(client, net_agent):
     bad = client.post("/agents/access/settings", data={"model_cheap": "bad model; rm"}, follow_redirects=False)
     assert "error=" in bad.headers["location"]
     assert agents  # the module is used by the fixture
+
+
+def test_sysai_auto_in_a_profile(client, net_agent):
+    profile = _profile("opo-engineer")
+    form = {"name": profile.name, "description": "", "commands_deny": "", "folders_read": "", "folders_write": "",
+            "folders_deny": "", "programs": "", "mcp": "sysai: whoami", "data_projects": "own", "data_to_base": "none",
+            "data_tags": "none", "internet_mode": "off", "internet_sites": "", "tier_mid": "on", "tier_auto": "on",
+            "model_main": "auto", "model_workers": "mid", "auto_cost": "medium", "budget_day_usd": "1",
+            "budget_project_usd": "0", "schedule": "", "chat_owner": "on", "chat_others": "", "skills_departments": "*"}
+    assert client.post(f"/agents/access/{profile.id}", data=form, follow_redirects=False).status_code == 303
+    rules = access.rules_for(net_agent["id"])["models"]
+    assert (rules["tiers"], rules["main"], rules["workers"], rules["auto_cost"]) == (["mid", "auto"], "auto", "mid", "medium")
+    hermes = access.document(net_agent["id"])["doc"]["harness_config"]
+    assert hermes["model"]["default"] == "sysai/auto"
+    assert hermes["auxiliary"]["compression"]["model"] == "sysai/mid" and hermes["auxiliary"]["vision"]["model"] == "sysai/mid"
+    # Jev picks among the models of the other tiers: without a text tier sysai/auto goes away
+    alone = access.normalize({"models": {"tiers": ["vision", "auto"], "main": "auto", "auto_cost": "lots"}})["models"]
+    assert alone["tiers"] == ["vision"] and alone["auto_cost"] == "low"
+    page = client.get("/agents/access").text
+    assert "sysai/auto" in page and 'name="auto_cost"' in page and 'name="model_auto"' not in page

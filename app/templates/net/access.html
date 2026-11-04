@@ -44,6 +44,7 @@
     <div class="net-checks wide">{% for t in tiers %}<label><input type="checkbox" name="tier_{{ t }}" {{ 'checked' if t in r.models.tiers }}> sysai/{{ t }} — {{ tier_ru[t] }}</label>{% endfor %}</div>
     <label class="f">Главная модель — думает, планирует, раздаёт подзадачи <select name="model_main">{% for t in tiers if t != 'vision' %}<option value="{{ t }}" {{ 'selected' if r.models.main == t }}>sysai/{{ t }} — {{ tier_ru[t] }}</option>{% endfor %}</select></label>
     <label class="f">Для подзадач (delegate_task в Hermes) <select name="model_workers">{% for t in tiers if t != 'vision' %}<option value="{{ t }}" {{ 'selected' if r.models.workers == t }}>sysai/{{ t }} — {{ tier_ru[t] }}</option>{% endfor %}</select><small class="muted">Только из отмеченных уровней; иначе SYSAI возьмёт ближайший разрешённый.</small></label>
+    <label class="f">sysai/auto — как выбирать <select name="auto_cost">{% for c in cost_tiers %}<option value="{{ c }}" {{ 'selected' if r.models.auto_cost == c }}>{{ cost_ru[c] }}</option>{% endfor %}</select><small class="muted">Jev (OpenRouter) берёт под каждый запрос модель из отмеченных уровней — не дороже самой дорогой из них; недоступен — средняя.</small></label>
     <label class="f">Бюджет агента в день, $ (0 — без лимита) <input name="budget_day_usd" type="number" min="0" step="0.5" value="{{ r.models.budget_day_usd }}"></label>
     <label class="f">Бюджет проекта, $ (0 — без лимита) <input name="budget_project_usd" type="number" min="0" step="1" value="{{ r.models.budget_project_usd }}"></label>
 
@@ -75,7 +76,8 @@
 </section>
 <section class="card" id="models"><h2>Модели и ограничения сети</h2>
   <form method="post" action="/agents/access/settings" class="net-form">
-    {% for t in tiers %}<label class="f">sysai/{{ t }} — {{ tier_ru[t] }} <input name="model_{{ t }}" value="{{ models[t] }}" placeholder="{{ vision_default if t == 'vision' else '' }}"></label>{% endfor %}
+    {% for t in model_tiers %}<label class="f">sysai/{{ t }} — {{ tier_ru[t] }} <input name="model_{{ t }}" value="{{ models[t] }}" placeholder="{{ vision_default if t == 'vision' else '' }}"></label>{% endfor %}
+    <p class="small muted wide">sysai/auto своей модели не имеет: под каждый запрос её выбирает Jev Router среди моделей уровней, разрешённых агенту.</p>
     <label class="f">Вызовов MCP в минуту на агента <input name="mcp_per_minute" type="number" min="1" value="{{ mcp_per_minute }}"></label>
     <label class="f">Сайты, к которым могут обращаться скрипты навыков <textarea name="hub_hosts" spellcheck="false">{{ hub_hosts }}</textarea></label>
     <div class="wide"><button class="btn primary">Сохранить</button> <span class="small muted">Сменили модель уровня — сменилась у всех агентов сразу.</span></div>

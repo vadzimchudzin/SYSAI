@@ -55,9 +55,11 @@ def client():
 def net_on():
     from app import settings_store
     settings_store.set_many({"agents_on": True, "openrouter_api_key": "test-openrouter-key"})
-    from app.net import mcp
+    from app.net import gateway, mcp
     mcp._calls.clear()
     mcp._notes.clear()
+    # the catalog of OpenRouter and the rest of Jev are kept per process: every test starts without them
+    gateway._state.update(prices={}, prices_at=0.0, prices_failed=0.0, jev_rest_until=0.0, jev_why="")
     return True
 
 

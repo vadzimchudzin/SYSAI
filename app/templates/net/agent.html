@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}{{ a.name }} — агенты — SYSAI{% endblock %}
+{% extends "base.html" %}{% from "net/_trace.html" import run_head %}{% block title %}{{ a.name }} — агенты — SYSAI{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
 {% block body %}
 <div class="page-h"><div><h1>{{ a.name }}</h1>
@@ -83,6 +83,13 @@
 </section>
 {% endif %}
 
+<section class="card" id="trace"><div class="row between"><h2>Трасса {% if debug_until %}<span class="pill amber">отладка до {{ net_when(debug_until) }}</span>{% endif %}</h2>
+  <a class="btn sm" href="/agents/{{ a.id }}/trace">Все шаги →</a></div>
+  <p class="small muted">Что агент делал по шагам: запросы к нейронкам и вызовы MCP — кто спросил, какая модель ответила, сколько токенов, сколько стоило и чем кончилось. Режим отладки ({{ debug_hours }} ч) сохраняет ещё и тексты.</p>
+  <ul class="tr-list">{% for r in runs %}<li>{{ run_head(r, fmt_tokens, fmt_ms, clock) }}{% if r.first_error %}<span class="small warn">{{ r.first_error[:160] }}</span>{% endif %}</li>
+  {% else %}<li class="muted">За двое суток шагов не было.</li>{% endfor %}</ul>
+</section>
+
 <div class="grid2">
 <section class="card"><h2>Расход за 7 дней</h2>
   {% if not spend.requests %}<p class="muted">Запросов к нейронкам ещё не было.</p>{% else %}
@@ -90,7 +97,8 @@
     <dt>По уровням</dt><dd>{% for k, v in spend.by_tier.items() %}{{ k }} ${{ '%.2f'|format(v) }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
     <dt>По проектам</dt><dd>{% for k, v in spend.by_project.items() %}{{ k }} ${{ '%.2f'|format(v) }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
     <dt>По навыкам</dt><dd>{% for k, v in spend.by_skill.items() %}{{ k }} ${{ '%.2f'|format(v) }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</dd>
-    <dt>Токенов</dt><dd>{{ spend.tokens }}</dd>
+    <dt>Токенов</dt><dd>{{ fmt_tokens(spend.tokens) }}{% if spend.cached %} · из кэша {{ fmt_tokens(spend.cached) }}{% endif %}</dd>
+    <dt>Ошибок</dt><dd>{% if spend.errors %}<a class="warn" href="/agents/{{ a.id }}/trace?days=7&errors=1">{{ spend.errors }} из {{ spend.requests }}</a>{% else %}нет{% endif %}</dd>
   </dl>{% endif %}
 </section>
 <section class="card"><h2>Журнал</h2>

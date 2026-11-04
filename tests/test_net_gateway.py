@@ -30,7 +30,7 @@ def _ask(client, agent, model="sysai/mid", **extra):
 
 def test_models_are_the_allowed_tiers(client, net_agent):
     data = client.get("/v1/models", headers=net_agent["headers"]).json()
-    assert [m["id"] for m in data["data"]] == ["sysai/cheap", "sysai/mid", "sysai/strong", "sysai/vision"]
+    assert [m["id"] for m in data["data"]] == ["sysai/cheap", "sysai/mid", "sysai/strong", "sysai/vision", "sysai/auto"]
     access.set_agent_access(net_agent["id"], overrides={"models": {"tiers": ["cheap"]}})
     assert [m["id"] for m in client.get("/v1/models", headers=net_agent["headers"]).json()["data"]] == ["sysai/cheap"]
 
@@ -155,3 +155,150 @@ def test_web_plugins_need_the_whole_internet(client, net_agent, monkeypatch):
     access.set_agent_access(net_agent["id"], overrides={"internet": {"mode": "all"}})
     _ask(client, net_agent, plugins=[{"id": "web"}])
     assert up.bodies[-1]["plugins"] == [{"id": "web"}]
+
+
+
+# ----------------------------------------------------------------------------- sysai/auto: Jev Router (ОПО-5.8)
+CATALOG = {"data": [
+    {"id": "google/gemini-2.5-flash-lite", "pricing": {"prompt": "0.0000001", "completion": "0.0000004"}},
+    {"id": "google/gemini-2.5-flash", "pricing": {"prompt": "0.0000003", "completion": "0.0000025"}},
+    {"id": "google/gemini-2.5-pro", "pricing": {"prompt": "0.00000125", "completion": "0.00001"}},
+    {"id": "deepseek/deepseek-v3.2", "pricing": {"prompt": "0.00000027", "completion": "0.0000004"}},
+    {"id": "anthropic/claude-opus-4.1", "pricing": {"prompt": "0.000015", "completion": "0.000075"}},
+    {"id": "openai/o3-pro", "pricing": {"prompt": "0.00002", "completion": "0.00008"}},
+    {"id": "x-ai/grok-long", "pricing": {"prompt": "0.000001", "completion": "0.00002"}},
+    {"id": "typesafe/jev-router", "pricing": {"prompt": "-1", "completion": "-1"}},
+]}
+SERVED = {"id": "gen-2", "model": "google/gemini-2.5-flash", "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+          "usage": {"prompt_tokens": 1000, "completion_tokens": 50, "cost": 0.001,
+                    "prompt_tokens_details": {"cached_tokens": 600}}}
+
+
+def _catalog(monkeypatch, data=None, status=200):
+    asked = []
+
+    def fake_get(url, headers):
+        asked.append(url)
+        return httpx.Response(status, json=CATALOG if data is None else data)
+    monkeypatch.setattr(gateway, "_get", fake_get)
+    return asked
+
+
+def test_auto_lets_jev_pick_only_among_the_agents_models(client, net_agent, monkeypatch):
+    asked = _catalog(monkeypatch)
+    up = Upstream(data=SERVED)
+    monkeypatch.setattr(gateway, "_post", up.post)
+    r = _ask(client, net_agent, model="sysai/auto", reasoning={"max_tokens": 2000, "effort": "high"},
+             sysai={"role": "workers", "anything": "else"})
+    assert r.status_code == 200, r.text
+    body = up.bodies[0]
+    assert body["model"] == gateway.JEV_ROUTER and "sysai" not in body
+    assert body["reasoning"] == {"effort": "high"}  # a budget of tokens the router refuses; the effort is a hint
+    plugin = body["plugins"][-1]
+    assert plugin["id"] == "jev-router" and plugin["cost_tier"] == "low"
+    assert plugin["models"] == ["google/gemini-2.5-flash", "google/gemini-2.5-flash-lite", "google/gemini-2.5-pro"]
+    # dearer than gemini-2.5-pro per prompt or per completion token: never; routers (-1) are not models
+    assert plugin["excluded_models"] == ["anthropic/claude-opus-4.1", "openai/o3-pro", "x-ai/grok-long"]
+    with SessionLocal() as s:
+        spend = s.query(NetSpend).one()
+        assert (spend.tier, spend.model, spend.route, spend.role) == ("auto", "google/gemini-2.5-flash", "jev:low", "workers")
+        assert spend.cached_tokens == 600 and spend.ok and spend.error == "" and spend.ms >= 0
+    access.set_agent_access(net_agent["id"], overrides={"models": {"auto_cost": "high"}})
+    _ask(client, net_agent, model="sysai/auto")
+    assert up.bodies[-1]["plugins"][-1]["cost_tier"] == "high" and "reasoning" not in up.bodies[-1]
+    assert len(asked) == 1  # the catalog is kept for hours
+
+
+def test_auto_falls_back_to_mid_and_lets_jev_rest(client, net_agent, monkeypatch):
+    _catalog(monkeypatch)
+
+    class NoJev(Upstream):
+        def post(self, url, body, headers):
+            self.bodies.append(body)
+            if body["model"] == gateway.JEV_ROUTER:
+                return httpx.Response(404, json={"error": {"message": "No endpoints found for typesafe/jev-router"}})
+            return httpx.Response(200, json={**SERVED, "model": body["model"]})
+    up = NoJev()
+    monkeypatch.setattr(gateway, "_post", up.post)
+    assert _ask(client, net_agent, model="sysai/auto").status_code == 200
+    assert [b["model"] for b in up.bodies] == [gateway.JEV_ROUTER, gateway.DEFAULT_MODELS["mid"]]
+    assert "plugins" not in up.bodies[1]
+    assert _ask(client, net_agent, model="sysai/auto").status_code == 200  # Jev rests: straight to «mid»
+    assert len(up.bodies) == 3 and up.bodies[2]["model"] == gateway.DEFAULT_MODELS["mid"]
+    with SessionLocal() as s:
+        routes = [r.route for r in s.query(NetSpend).order_by(NetSpend.id)]
+    assert routes[0].startswith("jev→mid: HTTP 404") and routes[1].startswith("auto→mid: Jev недоступен")
+    gateway._state["jev_rest_until"] = 0.0
+    up.bodies.clear()
+    access.set_agent_access(net_agent["id"], overrides={"models": {"tiers": ["cheap", "auto"]}})
+    _ask(client, net_agent, model="sysai/auto")
+    assert [b["model"] for b in up.bodies] == [gateway.JEV_ROUTER, gateway.DEFAULT_MODELS["cheap"]]  # no «mid»
+
+
+def test_auto_without_the_catalog_does_not_ask_jev(client, net_agent, monkeypatch):
+    asked = _catalog(monkeypatch, {"error": "down"}, status=500)
+    up = Upstream()
+    monkeypatch.setattr(gateway, "_post", up.post)
+    assert _ask(client, net_agent, model="sysai/auto").status_code == 200
+    assert up.bodies[0]["model"] == gateway.DEFAULT_MODELS["mid"] and "plugins" not in up.bodies[0]
+    _ask(client, net_agent, model="sysai/auto")
+    assert len(asked) == 1  # asked again in 10 minutes, not on every request
+    with SessionLocal() as s:
+        assert s.query(NetSpend).first().route == "auto→mid: нет цен моделей в каталоге OpenRouter"
+
+
+def test_refused_and_failed_requests_are_counted_with_their_reason(client, net_agent, monkeypatch):
+    monkeypatch.setattr(gateway, "_post", Upstream(500, {"error": {"message": "boom"}}).post)
+    assert _ask(client, net_agent).status_code == 502
+    access.set_agent_access(net_agent["id"], overrides={"models": {"tiers": ["cheap"]}})
+    assert _ask(client, net_agent, model="sysai/strong").status_code == 403
+    with SessionLocal() as s:
+        rows = s.query(NetSpend).order_by(NetSpend.id).all()
+        assert [(r.ok, r.tier, r.cost) for r in rows] == [(False, "mid", 0.0), (False, "strong", 0.0)]
+        assert rows[0].error.startswith("upstream_error") and "boom" in rows[0].error
+        assert rows[1].error.startswith("model_not_allowed") and rows[0].project == "24-017"
+    assert gateway.summary(net_agent["id"])["errors"] == 2
+
+
+def test_a_stream_through_jev_keeps_the_served_model_and_a_broken_end(client, net_agent, monkeypatch):
+    _catalog(monkeypatch)
+    lines = []
+    for chunk in ({"model": "google/gemini-2.5-flash-lite", "choices": [{"delta": {"content": "x"}}]},
+                  {"error": {"message": "provider died"}}):
+        lines += ["data: " + json.dumps(chunk), ""]
+    opened = []
+
+    def fake_open(url, body, headers):
+        opened.append(body["model"])
+        if body["model"] == gateway.JEV_ROUTER and len(opened) == 1:
+            return FakeClient(), FakeStream([], status=503)
+        return FakeClient(), FakeStream(lines)
+    monkeypatch.setattr(gateway, "_open", fake_open)
+    r = _ask(client, net_agent, model="sysai/auto", stream=True)
+    assert r.status_code == 200 and "provider died" in r.text
+    assert opened == [gateway.JEV_ROUTER, gateway.DEFAULT_MODELS["mid"]]
+    with SessionLocal() as s:
+        spend = s.query(NetSpend).one()
+        assert spend.model == "google/gemini-2.5-flash-lite" and spend.ok is False and "provider died" in spend.error
+        assert spend.route.startswith("jev→mid: HTTP 503")
+
+
+def test_a_stream_the_agent_leaves_is_closed_and_counted(client, net_agent, monkeypatch):
+    import anyio
+    from app.net import agents, routes
+    lines = ["data: " + json.dumps({"model": "google/gemini-2.5-flash", "choices": [{"delta": {"content": "x"}}]}), "",
+             "data: [DONE]", ""]
+    upstream = FakeStream(lines)
+    monkeypatch.setattr(gateway, "_open", lambda url, body, headers: (FakeClient(), upstream))
+    ctx = agents.authenticate(net_agent["token"])
+    chunks = gateway.stream(ctx, {"model": "sysai/mid", "messages": [{"role": "user", "content": "x"}], "stream": True})
+
+    async def leave_after_the_first_piece():
+        relay = routes._relay(chunks)
+        assert (await relay.__anext__()).startswith(b"data:")
+        await relay.aclose()
+    anyio.run(leave_after_the_first_piece)
+    assert upstream.closed
+    with SessionLocal() as s:
+        spend = s.query(NetSpend).one()
+        assert spend.ok is False and spend.error.startswith("client_closed") and spend.model == "google/gemini-2.5-flash"

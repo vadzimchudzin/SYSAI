@@ -17,15 +17,17 @@ def _fit(details):
 
 
 def log(action: str, target: str = "", details=None, actor: str = "", actor_kind: str = "user", agent_id=None,
-        session=None) -> None:
+        session=None):
+    """The id of the event when it is written here; with a session of the caller — None (it is written on its commit)."""
     row = NetEvent(action=action[:60], target=str(target or "")[:160], details=_fit(details), actor=str(actor or "")[:64],
                    actor_kind=actor_kind, agent_id=agent_id)
     if session is not None:
         session.add(row)
-        return
+        return None
     with SessionLocal() as s:
         s.add(row)
         s.commit()
+        return row.id
 
 
 def changes(before: dict, after: dict) -> dict:

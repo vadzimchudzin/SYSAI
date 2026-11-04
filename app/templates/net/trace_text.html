@@ -1,0 +1,33 @@
+{% extends "base.html" %}{% block title %}Текст шага — {{ agent.name }} — SYSAI{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
+{% block body %}{% set q = item.request or {} %}{% set a = item.response or {} %}
+<div class="page-h"><div><h1>{{ 'Запрос к модели' if item.kind == 'model' else 'Вызов MCP' }}</h1>
+  <p>{{ agent.name }} · {{ net_when(item.at) }} · сохранено в режиме отладки</p></div>
+  <div class="actions"><a class="btn" href="/agents/{{ agent.id }}/trace">← Трасса</a></div></div>
+
+{% if item.kind == 'model' and q.tail is defined %}
+<section class="card"><h2>Что видела модель</h2>
+  <p class="small muted">Сообщений в запросе: {{ q.messages }} · системный промпт {{ q.system_chars }} знаков · инструментов {{ q.tools|length }}{% if q.settings %} · {% for k, v in q.settings.items() %}{{ k }}={{ v }}{{ ', ' if not loop.last }}{% endfor %}{% endif %}. Весь разговор уходит в каждый запрос заново; здесь его конец — то новое, на что модель отвечала.</p>
+  {% for m in q.tail %}<div class="tr-msg"><div class="tr-role">{{ {'user': 'человек', 'assistant': 'агент', 'tool': 'инструмент', 'system': 'система'}.get(m.role, m.role) }}{% if m.name %} · {{ m.name }}{% endif %}</div>
+    {% if m.content %}<pre class="net-pre">{{ m.content }}</pre>{% endif %}
+    {% for c in m.tool_calls or [] %}<pre class="net-pre">→ {{ c.name }}({{ c.arguments }})</pre>{% endfor %}</div>{% endfor %}
+  <details><summary class="small soft">▸ Показать начало системного промпта и инструменты</summary>
+    <pre class="net-pre">{{ q.system_start }}</pre>
+    <p class="small muted">{{ q.tools|join(', ') or 'без инструментов' }}</p></details>
+</section>
+<section class="card"><h2>Ответ</h2>
+  {% if a.error %}<p class="warn">{{ a.error }}</p>{% else %}
+  {% if a.content %}<pre class="net-pre">{{ a.content }}</pre>{% endif %}
+  {% for c in a.tool_calls or [] %}<pre class="net-pre">→ {{ c.name }}({{ c.arguments }})</pre>{% endfor %}
+  <p class="small muted">Конец ответа: {{ a.finish_reason or '—' }}</p>{% endif %}
+</section>
+{% elif item.kind == 'mcp' and q.tool is defined %}
+<section class="card"><h2>{{ q.tool }}</h2>
+  <h3>Аргументы</h3><pre class="net-pre">{{ q.arguments }}</pre>
+  <h3>{{ 'Ошибка' if a.error else 'Результат' }}</h3><pre class="net-pre">{{ a.error or a.result }}</pre>
+</section>
+{% else %}
+<section class="card"><h2>Запрос</h2><pre class="net-pre">{{ request_text }}</pre></section>
+<section class="card"><h2>Ответ</h2><pre class="net-pre">{{ response_text }}</pre></section>
+{% endif %}
+{% endblock %}

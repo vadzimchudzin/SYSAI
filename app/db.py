@@ -1205,6 +1205,13 @@ def init_db():
     _add_column_if_missing("net_skills", "kind", "kind VARCHAR(10) DEFAULT 'skill'")
     _add_column_if_missing("net_skills", "delivery", "delivery VARCHAR(10) DEFAULT 'always'")
     _add_column_if_missing("net_skill_versions", "spec", "spec JSON")
+    # the trace of agents (ОПО-5.7): every request through the gateway with its time and end; the debug mode
+    for column, ddl in (("cached_tokens", "INTEGER DEFAULT 0"), ("ms", "INTEGER DEFAULT 0"), ("ok", "BOOLEAN DEFAULT TRUE"),
+                        ("error", "VARCHAR(300) DEFAULT ''"), ("role", "VARCHAR(16) DEFAULT ''"),
+                        ("task", "VARCHAR(64) DEFAULT ''"), ("route", "VARCHAR(120) DEFAULT ''")):
+        _add_column_if_missing("net_spend", column, f"{column} {ddl}")
+    _add_column_if_missing("net_agents", "debug_until", "debug_until TIMESTAMP")
+    _add_column_if_missing("net_agents", "debug_by", "debug_by VARCHAR(64) DEFAULT ''")
     _add_column_if_missing("meetings", "options", "options JSON")
     _add_column_if_missing("meetings", "waveform", "waveform JSON")
     _add_column_if_missing("meetings", "recording_status", "recording_status VARCHAR(12) DEFAULT ''")

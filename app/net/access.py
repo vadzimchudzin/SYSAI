@@ -25,8 +25,14 @@ SECTIONS = ("commands", "folders", "programs", "mcp", "data", "internet", "model
 SECTION_RU = {"commands": "Команды на ПК", "folders": "Папки", "programs": "Программы", "mcp": "MCP-инструменты",
               "data": "Данные SYSAI", "internet": "Интернет", "models": "Нейронки", "schedule": "Дела по расписанию",
               "chat": "Кто может писать агенту", "skills": "Хаб: навыки и инструменты", "files": "Хранилище"}
-TIERS = ("cheap", "mid", "strong", "vision")
-TIER_RU = {"cheap": "дешёвая", "mid": "средняя", "strong": "сильная", "vision": "зрение (сканы, фото)"}
+TIERS = ("cheap", "mid", "strong", "vision", "auto")
+MODEL_TIERS = ("cheap", "mid", "strong", "vision")  # a real model behind each, chosen in the settings
+TEXT_TIERS = ("cheap", "mid", "strong")
+TIER_RU = {"cheap": "дешёвая", "mid": "средняя", "strong": "сильная", "vision": "зрение (сканы, фото)",
+           "auto": "авто: модель под запрос выбирает Jev"}
+# sysai/auto: the routing policy of Jev Router (ОПО-5.8) among the models of the agent's other tiers
+COST_TIERS = ("low", "medium", "high")
+COST_RU = {"low": "экономнее", "medium": "поровну цена и сила", "high": "сильнее, когда это окупается"}
 SCOPES = ("own", "department", "all")
 SCOPE_RU = {"own": "свои", "department": "отдела", "all": "все"}
 LEVELS = ("none", "read", "write")
@@ -67,7 +73,8 @@ _ENGINEER = {
     "mcp": {"sysai": ["*"], "plc-kit": ["*"], "machine-expert": ["*"], "cad": ["*"]},
     "data": {"projects": "own", "to_base": "read", "tags": "write", "questions": True, "people": True},
     "internet": {"mode": "list", "sites": ["se.com", "schneider-electric.com", "sysat.by"]},
-    "models": {"tiers": ["cheap", "mid", "strong", "vision"], "budget_day_usd": 3.0, "budget_project_usd": 30.0},
+    "models": {"tiers": ["cheap", "mid", "strong", "vision", "auto"], "main": "auto", "workers": "cheap",
+               "auto_cost": "low", "budget_day_usd": 3.0, "budget_project_usd": 30.0},
     "schedule": [{"when": "каждые 15 минут", "task": "Проверить новые пакеты ТО по моим проектам"},
                  {"when": "пн–пт 09:00", "task": "Сводка: что сделано вчера и что ждёт меня"}],
     "chat": {"owner": True, "others": []},
@@ -84,7 +91,8 @@ _TO = {
     "mcp": {"sysai": ["*"], "cad": ["*"]},
     "data": {"projects": "department", "to_base": "write", "tags": "read", "questions": True, "people": True},
     "internet": {"mode": "list", "sites": ["sysat.by"]},
-    "models": {"tiers": ["cheap", "mid", "vision"], "budget_day_usd": 2.0, "budget_project_usd": 0.0},
+    "models": {"tiers": ["cheap", "mid", "vision", "auto"], "main": "auto", "workers": "cheap", "auto_cost": "low",
+               "budget_day_usd": 2.0, "budget_project_usd": 0.0},
     "schedule": [],
     "chat": {"owner": True, "others": []},
     "skills": {"departments": ["*"], "propose": True},
@@ -150,8 +158,12 @@ def normalize(rules) -> dict:
     out["internet"] = {"mode": i.get("mode") if i.get("mode") in INTERNET else "off", "sites": _lines(i.get("sites"), 100, 120)}
     mo = rules.get("models") if isinstance(rules.get("models"), dict) else {}
     tiers = [t for t in TIERS if t in (mo.get("tiers") or [])]
+    if not any(t in TEXT_TIERS for t in tiers):
+        tiers = [t for t in tiers if t != "auto"]  # Jev picks among the models of the other tiers: none — nothing to pick
     main, workers = _main_and_workers(tiers, mo.get("main"), mo.get("workers"))
-    out["models"] = {"tiers": tiers, "main": main, "workers": workers, "budget_day_usd": _money(mo.get("budget_day_usd"), 1.0),
+    out["models"] = {"tiers": tiers, "main": main, "workers": workers,
+                     "auto_cost": mo.get("auto_cost") if mo.get("auto_cost") in COST_TIERS else "low",
+                     "budget_day_usd": _money(mo.get("budget_day_usd"), 1.0),
                      "budget_project_usd": _money(mo.get("budget_project_usd"), 0.0)}
     sched = []
     for item in (rules.get("schedule") or [])[:30] if isinstance(rules.get("schedule"), list) else []:
@@ -177,6 +189,12 @@ def _main_and_workers(tiers: list, main=None, workers=None) -> tuple[str, str]:
     if workers not in usable:
         workers = "cheap" if "cheap" in usable else main
     return main, workers
+
+
+def _plain(tiers: list, order: tuple, default: str) -> str:
+    """A tier with a model of its own for the helpers of Hermes (pictures, squeezing a long conversation): Jev's choice
+    per request does not pay off there."""
+    return next((t for t in order if t in tiers), default)
 
 
 def merge(base: dict, over) -> dict:
@@ -457,12 +475,16 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None) -> dict:
     cfg = {
         "model": {"provider": "custom", "base_url": f"{server}/v1", "default": f"sysai/{main}",
                   "api_key": "${SYSAI_AGENT_TOKEN}"},
+        # «sysai» in the body tells the gateway who asks (the trace); the gateway takes it out before OpenRouter
         "delegation": {"model": f"sysai/{workers}", "base_url": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}",
-                       "max_concurrent_children": 3, "max_spawn_depth": 1},  # flat: workers do not delegate further
+                       "max_concurrent_children": 3, "max_spawn_depth": 1,  # flat: workers do not delegate further
+                       "request_overrides": {"extra_body": {"sysai": {"role": "workers"}}}},
         "auxiliary": {"vision": {"provider": "custom", "base_url": f"{server}/v1",
-                                 "model": "sysai/vision" if "vision" in tiers else f"sysai/{main}"},
+                                 "model": "sysai/" + _plain(tiers, ("vision", "mid", "strong", "cheap"), main),
+                                 "extra_body": {"sysai": {"role": "vision"}}},
                       "compression": {"provider": "custom", "base_url": f"{server}/v1",
-                                      "model": "sysai/cheap" if "cheap" in tiers else f"sysai/{main}"}},
+                                      "model": "sysai/" + _plain(tiers, ("cheap", "mid", "strong"), main),
+                                      "extra_body": {"sysai": {"role": "compression"}}}},
         "approvals": {"mode": "off", "deny": deny},
         "mcp_servers": mcp,
         "skills": {"external_dirs": ["${SYSAI_HOME}/hub"],
@@ -553,7 +575,7 @@ def rules_from_form(form) -> dict:
         "data": {"projects": get("data_projects"), "to_base": get("data_to_base"), "tags": get("data_tags"),
                  "questions": bool(get("data_questions")), "people": bool(get("data_people"))},
         "internet": {"mode": get("internet_mode"), "sites": lines("internet_sites")},
-        "models": {"tiers": tiers, "main": get("model_main"), "workers": get("model_workers"),
+        "models": {"tiers": tiers, "main": get("model_main"), "workers": get("model_workers"), "auto_cost": get("auto_cost"),
                    "budget_day_usd": get("budget_day_usd"), "budget_project_usd": get("budget_project_usd")},
         "schedule": schedule,
         "chat": {"owner": bool(get("chat_owner")), "others": lines("chat_others")},

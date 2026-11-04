@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from ..db import Department, Employee, SessionLocal, User, now
 from . import journal
-from .models import NetAccessProfile, NetAgent, NetAgentAccess, NetAgentToken
+from .models import NetAccessProfile, NetAgent, NetAgentAccess, NetAgentToken, NetDebug
 
 CODE_TTL = dt.timedelta(minutes=10)
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I: the code is typed by hand
@@ -236,6 +236,7 @@ def delete(agent_id: int, by: str = "") -> None:
         name = agent.name
         s.query(NetAgentToken).filter(NetAgentToken.agent_id == agent_id).delete()
         s.query(NetAgentAccess).filter(NetAgentAccess.agent_id == agent_id).delete()
+        s.query(NetDebug).filter(NetDebug.agent_id == agent_id).delete()  # the texts of the debug mode go with it
         s.delete(agent)
         journal.log("agent.delete", name, None, actor=by, session=s)
         s.commit()

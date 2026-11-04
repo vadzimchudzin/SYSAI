@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from .. import settings_store, telegram, userbot
 from ..db import Department, Employee, EmployeeDepartment, SessionLocal
-from . import access, files, hub, journal
+from . import access, files, hub, journal, trace
 from .agents import AgentCtx
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -273,6 +273,8 @@ def _log_event(ctx, rules, args):
     if not action:
         raise ToolError("Нужно действие (action)")
     details = args.get("details") if isinstance(args.get("details"), dict) else {"text": str(args.get("details") or "")[:2000]}
+    if ctx.extra.get("task") and "task" not in details:  # the event goes into the run of its task (the trace)
+        details = {**details, "task": ctx.extra["task"]}
     journal.log("agent:" + action, str(args.get("target") or "")[:160], details, actor=ctx.name, actor_kind="agent",
                 agent_id=ctx.agent_id)
     if action == "skill_used" and details.get("skill"):
@@ -340,24 +342,30 @@ def call_tool(ctx: AgentCtx, name: str, args: dict) -> dict:
     if name not in TOOLS:
         return {"content": [{"type": "text", "text": f"Нет инструмента {name}"}], "isError": True}
     if not access.tool_allowed(rules, "sysai", name):
-        journal.log("mcp.denied", name, None, actor=ctx.name, actor_kind="agent", agent_id=ctx.agent_id)
+        journal.log("mcp.denied", name, {"task": ctx.extra["task"]} if ctx.extra.get("task") else None, actor=ctx.name,
+                    actor_kind="agent", agent_id=ctx.agent_id)
         return {"content": [{"type": "text", "text": f"Доступы агента не разрешают инструмент {name}"}], "isError": True}
     started = time.time()
+    args = args if isinstance(args, dict) else {}
     try:
-        result = TOOLS[name][2](ctx, rules, args if isinstance(args, dict) else {})
+        result = TOOLS[name][2](ctx, rules, args)
         error = None
     except ToolError as exc:
         result, error = None, str(exc)
     except (TypeError, ValueError) as exc:
         result, error = None, f"Неверные аргументы: {exc}"
+    text = json.dumps(result, ensure_ascii=False, default=_plain) if error is None else error
     if name != "log_event":
-        journal.log("mcp." + name, "", {"args": {k: (str(v)[:200]) for k, v in (args or {}).items()} if isinstance(args, dict) else {},
-                                        "ok": error is None, "ms": int((time.time() - started) * 1000),
-                                        **({"error": error} if error else {})},
-                    actor=ctx.name, actor_kind="agent", agent_id=ctx.agent_id)
+        task = ctx.extra.get("task") or ""
+        event = journal.log("mcp." + name, "", {"args": {k: (str(v)[:200]) for k, v in args.items()},
+                                                "ok": error is None, "ms": int((time.time() - started) * 1000),
+                                                **({"error": error} if error else {}), **({"task": task} if task else {})},
+                            actor=ctx.name, actor_kind="agent", agent_id=ctx.agent_id)
+        if trace.debug_on(ctx.agent_id):  # the debug mode (ОПО-5.7): the whole arguments and the whole answer
+            trace.save(ctx.agent_id, "mcp", event, request={"tool": name, "arguments": trace.clip(args)},
+                       response={"error": error} if error is not None else {"result": trace.clip(text)})
     if error is not None:
         return {"content": [{"type": "text", "text": error}], "isError": True}
-    text = json.dumps(result, ensure_ascii=False, default=_plain)
     return {"content": [{"type": "text", "text": text}], "structuredContent": json.loads(text), "isError": False}
 
 
