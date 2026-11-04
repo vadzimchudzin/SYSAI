@@ -41,6 +41,29 @@ class LoginError(RuntimeError):
     """A problem with signing in that the person can fix; the message is shown in the panel (Russian)."""
 
 
+class NoCodeError(LoginError):
+    """Telegram sends this account no code at all (it wants a login e-mail set up first): the way in is the QR code."""
+
+
+def code_route(code_type) -> str:
+    """Where Telegram says it sent the login code, in words for the panel ("" when it does not say)."""
+    kind = type(code_type).__name__ if code_type is not None else ""
+    if kind == "SentCodeTypeApp":
+        return ("в приложение Telegram — сообщением от «Telegram» с синей галочкой на телефоне или компьютере, где открыт "
+                "этот номер (не SMS)")
+    if kind in ("SentCodeTypeSms", "SentCodeTypeFirebaseSms", "SentCodeTypeSmsWord", "SentCodeTypeSmsPhrase"):
+        return "по SMS"
+    if kind == "SentCodeTypeCall":
+        return "звонком: код продиктуют"
+    if kind in ("SentCodeTypeFlashCall", "SentCodeTypeMissedCall"):
+        return "звонком: код — последние цифры номера, с которого позвонят"
+    if kind == "SentCodeTypeEmailCode":
+        return f"на почту для входа {getattr(code_type, 'email_pattern', '') or 'этого аккаунта'}"
+    if kind == "SentCodeTypeFragmentSms":
+        return "на fragment.com (номер анонимный)"
+    return ""
+
+
 class RefError(ValueError):
     """An address of a person or group that cannot be understood (Russian message)."""
 
@@ -109,6 +132,7 @@ class TelethonBackend:
         self._watch = None
         self.wants = None  # optional pre-filter: only messages from people the app serves are handed over
         self._guard = threading.Lock()
+        self._qr = None  # the login by QR code in progress: its client, the waiting task and what the panel shows
 
     # plumbing
     def _run(self, coro, timeout=90):
@@ -134,7 +158,10 @@ class TelethonBackend:
             try:
                 await client.connect()
                 sent = await client.send_code_request(phone)
-                return {"session": client.session.save(), "phone": phone, "hash": sent.phone_code_hash}
+                if type(sent.type).__name__ == "SentCodeTypeSetUpEmailRequired":
+                    raise NoCodeError("Telegram не присылает код этому аккаунту: он требует сначала привязать почту для входа.")
+                return {"session": client.session.save(), "phone": phone, "hash": sent.phone_code_hash,
+                        "via": code_route(sent.type)}
             except errors.ApiIdInvalidError:
                 raise LoginError("Telegram не принял api_id и api_hash: проверьте, что скопировали их полностью.") from None
             except errors.PhoneNumberInvalidError:
@@ -180,6 +207,68 @@ class TelethonBackend:
             finally:
                 await client.disconnect()
         return self._run(go())
+
+    # login by QR code: no code at all, the phone where the account is open confirms the new device
+    def qr_start(self, api_id, api_hash):
+        TelegramClient, StringSession, errors, *_ = self._telethon()
+
+        async def go():
+            old, self._qr = self._qr, None
+            if old and not old["task"].done():
+                old["task"].cancel()
+            client = TelegramClient(StringSession(), int(api_id), api_hash)
+            await client.connect()
+            try:
+                qr = await client.qr_login()
+            except errors.ApiIdInvalidError:
+                await client.disconnect()
+                raise LoginError("Telegram не принял api_id и api_hash: проверьте, что скопировали их полностью.") from None
+            except BaseException:
+                await client.disconnect()
+                raise
+            state = {"state": "wait", "url": qr.url, "session": "", "phone": "", "error": ""}
+            self._qr = {"state": state, "task": asyncio.ensure_future(self._qr_wait(client, qr, state, errors))}
+        return self._run(go())
+
+    @staticmethod
+    async def _qr_wait(client, qr, state, errors, minutes=5):
+        """Keeps the code fresh (Telegram renews it every 30 s) until the phone confirms or the minutes run out."""
+        deadline = time.monotonic() + minutes * 60
+        try:
+            while True:
+                left = (qr.expires - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                try:
+                    user = await qr.wait(timeout=max(3.0, min(left, deadline - time.monotonic())))
+                except (asyncio.TimeoutError, TimeoutError):
+                    if time.monotonic() >= deadline:
+                        state.update(state="expired")
+                        return
+                    await qr.recreate()
+                    state["url"] = qr.url
+                    continue
+                except errors.SessionPasswordNeededError:
+                    state.update(state="password", session=client.session.save())
+                    return
+                state.update(state="ok", session=client.session.save(), phone=getattr(user, "phone", "") or "")
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Telegram QR login failed")
+            state.update(state="error", error=f"Не удалось войти по QR-коду: {str(exc)[:200]}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def qr_state(self):
+        return dict(self._qr["state"]) if self._qr else None
+
+    def qr_cancel(self):
+        qr, self._qr = self._qr, None
+        if qr and not qr["task"].done() and self._loop is not None:
+            self._loop.call_soon_threadsafe(qr["task"].cancel)
 
     # running connection
     def connect(self, api_id, api_hash, session, on_message):
@@ -564,14 +653,12 @@ def me() -> dict:
 
 def status() -> dict:
     step = pending_step()
-    phone = settings_store.get("userbot_phone") or ""
-    if step:  # the number of the login that is still in progress
-        try:
-            phone = json.loads(unseal(settings_store.get("userbot_pending") or "") or "{}").get("phone", phone)
-        except ValueError:
-            pass
+    phone, via = settings_store.get("userbot_phone") or "", ""
+    if step:  # the number of the login that is still in progress and where Telegram sent its code
+        data = _pending_data()
+        phone, via = data.get("phone") or phone, data.get("via", "")
     return {"configured": configured(), "connected": ready(), "me": me(), "error": _state["error"], "step": step,
-            "phone": phone, "paused": time.time() < _paused_until[0]}
+            "phone": phone, "via": via, "paused": time.time() < _paused_until[0]}
 
 
 def take_lease() -> bool:
@@ -706,37 +793,104 @@ def pending_step():
         return None
 
 
-def _pending() -> dict:
+def _pending_data() -> dict:
     try:
         data = json.loads(unseal(settings_store.get("userbot_pending") or "") or "{}")
     except ValueError:
         data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _pending() -> dict:
+    data = _pending_data()
     if not data:
         raise LoginError("Вход не начат или устарел: начните заново с номера телефона.")
     return data
 
 
-def login_start(api_id: str, api_hash: str, phone: str) -> None:
-    api_id, api_hash = (api_id or "").strip(), (api_hash or "").strip()
-    phone = re.sub(r"[\s()\-]", "", phone or "")
+def _check_keys(api_id: str, api_hash: str) -> None:
     if not re.fullmatch(r"\d{4,12}", api_id):
         raise LoginError("api_id это число из 5-9 цифр со страницы my.telegram.org/apps.")
     if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
         raise LoginError("api_hash это 32 символа (цифры и буквы a-f) со страницы my.telegram.org/apps.")
+
+
+def login_start(api_id: str, api_hash: str, phone: str) -> str:
+    """Asks Telegram for the code (the code step says where it went). Returns what the panel says: that the QR code is
+    shown instead when Telegram sends this account no code at all."""
+    api_id, api_hash = (api_id or "").strip(), (api_hash or "").strip()
+    phone = re.sub(r"[\s()\-]", "", phone or "")
+    _check_keys(api_id, api_hash)
     if not re.fullmatch(r"\+\d{7,15}", phone):
         raise LoginError("Номер телефона нужен в международном формате, например +375291234567.")
-    pending = _backend().login_start(api_id, api_hash, phone)
+    try:
+        pending = _backend().login_start(api_id, api_hash, phone)
+    except NoCodeError as exc:
+        qr_start(api_id, api_hash)
+        return f"{exc} Войдите по QR-коду: код не нужен."
     pending.update(api_id=api_id, api_hash=api_hash, step="code")
     settings_store.set_many({"userbot_pending": seal(json.dumps(pending))})
+    return "Код отправлен."
+
+
+# login by QR code: the phone where the account is open confirms the new device, no code is needed
+_qr_lock = threading.Lock()
+
+
+def qr_start(api_id: str = "", api_hash: str = "") -> None:
+    """Shows a QR code to scan. Without keys («Код не пришёл?», «Показать новый QR-код») takes those of the login in
+    progress, so nobody types them again."""
+    api_id, api_hash = (api_id or "").strip(), (api_hash or "").strip()
+    if not api_id and not api_hash:
+        data = _pending_data()
+        api_id, api_hash = str(data.get("api_id") or ""), str(data.get("api_hash") or "")
+        if not api_id:
+            raise LoginError("Вход не начат или устарел: впишите api_id и api_hash заново.")
+    _check_keys(api_id, api_hash)
+    _backend().qr_start(api_id, api_hash)
+    settings_store.set_many({"userbot_pending": seal(json.dumps({"api_id": api_id, "api_hash": api_hash, "step": "qr"}))})
+
+
+def qr_poll() -> dict:
+    """Where the login by QR code stands: "wait" with the link to show, "ok" (signed in), "password" (the account
+    asks its two-step password next), "expired" (show a new code) or "gone" (no QR login in progress)."""
+    with _qr_lock:
+        if pending_step() != "qr":
+            return {"state": "gone"}
+        state = getattr(_backend(), "qr_state", lambda: None)()
+        if not state:  # the service restarted while the code was on the screen
+            return {"state": "expired", "error": "QR-код устарел."}
+        if state["state"] == "wait":
+            return {"state": "wait", "url": state["url"]}
+        if state["state"] in ("expired", "error"):
+            return {"state": "expired", "error": state.get("error") or "QR-код устарел: за 5 минут его не отсканировали."}
+        pending = _pending()
+        _backend().qr_cancel()
+        if state["state"] == "password":
+            settings_store.set_many({"userbot_pending": seal(json.dumps(dict(pending, session=state["session"],
+                                                                                  step="password")))})
+            return {"state": "password"}
+        phone = str(state.get("phone") or "")
+        _finish(state["session"], dict(pending, phone=("+" + phone.lstrip("+")) if phone else ""))
+        return {"state": "ok"}
+
+
+def qr_picture(url: str) -> str:
+    """The login link as an inline SVG QR code for the panel."""
+    import segno
+    return segno.make(url, error="m").svg_inline(scale=6, border=3, dark="#111111", light="#ffffff", svgclass="tg-qr-svg",
+                                                 omitsize=True)
 
 
 def _finish(session: str, pending: dict) -> None:
     settings_store.set_many({
         "userbot_api_id": seal(pending["api_id"]), "userbot_api_hash": seal(pending["api_hash"]),
-        "userbot_session": seal(session), "userbot_phone": pending["phone"], "userbot_pending": ""})
+        "userbot_session": seal(session), "userbot_phone": pending.get("phone") or "", "userbot_pending": ""})
     _state["error"] = ""
     if not start():
         raise LoginError(_state["error"] or "Вход выполнен, но подключиться к Telegram не удалось.")
+    if not pending.get("phone") and (_state["me"] or {}).get("phone"):  # by QR code the number comes from the account
+        settings_store.set_many({"userbot_phone": "+" + str(_state["me"]["phone"]).lstrip("+")})
 
 
 def login_code(code: str) -> str:
@@ -762,6 +916,10 @@ def logout() -> None:
             _backend().log_out()
     except Exception:  # noqa: BLE001
         log.exception("log out failed")
+    try:
+        getattr(_backend(), "qr_cancel", lambda: None)()  # a QR code still on the screen stops waiting
+    except Exception:  # noqa: BLE001
+        log.exception("could not stop the QR login")
     _state.update(connected=False, me=None, error="")
     settings_store.set_many({key: "" for key in ("userbot_api_id", "userbot_api_hash", "userbot_session",
                                                  "userbot_phone", "userbot_pending")})

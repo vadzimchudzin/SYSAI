@@ -269,6 +269,10 @@ table.list tbody tr { cursor: pointer; transition: background .12s; } table.list
 .sticky { position: sticky; bottom: 0; background: linear-gradient(transparent, var(--bg) 30%); padding: 22px 0 10px; z-index: 4; }
 .emp { padding: 14px 0; border-bottom: 1px solid var(--line); } .emp:last-child { border: 0; } .emp.off { opacity: .45; } .edit-box { margin-top: 12px; }
 .emp-form { display: grid; gap: 12px; }
+.tg-alt { margin: 16px 0 12px; padding-top: 14px; border-top: 1px solid var(--line); }
+.tg-alt p { margin: 0 0 8px; }
+.tg-qr { display: inline-block; margin: 4px 0 8px; padding: 6px; border-radius: 12px; background: #fff; line-height: 0; }
+.tg-qr svg { display: block; width: 240px; max-width: 70vw; aspect-ratio: 1; height: auto; }
 .topic { padding: 12px 0; border-bottom: 1px solid var(--line); } .topic:last-child { border: 0; }
 .transcript { max-height: 560px; overflow-y: auto; font-size: 14px; color: var(--soft); } .transcript p { margin: 6px 0; } .transcript b { color: var(--text); }
 details summary { cursor: pointer; list-style: none; } details summary::-webkit-details-marker { display: none; }

@@ -24,9 +24,23 @@ class FakeBackend:
         self.alive = True
         self.connects = 0
         self.file_data = []
+        self.via, self.no_code = "", False  # where Telegram says the code went; no code at all for this account
+        self.qr, self.qr_starts = None, []  # the login by QR code in progress
 
     def login_start(self, api_id, api_hash, phone):
-        return {"session": "half", "phone": phone, "hash": "h"}
+        if self.no_code:
+            raise userbot.NoCodeError("Telegram не присылает код этому аккаунту: он требует сначала привязать почту для входа.")
+        return {"session": "half", "phone": phone, "hash": "h", **({"via": self.via} if self.via else {})}
+
+    def qr_start(self, api_id, api_hash):
+        self.qr_starts.append((api_id, api_hash))
+        self.qr = {"state": "wait", "url": f"tg://login?token=T{len(self.qr_starts)}", "session": "", "phone": "", "error": ""}
+
+    def qr_state(self):
+        return dict(self.qr) if self.qr else None
+
+    def qr_cancel(self):
+        self.qr = None
 
     def login_code(self, pending, code):
         if code != "12345":
@@ -277,6 +291,139 @@ def test_only_superusers_manage_the_account(client):
         other.post("/login", data={"username": "worker", "password": "correct-horse"})
         assert other.get("/settings/telegram").status_code == 403
         assert other.post("/settings/telegram/logout").status_code == 403
+        assert other.get("/settings/telegram/qr").status_code == 403
+        assert other.post("/settings/telegram/qr", data={"api_id": "1234567", "api_hash": "c" * 32}).status_code == 403
+
+
+def test_the_panel_says_where_the_code_went():
+    from telethon.tl import types
+    assert "«Telegram» с синей галочкой" in userbot.code_route(types.auth.SentCodeTypeApp(length=5))
+    assert userbot.code_route(types.auth.SentCodeTypeEmailCode(email_pattern="i***@mail.ru", length=6)) == \
+        "на почту для входа i***@mail.ru"
+    assert userbot.code_route(types.auth.SentCodeTypeSms(length=5)) == "по SMS"
+    assert "звонком" in userbot.code_route(types.auth.SentCodeTypeMissedCall(prefix="+375", length=4))
+    assert userbot.code_route(None) == "" and userbot.code_route(object()) == ""
+
+
+def test_no_code_then_the_qr_code_logs_in(client, monkeypatch):
+    """The code went to the login e-mail and never came: «Код не пришёл?» shows a QR code with the keys entered before,
+    the phone confirms the new device and the account is online."""
+    fake = FakeBackend()
+    fake.via = "на почту для входа i***@mail.ru"
+    monkeypatch.setattr(userbot, "backend", fake)
+    monkeypatch.setattr(userbot, "_state", {"me": None, "error": "", "connected": False})
+    page = client.post("/settings/telegram/start", data={"api_id": "1234567", "api_hash": "c" * 32,
+                                                         "phone": "+375291234567"}).text
+    assert "Номер +375291234567: код отправлен на почту для входа i***@mail.ru." in page
+    assert "Код не пришёл?" in page and 'action="/settings/telegram/qr"' in page
+    page = client.post("/settings/telegram/qr").text  # no keys typed again: those of the login in progress
+    assert fake.qr_starts == [("1234567", "c" * 32)] and userbot.pending_step() == "qr"
+    assert "Вход по QR-коду" in page and 'class="tg-qr-svg"' in page and "«Подключить устройство»" in page
+    first = client.get("/settings/telegram/qr").json()
+    assert first["state"] == "wait" and first["svg"].startswith("<svg") and first["v"]
+    fake.qr["url"] = "tg://login?token=renewed"  # Telegram renews the code every 30 seconds
+    assert client.get("/settings/telegram/qr").json()["v"] != first["v"]
+    fake.qr.update(state="ok", session="QR-SESSION", phone="375291112233")  # the phone scanned it
+    assert client.get("/settings/telegram/qr").json() == {"state": "ok", "msg": "Аккаунт подключён."}
+    assert fake.connected == ("1234567", "c" * 32, "QR-SESSION") and fake.qr is None and userbot.pending_step() is None
+    assert userbot.unseal(settings_store.get("userbot_session")) == "QR-SESSION"
+    assert settings_store.get("userbot_phone") == "+375291112233"
+    page = client.get("/settings/telegram").text
+    assert "Подключён" in page and "Алексей Помощник" in page
+    assert client.get("/settings/telegram/qr").json() == {"state": "gone"}
+
+
+def test_qr_code_with_the_two_step_password(monkeypatch):
+    fake = FakeBackend()
+    monkeypatch.setattr(userbot, "backend", fake)
+    monkeypatch.setattr(userbot, "_state", {"me": None, "error": "", "connected": False})
+    with pytest.raises(userbot.LoginError, match="api_id"):
+        userbot.qr_start("abc", "b" * 32)
+    with pytest.raises(userbot.LoginError, match="Вход не начат"):
+        userbot.qr_start()  # nothing in progress to take the keys from
+    userbot.qr_start("1234567", "b" * 32)
+    assert userbot.qr_poll()["state"] == "wait"
+    fake.qr.update(state="password", session="half-qr")
+    assert userbot.qr_poll() == {"state": "password"} and userbot.pending_step() == "password"
+    userbot.login_password("secret")
+    assert userbot.status()["connected"] and fake.connected == ("1234567", "b" * 32, "SESSION-STRING")
+    assert settings_store.get("userbot_phone") == "+375"  # the number comes from the account itself
+
+
+def test_an_expired_qr_code_is_shown_again(client, monkeypatch):
+    fake = FakeBackend()
+    monkeypatch.setattr(userbot, "backend", fake)
+    monkeypatch.setattr(userbot, "_state", {"me": None, "error": "", "connected": False})
+    assert "api_id это число" in client.post("/settings/telegram/qr", data={"api_id": "abc", "api_hash": "c" * 32}).text
+    page = client.post("/settings/telegram/qr", data={"api_id": "1234567", "api_hash": "c" * 32, "phone": ""}).text
+    assert 'class="tg-qr-svg"' in page  # straight from the first form, the number is not needed
+    fake.qr.update(state="expired")
+    assert client.get("/settings/telegram/qr").json()["state"] == "expired"
+    page = client.get("/settings/telegram").text
+    assert "QR-код устарел" in page and "Показать новый QR-код" in page and userbot.pending_step() == "qr"
+    fake.qr = None  # the service restarted while the code was on the screen
+    assert "Показать новый QR-код" in client.get("/settings/telegram").text
+    assert 'class="tg-qr-svg"' in client.post("/settings/telegram/qr").text
+    assert fake.qr_starts == [("1234567", "c" * 32)] * 2
+    assert "Войти в аккаунт" in client.post("/settings/telegram/logout").text and fake.qr is None
+
+
+def test_an_account_without_codes_goes_straight_to_the_qr_code(client, monkeypatch):
+    fake = FakeBackend()
+    fake.no_code = True
+    monkeypatch.setattr(userbot, "backend", fake)
+    monkeypatch.setattr(userbot, "_state", {"me": None, "error": "", "connected": False})
+    page = client.post("/settings/telegram/start", data={"api_id": "1234567", "api_hash": "c" * 32,
+                                                         "phone": "+375291234567"}).text
+    assert "требует сначала привязать почту" in page and "Войдите по QR-коду: код не нужен." in page
+    assert 'class="tg-qr-svg"' in page and fake.qr_starts == [("1234567", "c" * 32)]
+
+
+def test_the_qr_wait_renews_the_code_and_reports_the_result():
+    import asyncio
+    import types as pytypes
+    from telethon import errors
+
+    class Session:
+        def save(self):
+            return "S"
+
+    class Client:
+        def __init__(self):
+            self.session, self.disconnected = Session(), False
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    class QR:
+        def __init__(self, outcomes):
+            self.outcomes, self.url, self.renewed = list(outcomes), "tg://login?token=a", 0
+            self.expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=30)
+
+        async def wait(self, timeout=None):
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        async def recreate(self):
+            self.renewed += 1
+            self.url = f"tg://login?token=b{self.renewed}"
+
+    run = userbot.TelethonBackend._qr_wait
+    client, qr, state = Client(), QR([asyncio.TimeoutError(), pytypes.SimpleNamespace(phone="375291112233")]), {}
+    asyncio.run(run(client, qr, state, errors))
+    assert qr.renewed == 1 and state.pop("url") == "tg://login?token=b1"  # the renewed code is what the page shows
+    assert state == {"state": "ok", "session": "S", "phone": "375291112233"} and client.disconnected
+    client, state = Client(), {}
+    asyncio.run(run(client, QR([errors.SessionPasswordNeededError(request=None)]), state, errors))
+    assert state == {"state": "password", "session": "S"} and client.disconnected
+    state = {}
+    asyncio.run(run(Client(), QR([asyncio.TimeoutError()]), state, errors, minutes=0))
+    assert state == {"state": "expired"}
+    state = {}
+    asyncio.run(run(Client(), QR([RuntimeError("boom")]), state, errors))
+    assert state["state"] == "error" and "boom" in state["error"]
 
 
 # ----------------------------------------------------------------------------- minimal settings

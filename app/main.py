@@ -1,5 +1,6 @@
 """SYSAI web app: upload form, meetings, draft editing/approval, settings, employees, Telegram webhook."""
 import datetime as dt
+import hashlib
 import hmac
 import json
 import logging
@@ -3387,17 +3388,50 @@ def _tg_step(action, success: str):
         return _tg_redirect(f"Не удалось связаться с Telegram: {str(e)[:200]}")
 
 
+def _tg_qr() -> dict:
+    """The login by QR code as the panel shows it: the picture while it waits for the phone, otherwise what happened."""
+    try:
+        state = userbot.qr_poll()
+    except userbot.LoginError as e:
+        return {"state": "error", "msg": str(e)}
+    except Exception as e:  # noqa: BLE001
+        log.exception("telegram QR login failed")
+        return {"state": "error", "msg": f"Не удалось связаться с Telegram: {str(e)[:200]}"}
+    if state.get("url"):
+        url = state.pop("url")
+        state.update(svg=userbot.qr_picture(url), v=hashlib.sha256(url.encode()).hexdigest()[:12])
+    if state["state"] == "ok":
+        state["msg"] = "Аккаунт подключён."
+    return state
+
+
 @app.get("/settings/telegram", response_class=HTMLResponse)
 def telegram_account_view(request: Request, msg: str = ""):
     guard_admin(request)
-    return page(request, "telegram_account.html", account=userbot.status(), msg=msg)
+    qr = _tg_qr() if userbot.pending_step() == "qr" else {}  # first: a confirmed QR code finishes the login here
+    return page(request, "telegram_account.html", account=userbot.status(), msg=msg or qr.get("msg", ""), qr=qr)
 
 
 @app.post("/settings/telegram/start")
 def telegram_account_start(request: Request, api_id: str = Form(""), api_hash: str = Form(""), phone: str = Form("")):
     guard_admin(request)
-    return _tg_step(lambda: userbot.login_start(api_id, api_hash, phone),
-                    "Код отправлен в Telegram: он придёт сообщением от «Telegram» в приложении.")
+    return _tg_step(lambda: userbot.login_start(api_id, api_hash, phone), "Код отправлен.")
+
+
+@app.post("/settings/telegram/qr")
+def telegram_account_qr(request: Request, api_id: str = Form(""), api_hash: str = Form("")):
+    """Login by QR code: from the first form, or «Код не пришёл?» / «Показать новый QR-код» with the keys entered before."""
+    guard_admin(request)
+    return _tg_step(lambda: userbot.qr_start(api_id, api_hash), "")
+
+
+@app.get("/settings/telegram/qr")
+def telegram_account_qr_state(request: Request):
+    """Polled by the QR page every two seconds: a fresh picture while waiting, else where to go next."""
+    guard_admin(request)
+    state = _tg_qr()
+    return JSONResponse({k: v for k, v in state.items() if k in ("state", "svg", "v", "msg")},
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.post("/settings/telegram/code")
