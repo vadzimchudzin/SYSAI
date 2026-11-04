@@ -8,7 +8,7 @@
 {% set nav_open = (nav_cookie if nav_cookie else 'work').split('.') %}
 {% set on_work = path.startswith('/meetings') or path.startswith('/progress') or path.startswith('/calendar') or path.startswith('/reminders') or path == '/app/new' %}
 {% set on_company = path.startswith('/employees') or path.startswith('/departments') or path.startswith('/entities') or path.startswith('/documents') or path.startswith('/tables') %}
-{% set on_ai = path.startswith('/mail') or path.startswith('/skills') or path.startswith('/memory') %}
+{% set on_ai = path.startswith('/skills') or path.startswith('/memory') %}
 {% set on_net = path.startswith('/agents') or path.startswith('/hub') or path.startswith('/files') %}
 {% set on_admin = path.startswith('/admin') or path.startswith('/integrations') or path.startswith('/settings') %}
 {% macro nav(href, ic, label, on, tip='') %}<a class="nav{{ ' on' if on }}" href="{{ href }}" title="{{ tip or label }}"{% if on %} aria-current="page"{% endif %}>{{ icon(ic) }}<span class="nav-t">{{ label }}</span>{% if caller is defined %}{{ caller() }}{% endif %}</a>{% endmacro %}
@@ -40,7 +40,6 @@
       {{ nav('/tables', 'table', 'Таблицы', path.startswith('/tables')) }}
     {% endcall %}
     {% call group('ai', 'ИИ-сотрудник', on_ai, nav_open) %}
-      {% call nav('/mail', 'mail', 'Секретарь', path.startswith('/mail'), 'Почта компании: письма, кто чем занимается, ответы и все настройки') %}<i class="side-dot {{ 'on' if mail_on }}" title="{{ 'читает почту' if mail_on else 'почта не подключена или чтение выключено' }}"></i>{% endcall %}
       {{ nav('/skills', 'spark', 'Навыки', path.startswith('/skills'), 'Что ИИ-сотрудник делает сам в чатах') }}
       {{ nav('/memory', 'brain', 'Память', path.startswith('/memory')) }}
     {% endcall %}
@@ -62,6 +61,10 @@
     {% endif %}
     </nav>
     <div class="sp"></div>
+    {# the secretary is pinned at the bottom, above the account: always at hand, not inside a group #}
+    {% if boss %}
+    <a class="nav side-agent{{ ' on' if path.startswith('/mail') }}" href="/mail" title="Секретарь: почта компании, письма, кто чем занимается, ответы и все настройки"{% if path.startswith('/mail') %} aria-current="page"{% endif %}>{{ icon('mail') }}<span class="side-agent-t">Секретарь<small>почта компании</small></span><i class="side-dot {{ 'on' if mail_on }}" title="{{ 'читает почту' if mail_on else 'почта не подключена или чтение выключено' }}"></i></a>
+    {% endif %}
     <div class="me"><span class="ava" title="{{ request.session.get('user') or 'SYSAI' }}">{{ (request.session.get('user') or 'S')[:2]|upper }}</span><span class="me-name">{{ request.session.get('user') or 'SYSAI' }}</span>
       <button type="button" class="side-fold" data-side-mini title="Свернуть или развернуть меню" aria-label="Свернуть или развернуть меню">{{ icon('rail') }}</button>
       <a href="/logout" class="muted side-out" title="Выйти">{{ icon('logout') }}</a></div>

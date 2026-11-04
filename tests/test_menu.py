@@ -26,6 +26,17 @@ def test_groups_fold_and_the_choice_is_remembered(client):
     assert "/static/sidebar.js" in client.get("/app").text
 
 
+def test_the_secretary_is_pinned_at_the_bottom(client):
+    """«Секретарь» is not inside a group: it stays at the bottom above the account, always at hand, even in the rail."""
+    for url in ("/app", "/settings", "/mail"):
+        html = client.get(url).text
+        menu = html.split('<div class="sp"></div>')
+        assert len(menu) == 2 and 'href="/mail"' not in menu[0]  # not in the groups above
+        assert 'class="nav side-agent' in menu[1].split('<div class="me">')[0] and "Секретарь" in menu[1]
+    assert 'class="nav side-agent on"' in client.get("/mail").text
+    assert "ai" not in _opened(client.get("/mail").text)  # the open mail does not unfold «ИИ-сотрудник»
+
+
 def test_the_network_group_and_what_an_employee_sees(client, net_on):
     html = client.get("/files").text
     assert "net" in _opened(html) and 'href="/hub"' in html and 'href="/agents/access"' in html
