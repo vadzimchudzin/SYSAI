@@ -1,26 +1,26 @@
-{% from "_logo.html" import logo %}<!doctype html>
-<html lang="ru"><head>{% include "_head.html" %}<link rel="stylesheet" href="{{ asset('landing.css') }}"><title>SYSAI: протоколы совещаний и задачи</title>
+{% set lean_fonts = true %}{% from "_wordmark.html" import wordmark %}<!doctype html>
+<html lang="ru"><head>{% include "_head.html" %}
+<link rel="preload" href="/static/fonts/geist-cyr.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/geist-lat.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{{ asset('landing.css') }}">
+<script>document.documentElement.classList.add('js')</script>
+<title>SYSAI: протоколы совещаний и задачи</title>
 <meta name="description" content="SYSAI превращает запись совещания в протокол, задачи и рассылку: ИИ-агенты, Telegram, Битрикс24, руководителю на проверку."></head>
-<body><div class="aura" aria-hidden="true"><i></i><i></i><i></i></div>
+<body class="l-body">
 {% include "_landing_sprite.html" %}
 <div class="landing">
+  <div class="l-bg" id="l-bg" aria-hidden="true"><i class="l-bg-d"></i><i class="l-bg-i"></i></div>
   <header class="l-top">
-    <a href="/">{{ logo('md') }}</a>
-    <nav><a href="#how" class="hide-m">Как это работает</a>
-      {% if authed %}<a class="btn sm primary" href="/app">Открыть кабинет</a>{% else %}<a class="btn sm" href="/login">Войти</a>{% endif %}</nav>
+    <a class="l-logo" href="/" aria-label="SYSAI">{{ wordmark("lw") }}</a>
+    <nav><a href="#how" class="l-link hide-m">Как это работает</a>
+      {% if authed %}<a class="l-btn sm pri" href="/app">Открыть кабинет</a>{% else %}<a class="l-btn sm" href="/login">Войти</a>{% endif %}</nav>
   </header>
 
-  <section class="hero">
-    <div class="notes">
-      <a class="note-pill" href="#how"><b>Новое:</b> ИИ-агенты сами уточняют сроки в Telegram и ставят задачи в Битрикс24 <span class="tag">агенты</span></a>
-    </div>
+  <main class="l-hero">
+    <a class="l-news" href="#how"><span class="l-news-tag">Новое</span><span>ИИ-агенты сами уточняют сроки<span class="hide-s"> в&nbsp;Telegram</span> и&nbsp;ставят задачи в&nbsp;Битрикс24</span><svg class="lx-i" aria-hidden="true"><use href="#i-arrow"/></svg></a>
 
     <div class="wm-wrap">
-      <div class="wm" aria-label="SYSAI">
-        <span class="s"><i style="animation-delay:.25s">S</i></span><span class="s"><i style="animation-delay:.33s">Y</i></span><span class="s"><i style="animation-delay:.41s">S</i></span>
-        <span class="sp"></span>
-        <span class="a"><i style="animation-delay:.52s">A</i></span><span class="a"><i style="animation-delay:.6s">I</i></span>
-      </div>
+      <div class="wm">{% include "_wordmark_hero.html" %}</div>
       <div class="vx" id="vx" aria-label="Запись совещания: говорят директор и Иван">
         <div class="vx-lane vx-top" aria-hidden="true"></div>
         <canvas class="vx-cv" aria-hidden="true"></canvas>
@@ -29,113 +29,163 @@
       </div>
     </div>
 
-    <h1>Каждое совещание в&nbsp;<em>протокол</em>,<br>задачи и сроки</h1>
-    <p class="lead">Загрузите запись или включите микрофон. SYSAI расшифрует разговор по голосам, соберёт решения, назначит задачи и разошлёт их нужным людям.</p>
-    <div class="chips-row">
-      <span class="chip-lg"><i></i>Расшифровка по голосам</span><span class="chip-lg"><i></i>Протокол и решения</span>
-      <span class="chip-lg"><i></i>Задачи с исполнителями</span><span class="chip-lg"><i class="b"></i>ИИ-ассистент в Telegram</span>
-      <span class="chip-lg"><i class="b"></i>Битрикс24</span><span class="chip-lg"><i class="b"></i>Календарь и напоминания</span>
-      <span class="chip-lg"><i></i>PDF и DOCX по шаблону</span>
+    <h1 class="l-h1">Каждое совещание —<br>в&nbsp;<em>протокол</em>, задачи и&nbsp;сроки</h1>
+    <p class="l-lead">Загрузите запись или включите микрофон. SYSAI расшифрует разговор по голосам, соберёт решения, назначит задачи и&nbsp;разошлёт их нужным людям.</p>
+    <div class="l-cta">
+      {% if authed %}<a class="l-btn lg pri" href="/app">Открыть кабинет<svg class="lx-i" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      {% else %}<a class="l-btn lg pri" href="/register">Оставить заявку<svg class="lx-i" aria-hidden="true"><use href="#i-arrow"/></svg></a><a class="l-btn lg" href="/login">Войти в кабинет</a>{% endif %}
     </div>
-    <div class="cta">
-      {% if authed %}<a class="btn primary btn-hero" href="/app">Открыть кабинет</a>
-      {% else %}<div class="cta-row"><a class="btn primary btn-hero" href="/register">Оставить заявку</a><a class="btn btn-hero ghost" href="/login">Войти в кабинет</a></div>
-      <span class="small muted">Доступ по заявке — её одобряет администратор</span>{% endif %}
-    </div>
+    {% if not authed %}<p class="l-note">Доступ по заявке — её одобряет администратор</p>{% endif %}
+    <ul class="l-feats" aria-label="Что умеет SYSAI">
+      <li>Расшифровка по голосам</li><li>Протокол и решения</li><li>Задачи с исполнителями</li><li>PDF и DOCX по шаблону</li>
+      <li class="b">ИИ-ассистент в Telegram</li><li class="b">Битрикс24</li><li class="b">Календарь и напоминания</li>
+    </ul>
+  </main>
 
-    <div class="flow" id="how">
-      <div class="flow-h"><h4>Как запись становится задачами</h4><span id="lx-clock">4 агента · 5 моделей · Hermes</span></div>
-      <div class="lx" id="lx">
-        <div class="lx-glow" aria-hidden="true"><i></i><i></i><i></i></div>
-        <svg class="lx-svg" id="lx-svg" aria-hidden="true"></svg>
+  <section class="l-how" id="how">
+    <div class="l-sh lx-rv"><p class="l-kick">4 агента · 18 шагов · 5 моделей · Hermes</p><h2>Как запись становится задачами</h2></div>
+    <div class="lx" id="lx">
+      <svg class="lx-svg" id="lx-svg" aria-hidden="true"></svg>
 
-        <div class="lx-in">
-          <div class="lx-cap">Источники</div>
-          <div class="lx-src" data-k="mic"><span class="lx-ic"><svg class="lx-i"><use href="#i-mic"/></svg></span><span class="lx-src-t"><b>Микрофон</b><small>запись в браузере</small></span></div>
-          <div class="lx-src" data-k="tic"><span class="lx-ic"><svg class="lx-i"><use href="#i-rec"/></svg></span><span class="lx-src-t"><b>TicNote</b><small>диктофон и импорт</small></span></div>
-          <div class="lx-src" data-k="tg"><span class="lx-ic tg"><svg class="lx-lg"><use href="#lg-telegram"/></svg></span><span class="lx-src-t"><b>Telegram</b><small>голосовые и файлы</small></span></div>
-          <div class="lx-src" data-k="mail"><span class="lx-ic"><svg class="lx-i"><use href="#i-mail"/></svg></span><span class="lx-src-t"><b>Почта</b><small>письмо с записью</small></span></div>
-          <div class="lx-src" data-k="drive"><span class="lx-ic"><svg class="lx-lg"><use href="#lg-gdrive"/></svg></span><span class="lx-src-t"><b>Google Drive</b><small>папка «Входящие»</small></span></div>
+      <ul class="lx-srcs lx-rv" aria-label="Откуда приходит запись">
+        <li class="lx-src"><b>Кабинет</b><small>файл до 500 МБ</small></li>
+        <li class="lx-src"><b>Микрофон</b><small>в браузере</small></li>
+        <li class="lx-src"><b>TicNote</b><small>диктофон</small></li>
+        <li class="lx-src"><b>Telegram</b><small>голосовые и файлы</small></li>
+        <li class="lx-src"><b>Почта</b><small>письмо с записью</small></li>
+        <li class="lx-src"><b><span class="hide-s">Google </span>Drive</b><small>папка «Входящие»</small></li>
+      </ul>
+
+      <div class="lx-rec lx-rv" id="lx-rec">
+        <div class="lx-rec-h"><b>Запись совещания</b><span>45:12</span></div>
+        <canvas class="lx-wave" id="lx-wave" aria-hidden="true"></canvas>
+        <div class="lx-rec-f"><span>планёрка_пн.m4a</span><em class="lx-st" data-s="run"><i></i><b>запись</b></em></div>
+      </div>
+
+      <ol class="lx-prep" id="lx-prep" aria-label="Подготовка звука">
+        <li>моно 16 кГц</li><li>нарезка по 45–90 с</li><li>детектор речи · Silero</li>
+      </ol>
+
+      <div class="lx-models lx-rv" id="lx-models">
+        <p class="lx-cap">Модели<span>через OpenRouter</span></p>
+        <ul>
+          <li class="lx-m" data-m="eleven"><b>Scribe</b><small>расшифровка</small><i class="lx-sq"></i></li>
+          <li class="lx-m" data-m="gemini"><b>Gemini</b><small>сверка и протокол</small><i class="lx-sq"></i></li>
+          <li class="lx-m" data-m="mistral"><b>Mistral</b><small>запасной движок</small><i class="lx-sq"></i></li>
+          <li class="lx-m" data-m="claude"><b>Claude</b><small>протокол, ассистент</small><i class="lx-sq"></i></li>
+          <li class="lx-m" data-m="openai"><b>OpenAI</b><small>ассистент, поиск</small><i class="lx-sq"></i></li>
+        </ul>
+      </div>
+
+      <div class="lx-core lx-rv" id="lx-core">
+        <div class="lx-core-h"><span class="lx-core-wm">{{ wordmark("lc") }}</span><span class="lx-core-t">ИИ-агенты</span><span class="lx-stage" id="lx-stage"><i></i><b>ждёт запись</b></span></div>
+        <p class="lx-mrow" aria-hidden="true"><span data-m="eleven"><i class="lx-sq"></i>Scribe</span><span data-m="gemini"><i class="lx-sq"></i>Gemini</span><span data-m="mistral"><i class="lx-sq"></i>Mistral</span><span data-m="claude"><i class="lx-sq"></i>Claude</span><span data-m="openai"><i class="lx-sq"></i>OpenAI</span></p>
+        <div class="lx-ag" data-a="ear" style="--tone:var(--lx-blue)">
+          <div class="lx-ah"><i class="lx-sq"></i><b>Слух</b><small>речь в текст</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+          <ol class="lx-ss">
+            <li data-k="asr" data-uses="eleven gemini mistral"><span>две расшифровки</span><small>Scribe и Gemini</small></li>
+            <li data-k="cmp"><span>сверка движков</span><small>слово к слову</small></li>
+            <li data-k="judge" data-uses="gemini"><span>проверка по звуку</span><small>спорные слова</small></li>
+            <li data-k="terms" data-mem="gloss nick people"><span>имена и термины</span><small>винсунаба → ВентСнаб</small></li>
+          </ol>
         </div>
-
-        <div class="lx-card lx-rec" id="lx-rec">
-          <div class="lx-rec-h"><span>Запись совещания</span><span class="lx-dur">45:12</span></div>
-          <div class="lx-bars" id="lx-bars" aria-hidden="true"></div>
-          <div class="lx-rec-f"><span>планёрка_пн.m4a</span><em class="lx-st" data-s="run"><i></i><b>запись</b></em></div>
+        <div class="lx-ag" data-a="who" style="--tone:var(--lx-violet)">
+          <div class="lx-ah"><i class="lx-sq"></i><b>Кто говорит</b><small>голоса по памяти</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+          <ol class="lx-ss">
+            <li data-k="marks" data-uses="gemini"><span>метки голосов</span><small>по частям</small></li>
+            <li data-k="glue"><span>склейка частей</span><small>по всей записи</small></li>
+            <li data-k="print" data-mem="voices"><span>отпечаток голоса</span><small>ECAPA · 192 числа</small></li>
+            <li data-k="names" data-mem="people"><span>имена спикеров</span><small>из справочника</small></li>
+          </ol>
         </div>
-
-        <div class="lx-mid">
-          <div class="lx-core" id="lx-core">
-            <div class="lx-core-h"><span class="lx-wm">SYS<b>AI</b></span><span class="lx-core-t">ИИ-агенты</span><span class="lx-stage" id="lx-stage"><i></i><b>ждёт запись</b></span></div>
-            <div class="lx-models" id="lx-models">
-              <span class="lx-mcap">Модели</span>
-              <span class="lx-via" title="Модели подключены через OpenRouter: для каждой задачи своя"><svg class="lx-lg"><use href="#lg-openrouter"/></svg>OpenRouter</span>
-              <span class="lx-m" data-m="eleven" title="ElevenLabs Scribe v2 — распознавание речи"><span class="lx-mi"><svg class="lx-lg"><use href="#lg-eleven"/></svg></span><span class="lx-mt"><b>Scribe</b><small>распознавание речи</small></span></span>
-              <span class="lx-m" data-m="mistral" title="Mistral Voxtral — запасной движок речи"><span class="lx-mi"><svg class="lx-lg"><use href="#lg-mistral"/></svg></span><span class="lx-mt"><b>Mistral</b><small>запасной движок</small></span></span>
-              <span class="lx-m" data-m="gemini" title="Google Gemini — второй движок, голоса, протокол"><span class="lx-mi"><svg class="lx-lg"><use href="#lg-gemini"/></svg></span><span class="lx-mt"><b>Gemini</b><small>второй движок, голоса</small></span></span>
-              <span class="lx-m" data-m="claude" title="Anthropic Claude — протокол и ассистент"><span class="lx-mi"><svg class="lx-lg"><use href="#lg-claude"/></svg></span><span class="lx-mt"><b>Claude</b><small>протокол, ассистент</small></span></span>
-              <span class="lx-m" data-m="openai" title="OpenAI — ассистент и поиск по памяти"><span class="lx-mi"><svg class="lx-lg"><use href="#lg-openai"/></svg></span><span class="lx-mt"><b>OpenAI</b><small>ассистент, поиск</small></span></span>
-            </div>
-            <div class="lx-agents">
-              <div class="lx-ag" data-a="ear" data-uses="eleven gemini mistral" style="--tone:var(--lx-blue)"><span class="lx-ag-ic"><svg class="lx-i"><use href="#i-ear"/></svg></span><b>Слух</b><small>Речь в текст: два движка сверяют друг друга</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-              <div class="lx-ag" data-a="who" data-uses="gemini" style="--tone:var(--lx-violet)"><span class="lx-ag-ic"><svg class="lx-i"><use href="#i-voice"/></svg></span><b>Кто говорит</b><small>Узнаёт голоса сотрудников по памяти</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-              <div class="lx-ag" data-a="sec" data-uses="gemini claude" style="--tone:var(--lx-coral)"><span class="lx-ag-ic"><svg class="lx-i"><use href="#i-pen"/></svg></span><b>Секретарь</b><small>Протокол, решения, задачи и сроки</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-              <div class="lx-ag" data-a="ast" data-uses="claude openai gemini" style="--tone:var(--lx-amber)"><span class="lx-ag-ic"><svg class="lx-i"><use href="#i-spark"/></svg></span><b>Ассистент</b><small>Рассылает, уточняет сроки, напоминает</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-            </div>
-            <div class="lx-mem" id="lx-mem"><span class="lx-ag-ic"><svg class="lx-i"><use href="#i-brain"/></svg></span><span class="lx-mem-t"><b>Память компании</b><small>люди · отделы · голоса · факты — растёт с каждой встречей</small></span></div>
-          </div>
-
-          <div class="lx-herm" id="lx-herm" data-tone="v">
-            <div class="lx-cap">Сеть агентов</div>
-            <div class="lx-card lx-hcard">
-              <div class="lx-hh"><span class="lx-ic h"><svg class="lx-lg"><use href="#lg-nous"/></svg></span><span class="lx-t"><b>Hermes Agent</b><small>свой агент у каждого на ПК</small></span><em class="lx-st" data-s="ok"><i></i><b>на связи</b></em></div>
-              <div class="lx-hrows">
-                <div class="lx-hrow" data-k="ivan"><span class="lx-hn">Агент Ивана</span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-                <div class="lx-hrow" data-k="maria"><span class="lx-hn">Агент Марии</span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-              </div>
-              <div class="lx-hf">навыки SYSAI_Hub · доступы и нейронки через SYSAI</div>
-            </div>
-          </div>
+        <div class="lx-ag" data-a="sec" style="--tone:var(--lx-coral)">
+          <div class="lx-ah"><i class="lx-sq"></i><b>Секретарь</b><small>протокол и задачи</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+          <ol class="lx-ss">
+            <li data-k="parts" data-uses="gemini claude"><span>анализ частями</span><small>длинные записи</small></li>
+            <li data-k="tasks" data-mem="tasks clients"><span>решения, задачи, риски</span><small>с исполнителями</small></li>
+            <li data-k="quotes" data-uses="claude"><span>проверка цитат</span><small>по словам записи</small></li>
+            <li data-k="dates"><span>сроки</span><small>в рабочих днях</small></li>
+            <li data-k="docx"><span>шаблон DOCX и PDF</span><small>как в Word</small></li>
+          </ol>
         </div>
+        <div class="lx-ag" data-a="ast" style="--tone:var(--lx-amber)">
+          <div class="lx-ah"><i class="lx-sq"></i><b>Ассистент</b><small>доводит до конца</small><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+          <ol class="lx-ss">
+            <li data-k="ask" data-uses="claude" data-mem="dialogs"><span>уточнит срок</span><small>«к какому дню?»</small></li>
+            <li data-k="remind"><span>напомнит</span><small>чт, 10:00</small></li>
+            <li data-k="self" data-uses="openai" data-mem="docs clients"><span>сделает сам</span><small>лёгкие поручения</small></li>
+            <li data-k="pc" data-uses="openai"><span>поручит агенту</span><small>Hermes на ПК</small></li>
+            <li data-k="digest"><span>утренняя сводка</span><small>каждый день</small></li>
+          </ol>
+        </div>
+      </div>
 
-        <div class="lx-col lx-out">
-          <div class="lx-cap">Куда уходит</div>
-          <div class="lx-br" data-k="boss" data-tone="b">
-            <div class="lx-card lx-node"><span class="lx-ic b">PDF</span><span class="lx-t"><b>Руководителю</b><small>Протокол на проверку · 4 стр.</small></span><em class="lx-st" data-s="wait"><i></i><b>готовится</b></em></div>
-            <div class="lx-subs"><div class="lx-sub" data-k="dec"><span class="lx-chip">Решения <b>4</b></span></div><div class="lx-sub" data-k="tasks"><span class="lx-chip">Задачи <b>16</b></span></div><div class="lx-sub" data-k="risk"><span class="lx-chip">Риски <b>2</b></span></div></div>
-          </div>
-          <div class="lx-br" data-k="ivan" data-tone="r">
-            <div class="lx-card lx-node"><span class="lx-ic tg"><svg class="lx-lg"><use href="#lg-telegram"/></svg></span><span class="lx-t"><b>Иван Петров</b><small>Исправить ошибки оплаты · пт</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-            <div class="lx-subs"><div class="lx-sub" data-k="remind"><span class="lx-mini"><svg class="lx-i"><use href="#i-bell"/></svg>Напомню в чт, 10:00</span></div></div>
-          </div>
-          <div class="lx-br" data-k="maria" data-tone="r">
-            <div class="lx-card lx-node"><span class="lx-ic tg"><svg class="lx-lg"><use href="#lg-telegram"/></svg></span><span class="lx-t"><b>Мария Смирнова</b><small>Креативы для рассылки · срок?</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-            <div class="lx-subs col"><div class="lx-sub" data-k="ask"><span class="lx-bubble"><b>SYSAI:</b> к какому дню успеете?</span></div><div class="lx-sub" data-k="reply"><span class="lx-bubble me"><b>Мария:</b> к пятнице</span></div></div>
-          </div>
-          <div class="lx-br" data-k="b24" data-tone="b">
-            <div class="lx-card lx-node"><span class="lx-ic b">Б24</span><span class="lx-t"><b>Битрикс24</b><small>3 задачи в проекте «Продажи»</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-          </div>
-          <div class="lx-br" data-k="chat" data-tone="r">
-            <div class="lx-card lx-node"><span class="lx-ic"><svg class="lx-i"><use href="#i-chat"/></svg></span><span class="lx-t"><b>Чат отдела</b><small>Итоги планёрки и решения</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-          </div>
-          <div class="lx-br" data-k="cal" data-tone="b">
-            <div class="lx-card lx-node"><span class="lx-ic"><svg class="lx-i"><use href="#i-cal"/></svg></span><span class="lx-t"><b>Календарь</b><small>Сроки задач у каждого</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-          </div>
-          <div class="lx-br" data-k="drive" data-tone="b">
-            <div class="lx-card lx-node"><span class="lx-ic"><svg class="lx-lg"><use href="#lg-gdrive"/></svg></span><span class="lx-t"><b>Google Drive</b><small>Протокол.docx по шаблону</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
-          </div>
+      <div class="lx-side">
+        <div class="lx-mem lx-rv" id="lx-mem">
+          <p class="lx-cap">Память компании</p>
+          <ul>
+            <li data-k="people"><i class="lx-sq"></i><b>Люди и отделы</b><small>справочник</small></li>
+            <li data-k="nick"><i class="lx-sq"></i><b>Клички</b><small>Ваня = Иван</small></li>
+            <li data-k="gloss"><i class="lx-sq"></i><b>Глоссарий</b><small>термины компании</small></li>
+            <li data-k="voices"><i class="lx-sq"></i><b>Образцы голосов</b><small>с согласия</small></li>
+            <li data-k="tasks"><i class="lx-sq"></i><b>Открытые задачи</b><small>без дублей</small></li>
+            <li data-k="clients"><i class="lx-sq"></i><b>Клиенты и объекты</b><small>карточки</small></li>
+            <li data-k="docs"><i class="lx-sq"></i><b>Документы</b><small>договоры, акты</small></li>
+            <li data-k="dialogs"><i class="lx-sq"></i><b>Диалоги</b><small>память переписки</small></li>
+          </ul>
+          <p class="lx-note">растёт с каждой встречей</p>
+        </div>
+        <div class="lx-herm lx-rv" id="lx-herm">
+          <p class="lx-cap">Hermes Agent<span>свой агент на ПК</span></p>
+          <ul>
+            <li class="lx-hrow" data-k="ivan"><i class="lx-sq"></i><b>Агент Ивана</b><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></li>
+            <li class="lx-hrow" data-k="maria"><i class="lx-sq"></i><b>Агент Марии</b><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="lx-out" data-side="l">
+        <p class="lx-cap lx-rv">Людям</p>
+        <div class="lx-br lx-rv" data-k="boss" data-tone="b" data-from="docx tasks quotes">
+          <div class="lx-node"><i class="lx-sq"></i><span class="lx-t"><b>Руководителю</b><small>протокол на проверку · PDF, 4 стр.</small></span><em class="lx-st" data-s="wait"><i></i><b>готовится</b></em></div>
+          <div class="lx-subs"><span class="lx-sub" data-k="dec">Решения <b>4</b></span><span class="lx-sub" data-k="tasks">Задачи <b>16</b></span><span class="lx-sub" data-k="risk">Риски <b>2</b></span></div>
+        </div>
+        <div class="lx-br lx-rv" data-k="ivan" data-tone="r" data-from="tasks remind">
+          <div class="lx-node"><i class="lx-sq"></i><span class="lx-t"><b>Иван Петров</b><small>Telegram · исправить ошибки оплаты · пт</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+          <div class="lx-subs"><span class="lx-sub" data-k="remind">напомню в чт, 10:00</span></div>
+        </div>
+        <div class="lx-br lx-rv" data-k="maria" data-tone="r" data-from="tasks ask">
+          <div class="lx-node"><i class="lx-sq"></i><span class="lx-t"><b>Мария Смирнова</b><small>Telegram · креативы для рассылки · срок?</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+          <div class="lx-subs col"><span class="lx-sub bub" data-k="ask"><b>SYSAI</b>к какому дню успеете?</span><span class="lx-sub bub me" data-k="reply"><b>Мария</b>к пятнице</span></div>
+        </div>
+      </div>
+
+      <div class="lx-out" data-side="r">
+        <p class="lx-cap lx-rv">В системы</p>
+        <div class="lx-br lx-rv" data-k="b24" data-tone="b" data-from="tasks dates ask">
+          <div class="lx-node"><i class="lx-sq"></i><span class="lx-t"><b>Битрикс24</b><small>3 задачи в проекте «Продажи»</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+        </div>
+        <div class="lx-br lx-rv" data-k="chat" data-tone="r" data-from="tasks">
+          <div class="lx-node"><i class="lx-sq"></i><span class="lx-t"><b>Чат отдела</b><small>итоги планёрки и решения</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+        </div>
+        <div class="lx-br lx-rv" data-k="cal" data-tone="b" data-from="dates remind">
+          <div class="lx-node"><i class="lx-sq"></i><span class="lx-t"><b>Календарь</b><small>сроки задач у каждого</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
+        </div>
+        <div class="lx-br lx-rv" data-k="drive" data-tone="b" data-from="docx">
+          <div class="lx-node"><i class="lx-sq"></i><span class="lx-t"><b>Google Drive</b><small>Протокол.docx по шаблону</small></span><em class="lx-st" data-s="wait"><i></i><b>ждёт</b></em></div>
         </div>
       </div>
     </div>
+  </section>
 
-    <div class="steps lx-steps" id="lx-steps">
-      <div class="step"><div class="n">01</div><h3>Запись</h3><p>Файл через кабинет, микрофон в браузере, TicNote или голосовое в Telegram.</p>
-        <ul class="tree"><li>Файл до 500 МБ</li><li>Микрофон</li><li>TicNote</li><li>Telegram и почта</li></ul></div>
-      <div class="step"><div class="n">02</div><h3>Протокол</h3><p>Агенты расшифруют по голосам, сверят движки и соберут протокол.</p>
-        <ul class="tree"><li>Резюме</li><li>Решения и задачи</li><li>Риски и сроки</li><li>PDF и DOCX</li></ul></div>
-      <div class="step"><div class="n">03</div><h3>Рассылка</h3><p>Каждый получает своё. Ассистент сам уточняет сроки и напоминает.</p>
-        <ul class="tree"><li>Telegram лично</li><li>Битрикс24</li><li>Календарь</li><li>Напоминания</li></ul></div>
-    </div>
+  <section class="l-steps" id="lx-steps">
+    <div class="l-steps-line" aria-hidden="true"><i></i></div>
+    <div class="l-step lx-rv"><span class="l-step-n">01</span><h3>Запись</h3><p>Файл в кабинете, микрофон в браузере, TicNote или голосовое в Telegram.</p>
+      <ul><li>Файл до 500 МБ</li><li>Микрофон</li><li>TicNote</li><li>Telegram и почта</li></ul></div>
+    <div class="l-step lx-rv"><span class="l-step-n">02</span><h3>Протокол</h3><p>Агенты расшифруют по голосам, сверят движки и соберут протокол.</p>
+      <ul><li>Резюме</li><li>Решения и задачи</li><li>Риски и сроки</li><li>PDF и DOCX</li></ul></div>
+    <div class="l-step lx-rv"><span class="l-step-n">03</span><h3>Рассылка</h3><p>Каждый получает своё. Ассистент сам уточняет сроки и&nbsp;напоминает.</p>
+      <ul><li>Telegram лично</li><li>Битрикс24</li><li>Календарь</li><li>Напоминания</li></ul></div>
   </section>
   {% include "_legal_footer.html" %}
 </div>
