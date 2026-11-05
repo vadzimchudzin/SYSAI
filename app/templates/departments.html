@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block title %}Подразделения — SYSAI{% endblock %}
 {% macro initials(name) %}{% set parts = (name or '').replace('-', ' ').split() %}{% if not parts %}С{% elif parts|length == 1 %}{{ parts[0][:2]|upper }}{% else %}{{ (parts[0][:1] ~ parts[1][:1])|upper }}{% endif %}{% endmacro %}
+{% macro plural(n, one, few, many) %}{{ one if n % 10 == 1 and n % 100 != 11 else (few if n % 10 in [2,3,4] and n % 100 not in [12,13,14] else many) }}{% endmacro %}
 {% macro form(d) %}
 <form method="post" action="/departments" class="department-form">
   <input type="hidden" name="id" value="{{ d.id if d else 0 }}">
@@ -91,13 +92,14 @@
 <a class="org-map-node org-map-person-node{% if member.access_level == 'reviewer' %} is-reviewer{% endif %}{% if member.is_director %} is-director{% endif %}"
    data-map-node data-node-kind="employee" data-node-key="employee:{{ member.id }}"
    data-employee-id="{{ member.id }}"{% if member.manager_summary %} data-head="1"{% endif %}{% if not member.department_ids %} data-unassigned="1"{% endif %} draggable="false"
-   style="left:{{ member.map_x }}px;top:{{ member.map_y }}px"
-   href="/employees?edit={{ member.id }}" title="{{ member.name }}{% if member.role_summary %} · {{ member.role_summary }}{% endif %}">
+   href="/employees?edit={{ member.id }}" title="{{ member.name }}{% if member.position %} — {{ member.position }}{% endif %}{% if member.role_summary %} · {{ member.role_summary }}{% endif %}">
   <span class="org-map-person-avatar" aria-hidden="true">{{ initials(member.name) }}</span>
   <span class="org-map-person-copy">
     <strong>{{ member.name }}</strong>
     <small>{{ member.position or 'Должность не указана' }}</small>
-    {% if member.manager_summary %}<small class="org-map-manager-summary">Руководит: {{ member.manager_summary }}</small>{% elif member.department_summary %}<small class="org-map-role">{{ member.department_summary }}</small>{% else %}<small class="org-map-role is-free">Без подразделения</small>{% endif %}
+    {% if member.line_label %}<small class="org-map-line-label">{{ member.line_label }}</small>{% endif %}
+    {% if member.manager_summary %}<small class="org-map-manager-summary">Руководит: {{ member.manager_summary }}</small>{% endif %}
+    {% if member.also_summary %}<small class="org-map-role">Также: {{ member.also_summary }}</small>{% endif %}
     {% if member.access_level == 'reviewer' %}<small class="org-map-reviewer-label">ПРОВЕРЯЮЩИЙ</small>{% endif %}
   </span>
   {% if member.is_director %}<span class="director-crown" title="Директор" aria-label="Директор"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.2 8.2 7.6 12 12 4.8l4.4 7.2 4.4-3.8-1.9 10.3H5.1Z"/><path d="M5.4 20.6h13.2"/></svg></span>{% elif member.manager_summary %}<span class="org-head-badge" title="Руководитель подразделения" aria-label="Руководитель">★</span>{% endif %}
@@ -139,9 +141,9 @@
         <h2>{{ company_title }} <em>— карта команды</em></h2>
       </div>
       <ul class="org-studio-stats" aria-label="Сводка">
-        <li><b>{{ map_departments|length }}</b><span>подразделений</span></li>
-        <li><b>{{ map_employees|length }}</b><span>сотрудников</span></li>
-        <li><b>{{ head_total }}</b><span>руководителей</span></li>
+        <li><b>{{ map_departments|length }}</b><span>{{ plural(map_departments|length, 'подразделение', 'подразделения', 'подразделений') }}</span></li>
+        <li><b>{{ map_employees|length }}</b><span>{{ plural(map_employees|length, 'сотрудник', 'сотрудника', 'сотрудников') }}</span></li>
+        <li><b>{{ head_total }}</b><span>{{ plural(head_total, 'руководитель', 'руководителя', 'руководителей') }}</span></li>
         <li class="{{ 'is-warn' if map_unassigned else '' }}"><b>{{ map_unassigned|length }}</b><span>без отдела</span></li>
       </ul>
       <nav class="org-map-top-actions" aria-label="Инструменты конструктора">
@@ -165,30 +167,31 @@
   {% else %}
   <div class="org-map-stage" id="org-map-stage">
     <div class="org-map-scroll" id="org-map-scroll" tabindex="0" aria-label="Карта структуры: колесо — масштаб, перетаскивание пустого места — перемещение">
-      <div class="org-map-canvas org-map-grid" id="org-map-canvas" style="width:{{ map_board_width }}px;height:{{ map_board_height }}px">
+      <div class="org-map-canvas org-map-grid" id="org-map-canvas">
         <svg class="org-map-lines" aria-hidden="true"></svg>
-        <div class="org-map-root" data-map-node data-node-kind="company" data-node-key="company:1" data-drop-root style="left:{{ map_root_x }}px;top:{{ map_root_y }}px">
-          <span class="org-map-root-halo" aria-hidden="true"></span>
+        <div class="org-map-root" data-map-node data-node-kind="company" data-node-key="company:1" data-drop-root>
           <i class="org-studio-tile is-root" aria-hidden="true"></i>
-          <span class="org-map-root-kicker">Компания</span>
-          <strong>{{ company_title }}</strong>
-          <span class="org-map-root-stats"><span><b>{{ map_departments|length }}</b> отделов</span><span><b>{{ map_employees|length }}</b> человек</span></span>
+          <span class="org-map-root-copy"><span class="org-map-root-kicker">Компания</span><strong>{{ company_title }}</strong></span>
+          <span class="org-map-root-stats"><span><b>{{ map_departments|length }}</b> {{ plural(map_departments|length, 'отдел', 'отдела', 'отделов') }}</span><span><b>{{ map_employees|length }}</b> {{ plural(map_employees|length, 'человек', 'человека', 'человек') }}</span></span>
         </div>
+        {% if map_free_count %}
+        <div class="org-map-group" data-map-node data-node-kind="group" data-node-key="group:free" title="Сотрудники без подразделения: перетащите карточку на отдел">
+          <span class="org-map-node-kicker">Без подразделения</span>
+          <strong>{{ map_free_count }} {{ plural(map_free_count, 'сотрудник', 'сотрудника', 'сотрудников') }}</strong>
+          <small>Перетащите карточку на отдел</small>
+        </div>
+        {% endif %}
         {% for d in map_departments %}
         <article class="org-map-node org-map-dept-node{{ '' if d.active else ' is-inactive' }}"
                  data-map-node data-node-kind="department" data-node-key="department:{{ d.id }}"
                  data-department-id="{{ d.id }}" data-accent="{{ accent_by_dept.get(d.id, 0) }}"{% if d.active %} data-drop-department="{{ d.id }}"{% endif %}
-                 style="left:{{ d.map_x }}px;top:{{ d.map_y }}px">
+                 title="{{ d.name }}{% if d.description %} — {{ d.description }}{% endif %}">
           <div class="org-dept-top">
-            <span class="org-map-node-kicker">Подразделение</span>
-            <span class="org-map-node-status"><i class="{{ 'is-active' if d.active else '' }}"></i>{{ 'Активно' if d.active else 'Неактивно' }}</span>
+            <span class="org-map-node-kicker">{{ 'Подразделение' if d.active else 'Неактивно' }}</span>
+            <span class="org-dept-count" title="В составе"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19c.6-3.3 2.8-5 5.5-5s4.9 1.7 5.5 5"/><circle cx="16.8" cy="9.6" r="2.5"/><path d="M15.6 14.2c2.6-.3 4.4 1.2 4.9 4.3"/></svg>{{ d.members|length }}</span>
           </div>
           <strong>{{ d.name }}</strong>
           {% if d.description %}<p class="org-dept-desc">{{ d.description }}</p>{% endif %}
-          <div class="org-dept-foot">
-            <span class="org-dept-faces" aria-hidden="true">{% for m in d.members[:4] %}<i>{{ initials(m.employee.name) }}</i>{% endfor %}{% if d.members|length > 4 %}<i class="more">+{{ d.members|length - 4 }}</i>{% endif %}</span>
-            <span class="org-map-node-meta">{{ d.members|length }} {{ 'сотрудник' if d.members|length % 10 == 1 and d.members|length % 100 != 11 else ('сотрудника' if d.members|length % 10 in [2,3,4] and d.members|length % 100 not in [12,13,14] else 'сотрудников') }}</span>
-          </div>
           <div class="org-dept-head">{% if d.head_name %}<span class="org-head-badge" aria-hidden="true">★</span><span>{{ d.head_name }}</span>{% else %}<span class="muted">Руководитель не назначен</span>{% endif %}</div>
           <div class="org-map-node-actions">
             <button type="button" data-inspect-department="{{ d.id }}">Состав</button>
@@ -207,36 +210,37 @@
       <div class="org-map-search-results" id="org-map-search-results" hidden></div>
     </div>
 
-    <div class="org-map-toolbar" role="toolbar" aria-label="Масштаб и раскладка">
+    <div class="org-map-toolbar" role="toolbar" aria-label="Масштаб и ветки">
       <button type="button" data-zoom="out" title="Уменьшить (−)" aria-label="Уменьшить">−</button>
-      <button type="button" class="org-zoom-value" data-zoom="reset" title="Масштаб 100%" id="org-zoom-value">100%</button>
+      <button type="button" class="org-zoom-value" data-zoom="reset" title="Масштаб 100% (0)" id="org-zoom-value">100%</button>
       <button type="button" data-zoom="in" title="Увеличить (+)" aria-label="Увеличить">＋</button>
       <span class="sep" aria-hidden="true"></span>
-      <button type="button" data-zoom="fit" title="Показать всю структуру (F)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>Вписать</button>
-      <button type="button" data-auto-layout title="Аккуратно разложить всю структуру"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="5.5" r="2.2"/><circle cx="19" cy="12" r="2.2"/><circle cx="19" cy="18.5" r="2.2"/><path d="M7.2 12h9.6M7 11c4-5.5 6-5.5 9.8-5.5M7 13c4 5.5 6 5.5 9.8 5.5"/></svg>Упорядочить</button>
+      <button type="button" data-zoom="fit" title="Показать всю структуру (F)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg><span class="lbl">Вписать</span></button>
+      <button type="button" data-collapse-all title="Свернуть или развернуть все ветки"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="5" rx="1.4"/><rect x="2.5" y="16" width="6" height="5" rx="1.4"/><rect x="15.5" y="16" width="6" height="5" rx="1.4"/><path d="M12 8v4M5.5 16v-4h13v4"/></svg><span class="lbl" data-collapse-label>Свернуть всё</span></button>
     </div>
 
     <div class="org-map-legend" aria-label="Обозначения">
       <span><i class="org-legend-line is-member"></i> Состав отдела</span>
-      <span><i class="org-legend-line is-head"></i> Руководитель</span>
+      <span><b class="org-legend-star" aria-hidden="true">★</b> Руководитель</span>
       <span><i class="org-legend-line is-report"></i> Подчинение</span>
+      <span><i class="org-legend-line is-also"></i> Также в отделе</span>
       <span class="org-legend-reviewer"><i></i> Проверяющий</span>
       <span class="org-legend-director"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.2 8.2 7.6 12 12 4.8l4.4 7.2 4.4-3.8-1.9 10.3H5.1Z"/></svg> Директор</span>
       <details class="org-map-help"><summary>Как работать</summary>
-        <p class="org-map-hint">ЛКМ по пустому месту — двигать доску · колесо — масштаб · карточку сотрудника на отдел — добавить в состав · карточку на карточку — связать блоки · клик по линии — удалить связь · клик по карточке — редактировать.</p>
+        <p class="org-map-hint">ЛКМ по пустому месту — двигать доску · колесо — масштаб · кружок под карточкой — свернуть ветку · карточку сотрудника на отдел — добавить в состав · карточку на карточку — подчинить или связать блоки · клик по линии — удалить связь · клик по карточке — редактировать. Дерево раскладывается само: сверху компания и директор, ниже отделы и их люди.</p>
       </details>
     </div>
 
     <aside class="org-inspector" id="org-inspector" aria-live="polite" hidden></aside>
   </div>
-  <script type="application/json" id="org-map-edges">{{ map_edges|tojson }}</script>
+  <script type="application/json" id="org-map-tree">{{ map_tree|tojson }}</script>
   <script type="application/json" id="org-map-data">
   {%- set orm_emps = {} -%}
   {%- set memberships_by_emp = {} -%}
   {%- for d in departments -%}{%- for m in d.memberships -%}{%- if m.employee and m.employee.active -%}
     {%- set _ = orm_emps.update({m.employee_id: m.employee}) -%}
     {%- if m.employee_id not in memberships_by_emp -%}{%- set _ = memberships_by_emp.update({m.employee_id: []}) -%}{%- endif -%}
-    {%- set _ = memberships_by_emp[m.employee_id].append({'department_id': d.id, 'role': m.role or '', 'responsibilities': m.responsibilities or '', 'is_primary': true if m.is_primary else false, 'legacy_xy': m.map_x is not none and m.map_y is not none}) -%}
+    {%- set _ = memberships_by_emp[m.employee_id].append({'department_id': d.id, 'role': m.role or '', 'responsibilities': m.responsibilities or '', 'is_primary': true if m.is_primary else false}) -%}
   {%- endif -%}{%- endfor -%}{%- endfor -%}
   {%- for people in available_employees_by_department.values() -%}{%- for e in people -%}{%- set _ = orm_emps.update({e.id: e}) -%}{%- endfor -%}{%- endfor -%}
   {%- set payload_emps = [] -%}
@@ -248,11 +252,10 @@
       'responsibilities': (e.responsibilities or '') if e else '', 'context': (e.context or '') if e else '',
       'telegram': (e.telegram_chat_id or '') if e else '', 'bitrix': (e.bitrix_user_id or '') if e else '',
       'channel': (e.channel or 'telegram') if e else 'telegram', 'legacy_department': (e.department or '') if e else '',
-      'saved': (e is not none and e.map_x is not none and e.map_y is not none) or (ms|selectattr('legacy_xy')|list|length > 0),
       'memberships': ms}) -%}
   {%- endfor -%}
   {%- set payload_depts = [] -%}
-  {%- for d in departments -%}{%- set _ = payload_depts.append({'id': d.id, 'name': d.name, 'description': d.description or '', 'regulations': d.regulations or '', 'active': true if d.active else false, 'accent': accent_by_dept.get(d.id, 0), 'saved': d.map_x is not none and d.map_y is not none}) -%}{%- endfor -%}
+  {%- for d in departments -%}{%- set _ = payload_depts.append({'id': d.id, 'name': d.name, 'description': d.description or '', 'regulations': d.regulations or '', 'active': true if d.active else false, 'accent': accent_by_dept.get(d.id, 0)}) -%}{%- endfor -%}
   {%- set payload_rel = [] -%}
   {%- for edge in map_edges if edge.relation_id -%}{%- set _ = payload_rel.append({'id': edge.relation_id, 'source': edge.source, 'target': edge.target, 'label': edge.label}) -%}{%- endfor -%}
   {{- {'departments': payload_depts, 'employees': payload_emps, 'relations': payload_rel, 'accents': ACCENTS}|tojson -}}

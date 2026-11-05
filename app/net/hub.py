@@ -177,9 +177,13 @@ def tool_template(name: str = "my-tool", kind: str = "mcp") -> str:
 
 
 def _items(value) -> list:
+    """A list of the frontmatter: «a, b», a block («- a» on lines) or a YAML flow list «[a, "b"]»."""
+    text = str(value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
     out = []
-    for part in re.split(r"[,\n]", str(value or "")):
-        part = part.strip().strip("-").strip()
+    for part in re.split(r"[,\n]", text):
+        part = _unquote(part.strip().strip("-").strip()).strip()
         if part and part not in out:
             out.append(part[:120])
     return out

@@ -331,6 +331,13 @@ def save_folder_rule(form) -> None:
     if not folder:
         raise FolderError("укажите папку")
     rules = folder_rules()
+
+    def same(rule) -> tuple:  # the condition of a rule: the first matching rule wins, a second one never would
+        return (rule.get("kind") or "", sorted(x.lower() for x in mail_route._split(rule.get("senders"))),
+                sorted(w.lower() for w in mail_route._split(rule.get("keywords"))))
+    twin = next((r for r in rules if same(r) == same({"kind": kind, "senders": senders, "keywords": keywords})), None)
+    if twin is not None:
+        raise FolderError(f"такие письма уже кладутся в «{twin.get('folder')}» — уберите то правило или измените условие")
     if len(rules) >= MAX_RULES:
         raise FolderError(f"не больше {MAX_RULES} особых папок")
     rules.append({"kind": kind, "senders": senders, "keywords": keywords, "folder": folder})

@@ -49,7 +49,7 @@
   {% if r.tasks %}<p class="small">Задачи: {% for t in r.tasks %}«{{ t.title }}» до {{ t.deadline.strftime('%d.%m') if t.deadline }} <span class="muted">({{ t.status }})</span>{{ '; ' if not loop.last }}{% endfor %}</p>{% endif %}
   {% if r.errors %}<p class="small mail-bad">Ошибка маршрута: письмо попало не тому{% if r.errors > 1 %} ({{ r.errors }} раза){% endif %}.</p>{% endif %}
   {% if r.check and r.check.ok %}<p class="small mail-ok">✓ Передано верно{% if r.check.by %} ({{ r.check.by }}){% endif %}</p>{% endif %}
-  {% if r.history %}<details class="small"><summary>Раньше</summary>{% for h in r.history %}<div>{{ h.at or '' }} {{ h.to or h.status }}{% if h.by %} — {{ h.by }}{% endif %}</div>{% endfor %}</details>{% endif %}
+  {% if r.history %}<details class="small"><summary>Раньше</summary>{% for h in r.history %}<div>{{ h.at or '' }} {{ h.to or h.status_ru or h.status }}{% if h.by %} — {{ h.by }}{% endif %}</div>{% endfor %}</details>{% endif %}
   {% endif %}
   {% if m.kind %}<form method="post" action="/mail/{{ m.id }}/route" class="mail-form" style="margin-top:8px"><div class="row">
     <label class="f">Передать <select name="to" required><option value="">— кому —</option>{% for p in people %}<option value="{{ p.value }}" {{ 'selected' if r and r.hint and not r.to and r.hint.to_id and p.value == 'e:' ~ r.hint.to_id }}>{{ p.label }}</option>{% endfor %}{% if r and r.status == 'sent' %}<option value="none">— вернуть на решение —</option>{% endif %}</select></label>

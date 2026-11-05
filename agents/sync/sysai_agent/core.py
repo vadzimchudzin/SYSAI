@@ -1,5 +1,6 @@
 """Connection, one synchronization and the pulse; the loop of «sysai-agent run»."""
 import datetime as dt
+import hashlib
 import logging
 import logging.handlers
 import os
@@ -9,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, fsutil, hermes, hubsync, paths, secret, signing
+from . import __version__, desktop, fsutil, hermes, hubsync, paths, secret, signing, update
 from .client import ApiError, Client
 
 log = logging.getLogger("sysai_agent")
@@ -51,13 +52,16 @@ def load_agent(home: Path) -> dict:
 _hermes_version = {"at": 0.0, "value": ""}
 
 
-def versions() -> dict:
+def versions(home: Path | None = None) -> dict:
     """Shown on the agent's page; Hermes is asked once an hour."""
     if time.time() - _hermes_version["at"] > 3600:
         _hermes_version.update(at=time.time(), value=hermes.version())
     out = {"sysai-agent": __version__, "python": platform.python_version()}
     if _hermes_version["value"]:
         out["hermes"] = _hermes_version["value"]
+    window = desktop.installed(home) if home else {}
+    if window.get("version"):
+        out["desktop"] = window["version"]
     return out
 
 
@@ -126,7 +130,7 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     cfg = load_agent(home)
     client, token = client_for(home, cfg, transport)
     state = fsutil.read_json(home / "state.json", {}) or {}
-    report = {"agent": cfg["agent"], "changed": [], "hub": {}, "proposals": [], "errors": [], "restart": ""}
+    report = {"agent": cfg["agent"], "changed": [], "hub": {}, "proposals": [], "errors": [], "restart": "", "access": ""}
     try:
         signed = client.json("GET", "/agents/api/config")
     except ApiError as exc:
@@ -137,7 +141,15 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     doc = signed["doc"]
     if doc.get("agent") != cfg["agent"]:
         raise SyncError(f"Настройки для другого агента ({doc.get('agent')}): ничего не применено")
-    fsutil.write_json(home / "access.json", signed)  # the MCP servers check their calls by it
+    fsutil.write_json(home / "access.json", signed)  # the MCP servers and the hook check the calls by it
+    state["access_sha"] = hashlib.sha256((home / "access.json").read_bytes()).hexdigest()  # verified: the hook trusts it
+    state["offer"] = update.offer(doc)
+    state["desktop_offer"] = desktop.offer(doc)  # the window «Агент SYSAI»: installed by the loop, in the background
+    state["person"] = str(doc.get("person") or "")
+    try:
+        desktop.refresh(home, state)
+    except OSError as exc:
+        report["errors"].append(f"Окно агента: {exc}")
     harness = doc.get("harness_config") or {}
     fsutil.write_json(home / "sysai.json", harness.get("sysai") or {})
     profile_dir = paths.hermes_profile_dir(cfg)
@@ -154,7 +166,10 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
         report["hub"] = hubsync.sync(home, client, manifest, state, profile_dir)
         report["errors"] += report["hub"]["errors"]
         state["conflicts"] = report["hub"]["conflicts"]
-        state["hub_rev"] = manifest.get("rev", "")
+        if report["hub"]["errors"]:  # not taken whole: the next pulse sees another revision and tries again
+            state.pop("hub_rev", None)
+        else:
+            state["hub_rev"] = manifest.get("rev", "")
     except ApiError as exc:
         report["errors"].append(f"SYSAI_Hub: {exc}")
     try:
@@ -162,11 +177,16 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     except ApiError as exc:
         report["errors"].append(f"Предложения в хаб: {exc}")
     if applied:
+        if doc.get("rev", "") != state.get("access_rev", ""):
+            report["access"] = doc.get("rev", "")
         state["access_rev"] = doc.get("rev", "")
         state["applied_at"] = now()
     if report["changed"] or (report["hub"] or {}).get("changed") or (report["hub"] or {}).get("removed"):
         state["restart_pending"] = True
-    if restart and state.get("restart_pending"):
+    if state.get("restart_pending") and not hermes.gateway_running(profile_dir):
+        state.pop("restart_pending", None)  # nothing to restart: Hermes reads the new settings when it starts
+        report["restart"] = "шлюз Hermes не запущен: новые настройки он возьмёт при запуске"
+    elif restart and state.get("restart_pending"):
         done, said = hermes.restart(cfg.get("profile") or cfg["agent"], profile_dir)
         report["restart"] = said
         if done:
@@ -175,16 +195,16 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
             log.info("Hermes не перезапущен (%s): попробую при следующей синхронизации", said)
     state["synced_at"] = now()
     state["error"] = "; ".join(report["errors"])[:2000]
-    fsutil.write_json(home / "state.json", state)
     try:
         report["pulse"] = pulse(home, client, state)
     except ApiError as exc:
         report["errors"].append(f"Пульс: {exc}")
+    fsutil.write_json(home / "state.json", state)  # after the pulse: its time is kept too («sysai-agent status»)
     return report
 
 
 def pulse(home: Path, client: Client, state: dict, error: str | None = None) -> dict:
-    data = {"access_rev": state.get("access_rev", ""), "versions": versions(), "host": platform.node(),
+    data = {"access_rev": state.get("access_rev", ""), "versions": versions(home), "host": platform.node(),
             "hub": hubsync.summary(state), "error": state.get("error", "") if error is None else error}
     answer = client.json("POST", "/agents/api/heartbeat", data)
     state["pulse_at"] = now()
@@ -237,10 +257,20 @@ def run(home: Path | None = None, every: int = EVERY, transport=None, cycles: in
                 if need:
                     report = sync_once(home, transport)
                     last_full, failed = time.time(), False
-                    if report["changed"] or (report["hub"] or {}).get("changed") or report["proposals"]:
+                    if report["changed"] or (report["hub"] or {}).get("changed") or report["proposals"] or \
+                            report.get("access"):
                         log.info("Синхронизировано: %s", describe(report))
                     for e in report["errors"]:
                         log.warning("%s", e)
+                    state = fsutil.read_json(home / "state.json", {}) or {}
+                got = update.due(state)
+                if got and self_update(home, client, got, state):
+                    return 0
+                offered = desktop.due(home, state)  # after the synchronizer's own update: the new one installs it
+                if offered:
+                    state["desktop_try"] = {"sha256": offered["sha256"], "at": time.time()}  # not again before RETRY
+                    fsutil.write_json(home / "state.json", state)
+                    desktop.install_quietly(home, client, offered)  # minutes at most, once per build
             except (SyncError, ApiError, OSError) as exc:
                 failed = True
                 log.warning("%s", exc)
@@ -251,6 +281,23 @@ def run(home: Path | None = None, every: int = EVERY, transport=None, cycles: in
                 return 0
     finally:
         lock.unlink(missing_ok=True)
+
+
+def self_update(home: Path, client: Client, got: dict, state: dict) -> bool:
+    """The version SYSAI signed, downloaded and checked, goes to the helper; True — the loop leaves for it."""
+    if not paths.WINDOWS:
+        return False
+    try:
+        wheel = update.fetch(home, client, got)
+    except (update.UpdateError, ApiError, OSError) as exc:
+        state.update(update_to=got["version"], update_at=time.time())  # not again before update.RETRY
+        fsutil.write_json(home / "state.json", state)
+        log.warning("Обновление синхронизатора: %s", exc)
+        return False
+    if update.start(home, wheel, got["version"], state):
+        log.info("Обновляюсь до %s: синхронизатор перезапустится сам (журнал — logs\\update.log)", got["version"])
+        return True
+    return False
 
 
 def _wait(home: Path, seconds: int, sleep) -> bool:
@@ -289,6 +336,8 @@ def describe(report: dict) -> str:
         parts.append("убрано: " + ", ".join(hub["removed"]))
     if report.get("proposals"):
         parts.append("предложено в хаб: " + ", ".join(report["proposals"]))
+    if report.get("access") and not report.get("changed"):
+        parts.append("доступы: " + report["access"])
     return "; ".join(parts) or "без изменений"
 
 
@@ -300,7 +349,8 @@ def status(home: Path | None = None) -> dict:
            "server": cfg.get("server", ""), "version": __version__, "access_rev": state.get("access_rev", ""),
            "hub_rev": state.get("hub_rev", ""), "synced_at": state.get("synced_at", ""), "pulse_at": state.get("pulse_at", ""),
            "error": state.get("error", ""), "skills": sorted(state.get("skills") or {}), "tools": sorted(state.get("tools") or {}),
-           "conflicts": state.get("conflicts") or [], "restart_pending": bool(state.get("restart_pending"))}
+           "conflicts": state.get("conflicts") or [], "restart_pending": bool(state.get("restart_pending")),
+           "desktop": desktop.summary(home)}
     if cfg.get("agent"):
         out["hermes"] = hermes.profile_info(paths.hermes_profile_dir(cfg))
     return out

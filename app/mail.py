@@ -26,6 +26,7 @@ import base64
 import concurrent.futures
 import datetime as dt
 import email
+import email.header
 import email.message
 import email.policy
 import email.utils
@@ -308,7 +309,19 @@ def keyword(label: str) -> str:
 
 
 def _short(exc) -> str:
-    text = exc.args[0] if getattr(exc, "args", None) else exc
+    """The reason of a failure for a person: the words of the server or of the system, not a bare error number
+    (an OSError or an SSL error keeps its number in args[0])."""
+    if getattr(exc, "smtp_code", None) is not None:  # smtplib: (code, the answer of the server)
+        answer = getattr(exc, "smtp_error", b"")
+        answer = answer.decode("utf-8", "replace") if isinstance(answer, bytes) else str(answer or "")
+        text = f"{exc.smtp_code} {answer}".strip()
+    elif isinstance(exc, ssl.SSLCertVerificationError):
+        why = getattr(exc, "verify_message", None) or getattr(exc, "reason", None) or ""
+        text = "сертификат сервера не прошёл проверку" + (f" ({why})" if why else "")
+    elif isinstance(exc, OSError) and isinstance(exc.strerror, str) and exc.strerror:
+        text = exc.strerror
+    else:
+        text = exc.args[0] if getattr(exc, "args", None) else exc
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
     return " ".join(str(text).split())[:200]
@@ -687,20 +700,65 @@ def split_quoted(text: str) -> tuple:
     return str(text or "").strip(), ""
 
 
+def _raw(msg, name: str) -> list:
+    try:
+        return [str(v) for k, v in msg.raw_items() if str(k).lower() == name.lower()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _header(msg, name: str) -> str:
     try:
         value = msg.get(name)
     except Exception:  # noqa: BLE001  a broken header
         value = None
-    return " ".join(str(value or "").split())
+    text = " ".join(str(value or "").split())
+    if "\ufffd" in text:  # 8-bit bytes the mailer did not encode: read again (UTF-8 or Windows-1251)
+        raw = _raw(msg, name)
+        if raw:
+            text = " ".join(_decoded(raw[0]).split())
+    return text
+
+
+_ADDR_SPEC = re.compile(r'^[^@\s<>"(),;:\[\]]+@[^@\s<>"(),;:\[\]]+$')
+
+
+def _decoded(raw: str) -> str:
+    """A header as people read it: the encoded words decoded; 8-bit bytes (a header the mailer did not encode at
+    all) read as UTF-8, else as Windows-1251."""
+    text = str(raw or "")
+    try:
+        data = text.encode("ascii", "surrogateescape")
+    except UnicodeEncodeError:
+        data = b""  # already text
+    if any(b > 127 for b in data):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:  # Windows-1251 or KOI8-R: the one without «пРИВЕТ» inside the words
+            text = min((data.decode(c, "replace") for c in ("cp1251", "koi8-r")),
+                       key=lambda t: sum(a.islower() and b.isupper() for a, b in zip(t, t[1:])))
+    try:
+        return str(email.header.make_header(email.header.decode_header(text)))
+    except Exception:  # noqa: BLE001  a broken encoded word: as it is
+        return text
+
+
+def _pairs(values: list) -> list:
+    return [(" ".join(n.split()), a.strip().lower()) for n, a in email.utils.getaddresses(values)
+            if _ADDR_SPEC.match(a.strip())]
 
 
 def _addresses(msg, name: str) -> list:
+    """[(name, address)] of a header. A malformed one — the whole «Имя <адрес>» in one encoded word, as some mailers
+    and 1C send it (the standard reader loses the address then) — is decoded first and read once more."""
     try:
-        raw = [str(x) for x in (msg.get_all(name) or [])]
+        values = [str(x) for x in (msg.get_all(name) or [])]
     except Exception:  # noqa: BLE001
-        raw = []
-    return [(" ".join(n.split()), a.strip().lower()) for n, a in email.utils.getaddresses(raw) if a and "@" in a]
+        values = []
+    out = _pairs(values)
+    if (out and not any("\ufffd" in n for n, _ in out)) or not values:
+        return out
+    return _pairs([_decoded(v) for v in _raw(msg, name)]) or out
 
 
 def _content(part) -> str:
@@ -1256,6 +1314,7 @@ def clean(raw: dict, inputs: dict) -> dict:
         link_type, link_id = ("case", thread["case_id"]) if thread.get("case_id") else ("task", thread["task_id"])
         inherited.append("link")
     entity = next((e for e in inputs["entities"] if e["id"] == entity_id), None)
+    junk = kind in ("newsletter", "spam")  # «срочно», «подтвердите» and the dates of an advert or a phishing letter
     return {"kind": kind, "why": " ".join(str(raw.get("why") or "").split())[:200], "quote": quote,
             "entity_id": entity_id, "entity_why": (" ".join(str(raw.get("entity_why") or "").split())[:200]
                                                     or (entity or {}).get("why", "")) if entity_id else "",
@@ -1265,8 +1324,8 @@ def clean(raw: dict, inputs: dict) -> dict:
                                                                                     else "")) if link_type else "",
             "summary": " ".join(str(raw.get("summary") or "").split())[:500],
             "ask": " ".join(str(raw.get("ask") or "").split())[:200],
-            "urgent": raw.get("urgent") is True, "needs_reply": raw.get("needs_reply") is True,
-            "deadlines": _deadlines(raw.get("deadlines"), inputs), "inherited": inherited,
+            "urgent": raw.get("urgent") is True and not junk, "needs_reply": raw.get("needs_reply") is True and not junk,
+            "deadlines": [] if junk else _deadlines(raw.get("deadlines"), inputs), "inherited": inherited,
             **_department_of(raw, inputs), "by": "model"}
 
 

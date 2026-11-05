@@ -1,6 +1,6 @@
 """The MCP server «sysai» (docs/opo/TASKS.md, stage 4): Streamable HTTP JSON-RPC, tools checked by access."""
 from app.db import Employee, SessionLocal
-from app.net import access, agents, mcp
+from app.net import access, agents, files, mcp
 from app.net.models import NetAgent, NetEvent, NetSkillUsage
 
 
@@ -37,11 +37,21 @@ def test_the_protocol(client, net_agent):
     assert no_token.status_code == 401 and no_token.headers["www-authenticate"] == "Bearer"
 
 
+def _names(client, agent) -> set:
+    return {t["name"] for t in _rpc(client, agent, "tools/list").json()["result"]["tools"]}
+
+
 def test_tools_follow_the_access_of_the_agent(client, net_agent):
-    names = {t["name"] for t in _rpc(client, net_agent, "tools/list").json()["result"]["tools"]}
-    assert names == set(access.SYSAI_TOOLS)
+    storage = {t for t in access.SYSAI_TOOLS if t.startswith("files_")}
+    names = _names(client, net_agent)
+    assert names == set(access.SYSAI_TOOLS) - storage  # no open section: the storage tools would only say «нельзя»
     who = _call(client, net_agent, "whoami")["structuredContent"]
     assert who["agent"] == "opo-sysai" and who["profile"] == "Инженер ОПО" and "sysai/strong" in who["models"]
+    assert set(who["tools"]) == names
+    access.set_agent_access(net_agent["id"], overrides={"files": {"read": [files.COMMON], "write": []}})
+    assert _names(client, net_agent) == set(access.SYSAI_TOOLS)
+    access.set_agent_access(net_agent["id"], overrides={"files": {"read": [files.COMMON]}, "data": {"people": False}})
+    assert _names(client, net_agent) == set(access.SYSAI_TOOLS) - {"people"}  # no directory of people in the rules
     access.set_agent_access(net_agent["id"], overrides={"mcp": {"sysai": ["whoami"]}})
     assert {t["name"] for t in _rpc(client, net_agent, "tools/list").json()["result"]["tools"]} == {"whoami"}
     denied = _call(client, net_agent, "people")
@@ -73,10 +83,44 @@ def test_notify_me_writes_to_the_person_in_telegram(client, net_agent, tg):
         s.commit()
     ctx = agents.authenticate(net_agent["token"])
     assert ctx.employee_id
-    result = _call(client, net_agent, "notify_me", {"text": "Теги проекта 24-017 готовы к проверке"})
-    assert not result["isError"]
+    result = _call(client, net_agent, "notify_me", {"text": "Теги проекта 24-017 готовы к проверке: <A> & B"})
+    assert not result["isError"] and result["structuredContent"] == {"sent": True}
     sent = [d for m, d, _ in tg if m == "sendMessage"]
     assert sent and sent[-1]["chat_id"] == "555" and "opo-sysai" in sent[-1]["text"] and "24-017" in sent[-1]["text"]
+    assert sent[-1]["parse_mode"] == "HTML" and "&lt;A&gt; &amp; B" in sent[-1]["text"]  # the bot speaks HTML
+
+
+def test_notify_me_in_the_quiet_hours_waits_for_the_morning(client, net_agent, monkeypatch):
+    import datetime as dt
+    from app import userbot
+    from app.db import now
+    with SessionLocal() as s:
+        person = Employee(name="Админ", telegram_chat_id="@admin")
+        s.add(person)
+        s.commit()
+        s.get(NetAgent, net_agent["id"]).employee_id = person.id
+        s.commit()
+    out = []
+    morning = now() + dt.timedelta(hours=7)
+    monkeypatch.setattr(userbot, "ai_mode", lambda: True)
+    monkeypatch.setattr(userbot, "quiet_until", lambda *a, **k: morning)
+    monkeypatch.setattr(userbot, "send_message", lambda chat, text, *a, **k: out.append((chat, text)) or {"message_id": 1})
+    result = _call(client, net_agent, "notify_me", {"text": "Расчёт готов"})
+    held = result["structuredContent"]
+    assert not result["isError"] and held["sent"] is False and held["held_until"] and "уйдёт само" in held["message"]
+    assert out == [] and len(mcp.held()) == 1
+    assert mcp.send_held() == 0 and out == []  # the morning has not come
+    monkeypatch.setattr(userbot, "quiet_until", lambda *a, **k: None)
+    monkeypatch.setattr(mcp, "now", lambda: morning + dt.timedelta(minutes=1))
+    assert mcp.send_held() == 1 and out == [("@admin", "🤖 opo-sysai: Расчёт готов")] and mcp.held() == []
+    assert mcp.send_held() == 0 and len(out) == 1  # never twice
+
+    def busy(*a, **k):
+        raise userbot.Busy(600)
+    monkeypatch.setattr(mcp, "now", now)
+    monkeypatch.setattr(userbot, "send_message", busy)  # the hourly limit of the person: it waits too
+    later = _call(client, net_agent, "notify_me", {"text": "Ещё одно"})["structuredContent"]
+    assert later["sent"] is False and "Лимит" in later["message"] and len(mcp.held()) == 1
 
 
 def test_hub_tools_and_skill_usage(client, net_agent):

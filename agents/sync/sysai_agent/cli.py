@@ -1,14 +1,15 @@
-"""sysai-agent connect | sync | run | status | mcp <name> | version."""
+"""sysai-agent connect | sync | run | status | stop | desktop | mcp <name> | hook | version."""
 import argparse
 import json
 import os
 import sys
 from pathlib import Path
 
-from . import __version__, core, fsutil, mcpwrap, paths
+from . import __version__, fsutil, paths
 
 
 def _parser() -> argparse.ArgumentParser:
+    from . import core
     p = argparse.ArgumentParser(prog="sysai-agent", description="Синхронизатор агента SYSAI на компьютере сотрудника")
     p.add_argument("--home", help="папка SYSAI на компьютере (по умолчанию %%LOCALAPPDATA%%\\SYSAI)")
     sub = p.add_subparsers(dest="cmd")
@@ -26,19 +27,31 @@ def _parser() -> argparse.ArgumentParser:
     st.add_argument("--json", action="store_true", help="в JSON (для установщика)")
     m = sub.add_parser("mcp", help="запустить MCP-сервер из хаба под охраной доступов (так его зовёт Hermes)")
     m.add_argument("name")
+    sub.add_parser("hook", help="проверить действие Hermes по доступам SYSAI (так его спрашивает Hermes перед действием)")
     sub.add_parser("stop", help="остановить фоновую синхронизацию (до следующего входа в Windows)")
+    d = sub.add_parser("desktop", help="открыть окно агента «Агент SYSAI» (поставит его, если его нет)")
+    d.add_argument("--install-only", action="store_true", help="только поставить или обновить окно и ярлыки (так делает установщик)")
+    d.add_argument("files", nargs="*", help="файлы — сразу показать в окне")
     sub.add_parser("version", help="версия")
     return p
 
 
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv == ["hook"]:  # asked before every action of Hermes: no more than it needs, stdout is the answer
+        from . import hook
+        return hook.main(paths.home())
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    from . import core, mcpwrap
     args = _parser().parse_args(argv)
     home = Path(args.home) if args.home else paths.home()
+    if args.cmd == "hook":
+        from . import hook
+        return hook.main(home)
     if args.cmd == "mcp":  # stdout is the MCP channel: nothing else may be written there
         return mcpwrap.serve(args.name, home)
     if args.cmd == "version":
@@ -77,6 +90,13 @@ def main(argv=None) -> int:
             return 1 if report["errors"] else 0
         if args.cmd == "run":
             return core.run(home, every=max(30, args.every))
+        if args.cmd == "desktop":
+            from . import desktop
+            try:
+                return desktop.cli(home, args.files, args.install_only)
+            except (desktop.DesktopError, OSError) as exc:
+                core.log.error("Окно агента: %s", exc)
+                return 1
     except core.SyncError as exc:
         core.log.error("%s", exc)
         return 1
@@ -86,6 +106,7 @@ def main(argv=None) -> int:
 
 def main_windowless() -> int:
     """«sysai-agentw»: the background loop without a console window (started at Windows logon); logs only."""
+    from . import core
     home = paths.home()
     core.setup_logging(home, console=False)
     args = sys.argv[1:] or ["run"]
@@ -107,12 +128,16 @@ def _print_status(info: dict) -> None:
     h = info.get("hermes") or {}
     print(f"Профиль Hermes: {h.get('dir', '—')}  ·  модель: {h.get('model') or '—'}  ·  "
           f"шлюз {'работает' if h.get('gateway') else 'не запущен'}")
+    print("Проверка действий агента по доступам SYSAI: " + ("включена" if h.get("hook") else "нет — sysai-agent sync"))
     print(f"Навыки из хаба: {', '.join(info['skills']) or '—'}")
     print(f"Инструменты: {', '.join(info['tools']) or '—'}")
     if info["conflicts"]:
         print(f"Совпадают по имени со своими навыками профиля: {', '.join(info['conflicts'])}")
     if info["restart_pending"]:
         print("Hermes ждёт перезапуска (идёт задача?) — синхронизатор повторит")
+    window = info.get("desktop") or {}
+    print(f"Окно агента «Агент SYSAI»: {window['version']} (Electron {window['electron']})" if window.get("version") else
+          "Окно агента «Агент SYSAI»: не установлено (sysai-agent desktop)")
     if info["error"]:
         print(f"Последняя ошибка: {info['error']}")
     print(f"Папка SYSAI: {info['home']}")

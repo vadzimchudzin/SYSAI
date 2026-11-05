@@ -156,3 +156,40 @@ def test_agent_names_are_checked(client, net_on):
     assert agents.suggest_name("ОПО", "ivan.petrov") == "opo-ivan-petrov"
     settings_store.set_many({"agents_on": False})
     assert client.get("/agents").status_code == 404
+
+
+def test_turning_on_again_never_cuts_a_working_agent_and_waits_for_whoever_switched_it_off(client, net_agent):
+    import pytest
+    aid = net_agent["id"]
+    assert agents.enable(aid, by="SYSAI") is False  # working: a second click changes nothing
+    assert agents.authenticate(net_agent["token"]) is not None
+    r = client.post(f"/agents/{aid}/enable", follow_redirects=False)
+    assert "msg=" in r.headers["location"] and agents.authenticate(net_agent["token"]) is not None
+    agents.revoke(aid, by="SYSAI")  # an administrator switched it off: the owner cannot turn it back on
+    with pytest.raises(agents.AgentError, match="только администратор"):
+        agents.enable(aid, by="ivanov", boss=False)
+    assert agents.enable(aid, by="SYSAI") is True
+    with SessionLocal() as s:
+        assert s.get(NetAgent, aid).status == "pending"
+    agents.revoke(aid, by="ivanov")  # switched off by the owner himself: he may
+    assert agents.enable(aid, by="ivanov", boss=False) is True
+
+
+def test_a_deleted_agent_leaves_its_money_and_the_use_of_skills_but_takes_its_journal(client, net_agent):
+    from app.net.models import NetHubPick, NetSkillUsage, NetSpend
+    aid = net_agent["id"]
+    with SessionLocal() as s:
+        s.add(NetSpend(day=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"), agent_id=aid, tier="cheap", cost=1.25))
+        s.add(NetSkillUsage(skill="st-style", agent_id=aid, tokens=100))
+        s.add(NetHubPick(agent_id=aid, name="plc-kit"))
+        s.add(NetEvent(action="mcp.whoami", agent_id=aid, actor="opo-sysai", actor_kind="agent"))
+        s.commit()
+    agents.delete(aid, by="SYSAI")
+    with SessionLocal() as s:
+        assert s.get(NetAgent, aid) is None
+        assert [(x.agent_id, x.cost) for x in s.query(NetSpend)] == [(None, 1.25)]  # «удалённый агент» in the report
+        assert [x.agent_id for x in s.query(NetSkillUsage)] == [None]
+        assert s.query(NetHubPick).count() == 0 and s.query(NetAgentToken).count() == 0
+        assert s.query(NetEvent).filter(NetEvent.agent_id == aid).count() == 0
+        assert s.query(NetEvent).filter(NetEvent.action == "agent.delete").count() == 1
+    assert "удалённый агент" in client.get("/agents/spend").text

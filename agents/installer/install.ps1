@@ -2,7 +2,8 @@
 # Запуск — строка со страницы агента в SYSAI, в PowerShell (обычном, не от администратора):
 #   $env:SYSAI_CODE='КОД'; irm __SYSAI_SERVER__/agents/api/install.ps1 | iex
 # Ставит uv, синхронизатор SYSAI и Hermes (чего нет), создаёт профиль Hermes агента без встроенных навыков,
-# применяет доступы, характер (SOUL.md) и навыки SYSAI_Hub, включает синхронизацию при входе в Windows.
+# применяет доступы, характер (SOUL.md) и навыки SYSAI_Hub, ставит окно агента «Агент SYSAI» (ярлык на рабочем
+# столе), включает синхронизацию при входе в Windows.
 # Повторный запуск с новым кодом обновляет то же самое. Совместим с Windows PowerShell 5.1.
 & {
 $ErrorActionPreference = 'Continue'
@@ -100,7 +101,12 @@ try {
     if ($ProfileDir) { & sysai-agent sync --hermes-home $ProfileDir } else { & sysai-agent sync }
     if ($LASTEXITCODE -ne 0) { Warn 'синхронизация прошла с ошибками (см. выше): синхронизатор повторит сам' }
 
-    # 7. синхронизация в фоне: при входе в Windows и каждые 5 минут
+    # 7. окно агента «Агент SYSAI»: Electron и приложение, проверенные по подписи SYSAI, ярлыки на рабочем столе и в «Пуске»
+    Say 'ставлю окно агента «Агент SYSAI» (в первый раз скачивается около 160 МБ)...'
+    & sysai-agent desktop --install-only
+    if ($LASTEXITCODE -ne 0) { Warn 'окно агента не установилось (см. выше): синхронизатор попробует сам, или выполните sysai-agent desktop' }
+
+    # 8. синхронизация в фоне: при входе в Windows и каждые 5 минут
     $runner = Get-Command 'sysai-agentw' -ErrorAction SilentlyContinue
     if (-not $runner) { $runner = Get-Command 'sysai-agent' }
     $exe = $runner.Source
@@ -111,7 +117,8 @@ try {
 
     Write-Host ''
     Say "готово: агент $Agent на этом компьютере."
-    Write-Host "  Поговорить с агентом:  hermes -p $Agent"
+    Write-Host '  Окно агента:           ярлык «Агент SYSAI» на рабочем столе (или sysai-agent desktop)'
+    Write-Host "  Агент в терминале:     hermes -p $Agent"
     Write-Host '  Что на компьютере:     sysai-agent status'
     Write-Host "  Доступы, расходы, трасса - на странице агента в SYSAI: $Server/agents"
 }

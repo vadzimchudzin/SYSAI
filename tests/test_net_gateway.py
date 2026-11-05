@@ -152,8 +152,9 @@ def test_streaming_passes_events_through_and_counts_the_usage(client, net_agent,
 def test_web_plugins_need_the_whole_internet(client, net_agent, monkeypatch):
     up = Upstream()
     monkeypatch.setattr(gateway, "_post", up.post)
+    access.set_agent_access(net_agent["id"], overrides={"internet": {"mode": "list", "sites": ["se.com"]}})
     _ask(client, net_agent, plugins=[{"id": "web"}])
-    assert "plugins" not in up.bodies[-1]  # the engineer's profile has only a list of sites
+    assert "plugins" not in up.bodies[-1]  # only a list of sites
     access.set_agent_access(net_agent["id"], overrides={"internet": {"mode": "all"}})
     _ask(client, net_agent, plugins=[{"id": "web"}])
     assert up.bodies[-1]["plugins"] == [{"id": "web"}]

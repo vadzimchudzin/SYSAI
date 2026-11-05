@@ -10,6 +10,7 @@ import copy
 import fnmatch
 import hashlib
 import json
+import ntpath
 import re
 from types import SimpleNamespace
 
@@ -46,6 +47,13 @@ SYSAI_TOOLS = ("whoami", "departments", "people", "hub_search", "hub_get", "hub_
 # Nothing by default: the storage is opened to an agent only here, in its profile or personal exceptions.
 FILES_COMMON = "Общее"
 FILES_OWN = "свой отдел"
+# In «Папки»: the whole computer. The person's own rights stay the limit — Windows does not let the agent where the
+# person may not go (system folders, other users), the rules narrow it further.
+WHOLE_PC = "*"
+# Hermes asks the synchronizer before each of its own tools that touch the computer (a pre_tool_call shell hook, fail
+# closed): `sysai-agent hook` checks the call by the signed rules (agents/sync/sysai_agent/hook.py).
+HOOK_COMMAND = "sysai-agent hook"
+HOOK_TIMEOUT = 30
 
 # Never allowed, whatever the profile says (on top of the harness's own hard blocklist).
 ALWAYS_DENY = ("format *:*", "diskpart*", "bcdedit*", "vssadmin delete*", "cipher /w*", "rm -rf /*", "rm -rf ~*",
@@ -68,11 +76,11 @@ EMPTY = {
 
 _ENGINEER = {
     "commands": {"run": True, "deny": ["git push --force*", "Remove-Item * -Recurse*", "del /s *"]},
-    "folders": {"read": ["D:\\ОПО", "D:\\ТО"], "write": ["D:\\ОПО\\Проекты"], "deny": ["C:\\Windows", "C:\\Program Files"]},
+    "folders": {"read": [WHOLE_PC], "write": [WHOLE_PC], "deny": []},
     "programs": ["EcoStruxure Machine Expert", "ODA File Converter", "Excel", "Acrobat Reader"],
     "mcp": {"sysai": ["*"], "plc-kit": ["*"], "machine-expert": ["*"], "cad": ["*"]},
     "data": {"projects": "own", "to_base": "read", "tags": "write", "questions": True, "people": True},
-    "internet": {"mode": "list", "sites": ["se.com", "schneider-electric.com", "sysat.by"]},
+    "internet": {"mode": "all", "sites": []},
     "models": {"tiers": ["cheap", "mid", "strong", "vision", "auto"], "main": "auto", "workers": "cheap",
                "auto_cost": "low", "budget_day_usd": 3.0, "budget_project_usd": 30.0},
     "schedule": [{"when": "каждые 15 минут", "task": "Проверить новые пакеты ТО по моим проектам"},
@@ -86,11 +94,11 @@ _LEAD["models"].update(budget_day_usd=5.0, budget_project_usd=60.0)
 _LEAD["schedule"] = [{"when": "пн–пт 09:00", "task": "Сводка по проектам отдела: сроки, вопросы в ТО, правки"}]
 _TO = {
     "commands": {"run": True, "deny": ["Remove-Item * -Recurse*", "del /s *"]},
-    "folders": {"read": ["D:\\ТО"], "write": ["D:\\ТО\\Выгрузка"], "deny": ["C:\\Windows", "C:\\Program Files"]},
+    "folders": {"read": [WHOLE_PC], "write": [WHOLE_PC], "deny": []},
     "programs": ["AutoCAD", "ODA File Converter", "Excel", "Acrobat Reader"],
     "mcp": {"sysai": ["*"], "cad": ["*"]},
     "data": {"projects": "department", "to_base": "write", "tags": "read", "questions": True, "people": True},
-    "internet": {"mode": "list", "sites": ["sysat.by"]},
+    "internet": {"mode": "all", "sites": []},
     "models": {"tiers": ["cheap", "mid", "vision", "auto"], "main": "auto", "workers": "cheap", "auto_cost": "low",
                "budget_day_usd": 2.0, "budget_project_usd": 0.0},
     "schedule": [],
@@ -100,6 +108,7 @@ _TO = {
 _VIEWER = copy.deepcopy(EMPTY)
 _VIEWER["mcp"] = {"sysai": ["whoami", "departments", "hub_search", "hub_get", "notify_me", "log_event"]}
 _VIEWER["data"].update(tags="read")
+_VIEWER["folders"] = {"read": [WHOLE_PC], "write": [], "deny": []}
 
 BUILTIN = (
     ("opo-engineer", "Инженер ОПО", "Свои проекты ПЛК: чертежи ТО, теги, генерация и сборка в Machine Expert.", _ENGINEER),
@@ -107,6 +116,20 @@ BUILTIN = (
     ("to", "ТО", "Технический отдел: база чертежей и ответы на вопросы ОПО.", _TO),
     ("viewer", "Наблюдатель", "Только смотреть: без команд на ПК, интернета и записи.", _VIEWER),
 )
+
+
+# The first built-in folders and sites were placeholders of the ОПО department; the agent sees the whole computer and
+# the internet now, and the rules narrow them. A section of a built-in profile still exactly as it first was (nobody
+# changed it) gets the new default once.
+_OPO_FOLDERS = {"read": ["D:\\ОПО", "D:\\ТО"], "write": ["D:\\ОПО\\Проекты"], "deny": ["C:\\Windows", "C:\\Program Files"]}
+_OPO_SITES = {"mode": "list", "sites": ["se.com", "schneider-electric.com", "sysat.by"]}
+FIRST_DEFAULTS = {
+    "opo-engineer": {"folders": _OPO_FOLDERS, "internet": _OPO_SITES},
+    "opo-lead": {"folders": _OPO_FOLDERS, "internet": _OPO_SITES},
+    "to": {"folders": {"read": ["D:\\ТО"], "write": ["D:\\ТО\\Выгрузка"], "deny": ["C:\\Windows", "C:\\Program Files"]},
+           "internet": {"mode": "list", "sites": ["sysat.by"]}},
+    "viewer": {"folders": {"read": [], "write": [], "deny": []}},
+}
 
 
 class AccessError(Exception):
@@ -246,14 +269,21 @@ def command_denied(rules: dict, command: str) -> str:
 
 
 def path_allowed(rules: dict, path: str, write: bool = False) -> bool:
-    """Inside a «read» (or «write») folder and outside every forbidden one; Windows paths, any case."""
-    def norm(p):
-        return re.sub(r"[\\/]+", "\\\\", str(p).strip()).rstrip("\\").lower()
+    """Inside a «read» (or «write») folder and outside every forbidden one; Windows paths, any case; «*» — the whole
+    computer."""
+    def norm(p):  # as the synchronizer on the computer does (sysai_agent/rules.py): «..» collapsed — no way out
+        text = str(p or "").strip()
+        if not text:
+            return ""
+        text = ntpath.normpath(text.replace("/", "\\"))
+        return re.sub(r"\\+", r"\\", text).rstrip("\\").lower()
     target = norm(path)
     if not target:
         return False
 
     def inside(root):
+        if str(root or "").strip() == WHOLE_PC:
+            return True
         root = norm(root)
         return bool(root) and (target == root or target.startswith(root + "\\"))
     if any(inside(p) for p in rules["folders"]["deny"]):
@@ -267,11 +297,22 @@ def ensure_builtin(session=None) -> None:
     own = session is None
     s = session or SessionLocal()
     try:
-        have = {p.code for p in s.query(NetAccessProfile).all()}
+        rows = {p.code: p for p in s.query(NetAccessProfile).all()}
         for code, name, description, rules in BUILTIN:
-            if code not in have:
+            p = rows.get(code)
+            if p is None:
                 s.add(NetAccessProfile(code=code, name=name, description=description, rules=normalize(rules), builtin=True,
                                        updated_by="SYSAI"))
+            elif p.builtin and isinstance(p.rules, dict):
+                first = FIRST_DEFAULTS.get(code) or {}
+                stale = [k for k, v in first.items() if p.rules.get(k) == v]
+                if stale:
+                    was, fresh = normalize(p.rules), normalize(rules)
+                    p.rules = {**was, **{k: copy.deepcopy(fresh[k]) for k in stale}}
+                    p.version = (p.version or 0) + 1
+                    p.updated_at, p.updated_by = now(), "SYSAI"
+                    journal.log("access.profile", f"profile:{code}", {"версия": p.version, "изменения": journal.changes(
+                        {k: was[k] for k in stale}, {k: p.rules[k] for k in stale})}, actor="SYSAI", session=s)
         s.flush()
         if own:
             s.commit()
@@ -442,9 +483,29 @@ def to_yaml(obj, indent: int = 0) -> str:
     return "\n".join(lines)
 
 
+def hook_tools(rules: dict) -> list:
+    """Hermes's own tools the synchronizer checks before each call (`sysai-agent hook`): commands, code and writing
+    always (the forbidden patterns; the SYSAI folder and the agent's settings belong to the synchronizer), reading when
+    not the whole computer is open, the internet when it is not open whole, the screen and processes without commands.
+    What is open whole is not asked about: every check is a process start on the computer."""
+    folders, net = rules["folders"], rules["internet"]["mode"]
+    tools = ["terminal", "execute_code", "write_file", "patch"]
+    if not rules["commands"]["run"]:
+        tools += ["process_manage", "computer_use"]
+    if folders["deny"] or WHOLE_PC not in folders["read"] + folders["write"]:
+        tools += ["read_file", "search_files"]
+    if net != "all":
+        tools += ["web_search", "web_extract", "browser_.*"]
+    if net != "all" or "read_file" in tools:
+        tools.append("vision_analyze")  # a picture by its address or from a folder
+    return tools
+
+
 def render_hermes(agent: str, rules: dict, server: str, tools=None, cache=()) -> dict:
-    """The Hermes configuration made of the rules. Native keys where Hermes has them; the rest (schedule, internet,
-    folders, programs) is in «sysai» and applied by the synchronizer. Checked against Hermes in the bake-off (6.1).
+    """The Hermes configuration made of the rules. Native keys where Hermes has them (the forbidden commands —
+    approvals.deny); folders, the internet and the rest of the commands are checked by the synchronizer's hook before
+    each of Hermes's own tools (hooks.pre_tool_call → `sysai-agent hook`), the hub MCP servers by its wrapper. The
+    «sysai» part (schedule, programs, chat) stays with the synchronizer.
 
     The main model thinks, plans and hands parts of a task to sub-agents (delegate_task) on the «workers» model —
     that is how a strong model leads cheap ones inside one agent. MCP servers from the hub (tools) are started by the
@@ -458,13 +519,11 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None, cache=()) ->
     tiers = rules["models"]["tiers"] or ["cheap"]
     main, workers = _main_and_workers(tiers, rules["models"].get("main"), rules["models"].get("workers"))
     deny = rules["commands"]["deny"] if rules["commands"]["run"] else ["*"]
+    # only what can start: the built-in server and the hub MCP servers the synchronizer installs; a name allowed in
+    # the rules without such a tool (not in the hub, «по запросу» and not taken yet) would only be a broken server
     mcp = {}
-    for name in rules["mcp"]:
-        if name == "sysai":
-            mcp[name] = {"url": f"{server}/mcp", "headers": {"Authorization": "Bearer ${SYSAI_AGENT_TOKEN}"}}
-        else:
-            mcp[name] = {"command": "sysai-agent", "args": ["mcp", name],
-                         "env": {"SYSAI_ACCESS_FILE": "${SYSAI_HOME}/access.json", "SYSAI_URL": server}}
+    if "sysai" in rules["mcp"]:
+        mcp["sysai"] = {"url": f"{server}/mcp", "headers": {"Authorization": "Bearer ${SYSAI_AGENT_TOKEN}"}}
     hub_tools = []
     for tool in tools or []:
         spec = tool.get("spec") or {}
@@ -493,6 +552,9 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None, cache=()) ->
                                       "model": "sysai/" + _plain(tiers, ("cheap", "mid", "strong"), main),
                                       "extra_body": {"sysai": {"role": "compression"}}}},
         "approvals": {"mode": "off", "deny": deny},
+        # the rules reach Hermes's own tools too: files, the internet, commands (fail closed — no answer, no action)
+        "hooks": {"pre_tool_call": [{"command": HOOK_COMMAND, "matcher": "|".join(hook_tools(rules)),
+                                     "timeout": HOOK_TIMEOUT, "fail_closed": True}]},
         "memory": {"memory_enabled": True, "user_profile_enabled": True, "provider": ""},
         "security": {"redact_secrets": True},
         "mcp_servers": mcp,
@@ -549,23 +611,40 @@ def document(agent_id: int, server: str = "", session=None) -> dict:
         cache = cache_tiers(rules)
         character = soul.for_agent(agent.name, (user.display_name or user.username) if user else "",
                                    user.username if user else "", dept.name if dept else "")
+        offer = synchronizer_offer()
+        from . import desktop
+        window = desktop.offer(offer["auto_update"])
+        person = (user.display_name or user.username) if user else ""
         rev = hashlib.sha256(_canonical({"agent": agent.name, "harness": agent.harness, "rules": rules,
                                          "tools": [(t["name"], t["version"]) for t in tools], "cache": cache,
-                                         "soul": soul.digest(character)})).hexdigest()[:12]
+                                         "soul": soul.digest(character),
+                                         "sync": [offer["version"], offer["auto_update"]],
+                                         "desktop": [window["sha256"], window["electron"]["sha256"]],
+                                         "person": person})).hexdigest()[:12]
         server = (server or config.PUBLIC_URL or "").rstrip("/")
-        doc = {"agent": agent.name, "agent_id": agent.id, "user": user.username if user else "", "role": user.role if user else "",
+        doc = {"agent": agent.name, "agent_id": agent.id, "user": user.username if user else "", "person": person,
+               "role": user.role if user else "",
                "department": dept.name if dept else "", "harness": agent.harness, "rev": rev, "server": server,
                "profile": {"code": profile.code, "name": profile.name, "version": profile.version} if profile else
                {"code": "", "name": "без профиля", "version": 0},
                "rules": rules,
                "harness_config": render_hermes(agent.name, rules, server, tools, cache) if agent.harness == "hermes" else None,
-               "soul": character, "issued_at": now().isoformat(timespec="seconds")}
+               "soul": character, "synchronizer": offer, "desktop": window, "issued_at": now().isoformat(timespec="seconds")}
         return {"rev": rev, "rules": rules, "profile": doc["profile"], "doc": doc,
                 "overrides": row.overrides if row else {}, "applied_rev": row.applied_rev if row else "",
                 "applied_at": row.applied_at if row else None}
     finally:
         if own:
             s.close()
+
+
+def synchronizer_offer() -> dict:
+    """The synchronizer SYSAI gives out, in the signed document: the computer updates itself only to this wheel (its
+    sha256) and only while «обновлять сами» is on (Настройки → Сеть агентов)."""
+    from .. import settings_store
+    from . import installer
+    _, _, sha = installer.wheel()
+    return {"version": installer.version(), "sha256": sha, "auto_update": bool(settings_store.get("agents_auto_update"))}
 
 
 def rules_for(agent_id: int) -> dict:

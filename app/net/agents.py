@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 
 from ..db import Department, Employee, SessionLocal, User, now
 from . import journal
-from .models import NetAccessProfile, NetAgent, NetAgentAccess, NetAgentToken, NetDebug
+from .models import (NetAccessProfile, NetAgent, NetAgentAccess, NetAgentToken, NetDebug, NetEvent, NetHubPick,
+                     NetSkillUsage, NetSkillVersion, NetSpend)
 
 CODE_TTL = dt.timedelta(minutes=10)
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I: the code is typed by hand
@@ -216,16 +217,26 @@ def revoke(agent_id: int, by: str = "") -> None:
         s.commit()
 
 
-def enable(agent_id: int, by: str = "") -> None:
-    """Back on, but only through a new connect code: old tokens stay revoked."""
+def enable(agent_id: int, by: str = "", boss: bool = True) -> bool:
+    """Back on, but only through a new connect code: old tokens stay revoked. Only a switched-off agent (a second
+    click never cuts a working agent off); its owner turns it back on only when they switched it off themselves — an
+    agent stopped by an administrator waits for an administrator. Returns whether the status changed."""
     with SessionLocal() as s:
         agent = s.get(NetAgent, agent_id)
         if agent is None:
             raise AgentError("Нет такого агента")
+        if agent.status != "disabled":
+            return False
+        if not boss:
+            last = (s.query(NetEvent).filter(NetEvent.agent_id == agent_id, NetEvent.action == "agent.disable")
+                    .order_by(NetEvent.id.desc()).first())
+            if last is not None and last.actor and last.actor != by:
+                raise AgentError(f"Агента отключил {last.actor} — включить его снова может только администратор")
         agent.status = "pending"
         journal.log("agent.enable", agent.name, {"статус": {"было": "disabled", "стало": "pending"}}, actor=by,
                     agent_id=agent.id, session=s)
         s.commit()
+    return True
 
 
 def delete(agent_id: int, by: str = "") -> None:
@@ -234,9 +245,19 @@ def delete(agent_id: int, by: str = "") -> None:
         if agent is None:
             return
         name = agent.name
-        s.query(NetAgentToken).filter(NetAgentToken.agent_id == agent_id).delete()
-        s.query(NetAgentAccess).filter(NetAgentAccess.agent_id == agent_id).delete()
-        s.query(NetDebug).filter(NetDebug.agent_id == agent_id).delete()  # the texts of the debug mode go with it
+        # the money spent, the use of the skills and their authorship stay (without the agent): the «Расходы» page
+        # keeps adding up; its journal, hub picks, tokens, access and debug texts go with it. Done here, not by the
+        # database: SQLite does not keep foreign keys, and a new agent could get this id and inherit all of it.
+        s.query(NetSpend).filter(NetSpend.agent_id == agent_id).update({NetSpend.agent_id: None}, synchronize_session=False)
+        s.query(NetSkillUsage).filter(NetSkillUsage.agent_id == agent_id).update({NetSkillUsage.agent_id: None},
+                                                                                synchronize_session=False)
+        s.query(NetSkillVersion).filter(NetSkillVersion.author_agent_id == agent_id).update(
+            {NetSkillVersion.author_agent_id: None}, synchronize_session=False)
+        s.query(NetHubPick).filter(NetHubPick.agent_id == agent_id).delete(synchronize_session=False)
+        s.query(NetEvent).filter(NetEvent.agent_id == agent_id).delete(synchronize_session=False)
+        s.query(NetAgentToken).filter(NetAgentToken.agent_id == agent_id).delete(synchronize_session=False)
+        s.query(NetAgentAccess).filter(NetAgentAccess.agent_id == agent_id).delete(synchronize_session=False)
+        s.query(NetDebug).filter(NetDebug.agent_id == agent_id).delete(synchronize_session=False)  # debug texts too
         s.delete(agent)
         journal.log("agent.delete", name, None, actor=by, session=s)
         s.commit()

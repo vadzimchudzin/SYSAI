@@ -22,12 +22,28 @@ def home() -> Path:
     return Path.home() / ".sysai"
 
 
-def hermes_root() -> Path:
-    """The Hermes home the profiles live in: %LOCALAPPDATA%\\hermes on Windows, ~/.hermes elsewhere."""
+def _native_hermes_home() -> Path:
+    suffix = os.environ.get("HERMES_DATA_DIR_SUFFIX", "")
     if WINDOWS:
         base = os.environ.get("LOCALAPPDATA", "").strip()
-        return (Path(base) if base else Path.home() / "AppData" / "Local") / "hermes"
-    return Path.home() / ".hermes"
+        return (Path(base) if base else Path.home() / "AppData" / "Local") / ("hermes" + suffix)
+    return Path.home() / (".hermes" + suffix)
+
+
+def hermes_root() -> Path:
+    """The Hermes home the profiles live in, found as Hermes finds it (hermes_constants.get_default_hermes_root):
+    %LOCALAPPDATA%\\hermes on Windows, ~/.hermes elsewhere; HERMES_HOME under that place changes nothing, another
+    HERMES_HOME (Docker, a custom root) is the root itself, «<root>/profiles/<name>» — its <root>."""
+    native = _native_hermes_home()
+    env = os.environ.get("HERMES_HOME", "").strip()
+    if not env:
+        return native
+    path = Path(os.path.expanduser(os.path.expandvars(env)))
+    try:
+        path.resolve().relative_to(native.resolve())
+    except (ValueError, OSError):
+        return path.parent.parent if path.parent.name == "profiles" else path
+    return native
 
 
 def hermes_profile_dir(agent: dict) -> Path:

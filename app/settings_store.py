@@ -93,6 +93,7 @@ DEFAULTS = {
     "gdrive_state": {},              # the folders, the last sync, errors; upload_blocked when Google gives no space
     # the agent network (app/net, docs/opo): agents on the employees' computers, SYSAI_Hub, MCP and the model gateway
     "agents_on": False,              # off: every address of the network answers 404, SYSAI works as before
+    "agents_auto_update": True,      # the computers install the synchronizer SYSAI signed (its sha256) by themselves
     "opo_on": False,                 # the ОПО section (PLC projects from the drawings of ТО), built on the network
     "agents_models": {},             # tier → model behind sysai/cheap|mid|strong|vision ("" = the default of gateway.py)
     "agents_hub_hosts": ["sysat.by", "se.com", "schneider-electric.com", "localhost", "127.0.0.1"],  # sites scripts of skills may call

@@ -977,6 +977,7 @@ def poke():
 def start_background():
     from . import (agent, bitrix_sync, calendars, cases, conversations, digest, doc_intake, doctext, entities, gdrive, keep_awake, mail, meeting_alerts,
                    memory, reminders, ticnote_ingest, speaker_id)
+    from .net import mcp as net_mcp
     resume_jobs()
     conversations.recover()
     assistant.recover()
@@ -987,7 +988,7 @@ def start_background():
         while True:
             for fn in (speaker_id.purge_due_voice_samples, mic_scan, deadline_timeouts, retry_due_deliveries, conversations.run_pending, agent.run_pending,
                        assistant.run_pending, cases.run_due, mail.run_due, doctext.run_pending, doc_intake.run_pending, entities.run_pending, memory.refresh_vectors, meeting_alerts.run_due, reminders.run_due, userbot.watchdog, ticnote_ingest.scan, digest.run_due,
-                       audio_archive.run_due, calendars.run_due, bitrix_sync.run_due, gdrive.run_due, keep_awake.run_due):
+                       audio_archive.run_due, calendars.run_due, bitrix_sync.run_due, gdrive.run_due, keep_awake.run_due, net_mcp.send_held):
                 try:
                     fn()
                 except Exception:

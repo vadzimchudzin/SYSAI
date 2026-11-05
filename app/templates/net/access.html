@@ -2,7 +2,7 @@
 {% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
 {% block body %}
 <div class="page-h"><div><h1>Доступы агентов</h1>
-  <p>Что агенту можно — задаётся только здесь. Подтверждений в Telegram нет: разрешённое агент делает сам, остальное запрещено. SYSAI собирает из профиля настройки агента и подписывает их; MCP-серверы проверяют те же правила у себя.</p></div>
+  <p>Что агенту можно — задаётся только здесь. Подтверждений в Telegram нет: разрешённое агент делает сам, остальное запрещено. SYSAI собирает из профиля настройки агента и подписывает их. На ПК синхронизатор проверяет по ним каждое действие агента — команды, файлы, интернет, — и MCP-серверы проверяют те же правила у себя.</p></div>
   <div class="actions"><a class="btn" href="/agents">← Агенты</a></div></div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
@@ -18,12 +18,12 @@
     <h3 class="wide">{{ sections.commands }}</h3>
     <div class="net-checks wide"><label><input type="checkbox" name="commands_run" {{ 'checked' if r.commands.run }}> выполнять команды на ПК без вопросов</label></div>
     <label class="f wide">Запрещённые команды (шаблоны, «*» — любой текст; по строке) <textarea name="commands_deny" spellcheck="false">{{ r.commands.deny|join('\n') }}</textarea>
-      <small class="muted">Всегда запрещено, что бы ни было в профиле: {{ always_deny|join(' · ') }}</small></label>
+      <small class="muted">Всегда запрещено, что бы ни было в профиле: {{ always_deny|join(' · ') }}. Команды и код идут с правами человека и проверяются по тексту: кому нельзя в папку или в интернет — тому без команд.</small></label>
 
     <h3 class="wide">{{ sections.folders }}</h3>
-    <label class="f">Читать <textarea name="folders_read" spellcheck="false">{{ r.folders.read|join('\n') }}</textarea></label>
-    <label class="f">Писать <textarea name="folders_write" spellcheck="false">{{ r.folders.write|join('\n') }}</textarea></label>
-    <label class="f">Нельзя <textarea name="folders_deny" spellcheck="false">{{ r.folders.deny|join('\n') }}</textarea></label>
+    <label class="f">Читать <textarea name="folders_read" spellcheck="false">{{ r.folders.read|join('\n') }}</textarea><small class="muted">«*» — весь компьютер; иначе папки по строке: D:\Проекты</small></label>
+    <label class="f">Писать <textarea name="folders_write" spellcheck="false">{{ r.folders.write|join('\n') }}</textarea><small class="muted">«*» — везде, куда может писать сам человек</small></label>
+    <label class="f">Нельзя <textarea name="folders_deny" spellcheck="false">{{ r.folders.deny|join('\n') }}</textarea><small class="muted">ни читать, ни писать — даже внутри «*»</small></label>
 
     <label class="f">{{ sections.programs }} (по строке) <textarea name="programs">{{ r.programs|join('\n') }}</textarea></label>
     <label class="f">{{ sections.mcp }} («сервер: инструмент, инструмент» или «сервер: *») <textarea name="mcp" spellcheck="false">{% for srv, tools in r.mcp.items() %}{{ srv }}: {{ tools|join(', ') }}
@@ -38,7 +38,7 @@
 
     <h3 class="wide">{{ sections.internet }}</h3>
     <label class="f">Режим <select name="internet_mode">{% for s in internet %}<option value="{{ s }}" {{ 'selected' if r.internet.mode == s }}>{{ internet_ru[s] }}</option>{% endfor %}</select></label>
-    <label class="f">Сайты (для «только список») <textarea name="internet_sites" spellcheck="false">{{ r.internet.sites|join('\n') }}</textarea></label>
+    <label class="f">Сайты (для «только список») <textarea name="internet_sites" spellcheck="false">{{ r.internet.sites|join('\n') }}</textarea><small class="muted">«Весь» — поиск, браузер и любые сайты; «только список» — эти сайты по адресу, без поиска и браузера</small></label>
 
     <h3 class="wide">{{ sections.models }}</h3>
     <div class="net-checks wide">{% for t in tiers %}<label><input type="checkbox" name="tier_{{ t }}" {{ 'checked' if t in r.models.tiers }}> sysai/{{ t }} — {{ tier_ru[t] }}</label>{% endfor %}</div>

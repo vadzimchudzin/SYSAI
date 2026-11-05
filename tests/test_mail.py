@@ -1,10 +1,13 @@
 """№22–23 «Почтальон»: the mailbox is read (only read) every few minutes, each letter is kept once with its attachments
 in «Документы»; each letter gets a type from the list, the client or object, the case or task and labels — only what
 the letter and the offered lists back — and the panel counts how often the sorting is right."""
+import base64
 import datetime as dt
 import email.utils
 import hashlib
 import json
+import smtplib
+import ssl
 from email.message import EmailMessage
 
 import pytest
@@ -123,6 +126,31 @@ def test_a_letter_is_read_with_its_cyrillic_headers_html_text_and_real_attachmen
     assert "color" not in parsed["text"] and "alert" not in parsed["text"]
     assert [a["filename"] for a in parsed["attachments"]] == ["Акт сверки.pdf"]  # the tiny logo is not a document
     assert parsed["sent_at"].tzinfo is not None
+
+
+def test_headers_of_old_mailers_are_read_as_people_see_them():
+    """Raw 8-bit headers (Windows-1251, KOI8-R, UTF-8 not encoded at all) and the whole «Имя <адрес>» in one encoded
+    word (1C and old mailers send so; the standard reader loses the address then)."""
+    for charset in ("cp1251", "koi8-r", "utf-8"):
+        raw = ("From: Иван Петров <ivan@monolit.by>\r\nTo: office@stroydom.by\r\nSubject: Счёт на оплату 15\r\n"
+               f"Content-Type: text/plain; charset={charset}\r\n\r\nтекст письма").encode(charset)
+        parsed = mail.parse(raw)
+        assert (parsed["subject"], parsed["from_name"], parsed["from_addr"]) == (
+            "Счёт на оплату 15", "Иван Петров", "ivan@monolit.by"), charset
+    word = base64.b64encode("ООО ТехноСнаб <sales@technosnab.by>".encode()).decode()
+    subject = base64.b64encode("Запрос КП".encode("cp1251")).decode()
+    raw = (f"From: =?utf-8?b?{word}?=\r\nTo: office@stroydom.by\r\nSubject: =?cp1251?b?{subject}?=\r\n"
+           "Content-Type: text/plain; charset=utf-8\r\n\r\n").encode() + "Текст".encode()
+    parsed = mail.parse(raw)
+    assert (parsed["subject"], parsed["from_name"], parsed["from_addr"]) == ("Запрос КП", "ООО ТехноСнаб", "sales@technosnab.by")
+
+
+def test_a_failure_is_told_by_the_words_of_the_server_not_by_a_bare_number():
+    assert mail._short(smtplib.SMTPDataError(554, b"5.7.1 Message rejected as spam")) == "554 5.7.1 Message rejected as spam"
+    assert mail._short(smtplib.SMTPAuthenticationError(535, b"5.7.8 Authentication failed")).startswith("535 5.7.8")
+    assert mail._short(ConnectionRefusedError(111, "Connection refused")) == "Connection refused"  # not «111»
+    assert mail._short(ssl.SSLCertVerificationError(1, "certificate verify failed")).startswith("сертификат сервера")
+    assert mail._short(mail.MailError("Ящик не ответил")) == "Ящик не ответил"
 
 
 def test_the_new_part_of_a_reply_is_told_from_the_quoted_letters_but_a_forward_is_kept_whole():
@@ -310,6 +338,17 @@ def test_the_sorting_keeps_only_what_the_letter_and_the_offered_lists_back(box, 
     smodel.answers.append({"kind": "Запрос"})
     mail.sort_letter(row.id, force=True)
     assert rows()[0].kind == "request"
+
+
+def test_an_advert_or_a_phishing_letter_is_never_urgent_and_waits_for_no_answer(box, smodel):
+    box.add(letter(subject="СРОЧНО: подтвердите пароль", text="Срочно подтвердите учётную запись до 10.11.2030."))
+    smodel.answers.append({"kind": "spam", "urgent": True, "needs_reply": True,
+                           "deadlines": [{"what": "подтвердить", "date": "2030-11-10", "quote": "до 10.11.2030"}]})
+    mail.check_now()
+    mail.sort_pending()
+    [row] = rows()
+    assert row.kind == "spam" and row.sort["urgent"] is False and row.sort["needs_reply"] is False
+    assert row.sort["deadlines"] == [] and "ждёт ответа" not in row.labels and "срочно" not in row.labels
 
 
 def test_the_sorting_waits_for_the_attachments_and_uses_what_their_analysis_found(box, smodel):

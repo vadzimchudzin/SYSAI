@@ -29,7 +29,8 @@ def test_builtin_profiles_and_the_hermes_configuration(client, net_agent):
     assert hermes["auxiliary"]["vision"]["extra_body"] == {"sysai": {"role": "vision"}}
     assert hermes["mcp_servers"]["sysai"]["url"] == "https://sysai.example/mcp"
     assert hermes["delegation"]["model"] == "sysai/cheap" and hermes["delegation"]["max_spawn_depth"] == 1
-    assert set(hermes["mcp_servers"]) == {"sysai", "plc-kit", "machine-expert", "cad"}
+    # allowed servers that are not in the hub would never start: only SYSAI and the delivered hub servers are there
+    assert set(hermes["mcp_servers"]) == {"sysai"} and {"plc-kit", "machine-expert", "cad"} <= set(doc["rules"]["mcp"])
     assert hermes["skills"]["external_dirs"] and hermes["skills"]["create_dir"]
     assert "sya_" not in str(hermes)  # the token never sits in the configuration
     yaml = access.to_yaml(hermes)
@@ -89,7 +90,8 @@ def test_personal_exceptions_and_never_more_than_the_person(client, net_agent):
 
 
 def test_command_folder_and_tool_checks():
-    rules = access.cap_by_person(access.normalize(access.BUILTIN[0][3]), "user")
+    folders = {"read": ["D:\\ОПО", "D:\\ТО"], "write": ["D:\\ОПО\\Проекты"], "deny": ["C:\\Windows", "C:\\Program Files"]}
+    rules = access.cap_by_person(access.normalize({**access.BUILTIN[0][3], "folders": folders}), "user")
     assert access.command_denied(rules, "git status") == ""
     assert access.command_denied(rules, "git push --force origin main") == "git push --force*"
     assert access.command_denied(rules, "FORMAT  D: /q")  # always forbidden, any case and spacing
@@ -100,6 +102,10 @@ def test_command_folder_and_tool_checks():
     assert not access.path_allowed(rules, "D:\\ТО\\Пакет 3\\схема.pdf", write=True)
     assert not access.path_allowed(rules, "C:\\Windows\\System32\\drivers\\etc\\hosts")
     assert not access.path_allowed(rules, "D:\\ОПО-чужое\\x.txt")
+    # «..» is collapsed as on the computer: no way out of an allowed folder into a forbidden one
+    assert not access.path_allowed(rules, "D:\\ОПО\\Проекты\\..\\..\\Windows\\win.ini")
+    assert not access.path_allowed(rules, "d:/ОПО/Проекты/../../ТО/Пакет 3/схема.pdf", write=True)
+    assert access.path_allowed(rules, "D:\\ОПО\\Проекты\\Линия 1\\..\\Линия 2\\main.st", write=True)
     assert access.tool_allowed(rules, "plc-kit", "anything") and not access.tool_allowed(viewer, "plc-kit", "parse")
     assert access.tool_allowed(viewer, "sysai", "whoami") and not access.tool_allowed(viewer, "sysai", "people")
 
@@ -180,3 +186,59 @@ def test_the_character_of_the_agents_soul(client, net_agent):
     # without a department addition the section is not there
     client.post("/agents/access/soul", data={"common": "Отвечай коротко.", "dept_name_0": "ОПО", "dept_0": ""})
     assert "## Отдел" not in access.document(net_agent["id"])["doc"]["soul"]
+
+
+def test_the_agent_sees_the_whole_computer_and_hermes_asks_before_acting(client, net_agent):
+    engineer = access.cap_by_person(access.normalize(access.BUILTIN[0][3]), "user")
+    viewer = access.cap_by_person(access.normalize(access.BUILTIN[3][3]), "user")
+    for path in ("C:\\Users\\ivanov\\Desktop\\план.xlsx", "D:\\ТО\\Пакет 3\\схема.pdf", "\\\\nas\\share\\a.dwg"):
+        assert access.path_allowed(engineer, path) and access.path_allowed(engineer, path, write=True), path
+        assert access.path_allowed(viewer, path) and not access.path_allowed(viewer, path, write=True), path
+    assert engineer["internet"]["mode"] == "all" and viewer["internet"]["mode"] == "off"
+    narrow = access.normalize({"folders": {"read": ["*"], "write": ["*"], "deny": ["D:\\Бухгалтерия"]}})
+    assert not access.path_allowed(narrow, "d:/бухгалтерия/2025.xlsx") and access.path_allowed(narrow, "D:\\Бух.txt")
+    assert not access.path_allowed(access.normalize({"folders": {"read": ["*"], "deny": ["*"]}}), "C:\\a.txt")
+    # Hermes asks the synchronizer before its own tools: what is open whole is not asked about
+    hook = access.document(net_agent["id"], "https://sysai.example")["doc"]["harness_config"]["hooks"]["pre_tool_call"]
+    assert hook == [{"command": "sysai-agent hook", "matcher": "terminal|execute_code|write_file|patch",
+                     "timeout": access.HOOK_TIMEOUT, "fail_closed": True}]
+    access.set_agent_access(net_agent["id"], overrides={"folders": {"read": ["D:\\ОПО"], "write": [], "deny": []},
+                                                        "internet": {"mode": "list", "sites": ["se.com"]},
+                                                        "commands": {"run": False}})
+    hook = access.document(net_agent["id"])["doc"]["harness_config"]["hooks"]["pre_tool_call"][0]
+    asked = hook["matcher"].split("|")
+    assert {"read_file", "search_files", "web_search", "web_extract", "browser_.*", "vision_analyze",
+            "process_manage", "computer_use", "terminal"} <= set(asked)
+    assert access.to_yaml({"hooks": {"pre_tool_call": [hook]}}).count("fail_closed: true") == 1
+
+
+def test_the_first_placeholder_folders_and_sites_give_way_once(client, net_agent):
+    """Profiles made before the whole computer: a section nobody changed gets the new default; a changed one stays."""
+    access.ensure_builtin()
+    with SessionLocal() as s:
+        for row in s.query(NetAccessProfile).filter(NetAccessProfile.builtin.is_(True)).all():
+            first = access.FIRST_DEFAULTS.get(row.code) or {}
+            rules = copy.deepcopy(row.rules)
+            rules.update(copy.deepcopy(first))
+            if row.code == "to":
+                rules["internet"] = {"mode": "list", "sites": ["sysat.by", "мой-сайт.by"]}  # changed by a person
+            row.rules, row.version = rules, 3
+        s.commit()
+    access.ensure_builtin()
+    access.ensure_builtin()  # once: the second call changes nothing
+    engineer, to, viewer = _profile("opo-engineer"), _profile("to"), _profile("viewer")
+    assert engineer.rules["folders"] == {"read": ["*"], "write": ["*"], "deny": []} and engineer.version == 4
+    assert engineer.rules["internet"]["mode"] == "all" and engineer.updated_by == "SYSAI"
+    assert to.rules["folders"]["read"] == ["*"] and to.rules["internet"]["sites"] == ["sysat.by", "мой-сайт.by"]
+    assert viewer.rules["folders"] == {"read": ["*"], "write": [], "deny": []} and viewer.rules["internet"]["mode"] == "off"
+
+
+def test_the_signed_document_offers_the_synchronizer_to_update_to(client, net_agent):
+    from app import settings_store
+    from app.net import installer
+    doc = access.document(net_agent["id"])
+    offer = doc["doc"]["synchronizer"]
+    assert offer == {"version": installer.version(), "sha256": installer.wheel()[2], "auto_update": True}
+    settings_store.set_many({"agents_auto_update": False})
+    later = access.document(net_agent["id"])
+    assert later["doc"]["synchronizer"]["auto_update"] is False and later["rev"] != doc["rev"]  # the computers learn

@@ -1,5 +1,6 @@
-/* SYSAI · interactive organisation mind map: zoom & pan, tidy auto-layout, drag to assign/link,
-   inspector panel to edit people and department composition without leaving the map. */
+/* SYSAI · organisation chart: a top-down tree that lays itself out (company → director → departments →
+   people), zoom & pan, collapsible branches, drag a card onto another to assign or link, and an inspector
+   panel to edit people and department composition without leaving the map. */
 (() => {
   'use strict';
   const canvas = document.getElementById('org-map-canvas');
@@ -12,8 +13,8 @@
   const ICON_CROWN = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M3.2 8.2 7.6 12 12 4.8l4.4 7.2 4.4-3.8-1.9 10.3H5.1Z" fill="currentColor"/></svg>';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const STATE_KEY = 'sysai-org-map-state';
-  const VIEW_KEY = 'sysai-org-map-view';
-  const ARRANGED_KEY = 'sysai-org-map-arranged-v2';
+  const VIEW_KEY = 'sysai-org-map-view-v3';
+  const COLLAPSE_KEY = 'sysai-org-map-collapsed-v1';
 
   /* ---------------- toast ---------------- */
   let toastTimer = 0;
@@ -126,109 +127,390 @@
 
   /* ---------------- data ---------------- */
   const svg = canvas.querySelector('.org-map-lines');
-  let edges = [];
-  let data = { departments: [], employees: [], relations: [], accents: [], layout_version: 0 };
-  try { edges = JSON.parse(document.getElementById('org-map-edges')?.textContent || '[]'); } catch (_) { edges = []; }
+  let data = { departments: [], employees: [], relations: [], accents: [] };
+  let tree = { nodes: [], cross: [] };
   try { data = Object.assign(data, JSON.parse(document.getElementById('org-map-data')?.textContent || '{}')); } catch (_) {}
+  try { tree = Object.assign(tree, JSON.parse(document.getElementById('org-map-tree')?.textContent || '{}')); } catch (_) {}
   const ACCENTS = data.accents && data.accents.length ? data.accents : ['#d98e8a', '#8fa8d8'];
-  const FREE_ACCENT = '#a9a59a';
+  const FREE_ACCENT = '#a9a59a', GOLD = '#e2c27a', SAND = '#d9b98a', TEAL = '#7fb7a4', NEUTRAL = '#8c877b';
   const deptById = new Map(data.departments.map(d => [d.id, d]));
   const empById = new Map(data.employees.map(e => [e.id, e]));
   const nodeByKey = new Map($$('[data-map-node]', canvas).map(n => [n.dataset.nodeKey, n]));
-  const accentOf = node => {
-    const index = Number(node?.dataset.accent ?? -1);
-    return index >= 0 ? ACCENTS[index % ACCENTS.length] : FREE_ACCENT;
-  };
-  nodeByKey.forEach(node => { if (node.dataset.nodeKind !== 'company') node.style.setProperty('--accent', accentOf(node)); });
+  const root = canvas.querySelector('[data-node-kind="company"]');
+  const ROOT_KEY = 'company:1';
+  const idOf = key => Number(String(key).split(':')[1]);
+  const kindOfKey = key => String(key).split(':')[0];
   const deptAccent = id => { const d = deptById.get(Number(id)); return d ? ACCENTS[d.accent % ACCENTS.length] : FREE_ACCENT; };
   const initials = name => {
     const parts = String(name || '').replace(/-/g, ' ').split(/\s+/).filter(Boolean);
     if (!parts.length) return 'С';
     return parts.length === 1 ? parts[0].slice(0, 2).toUpperCase() : (parts[0][0] + parts[1][0]).toUpperCase();
   };
-  const anchorDept = emp => {
-    if (!emp || !emp.memberships.length) return null;
-    return (emp.memberships.find(m => m.is_primary) || emp.memberships[0]).department_id;
+
+  /* ---------------- tree model (built on the server, see app/org_tree.py) ---------------- */
+  const parentOf = new Map(), linkOf = new Map(), childrenOf = new Map();
+  tree.nodes.forEach(n => {
+    if (!nodeByKey.has(n.key)) return;
+    const up = n.parent && nodeByKey.has(n.parent) ? n.parent : (n.key === ROOT_KEY ? null : ROOT_KEY);
+    parentOf.set(n.key, up);
+    linkOf.set(n.key, n);
+    if (up) { if (!childrenOf.has(up)) childrenOf.set(up, []); childrenOf.get(up).push(n.key); }
+  });
+  // Any card the tree did not mention still gets a place instead of piling up in the corner.
+  nodeByKey.forEach((_, key) => {
+    if (parentOf.has(key) || key === ROOT_KEY) return;
+    parentOf.set(key, ROOT_KEY); linkOf.set(key, { key, parent: ROOT_KEY, kind: 'company', label: '' });
+    if (!childrenOf.has(ROOT_KEY)) childrenOf.set(ROOT_KEY, []);
+    childrenOf.get(ROOT_KEY).push(key);
+  });
+  const kidsOf = key => childrenOf.get(key) || [];
+  const descendants = key => kidsOf(key).reduce((n, k) => n + 1 + descendants(k), 0);
+  const ancestors = key => { const out = []; let p = parentOf.get(key); while (p) { out.push(p); p = parentOf.get(p); } return out; };
+
+  // Cards take the colour of the department they sit in; the director is gold, the rest neutral.
+  const accentByKey = new Map();
+  const accentFor = key => {
+    if (accentByKey.has(key)) return accentByKey.get(key);
+    let value = FREE_ACCENT;
+    if (kindOfKey(key) === 'department') value = deptAccent(idOf(key));
+    else if (nodeByKey.get(key)?.classList.contains('is-director')) value = GOLD;
+    else { const up = parentOf.get(key); if (up && up !== ROOT_KEY && kindOfKey(up) !== 'group') value = accentFor(up); }
+    accentByKey.set(key, value);
+    return value;
+  };
+  const accentOf = node => (node ? accentFor(node.dataset.nodeKey) : FREE_ACCENT);
+  nodeByKey.forEach((node, key) => { if (key !== ROOT_KEY) node.style.setProperty('--accent', accentFor(key)); });
+  const lineColor = parent => {
+    if (!parent || parent === ROOT_KEY || kindOfKey(parent) === 'group') return NEUTRAL;
+    if (kindOfKey(parent) === 'department') return deptAccent(idOf(parent));
+    return nodeByKey.get(parent)?.classList.contains('is-director') ? GOLD : SAND;
   };
 
-  // The director is marked with a crown; when they already sit in a department the implicit root line only adds noise.
-  edges = edges.filter(e => !(e.kind === 'director' && !e.relation_id
-    && (empById.get(Number(String(e.target).split(':')[1]))?.memberships || []).length));
-  // Departments without a parent block hang from the company root, so the mind map always has a centre.
-  const deptHasParent = new Set(edges.filter(e => e.kind === 'block' && String(e.target).startsWith('department:')).map(e => e.target));
-  data.departments.forEach(d => {
-    const key = `department:${d.id}`;
-    if (!deptHasParent.has(key)) edges.unshift({ source: 'company:1', target: key, kind: 'root', label: 'Подразделение' });
-  });
+  /* ---------------- collapsed branches ---------------- */
+  let collapsed = new Set();
+  try { (JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]') || []).forEach(k => { if (kidsOf(k).length && k !== ROOT_KEY) collapsed.add(k); }); } catch (_) {}
+  const saveCollapsed = () => { try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsed])); } catch (_) {} };
+  const visibleKids = key => (collapsed.has(key) ? [] : kidsOf(key));
+  const isVisible = key => !ancestors(key).some(a => collapsed.has(a));
 
-  /* ---------------- geometry ---------------- */
+  const toggles = new Map();
+  childrenOf.forEach((kids, key) => {
+    if (!kids.length || key === ROOT_KEY) return;
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'org-map-toggle'; button.dataset.toggle = key;
+    canvas.appendChild(button);
+    toggles.set(key, button);
+  });
+  const collapseAllBtn = $('[data-collapse-all]');
+  function syncToggles() {
+    toggles.forEach((button, key) => {
+      const shut = collapsed.has(key), count = descendants(key);
+      button.classList.toggle('is-collapsed', shut);
+      button.innerHTML = shut ? `<span>+${count}</span>` : '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 6h6"/></svg>';
+      button.title = shut ? `Развернуть ветку (${count})` : 'Свернуть ветку';
+      button.setAttribute('aria-label', button.title);
+      button.setAttribute('aria-expanded', shut ? 'false' : 'true');
+    });
+    const label = collapseAllBtn?.querySelector('[data-collapse-label]');
+    if (label) label.textContent = collapsed.size ? 'Развернуть всё' : 'Свернуть всё';
+  }
+  function setCollapsed(key, shut) {
+    if (!toggles.has(key)) return;
+    if (shut) collapsed.add(key); else collapsed.delete(key);
+    saveCollapsed(); syncToggles();
+    autoLayout({ animate: true, keep: key });
+  }
+  collapseAllBtn?.addEventListener('click', () => {
+    if (collapsed.size) collapsed.clear();
+    else toggles.forEach((_, key) => {
+      // Keep the top of the chart open: company, director and the chain above the departments.
+      if (nodeByKey.get(key)?.classList.contains('is-director')) return;
+      collapsed.add(key);
+    });
+    saveCollapsed(); syncToggles();
+    autoLayout({ animate: true, fit: true });
+  });
+  function reveal(key) {
+    let changed = false;
+    ancestors(key).forEach(a => { if (collapsed.delete(a)) changed = true; });
+    if (changed) { saveCollapsed(); syncToggles(); autoLayout({ animate: false }); }
+  }
+
+  /* ---------------- layout: tidy top-down tree with stacked lists of people ---------------- */
+  const L = { V_GAP: 66, H_GAP: 34, LIST_TOP: 24, SPINE: 20, INDENT: 40, ROW_GAP: 10, COL_GAP: 26, MAX_ROWS: 8, MARGIN: 140 };
+  const sizes = new Map();
+  const sizeOf = key => {
+    if (!sizes.has(key)) { const n = nodeByKey.get(key); sizes.set(key, { w: n.offsetWidth || 240, h: n.offsetHeight || 60 }); }
+    return sizes.get(key);
+  };
+  const isLeaf = key => kindOfKey(key) === 'employee' && !visibleKids(key).length;
+
+  function measureList(leaves) {
+    const cols = leaves.length <= L.MAX_ROWS ? 1 : Math.ceil(leaves.length / L.MAX_ROWS);
+    const rows = Math.ceil(leaves.length / cols);
+    const columns = [];
+    let x = 0, h = 0;
+    for (let c = 0; c < cols; c++) {
+      const items = leaves.slice(c * rows, (c + 1) * rows);
+      if (!items.length) break;
+      const cw = Math.max(...items.map(k => sizeOf(k).w));
+      let y = 0;
+      const placed = items.map(k => { const s = sizeOf(k); const it = { key: k, dx: x + L.INDENT, dy: y, h: s.h }; y += s.h + L.ROW_GAP; return it; });
+      columns.push({ spine: x + L.SPINE, items: placed });
+      h = Math.max(h, y - L.ROW_GAP);
+      x += L.INDENT + cw + L.COL_GAP;
+    }
+    return { columns, w: x - L.COL_GAP, h };
+  }
+  function measure(key, memo) {
+    const s = sizeOf(key), kids = visibleKids(key);
+    let info;
+    if (!kids.length) info = { mode: 'leaf', nw: s.w, nh: s.h, nodeDx: 0, w: s.w, h: s.h };
+    else if (kids.every(isLeaf)) {
+      const list = measureList(kids);
+      info = { mode: 'list', nw: s.w, nh: s.h, nodeDx: 0, list, w: Math.max(s.w, list.w), h: s.h + L.LIST_TOP + list.h };
+    } else {
+      const blocks = [];
+      const leaves = kids.filter(isLeaf);
+      let listAdded = false;
+      kids.forEach(k => {
+        if (isLeaf(k)) { if (!listAdded) { blocks.push({ type: 'list', list: measureList(leaves) }); listAdded = true; } }
+        else blocks.push({ type: 'node', key: k, info: measure(k, memo) });
+      });
+      let x = 0;
+      blocks.forEach(b => {
+        b.w = b.type === 'list' ? b.list.w : b.info.w;
+        b.h = b.type === 'list' ? b.list.h : b.info.h;
+        b.dx = x;
+        b.anchors = b.type === 'list' ? b.list.columns.map(c => x + c.spine) : [x + b.info.nodeDx + b.info.nw / 2];
+        b.group = b.type === 'node' && kindOfKey(b.key) === 'group';
+        x += b.w + L.H_GAP;
+      });
+      // The parent sits above the middle of its children; the «no department» pile does not pull it aside.
+      const core = blocks.filter(b => !b.group).length ? blocks.filter(b => !b.group) : blocks;
+      const first = core[0].anchors[0], last = core[core.length - 1].anchors[core[core.length - 1].anchors.length - 1];
+      let nodeDx = (first + last) / 2 - s.w / 2;
+      const minX = Math.min(0, nodeDx), maxX = Math.max(x - L.H_GAP, nodeDx + s.w);
+      nodeDx -= minX;
+      blocks.forEach(b => { b.dx -= minX; b.anchors = b.anchors.map(a => a - minX); });
+      info = { mode: 'row', nw: s.w, nh: s.h, nodeDx, blocks, rowDy: s.h + L.V_GAP, w: maxX - minX, h: s.h + L.V_GAP + Math.max(...blocks.map(b => b.h)) };
+    }
+    memo.set(key, info);
+    return info;
+  }
+  function placeList(list, bx, by, from, parentKey, out) {
+    const sx0 = bx + list.columns[0].spine;
+    list.columns.forEach((col, c) => {
+      const sx = bx + col.spine;
+      col.items.forEach(it => {
+        const lx = bx + it.dx, ly = by + it.dy, cy = ly + it.h / 2;
+        out.pos.set(it.key, { x: lx, y: ly });
+        const pts = from.mode === 'list'
+          ? (c === 0 ? [[sx0, from.bottom], [sx0, cy], [lx, cy]] : [[sx0, from.bottom], [sx0, from.bus], [sx, from.bus], [sx, cy], [lx, cy]])
+          : [[from.px, from.bottom], [from.px, from.bus], [sx, from.bus], [sx, cy], [lx, cy]];
+        out.links.push({ parent: parentKey, child: it.key, pts, hit: [[sx, cy], [lx, cy]] });
+      });
+    });
+  }
+  function place(key, x0, y0, memo, out) {
+    const info = memo.get(key);
+    const nx = x0 + info.nodeDx, ny = y0, bottom = ny + info.nh;
+    out.pos.set(key, { x: nx, y: ny });
+    if (info.mode === 'list') {
+      placeList(info.list, nx, bottom + L.LIST_TOP, { mode: 'list', bottom, bus: bottom + L.LIST_TOP / 2 }, key, out);
+    } else if (info.mode === 'row') {
+      const px = nx + info.nw / 2, bus = bottom + L.V_GAP / 2;
+      info.blocks.forEach(b => {
+        const bx = x0 + b.dx, by = y0 + info.rowDy;
+        if (b.type === 'list') { placeList(b.list, bx, by, { mode: 'row', px, bottom, bus }, key, out); return; }
+        place(b.key, bx, by, memo, out);
+        const c = out.pos.get(b.key), cx = c.x + b.info.nw / 2;
+        out.links.push({ parent: key, child: b.key, pts: [[px, bottom], [px, bus], [cx, bus], [cx, c.y]], hit: [[cx, bus], [cx, c.y]], label: [cx, (bus + c.y) / 2] });
+      });
+    }
+  }
+  function computeLayout() {
+    // Long teams are folded into columns; the column height is chosen so the whole chart fits the
+    // screen as large as possible (a wide company gets taller columns, a narrow one shorter).
+    const r = vpRect(), availW = Math.max(320, r.width - 120), availH = Math.max(260, r.height - 170);
+    let best = null;
+    for (const rows of [8, 10, 12, 6, 16]) {
+      L.MAX_ROWS = rows;
+      const memo = new Map(), info = measure(ROOT_KEY, memo);
+      const k = Math.min(availW / info.w, availH / info.h, 1);
+      if (!best || k > best.k * 1.04) best = { rows, k, memo, info };
+    }
+    L.MAX_ROWS = best.rows;
+    const out = { pos: new Map(), links: [] };
+    place(ROOT_KEY, L.MARGIN, L.MARGIN, best.memo, out);
+    return { ...out, w: best.info.w + L.MARGIN * 2, h: best.info.h + L.MARGIN * 2 };
+  }
+
+  /* ---------------- drawing ---------------- */
+  const f1 = v => (Math.round(v * 10) / 10).toString();
+  function roundedPath(points, radius = 11) {
+    const pts = [];
+    points.forEach(p => { const z = pts[pts.length - 1]; if (!z || Math.abs(z[0] - p[0]) > 0.4 || Math.abs(z[1] - p[1]) > 0.4) pts.push(p); });
+    for (let i = pts.length - 2; i > 0; i--) {
+      const a = pts[i - 1], b = pts[i], c = pts[i + 1];
+      if ((Math.abs(a[0] - b[0]) < 0.4 && Math.abs(b[0] - c[0]) < 0.4) || (Math.abs(a[1] - b[1]) < 0.4 && Math.abs(b[1] - c[1]) < 0.4)) pts.splice(i, 1);
+    }
+    if (pts.length < 2) return '';
+    let d = `M ${f1(pts[0][0])} ${f1(pts[0][1])}`;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const a = pts[i - 1], b = pts[i], c = pts[i + 1];
+      const l1 = Math.hypot(b[0] - a[0], b[1] - a[1]), l2 = Math.hypot(c[0] - b[0], c[1] - b[1]);
+      const r = Math.min(radius, l1 / 2, l2 / 2);
+      d += ` L ${f1(b[0] + (a[0] - b[0]) * r / l1)} ${f1(b[1] + (a[1] - b[1]) * r / l1)} Q ${f1(b[0])} ${f1(b[1])} ${f1(b[0] + (c[0] - b[0]) * r / l2)} ${f1(b[1] + (c[1] - b[1]) * r / l2)}`;
+    }
+    const z = pts[pts.length - 1];
+    return `${d} L ${f1(z[0])} ${f1(z[1])}`;
+  }
   const box = node => ({ x: parseFloat(node.style.left) || 0, y: parseFloat(node.style.top) || 0, w: node.offsetWidth, h: node.offsetHeight });
   const center = b => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
-  const root = canvas.querySelector('[data-node-kind="company"]');
-
-  function edgePath(a, b) {
-    const ca = center(a), cb = center(b);
-    const dx = cb.x - ca.x, dy = cb.y - ca.y;
-    const horizontal = Math.abs(dx) > (a.w + b.w) / 2 * 0.72 || Math.abs(dx) > Math.abs(dy) * 1.2;
+  function curve(a, b) {
+    const ca = center(a), cb = center(b), dx = cb.x - ca.x, dy = cb.y - ca.y;
     let p1, p2, c1, c2;
-    if (horizontal) {
-      const s = Math.sign(dx) || 1;
-      p1 = { x: s > 0 ? a.x + a.w : a.x, y: ca.y };
-      p2 = { x: s > 0 ? b.x : b.x + b.w, y: cb.y };
-      const k = Math.max(36, Math.abs(p2.x - p1.x) * 0.5);
-      c1 = { x: p1.x + s * k, y: p1.y }; c2 = { x: p2.x - s * k, y: p2.y };
-    } else {
+    if (Math.abs(dy) > (a.h + b.h) / 2 + 24) {
       const s = Math.sign(dy) || 1;
-      p1 = { x: ca.x, y: s > 0 ? a.y + a.h : a.y };
-      p2 = { x: cb.x, y: s > 0 ? b.y : b.y + b.h };
-      const k = Math.max(30, Math.abs(p2.y - p1.y) * 0.5);
+      p1 = { x: ca.x, y: s > 0 ? a.y + a.h : a.y }; p2 = { x: cb.x, y: s > 0 ? b.y : b.y + b.h };
+      const k = Math.max(40, Math.abs(p2.y - p1.y) * 0.45);
       c1 = { x: p1.x, y: p1.y + s * k }; c2 = { x: p2.x, y: p2.y - s * k };
+    } else {
+      const s = Math.sign(dx) || 1;
+      p1 = { x: s > 0 ? a.x + a.w : a.x, y: ca.y }; p2 = { x: s > 0 ? b.x : b.x + b.w, y: cb.y };
+      const k = Math.max(40, Math.abs(p2.x - p1.x) * 0.45);
+      c1 = { x: p1.x + s * k, y: p1.y }; c2 = { x: p2.x - s * k, y: p2.y };
     }
     const mid = { x: (p1.x + 3 * c1.x + 3 * c2.x + p2.x) / 8, y: (p1.y + 3 * c1.y + 3 * c2.y + p2.y) / 8 };
-    return { d: `M ${p1.x.toFixed(1)} ${p1.y.toFixed(1)} C ${c1.x.toFixed(1)} ${c1.y.toFixed(1)}, ${c2.x.toFixed(1)} ${c2.y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`, p1, p2, mid };
+    return { d: `M ${f1(p1.x)} ${f1(p1.y)} C ${f1(c1.x)} ${f1(c1.y)}, ${f1(c2.x)} ${f1(c2.y)}, ${f1(p2.x)} ${f1(p2.y)}`, mid, end: p2 };
   }
-  const edgeColor = edge => {
-    const s = String(edge.source), t = String(edge.target);
-    if (t.startsWith('department:')) return s.startsWith('department:') ? '#7fb7a4' : deptAccent(t.split(':')[1]);
-    if (s.startsWith('department:')) return deptAccent(s.split(':')[1]);
-    if (edge.kind === 'manager') return deptAccent(t.split(':')[1]);
-    const src = nodeByKey.get(s);
-    return src && src.dataset.nodeKind === 'employee' ? accentOf(src) : '#c9c6bb';
+  const DEFAULT_LABELS = new Set(['', 'Подчинение', 'Связь отделов', 'Подразделение', 'Директор', 'Руководит', 'reports_to', 'linked_to']);
+  const hitAttrs = link => {
+    if (link.relation_id) return `data-edge-kind="org" data-edge-id="${link.relation_id}"`;
+    if (link.employee_id && link.department_id) return `data-edge-kind="membership" data-employee="${link.employee_id}" data-department="${link.department_id}"`;
+    return '';
   };
+  const hitTitle = link => (link.relation_id ? 'нажмите, чтобы удалить связь' : 'нажмите, чтобы убрать из отдела');
 
-  let frame = 0, focusKey = null;
-  function draw() {
-    cancelAnimationFrame(frame);
-    frame = requestAnimationFrame(drawNow);
+  let layout = { pos: new Map(), links: [], w: 0, h: 0 };
+  let drawnLinks = new Map();
+  let focusKey = null, frame = 0;
+  function litSets() {
+    if (!focusKey) return null;
+    const nodes = new Set([focusKey, ...ancestors(focusKey), ...visibleKids(focusKey)]);
+    const links = new Set([focusKey, ...ancestors(focusKey).filter(k => k !== ROOT_KEY), ...visibleKids(focusKey)]);
+    tree.cross.forEach(c => { if (c.source === focusKey) nodes.add(c.target); if (c.target === focusKey) nodes.add(c.source); });
+    return { nodes, links };
   }
-  function drawNow() {
-    const lit = focusKey ? new Set([focusKey]) : null;
-    let markup = '';
-    for (const edge of edges) {
-      const source = nodeByKey.get(edge.source), target = nodeByKey.get(edge.target);
-      if (!source || !target) continue;
-      const kind = ['manager', 'director', 'block', 'reporting', 'root', 'company-member'].includes(edge.kind) ? edge.kind : 'membership';
-      const geo = edgePath(box(source), box(target));
-      const color = edgeColor(edge);
-      const isLit = focusKey && (edge.source === focusKey || edge.target === focusKey);
-      if (isLit) { lit.add(edge.source); lit.add(edge.target); }
-      const litClass = isLit ? ' is-lit is-flow' : '';
-      const title = esc(edge.label || 'Связь');
-      let hit = '';
-      if (edge.relation_id) hit = `<path class="org-map-edge-hit" data-edge-kind="org" data-edge-id="${edge.relation_id}" d="${geo.d}"><title>${title} — нажмите, чтобы удалить</title></path>`;
-      else if (kind === 'membership' || kind === 'manager') {
-        const emp = kind === 'manager' ? edge.source : edge.target, dep = kind === 'manager' ? edge.target : edge.source;
-        hit = `<path class="org-map-edge-hit" data-edge-kind="membership" data-employee="${esc(emp.split(':')[1])}" data-department="${esc(dep.split(':')[1])}" d="${geo.d}"><title>${title} — нажмите, чтобы убрать из отдела</title></path>`;
+  function draw() { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => drawNow()); }
+  function drawNow(linkPts = null) {
+    const lit = litSets();
+    // Shared trunks overlap: each layer is composited as a whole so overlaps never look brighter.
+    let base = '', cross = '', top = '', hits = '', labels = '';
+    for (const l of layout.links) {
+      const link = linkOf.get(l.child) || {};
+      const pts = linkPts?.get(l.child) || l.pts;
+      const isLit = !!(lit && lit.links.has(l.child));
+      const path = `<path class="org-map-edge org-map-edge-${esc(link.kind || 'membership')}" style="--edge:${lineColor(l.parent)}" d="${roundedPath(pts)}"/>`;
+      if (isLit) top += path; else base += path;
+      if (linkPts) continue;
+      const attrs = hitAttrs(link);
+      if (attrs) hits += `<path class="org-map-edge-hit" ${attrs} d="M ${f1(l.hit[0][0])} ${f1(l.hit[0][1])} L ${f1(l.hit[1][0])} ${f1(l.hit[1][1])}"><title>${esc(link.label || 'Связь')} — ${hitTitle(link)}</title></path>`;
+      // People carry the caption of their line on the card; captions on the chart are for departments.
+      if (l.label && link.relation_id && kindOfKey(l.child) !== 'employee' && !DEFAULT_LABELS.has(link.label)) {
+        labels += `<text class="org-map-edge-label${isLit ? ' is-lit' : ''}" x="${f1(l.label[0] + 9)}" y="${f1(l.label[1] + 3.5)}">${esc(link.label)}</text>`;
       }
-      if (kind === 'manager') markup += `<path class="org-map-edge-manager-glow${isLit ? ' is-lit' : ''}" style="--edge:${color}" d="${geo.d}"/>`;
-      markup += hit + `<path class="org-map-edge org-map-edge-${kind}${litClass}" style="--edge:${color}" d="${geo.d}"><title>${title}</title></path>`;
-      markup += `<circle class="org-map-edge-dot${isLit ? ' is-lit' : ''}" style="--edge:${color}" cx="${geo.p2.x.toFixed(1)}" cy="${geo.p2.y.toFixed(1)}" r="3"/>`;
-      if (edge.relation_id && edge.label) markup += `<text class="org-map-edge-label${isLit ? ' is-lit' : ''}" x="${geo.mid.x.toFixed(1)}" y="${(geo.mid.y - 6).toFixed(1)}" text-anchor="middle">${esc(edge.label)}</text>`;
     }
-    svg.innerHTML = markup;
+    if (!linkPts) {
+      for (const c of tree.cross) {
+        const a = nodeByKey.get(c.source), b = nodeByKey.get(c.target);
+        if (!a || !b || a.classList.contains('is-hidden') || b.classList.contains('is-hidden')) continue;
+        const geo = curve(box(a), box(b));
+        const isLit = !!(lit && (c.source === focusKey || c.target === focusKey));
+        // «Also in another department» lines would criss-cross the chart: they appear for the selected card only.
+        if (!isLit && (c.kind === 'membership' || c.kind === 'manager')) continue;
+        const color = c.kind === 'reporting' ? SAND : c.kind === 'block' ? TEAL : deptAccent(idOf(c.source));
+        const markup = `<path class="org-map-cross org-map-cross-${esc(c.kind)}" style="--edge:${color}" d="${geo.d}"/>`
+          + `<circle class="org-map-edge-dot" style="--edge:${color}" cx="${f1(geo.end.x)}" cy="${f1(geo.end.y)}" r="2.6"/>`;
+        if (isLit) top += markup; else cross += markup;
+        const attrs = hitAttrs(c);
+        if (attrs) hits += `<path class="org-map-edge-hit is-cross" ${attrs} d="${geo.d}"><title>${esc(c.label || 'Связь')} — ${hitTitle(c)}</title></path>`;
+        if (isLit && c.label) labels += `<text class="org-map-edge-label is-lit" x="${f1(geo.mid.x)}" y="${f1(geo.mid.y - 6)}" text-anchor="middle">${esc(c.label)}</text>`;
+      }
+    }
+    svg.innerHTML = `<g class="org-map-layer-base">${base}</g><g class="org-map-layer-cross">${cross}</g><g class="org-map-layer-lit">${top}</g><g class="org-map-layer-hits">${hits}</g><g class="org-map-layer-labels">${labels}</g>`;
     svg.classList.toggle('has-focus', !!focusKey);
     canvas.classList.toggle('has-focus', !!focusKey);
-    nodeByKey.forEach((node, key) => node.classList.toggle('is-lit', !!(lit && lit.has(key))));
+    nodeByKey.forEach((node, key) => node.classList.toggle('is-lit', !!(lit && lit.nodes.has(key))));
+  }
+
+  /* ---------------- applying the layout (with a short, calm transition) ---------------- */
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  let layoutAnim = 0;
+  function positionToggles(pos) {
+    toggles.forEach((button, key) => {
+      const p = pos.get(key);
+      button.hidden = !p;
+      if (!p) return;
+      const s = sizeOf(key);
+      button.style.left = `${Math.round(p.x + s.w / 2)}px`;
+      button.style.top = `${Math.round(p.y + s.h - 11)}px`;
+    });
+  }
+  function autoLayout({ animate = false, fit = false, keep = null } = {}) {
+    sizes.clear();
+    nodeByKey.forEach((node, key) => node.classList.toggle('is-hidden', !isVisible(key)));
+    const before = new Map(layout.pos), beforeLinks = new Map(layout.links.map(l => [l.child, l.pts]));
+    const anchorBefore = keep ? before.get(keep) : null;
+    layout = computeLayout();
+    canvas.style.width = `${Math.ceil(layout.w)}px`;
+    canvas.style.height = `${Math.ceil(layout.h)}px`;
+    // Keep the branch the user clicked under the pointer: shift the view by how far it moved.
+    if (anchorBefore && layout.pos.get(keep)) {
+      const after = layout.pos.get(keep);
+      view.x -= (after.x - anchorBefore.x) * view.k; view.y -= (after.y - anchorBefore.y) * view.k;
+      applyView();
+    }
+    cancelAnimationFrame(layoutAnim);
+    const finish = () => {
+      layout.pos.forEach((p, key) => { const n = nodeByKey.get(key); n.style.left = `${Math.round(p.x)}px`; n.style.top = `${Math.round(p.y)}px`; n.classList.remove('is-entering'); });
+      positionToggles(layout.pos);
+      drawNow();
+    };
+    if (!animate || reduceMotion || !before.size) { finish(); if (fit) fitView(false); canvas.classList.add('is-ready'); return; }
+    const from = new Map();
+    layout.pos.forEach((p, key) => {
+      let start = before.get(key);
+      if (!start) {
+        const up = ancestors(key).find(a => before.has(a));
+        const anchor = up ? before.get(up) : p;
+        start = { x: anchor.x, y: anchor.y };
+        nodeByKey.get(key).classList.add('is-entering');
+      }
+      from.set(key, start);
+    });
+    const fromLinks = new Map();
+    layout.links.forEach(l => {
+      const prev = beforeLinks.get(l.child);
+      fromLinks.set(l.child, prev && prev.length === l.pts.length ? prev : l.pts.map(() => l.pts[0]));
+    });
+    positionToggles(new Map());
+    if (fit) fitView(true);
+    const t0 = performance.now(), ms = 360;
+    const step = now => {
+      const t = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - t, 3);
+      layout.pos.forEach((p, key) => {
+        const s = from.get(key), n = nodeByKey.get(key);
+        n.style.left = `${Math.round(s.x + (p.x - s.x) * e)}px`; n.style.top = `${Math.round(s.y + (p.y - s.y) * e)}px`;
+        if (n.classList.contains('is-entering')) n.style.opacity = String(e);
+      });
+      const pts = new Map();
+      layout.links.forEach(l => { const a = fromLinks.get(l.child); pts.set(l.child, l.pts.map((q, i) => [a[i][0] + (q[0] - a[i][0]) * e, a[i][1] + (q[1] - a[i][1]) * e])); });
+      if (t < 1) { drawNow(pts); layoutAnim = requestAnimationFrame(step); }
+      else { nodeByKey.forEach(n => { n.style.opacity = ''; }); finish(); }
+    };
+    layoutAnim = requestAnimationFrame(step);
   }
 
   /* ---------------- view: zoom & pan ---------------- */
@@ -244,7 +526,7 @@
     clearTimeout(viewSaveTimer);
     viewSaveTimer = setTimeout(() => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch (_) {} }, 250);
   }
-  const clampK = k => Math.max(0.2, Math.min(2, k));
+  const clampK = k => Math.max(0.15, Math.min(2, k));
   const vpRect = () => viewport.getBoundingClientRect();
   const toWorld = (clientX, clientY) => { const r = vpRect(); return { x: (clientX - r.left - view.x) / view.k, y: (clientY - r.top - view.y) / view.k }; };
   function zoomAt(k, clientX, clientY) {
@@ -256,8 +538,9 @@
     applyView();
   }
   let viewAnim = 0;
-  function animateView(target, ms = 480) {
+  function animateView(target, ms = 420) {
     cancelAnimationFrame(viewAnim);
+    if (reduceMotion) { Object.assign(view, target); applyView(); return; }
     const from = { ...view }, t0 = performance.now();
     const step = now => {
       const t = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - t, 3);
@@ -269,16 +552,28 @@
   }
   function contentBounds() {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    nodeByKey.forEach(node => { const b = box(node); minX = Math.min(minX, b.x); minY = Math.min(minY, b.y); maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h); });
+    layout.pos.forEach((p, key) => { const s = sizeOf(key); minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x + s.w); maxY = Math.max(maxY, p.y + s.h); });
     if (!isFinite(minX)) return { x: 0, y: 0, w: 800, h: 600 };
     return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
   }
+  const inspector = document.getElementById('org-inspector');
   const inspectorWidth = () => (inspector && !inspector.hidden && window.innerWidth > 980 ? inspector.offsetWidth + 28 : 0);
-  function fitView(animate = true) {
+  const READABLE_K = 0.45, START_K = 0.6;
+  function fitView(animate = true, { readable = false } = {}) {
     const r = vpRect(), b = contentBounds();
-    const padX = 70, padTop = 80, padBottom = 90, availW = Math.max(200, r.width - inspectorWidth());
-    const k = clampK(Math.min((availW - padX * 2) / b.w, (r.height - padTop - padBottom) / b.h, 1.05));
-    const target = { k, x: (availW - b.w * k) / 2 - b.x * k, y: padTop + (r.height - padTop - padBottom - b.h * k) / 2 - b.y * k };
+    const padX = 60, padTop = 78, padBottom = 92, availW = Math.max(200, r.width - inspectorWidth());
+    let k = clampK(Math.min((availW - padX * 2) / b.w, (r.height - padTop - padBottom) / b.h, 1));
+    let x = (availW - b.w * k) / 2 - b.x * k;
+    const top = layout.pos.get(ROOT_KEY);
+    if (readable && k < READABLE_K && top) {
+      // On a small screen the whole company would be too small to read: open at a readable scale
+      // with the company and the director in the middle; «Вписать» still shows everything.
+      k = clampK(START_K);
+      x = availW / 2 - (top.x + sizeOf(ROOT_KEY).w / 2) * k;
+    }
+    // A tall chart starts from the top (company and director in view) rather than from its middle.
+    const y = b.h * k > r.height - padTop - padBottom ? padTop - b.y * k : padTop + (r.height - padTop - padBottom - b.h * k) / 2 - b.y * k;
+    const target = { k, x, y };
     if (animate) animateView(target); else { Object.assign(view, target); applyView(); }
   }
   function centerOn(node, k = Math.max(view.k, 0.9)) {
@@ -312,7 +607,7 @@
   function nodeAt(world, except) {
     let found = null;
     nodeByKey.forEach(node => {
-      if (node === except || found) return;
+      if (node === except || found || node.classList.contains('is-hidden')) return;
       const b = box(node);
       if (world.x >= b.x && world.x <= b.x + b.w && world.y >= b.y && world.y <= b.y + b.h) found = node;
     });
@@ -329,193 +624,30 @@
     return null;
   }
 
-  /* ---------------- persistence ---------------- */
-  function positionPayload(node) {
-    const b = box(node);
-    const payload = { node_type: kindOf(node), map_x: Math.max(0, Math.round(b.x)), map_y: Math.max(0, Math.round(b.y)) };
-    if (payload.node_type === 'department') payload.department_id = Number(node.dataset.departmentId);
-    else if (payload.node_type === 'employee') payload.employee_id = Number(node.dataset.employeeId);
-    return payload;
-  }
-  const savePosition = node => fetchJson('/departments/map/position', positionPayload(node));
-  // Saves many positions through the regular per-card endpoint, a few requests at a time.
-  async function saveLayout(nodes) {
-    const queue = [...nodes];
-    const worker = async () => { while (queue.length) await savePosition(queue.shift()); };
-    await Promise.all(Array.from({ length: Math.min(6, queue.length) }, worker));
-  }
-
-  /* ---------------- auto layout: balanced two-sided mind map ---------------- */
-  function computeLayout() {
-    const R = box(root);
-    const DEPT_GAP_X = 150, PERSON_GAP_X = 96, ROW_GAP = 14, GROUP_GAP = 54;
-    const groups = [];
-    const placed = new Set();
-    const deptNodes = $$('.org-map-dept-node', canvas);
-    const people = $$('.org-map-person-node', canvas);
-    const byAnchor = new Map();
-    people.forEach(node => {
-      const emp = empById.get(Number(node.dataset.employeeId));
-      const anchor = anchorDept(emp);
-      const key = anchor && nodeByKey.has(`department:${anchor}`) ? anchor : 0;
-      if (!byAnchor.has(key)) byAnchor.set(key, []);
-      byAnchor.get(key).push(node);
-    });
-    const order = node => {
-      const emp = empById.get(Number(node.dataset.employeeId));
-      const dep = anchorDept(emp);
-      const m = emp?.memberships.find(x => x.department_id === dep);
-      return (node.classList.contains('is-director') ? 0 : m?.is_primary ? 1 : 2);
-    };
-    deptNodes.forEach(dept => {
-      const members = (byAnchor.get(Number(dept.dataset.departmentId)) || []).sort((a, b) => order(a) - order(b)
-        || (a.querySelector('strong')?.textContent || '').localeCompare(b.querySelector('strong')?.textContent || '', 'ru'));
-      members.forEach(m => placed.add(m));
-      const ph = members.reduce((s, m) => s + m.offsetHeight + ROW_GAP, -ROW_GAP);
-      groups.push({ dept, members, h: Math.max(dept.offsetHeight, ph) });
-    });
-    const free = people.filter(p => !placed.has(p));
-    if (free.length) {
-      const ph = free.reduce((s, m) => s + m.offsetHeight + ROW_GAP, -ROW_GAP);
-      groups.push({ dept: null, members: free, h: ph });
-    }
-    const sides = [[], []], heights = [0, 0];
-    groups.forEach(g => { const side = heights[0] <= heights[1] ? 0 : 1; sides[side].push(g); heights[side] += g.h + GROUP_GAP; });
-    // Right side is drawn first in reading order; make it the heavier one for a calm, left-anchored look.
-    if (heights[1] > heights[0]) { sides.reverse(); heights.reverse(); }
-    const deptW = deptNodes[0]?.offsetWidth || 300, personW = people[0]?.offsetWidth || 268;
-    const rootCx = 6000, rootCy = 6000;
-    const result = new Map();
-    result.set(root, { x: rootCx - R.w / 2, y: rootCy - R.h / 2 });
-    sides.forEach((list, sideIndex) => {
-      const dir = sideIndex === 0 ? 1 : -1;
-      const total = list.reduce((s, g) => s + g.h + GROUP_GAP, -GROUP_GAP);
-      let y = rootCy - total / 2;
-      const deptX = dir > 0 ? rootCx + R.w / 2 + DEPT_GAP_X : rootCx - R.w / 2 - DEPT_GAP_X - deptW;
-      const personX = dir > 0 ? deptX + deptW + PERSON_GAP_X : deptX - PERSON_GAP_X - personW;
-      list.forEach(g => {
-        const gc = y + g.h / 2;
-        if (g.dept) result.set(g.dept, { x: deptX, y: gc - g.dept.offsetHeight / 2 });
-        const ph = g.members.reduce((s, m) => s + m.offsetHeight + ROW_GAP, -ROW_GAP);
-        let py = gc - ph / 2;
-        const px = g.dept ? personX : (dir > 0 ? deptX : deptX + deptW - personW);
-        g.members.forEach(m => { result.set(m, { x: px, y: py }); py += m.offsetHeight + ROW_GAP; });
-        y += g.h + GROUP_GAP;
-      });
-    });
-    let minX = Infinity, minY = Infinity;
-    result.forEach(p => { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); });
-    const shiftX = 160 - minX, shiftY = 140 - minY;
-    result.forEach(p => { p.x = Math.round(p.x + shiftX); p.y = Math.round(p.y + shiftY); });
-    return result;
-  }
-  function growCanvas() {
-    const b = contentBounds();
-    canvas.style.width = `${Math.max(parseFloat(canvas.style.width) || 0, b.x + b.w + 400)}px`;
-    canvas.style.height = `${Math.max(parseFloat(canvas.style.height) || 0, b.y + b.h + 400)}px`;
-  }
-  function animateDraw(ms) {
-    const t0 = performance.now();
-    const loop = now => { drawNow(); if (now - t0 < ms) requestAnimationFrame(loop); };
-    requestAnimationFrame(loop);
-  }
-  async function autoLayout({ animate = true, save = true, silent = false } = {}) {
-    const layout = computeLayout();
-    if (animate) canvas.classList.add('is-layouting');
-    layout.forEach((p, node) => { node.style.left = `${p.x}px`; node.style.top = `${p.y}px`; });
-    growCanvas();
-    if (animate) { animateDraw(760); setTimeout(() => canvas.classList.remove('is-layouting'), 760); } else drawNow();
-    fitView(animate);
-    if (!save) return;
-    try {
-      await saveLayout([...layout.keys()]);
-      try { localStorage.setItem(ARRANGED_KEY, '1'); } catch (_) {}
-      if (!silent) toast('Структура разложена и сохранена');
-    } catch (error) { toast(error.message, true); }
-  }
-  $('[data-auto-layout]')?.addEventListener('click', () => autoLayout());
-
-  function resolveOverlaps() {
-    const moved = new Set();
-    const items = [...nodeByKey.values()].map(node => ({ node, b: box(node) }));
-    for (let pass = 0; pass < 60; pass++) {
-      let changed = false;
-      items.sort((p, q) => p.b.y - q.b.y || p.b.x - q.b.x);
-      for (let i = 0; i < items.length; i++) {
-        for (let j = i + 1; j < items.length; j++) {
-          const a = items[i].b, c = items[j].b;
-          if (!(a.x < c.x + c.w && a.x + a.w > c.x && a.y < c.y + c.h && a.y + a.h > c.y)) continue;
-          const lower = items[j].node === root ? items[i] : items[j], upper = lower === items[j] ? items[i] : items[j];
-          lower.b.y = Math.round(upper.b.y + upper.b.h + 14);
-          lower.node.style.top = `${lower.b.y}px`;
-          moved.add(lower.node); changed = true;
-        }
-      }
-      if (!changed) break;
-    }
-    return moved;
-  }
-
-  // Cards added after the last arrangement get a tidy slot next to their department instead of a random spot.
-  function placeNewcomers() {
-    const fresh = [];
-    const R = box(root), rootC = center(R);
-    const people = $$('.org-map-person-node', canvas);
-    people.forEach(node => {
-      const emp = empById.get(Number(node.dataset.employeeId));
-      if (!emp || emp.saved) return;
-      const dep = anchorDept(emp);
-      const deptNode = dep ? nodeByKey.get(`department:${dep}`) : null;
-      const siblings = people.filter(p => p !== node && !fresh.includes(p) && empById.get(Number(p.dataset.employeeId))?.saved
-        && anchorDept(empById.get(Number(p.dataset.employeeId))) === dep);
-      let x, y;
-      if (siblings.length) {
-        const ref = siblings.reduce((a, b) => (box(b).y > box(a).y ? b : a));
-        const rb = box(ref); x = rb.x; y = rb.y + rb.h + 14;
-      } else if (deptNode) {
-        const db = box(deptNode);
-        x = center(db).x >= rootC.x ? db.x + db.w + 96 : db.x - 96 - node.offsetWidth; y = db.y;
-      } else { x = R.x; y = R.y + R.h + 60 + fresh.length * 78; }
-      node.style.left = `${Math.max(0, Math.round(x))}px`; node.style.top = `${Math.max(0, Math.round(y))}px`;
-      fresh.push(node);
-    });
-    $$('.org-map-dept-node', canvas).forEach(node => {
-      const dep = deptById.get(Number(node.dataset.departmentId));
-      if (!dep || dep.saved) return;
-      const others = $$('.org-map-dept-node', canvas).filter(n => n !== node && deptById.get(Number(n.dataset.departmentId))?.saved);
-      let x = R.x + R.w + 150, y = R.y;
-      if (others.length) {
-        const right = others.filter(n => center(box(n)).x >= rootC.x), left = others.filter(n => center(box(n)).x < rootC.x);
-        const side = right.length <= left.length || !left.length ? right : left;
-        const list = side.length ? side : others;
-        const low = list.reduce((a, b) => (box(b).y + box(b).h > box(a).y + box(a).h ? b : a));
-        const lb = box(low);
-        const bottom = Math.max(lb.y + lb.h, ...people.filter(p => Math.abs(box(p).x - (lb.x + lb.w + 96)) < 40).map(p => box(p).y + box(p).h));
-        x = lb.x; y = bottom + 54;
-      }
-      node.style.left = `${Math.max(0, Math.round(x))}px`; node.style.top = `${Math.max(0, Math.round(y))}px`;
-      fresh.push(node);
-    });
-    // Cards never sit on top of each other: whatever overlaps slides down its column (newcomers or legacy layouts).
-    const moved = new Set(fresh);
-    resolveOverlaps().forEach(node => moved.add(node));
-    if (moved.size) { growCanvas(); saveLayout([...moved]).catch(() => {}); }
-    return fresh;
-  }
-
   /* ---------------- drag, pan, click ---------------- */
   let activeDrag = null, activePan = null, suppressClick = false, dropHover = null;
   const pointers = new Map();
   let pinch = null;
+  const dropHint = document.createElement('div');
+  dropHint.className = 'org-map-drop-hint'; dropHint.hidden = true;
+  stage?.appendChild(dropHint);
   const setDropHover = node => {
     if (dropHover === node) return;
     dropHover?.classList.remove('is-drop-target');
     dropHover = node; dropHover?.classList.add('is-drop-target');
   };
+  function showHint(drag, target, event) {
+    const intent = dropIntent(drag.node, target);
+    if (!intent) { dropHint.hidden = true; return; }
+    dropHint.textContent = intent === 'assign' ? `＋ В состав «${nodeTitle(target)}»` : `↳ Связать с «${nodeTitle(target)}»`;
+    const r = stage.getBoundingClientRect();
+    dropHint.style.left = `${event.clientX - r.left + 16}px`; dropHint.style.top = `${event.clientY - r.top + 18}px`;
+    dropHint.hidden = false;
+  }
 
   viewport.addEventListener('pointerdown', event => {
     if (event.button !== 0 && event.pointerType === 'mouse') return;
-    if (event.target.closest('.org-map-edge-hit')) return;
+    if (event.target.closest('.org-map-edge-hit, .org-map-toggle')) return;
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     if (pointers.size === 2) {
       const [p1, p2] = [...pointers.values()];
@@ -533,7 +665,7 @@
     }
     if (event.target.closest('button, input, select, textarea')) return;
     const w = toWorld(event.clientX, event.clientY), b = box(node);
-    activeDrag = { node, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, offX: w.x - b.x, offY: w.y - b.y, moved: false };
+    activeDrag = { node, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, offX: w.x - b.x, offY: w.y - b.y, home: { x: b.x, y: b.y }, moved: false };
     node.setPointerCapture(event.pointerId);
     event.preventDefault();
   });
@@ -553,15 +685,17 @@
     }
     if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
     const drag = activeDrag;
-    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+    if (kindOf(drag.node) === 'group') return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return;
     drag.moved = true; event.preventDefault();
     drag.node.classList.add('is-map-dragging');
+    canvas.classList.add('is-dragging');
     const w = toWorld(event.clientX, event.clientY);
-    drag.node.style.left = `${Math.max(0, Math.round(w.x - drag.offX))}px`;
-    drag.node.style.top = `${Math.max(0, Math.round(w.y - drag.offY))}px`;
+    drag.node.style.left = `${Math.round(w.x - drag.offX)}px`;
+    drag.node.style.top = `${Math.round(w.y - drag.offY)}px`;
     const target = nodeAt(w, drag.node);
     setDropHover(dropIntent(drag.node, target) ? target : null);
-    draw();
+    showHint(drag, target, event);
   });
   const finishPan = event => {
     pointers.delete(event.pointerId);
@@ -572,27 +706,40 @@
     if (pan.moved) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 300); }
     else if (!event.target.closest?.('[data-map-node]')) closeInspector();
   };
-  const finishDrag = async event => {
+  function snapBack(node, home) {
+    if (reduceMotion) { node.style.left = `${home.x}px`; node.style.top = `${home.y}px`; return; }
+    const from = box(node), t0 = performance.now(), ms = 260;
+    const step = now => {
+      const t = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - t, 3);
+      node.style.left = `${Math.round(from.x + (home.x - from.x) * e)}px`; node.style.top = `${Math.round(from.y + (home.y - from.y) * e)}px`;
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+  const finishDrag = event => {
     if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
     const drag = activeDrag; activeDrag = null;
     drag.node.classList.remove('is-map-dragging');
+    canvas.classList.remove('is-dragging');
+    dropHint.hidden = true;
     const target = dropHover; setDropHover(null);
     if (!drag.moved) { openInspectorFor(drag.node); return; }
     suppressClick = true; setTimeout(() => { suppressClick = false; }, 300);
-    growCanvas(); draw();
-    try { await savePosition(drag.node); } catch (error) { toast(error.message, true); return; }
-    const intent = dropIntent(drag.node, target);
+    snapBack(drag.node, drag.home);
+    const intent = event.type === 'pointerup' ? dropIntent(drag.node, target) : null;
     if (intent === 'assign') openAssign(drag.node, target);
     else if (intent === 'relation') openRelation(target, drag.node);
   };
   viewport.addEventListener('pointerup', event => { finishPan(event); finishDrag(event); });
   viewport.addEventListener('pointercancel', event => { finishPan(event); finishDrag(event); });
   viewport.addEventListener('dblclick', event => {
-    if (event.target.closest('[data-map-node]')) return;
+    if (event.target.closest('[data-map-node], .org-map-toggle')) return;
     const r = vpRect(), w = toWorld(event.clientX, event.clientY), k = clampK(view.k * 1.5);
     animateView({ k, x: event.clientX - r.left - w.x * k, y: event.clientY - r.top - w.y * k }, 280);
   });
   canvas.addEventListener('click', event => {
+    const toggle = event.target.closest('.org-map-toggle');
+    if (toggle) { event.preventDefault(); event.stopPropagation(); setCollapsed(toggle.dataset.toggle, !collapsed.has(toggle.dataset.toggle)); return; }
     const edge = event.target.closest('.org-map-edge-hit');
     if (edge) { event.preventDefault(); event.stopPropagation(); onEdgeClick(edge); return; }
     const inspectDept = event.target.closest('[data-inspect-department]');
@@ -600,8 +747,6 @@
     if (event.target.closest('.org-map-person-node')) event.preventDefault();
     if (suppressClick) { event.preventDefault(); event.stopPropagation(); }
   }, true);
-  svg.addEventListener('mouseover', event => { const h = event.target.closest('.org-map-edge-hit'); h?.nextElementSibling?.classList.add('is-hover'); });
-  svg.addEventListener('mouseout', event => { const h = event.target.closest('.org-map-edge-hit'); h?.nextElementSibling?.classList.remove('is-hover'); });
 
   async function onEdgeClick(edge) {
     if (edge.dataset.edgeKind === 'org') {
@@ -622,6 +767,7 @@
   const nodeTitle = node => {
     if (!node) return 'блок';
     if (kindOf(node) === 'company') return root.querySelector('strong')?.textContent || 'Компания';
+    if (kindOf(node) === 'group') return 'Без подразделения';
     if (kindOf(node) === 'department') return node.querySelector(':scope > strong')?.textContent || 'подразделение';
     return node.querySelector('.org-map-person-copy strong')?.textContent || 'сотрудник';
   };
@@ -672,7 +818,6 @@
   });
 
   /* ---------------- inspector ---------------- */
-  const inspector = document.getElementById('org-inspector');
   function selectNode(key) {
     nodeByKey.forEach((node, k) => node.classList.toggle('is-selected', k === key));
     focusKey = key; drawNow();
@@ -685,22 +830,23 @@
     const kind = kindOf(node);
     if (kind === 'employee') openInspector('employee', Number(node.dataset.employeeId));
     else if (kind === 'department') openInspector('department', Number(node.dataset.departmentId));
-    else openInspector('company', 1);
+    else openInspector('company', 1, { select: node.dataset.nodeKey });
   }
   let views = null;
   const membersOf = depId => data.employees.filter(e => e.memberships.some(m => m.department_id === depId));
 
-  function openInspector(kind, id, { center: doCenter = false } = {}) {
+  function openInspector(kind, id, { center: doCenter = false, select = null } = {}) {
     if (!inspector) return;
     const key = kind === 'company' ? 'company:1' : `${kind}:${id}`;
-    const node = nodeByKey.get(key);
+    reveal(key);
+    const node = nodeByKey.get(select || key);
     if (!node) return;
     currentInspect = { kind, id };
     inspector.style.setProperty('--accent', kind === 'company' ? '#d98e8a' : accentOf(node));
     views = views || window.SysaiOrgMapViews({ esc, initials, deptById, deptAccent, accentOf, nodeByKey, nodeTitle, membersOf, data, root, ICON_X, ICON_CROWN });
     inspector.innerHTML = kind === 'employee' ? views.employeeHtml(empById.get(id), node) : kind === 'department' ? views.departmentHtml(deptById.get(id)) : views.companyHtml();
     inspector.hidden = false;
-    selectNode(key);
+    selectNode(select || key);
     if (kind === 'employee') bindEmployee(empById.get(id));
     else if (kind === 'department') bindDepartment(deptById.get(id));
     else bindCompany();
@@ -750,7 +896,6 @@
     $('[data-profile]', inspector)?.addEventListener('submit', async event => {
       event.preventDefault();
       const f = event.currentTarget.elements;
-      const node = nodeByKey.get(`employee:${emp.id}`);
       // The regular employee card endpoint rewrites memberships, so send them back unchanged and re-mark heads.
       const fd = new FormData();
       fd.set('id', emp.id); fd.set('name', f.name.value); fd.set('aliases', f.aliases.value); fd.set('position', f.position.value);
@@ -764,7 +909,6 @@
         fd.set(`department_responsibilities_${m.department_id}`, m.responsibilities || '');
       });
       try {
-        if (node) await savePosition(node);
         await postForm('/employees', fd);
         for (const m of emp.memberships.filter(x => x.is_primary)) {
           await fetchJson('/departments/map/assign', { employee_id: emp.id, department_id: m.department_id, role: m.role, responsibilities: m.responsibilities, is_primary: true });
@@ -867,8 +1011,8 @@
     if (!btn) return;
     const kind = btn.dataset.kind, id = Number(btn.dataset.id);
     searchResults.hidden = true; searchInput.value = ''; searchInput.blur();
-    const node = nodeByKey.get(`${kind}:${id}`);
     openInspector(kind, id, { center: true });
+    const node = nodeByKey.get(`${kind}:${id}`);
     node?.classList.remove('is-pulse'); void node?.offsetWidth; node?.classList.add('is-pulse');
   }
   searchInput?.addEventListener('input', () => { searchIndex = 0; renderSearch(); });
@@ -883,7 +1027,7 @@
   searchInput?.addEventListener('blur', () => setTimeout(() => { searchResults.hidden = true; }, 120));
 
   document.addEventListener('keydown', event => {
-    if (event.target.closest('input, textarea, select, [contenteditable]') || document.querySelector('dialog[open]')) return;
+    if (event.target.closest?.('input, textarea, select, [contenteditable]') || document.querySelector('dialog[open]')) return;
     if (event.key === '/') { event.preventDefault(); searchInput?.focus(); }
     else if (event.key === 'Escape') closeInspector();
     else if (event.key === 'f' || event.key === 'F' || event.key === 'а' || event.key === 'А') fitView();
@@ -893,49 +1037,51 @@
   });
 
   /* ---------------- boot ---------------- */
-  if ('ResizeObserver' in window) {
-    const observer = new ResizeObserver(() => draw());
-    nodeByKey.forEach(node => observer.observe(node));
-  }
-  window.addEventListener('resize', draw, { passive: true });
-
+  syncToggles();
   let saved = null;
   try { saved = JSON.parse(sessionStorage.getItem(STATE_KEY) || 'null'); sessionStorage.removeItem(STATE_KEY); } catch (_) {}
-  const nothingSaved = data.departments.every(d => !d.saved) && data.employees.every(e => !e.saved);
-  let fresh = [];
-  if (nothingSaved) {
-    autoLayout({ animate: false, save: true, silent: true });
-  } else {
-    fresh = placeNewcomers();
-    let restored = false;
+  autoLayout();
+  let restored = false;
+  if (saved) {
+    // Back from an edit made on the map: keep the user's place instead of jumping to the overview.
     try {
       const v = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null');
       if (v && isFinite(v.x) && isFinite(v.y) && isFinite(v.k)) { Object.assign(view, { x: v.x, y: v.y, k: clampK(v.k) }); applyView(); restored = true; }
     } catch (_) {}
-    if (!restored) fitView(false);
-    drawNow();
   }
-  let arrangedHint = false;
-  try { arrangedHint = !nothingSaved && !localStorage.getItem(ARRANGED_KEY) && !saved; } catch (_) {}
+  if (!restored) fitView(false, { readable: true });
+
+  // Card sizes settle once web fonts arrive (or a name is edited): re-flow quietly when they change.
+  let relayoutTimer = 0;
+  const signatureNow = () => [...sizes.keys()].map(k => { const n = nodeByKey.get(k); return `${k}:${n.offsetWidth}x${n.offsetHeight}`; }).join('|');
+  const signatureMeasured = () => [...sizes].map(([k, s]) => `${k}:${s.w}x${s.h}`).join('|');
+  const relayoutIfNeeded = () => {
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(() => {
+      if (activeDrag) return;
+      if (signatureNow() !== signatureMeasured()) autoLayout();
+    }, 80);
+  };
+  document.fonts?.ready?.then(relayoutIfNeeded);
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(relayoutIfNeeded);
+    nodeByKey.forEach(node => observer.observe(node));
+  }
+
   if (saved?.toast) toast(saved.toast);
   else if (toastEl?.dataset.initial) toast(toastEl.dataset.initial);
-  else if (arrangedHint) {
-    toast('Новая карта структуры: нажмите «Упорядочить», чтобы аккуратно разложить отделы и людей');
-    try { localStorage.setItem(ARRANGED_KEY, 'hinted'); } catch (_) {}
-  }
   const newest = kind => {
     const list = kind === 'employee' ? data.employees : data.departments;
     return list.length ? list.reduce((a, b) => (b.id > a.id ? b : a)) : null;
   };
+  const pulse = key => { const node = nodeByKey.get(key); node?.classList.remove('is-pulse'); void node?.offsetWidth; node?.classList.add('is-pulse'); };
   if (saved?.focusNewEmployee) {
     const emp = newest('employee');
-    if (emp) setTimeout(() => { openInspector('employee', emp.id, { center: true }); nodeByKey.get(`employee:${emp.id}`)?.classList.add('is-pulse'); }, 80);
+    if (emp) setTimeout(() => { openInspector('employee', emp.id, { center: true }); pulse(`employee:${emp.id}`); }, 80);
   } else if (saved?.focusNewDepartment) {
     const dep = newest('department');
-    if (dep) setTimeout(() => { openInspector('department', dep.id, { center: true }); nodeByKey.get(`department:${dep.id}`)?.classList.add('is-pulse'); }, 80);
+    if (dep) setTimeout(() => { openInspector('department', dep.id, { center: true }); pulse(`department:${dep.id}`); }, 80);
   } else if (saved?.inspect && nodeByKey.get(saved.inspect.kind === 'company' ? 'company:1' : `${saved.inspect.kind}:${saved.inspect.id}`)) {
     openInspector(saved.inspect.kind, saved.inspect.id);
-  } else if (fresh.length) {
-    fresh.forEach(node => node.classList.add('is-pulse'));
   }
 })();
