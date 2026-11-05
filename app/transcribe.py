@@ -867,6 +867,8 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
             progress(f"Расшифровка {i + 1} из {len(plan)}")
             result = part(lambda offset=offset, seconds=seconds, i=i: cut(offset, seconds, f"chunk_{i:03d}.mp3"),
                           offset, seconds, str(i), _context(segments))
+            for item in result:  # its labels are this part's own: the voice way prints them part by part (diarize.py)
+                item["part"] = i
             _merge(segments, result, offset)
     finally:
         if workdir:
@@ -888,6 +890,29 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
     if not segments:
         raise llm.LLMError("Речь в записи не распознана. Проверьте аудио; рассылка не запускалась.")
     return total, _ends(segments, total)
+
+
+def part_starts(meeting_id: int) -> list:
+    """Where the parts of the meeting's recognition began ([] when unknown), from its saved results — for a transcript
+    made before the replicas carried their part («part»). The latest result of every part is taken."""
+    latest = {}
+    for number, data, row_id in checkpoints.rows(meeting_id, "transcribe"):
+        if not str(number).isdigit() or not isinstance(data, list):  # «3L», «3R»: halves of a part; a split state
+            continue
+        starts = []
+        for item in data:
+            try:
+                value = float(item.get("start")) if isinstance(item, dict) else math.nan
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                starts.append(value)
+        if starts and (int(number) not in latest or row_id > latest[int(number)][0]):
+            latest[int(number)] = (row_id, min(starts))
+    values = [latest[number][1] for number in sorted(latest)]
+    if len(values) < 2 or any(later <= earlier for earlier, later in zip(values, values[1:])):
+        return []
+    return values
 
 
 def mock_transcribe() -> tuple[float, list]:

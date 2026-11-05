@@ -322,6 +322,7 @@ def test_recognition_cuts_in_pauses_recovers_missed_speech_and_reports(monkeypat
     texts = [(s["text"], s.get("recovered", False)) for s in segments]
     assert ("Начинаем планёрку.", False) in texts and any(t[1] for t in texts)
     assert all("heard" not in s and "doubts" not in s for s in segments)
+    assert all(s.get("part") == 0 for s in segments)  # the labels are that part's own; recovered words go with it
     assert info["engine"] == "elevenlabs/scribe-v2" and info["detector"] and info["recovered"] >= 1
     assert info["gaps"] >= 1 and info["keyterms"] >= 1
 

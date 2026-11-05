@@ -4731,6 +4731,7 @@ from .net.routes import router as net_router, when as net_when  # noqa: E402  af
 
 app.include_router(net_router)
 tpl.env.globals["net_when"] = net_when
+tpl.env.globals["outdated_voice_models"] = speaker_id.OUTDATED_MODELS
 
 
 @app.exception_handler(HTTPException)

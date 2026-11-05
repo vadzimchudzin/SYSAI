@@ -22,6 +22,8 @@ Create the Blob store with **Private** access. Source audio is uploaded under ra
 
 The service uses an ONNX conversion of SpeechBrain ECAPA-TDNN from Hugging Face repo `vedk00/ecapa-voxceleb-speaker-embedding-onnx` at revision `a9cb932`, Apache-2.0 licensed. The 83 MB model and small fbank table are downloaded on first model use and cached under `/tmp` for warm invocations; they are not committed to this repository. Output vectors are L2-normalized and have 192 dimensions.
 
+Features are SpeechBrain's `Fbank(n_mels=80)` with sentence mean normalisation, reproduced in NumPy: 25 ms periodic Hamming window, 10 ms hop, centred zero padding, power spectrum, the 80 mel filters, `10·log10` with `top_db=80`. Note that `fbank-80x201-f32.bin` stores SpeechBrain's matrix as 201 FFT bins × 80 filters despite its name; `_filters()` reads it that way and refuses a table that is not a set of triangular filters. Checked against SpeechBrain 1.0.3 itself: features within 0.002 dB, embeddings identical (cos 1.000); on LibriSpeech test-clean the equal error rate is 0.7% for whole utterances, 1.5% for 3 s and 3.5% for 1.5 s. Model version `speechbrain-ecapa-voxceleb-onnx-a9cb932-fbank2`; prints of the earlier `…-a9cb932` came from wrong features (EER ≈ 30%, every voice ~0.93 alike) and are not compared with the new ones.
+
 This model was trained on VoxCeleb data. Its performance on Russian-language meetings, noisy microphones, short turns, and overlapping speech is **not yet validated**. Thresholds must be calibrated against consented recordings before production auto-labeling.
 
 ## Expected audio

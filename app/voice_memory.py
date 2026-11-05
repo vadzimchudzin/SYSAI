@@ -233,7 +233,8 @@ def history(employee_id: int, limit: int = LATEST) -> list:
         if employee is None or not consented(employee):
             return []
         people = s.query(Employee).filter(Employee.active.is_(True)).all()
-        done = {mid for (mid,) in s.query(EmployeeVoiceMemory.meeting_id).filter_by(employee_id=employee_id)}
+        done = {mid for (mid, version) in s.query(EmployeeVoiceMemory.meeting_id, EmployeeVoiceMemory.model_version)
+                .filter_by(employee_id=employee_id) if (version or "") not in speaker_id.OUTDATED_MODELS}
         out = []
         for meeting in s.query(Meeting).order_by(Meeting.id.desc()).limit(HISTORY):
             if meeting.id in done or not meeting.transcript or meeting.source == "demo":
@@ -275,6 +276,8 @@ def prints(allowed=None, exclude_meeting: int | None = None) -> dict:
                 continue
             expires = row.expires_at
             if expires is not None and (expires if expires.tzinfo else expires.replace(tzinfo=dt.timezone.utc)) <= moment:
+                continue
+            if (row.model_version or "") in speaker_id.OUTDATED_MODELS:  # made from wrong features: not this voice
                 continue
             try:
                 vector = _unit(json.loads(speaker_id.decrypt_voiceprint(row.encrypted_embedding)))
@@ -381,8 +384,9 @@ HOW_RU = {"manual": "подтверждён вручную", "context": "пре�
 
 def card(session, employee) -> dict:
     """What the employee's «Голос» tab says about the remembered voice."""
-    rows = (session.query(EmployeeVoiceMemory).filter_by(employee_id=employee.id)
-            .order_by(EmployeeVoiceMemory.created_at.desc(), EmployeeVoiceMemory.id.desc()).all())
+    rows = [row for row in session.query(EmployeeVoiceMemory).filter_by(employee_id=employee.id)
+            .order_by(EmployeeVoiceMemory.created_at.desc(), EmployeeVoiceMemory.id.desc()).all()
+            if (row.model_version or "") not in speaker_id.OUTDATED_MODELS]
     titles = dict(session.query(Meeting.id, Meeting.title).filter(
         Meeting.id.in_([row.meeting_id for row in rows if row.meeting_id is not None])).all()) if rows else {}
     meetings = {row.meeting_id for row in rows if row.meeting_id is not None}

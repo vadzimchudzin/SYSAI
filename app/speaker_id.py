@@ -26,6 +26,12 @@ log = logging.getLogger("sysai.speaker_id")
 CONSENT_VERSION = "voiceprint-consent-v1"
 MIN_SAMPLE_SECONDS = 5.0
 MAX_SAMPLE_SECONDS = 30.0
+# Voice-service versions whose prints are wrong: until «-fbank2» the service read the mel filter table turned through
+# 90 degrees and its features differed from SpeechBrain's, so every voice was ~0.93 alike to every other one. Such a
+# print is not evidence: a sample with one is not used until its features are extracted again.
+OUTDATED_MODELS = frozenset({"speechbrain-ecapa-voxceleb-onnx-a9cb932"})
+MATCH_FLOOR = 0.6          # the least similarity to a person's samples that may name a voice (ECAPA, cos)
+SAME_PERSON = 0.6          # two samples of one person are consistent from this similarity up
 
 
 class SpeakerIdentityError(RuntimeError):
@@ -328,7 +334,7 @@ def identify_embedded_segments(
         margin_required = float(config.VOICE_MATCH_MARGIN)
     except (TypeError, ValueError):
         threshold, margin_required = 0.55, 0.08
-    threshold = min(0.95, max(0.75, threshold)) if math.isfinite(threshold) else 0.75
+    threshold = min(0.95, max(MATCH_FLOOR, threshold)) if math.isfinite(threshold) else MATCH_FLOOR
     margin_required = min(0.5, max(0.15, margin_required)) if math.isfinite(margin_required) else 0.15
     recognized: dict[str, tuple[int, str, float]] = {}
     for speaker, info in speaker_embeddings.items():
@@ -652,6 +658,7 @@ def sample_has_usable_embedding(row):
             or getattr(row, "embedding_dimensions", 0) != 192
             or not getattr(row, "model_version", "")
             or row.model_version in ("unknown", "local-confirmed-v1")
+            or row.model_version in OUTDATED_MODELS
             or not getattr(row, "content_sha256", "")
             or not MIN_SAMPLE_SECONDS <= (getattr(row, "sample_duration", 0) or 0) <= MAX_SAMPLE_SECONDS):
         return False
@@ -707,7 +714,7 @@ def identification_readiness(samples_by_employee):
         models = {r.model_version for r in rows}
         vectors = vectors_by_employee[eid]
         consistent = len(models) == 1 and all(
-            similarity(a, b) >= 0.75 for i, a in enumerate(vectors) for b in vectors[i+1:])
+            similarity(a, b) >= SAME_PERSON for i, a in enumerate(vectors) for b in vectors[i+1:])
         separated = True
         for other_id, other_rows in valid_by_employee.items():
             if other_id == eid or not separated:

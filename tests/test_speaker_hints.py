@@ -130,3 +130,14 @@ def test_the_threshold_is_set_in_percent(client):
     assert client.post("/settings", data={"speaker_name_threshold": "много"}).status_code == 400
     assert speakers.threshold_of({"speaker_name_threshold": 80}) == 0.8 and speakers.threshold_of({"speaker_name_threshold": 0.2}) == 0.5
     assert speakers.threshold_of({"speaker_name_threshold": "x"}) == speakers.DEFAULT_THRESHOLD
+
+
+def test_this_is_anna_who_did_it_is_not_anna_introducing_herself(staff):
+    people = list(staff.values())
+    about = [{"speaker": "Спикер 1", "start": 0.0, "end": 4.0, "text": "Смета готова? Это Анна делала, она знает."},
+             {"speaker": "Спикер 2", "start": 4.5, "end": 8.0, "text": "Алло, это Игорь?"}]
+    _, mapping = speakers.name_speakers([dict(seg) for seg in about], people, use_model=False)
+    assert mapping == {}
+    herself = [{"speaker": "Спикер 1", "start": 0.0, "end": 4.0, "text": "Это Анна Смирнова, бухгалтерия, добрый день."}]
+    _, mapping = speakers.name_speakers([dict(seg) for seg in herself], people, use_model=False)
+    assert mapping == {"Спикер 1": "Анна Смирнова"}

@@ -42,10 +42,56 @@ def test_the_same_voice_in_other_minutes_is_one_person_even_with_another_label()
 
 
 def test_two_labels_of_one_minute_stay_apart_unless_nearly_the_same_voice():
-    alike = [group(0, "Спикер 1", ANNA), group(0, "Спикер 2", vec(1, 0.9, 0))]  # similarity ≈ 0.74 > threshold
+    alike = [group(0, "Спикер 1", ANNA), group(0, "Спикер 2", vec(1, 1.2, 0))]  # similarity ≈ 0.64 > threshold
     assert diarize.cluster(alike, 0.5) == [0, 1]
-    same = [group(0, "Спикер 1", ANNA), group(0, "Спикер 2", vec(1, 0.3, 0))]  # ≈ 0.96: the part split one voice
+    same = [group(0, "Спикер 1", ANNA), group(0, "Спикер 2", vec(1, 0.5, 0))]  # ≈ 0.89: the part split one voice
     assert diarize.cluster(same, 0.5) == [0, 0]
+
+
+def test_a_label_is_one_person_only_inside_its_part():
+    """Parts cut in pauses number their voices anew: «Спикер 1» of part 0 (Anna) is Boris in part 1. A print per minute
+    would blend them; prints per part keep them apart and link the same voice across the cut."""
+    segments = [seg("Спикер 1", 0, 20, part=0), seg("Спикер 2", 20, 38, part=0),
+                seg("Спикер 1", 39, 55, part=1), seg("Спикер 2", 55, 80, part=1),
+                seg("Спикер 2", 80, 84, "это мы ещё услышали", recovered=True)]  # heard again later, no part of its own
+    rows = diarize._rows(segments, 84)
+    assert diarize.windows_of(segments, rows) == ({0: 0, 1: 0, 2: 1, 3: 1, 4: 1}, True)
+    groups = [group(0, "Спикер 1", ANNA), group(0, "Спикер 2", BORIS),
+              group(1, "Спикер 1", vec(0.05, 1, 0)), group(1, "Спикер 2", vec(1, 0.05, 0))]
+    labels = diarize.voice_labels(segments, groups, 0.5, total=84)
+    assert labels == ["Спикер 1", "Спикер 2", "Спикер 2", "Спикер 1", "Спикер 1"]
+    # without parts (an old transcript) the minute is the window, as before
+    plain = [{k: v for k, v in item.items() if k != "part"} for item in segments]
+    assert diarize.windows_of(plain, diarize._rows(plain, 84)) == ({0: 0, 1: 0, 2: 0, 3: 0, 4: 1}, False)
+
+
+def test_old_transcripts_get_their_parts_from_the_saved_results():
+    segments = [seg("Спикер 1", 0, 20), seg("Спикер 2", 41.0, 50), seg("Спикер 1", 95.3, 99)]
+    diarize.mark_parts(segments, [0.4, 40.95, 95.3])
+    assert [item["part"] for item in segments] == [0, 1, 2]
+    tagged = [seg("Спикер 1", 0, 20, part=0), seg("Спикер 2", 41.0, 50)]
+    assert diarize.mark_parts(tagged, [0, 40]) == tagged and "part" not in tagged[1]  # the transcript knows them
+
+
+def test_part_starts_are_read_from_the_checkpoints():
+    from app import transcribe
+    from app.db import Meeting, ProcessingCheckpoint, SessionLocal
+    with SessionLocal() as s:
+        meeting = Meeting(title="t", status="done")
+        s.add(meeting)
+        s.commit()
+        mid = meeting.id
+        rows = [("0", [{"speaker": "Спикер 1", "start": 0.5, "text": "а"}]),
+                ("1", [{"speaker": "Спикер 1", "start": 47.2, "text": "б"}, {"speaker": "Спикер 2", "start": 44.1, "text": "в"}]),
+                ("1L", [{"speaker": "Спикер 1", "start": 44.1, "text": "в"}]),
+                ("2", {"_sysai_checkpoint_state": "split", "half": 30, "overlap": 4}),
+                ("2", [{"speaker": "Спикер 1", "start": 90.0, "text": "г"}])]
+        for number, (part, data) in enumerate(rows):
+            s.add(ProcessingCheckpoint(meeting_id=mid, stage="transcribe", part=part, fingerprint=f"f{number}", data=data))
+        s.add(ProcessingCheckpoint(meeting_id=mid, stage="vad", part="0", fingerprint="v", data={"speech": []}))
+        s.commit()
+    assert transcribe.part_starts(mid) == [0.5, 44.1, 90.0]
+    assert transcribe.part_starts(mid + 1) == []
 
 
 def test_the_number_of_participants_lets_voices_merge_a_little_below_the_threshold():
@@ -99,6 +145,24 @@ def test_voice_groups_send_every_minute_with_its_speech_and_keep_named_voices(mo
     assert [s["speaker"] for s in second[0]] == ["Спикер 1", "#4"] and second[1] == diarize.SHORT_MIN_SECONDS
     assert [(g["window"], g["label"], g.get("short")) for g in groups] == [
         (0, "Спикер 1", None), (0, "Спикер 2", None), (1, "Спикер 1", None), (1, "#4", 4)]
+
+
+def test_voice_groups_print_every_part_on_its_own(monkeypatch, tmp_path):
+    record = tmp_path / "meeting.mp3"
+    record.write_bytes(b"audio")
+    calls, said = [], []
+    monkeypatch.setattr(diarize, "_cut", fake_cut)
+
+    def embed(path, segments, min_seconds=None):
+        calls.append(sorted(s["speaker"] for s in segments))
+        return {"speakers": {s["speaker"]: {"embedding": ANNA, "duration_seconds": 10.0} for s in segments}}
+    monkeypatch.setattr(speaker_id, "embed_speakers", embed)
+    segments = [seg("Спикер 1", 0, 20, part=0), seg("Спикер 2", 20, 38, part=0),
+                seg("Спикер 1", 39, 55, part=1), seg("Спикер 2", 55, 75, part=1)]  # one minute, two parts
+    groups = diarize.voice_groups(record, segments, 75, progress=said.append)
+    assert calls == [["Спикер 1", "Спикер 2"], ["Спикер 1", "Спикер 2"]]
+    assert [(g["window"], g["label"]) for g in groups] == [(0, "Спикер 1"), (0, "Спикер 2"), (1, "Спикер 1"), (1, "Спикер 2")]
+    assert said == ["Голоса по всей записи: 2 из 2 кусков"]
 
 
 def test_voice_groups_give_up_when_the_service_loses_many_minutes(monkeypatch, tmp_path):

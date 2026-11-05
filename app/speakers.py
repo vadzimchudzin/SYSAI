@@ -26,8 +26,17 @@ log = logging.getLogger("sysai.speakers")
 
 ANON = re.compile(r"^\s*(спикер|speaker|говорящий)\s*\d+\s*$", re.IGNORECASE)
 _NAME = r"([А-ЯЁ][а-яё]{2,})"
-# «Это Вадим», «меня зовут Пётр», «с вами Анна», «Игорь на связи»
-_INTRO = re.compile(r"(?:^|[.!?…,]\s*)(?i:это|меня зовут|с вами|на связи)\s+" + _NAME + r"|" + _NAME + r"\s+(?i:на связи)")
+# «Это Вадим», «меня зовут Пётр», «с вами Анна», «Игорь на связи». After «это» the name must end the phrase (or go on
+# with a surname, «из…», «говорит»…): «это Анна делала смету» is about Anna, not Anna introducing herself, and
+# «это Игорь?» asks who is there.
+_INTRO = re.compile(r"(?:^|[.!?…,]\s*)(?:(?i:меня зовут|с вами|на связи)\s+" + _NAME
+                    + r"|(?i:это)\s+" + _NAME + r"(?:\s+[А-ЯЁ][а-яё]+)?"
+                    r"(?=\s*(?:$|[.,!…;:—–-]|(?i:из|от|со?|здесь|тут|говорит|говорю|на связи)\b)))"
+                    + r"|" + _NAME + r"\s+(?i:на связи)")
+
+
+def _intro_name(match) -> str:
+    return next(group for group in match.groups() if group)
 # «Анна, что с актом?», «Отлично. Игорь, а что…», «Да, Пётр, слушаю», «Спасибо, Анна.»
 _ADDRESS = re.compile(r"(?:^|[.!?…]\s*)(?:(?i:да|ну|так|хорошо|отлично|слушай|скажи|а|и|спасибо|привет|"
                       r"добрый день|доброе утро)[,!]?\s+)?" + _NAME + r"\s*[,!?]")
@@ -127,7 +136,7 @@ def _evidence(segments: list, employees) -> tuple:
         own = anonymous(label)  # a label named by a voice profile still tells us whom it called
         introduced = set()
         for match in _INTRO.finditer(text):
-            word = match.group(1) or match.group(2)
+            word = _intro_name(match)
             hits = _who(word, people)
             if len(hits) == 1:
                 if own:
@@ -207,7 +216,7 @@ def _proof(label: str, employee, quote: str, segments: list, names: list) -> tup
             continue
         text = str(seg.get("text") or "")
         if seg.get("speaker") == label:
-            intro = any(employee in _who(m.group(1) or m.group(2), [(employee, names)]) for m in _INTRO.finditer(text))
+            intro = any(employee in _who(_intro_name(m), [(employee, names)]) for m in _INTRO.finditer(text))
             return (i, i) if intro else None
         called = any(employee in _who(m.group(1), [(employee, names)]) for m in _ADDRESS.finditer(text))
         j = next((k for k in range(i + 1, min(i + 3, len(segments))) if segments[k].get("speaker") != seg.get("speaker")), None)

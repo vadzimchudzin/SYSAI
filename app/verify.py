@@ -268,15 +268,16 @@ def recover(path, segments: list, speech, settings: dict, total: float, checkpoi
             text = ""
         neighbour = _neighbour(segments + added, start, end)
         speaker = neighbour["speaker"] if neighbour else "Спикер 1"
+        part = {"part": neighbour["part"]} if neighbour and "part" in neighbour else {}  # its label is that part's
         tokens = _tokens(text)
         if tokens and not HALLUCINATIONS.search(text) and not _repeats(tokens, segments + added, start, end):
             added.append({"speaker": speaker, "start": round(max(0.0, first), 1), "end": round(max(first, last), 1),
-                          "text": text.strip(), "recovered": True, "heard": [[first, last]]})
+                          "text": text.strip(), "recovered": True, "heard": [[first, last]], **part})
             info["recovered"] += 1
             info["recovered_words"] += len(tokens)
         elif not tokens and end - start >= UNCLEAR_MIN and score >= UNCLEAR_SCORE:
             added.append({"speaker": speaker, "start": round(start, 1), "end": round(end, 1), "text": UNCLEAR,
-                          "unclear": True, "heard": [[start, end]]})
+                          "unclear": True, "heard": [[start, end]], **part})
             info["unclear"] += 1
     if added:
         log.info("detector: %s replicas recovered, %s unclear", info["recovered"], info["unclear"])

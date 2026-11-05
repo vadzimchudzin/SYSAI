@@ -156,6 +156,9 @@ def run_reference(meeting_id: int, methods=ORDER, progress=None) -> dict:
             raise diarize.DiarizationError("У совещания нет эталона.")
         truth = copy.deepcopy(reference["transcript"])
         base = diarize.anonymous(reference.get("auto") or [])
+        if base and not diarize.has_parts(base):  # recognised before the replicas kept their part: from its results
+            from . import transcribe
+            diarize.mark_parts(base, transcribe.part_starts(meeting_id))
         stamp = reference.get("at")
         total = max([float(meeting.duration_sec or 0)] + [row[2] for row in diarize._rows(base, 0.0)])
         allowed = participants.employee_ids(meeting) if participants.is_set(meeting) else None

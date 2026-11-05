@@ -3,18 +3,21 @@
 Transcription works in parts of 45–90 seconds and every part names its voices anew; the stitching then guesses which
 «Спикер 2» of one part is which voice of the next. Here the labels are set over the whole recording at once:
 
-- «voice» — our voice service (speaker-service/, Vercel): one voice print per label in every minute of the recording,
-  then the prints of the whole meeting are clustered. Labels of one minute stay apart (the part model heard them as
-  different people), the same voice in different minutes becomes one person.
+- «voice» — our voice service (speaker-service/, Vercel): one voice print per label in every part of the recognition
+  (in every minute for a transcript without parts), then the prints of the whole meeting are clustered. Labels of one
+  part stay apart (the part model heard them as different people), the same voice in different parts becomes one person.
 - «gemini» — the audio model hears the recording in parts of half an hour together with the recognised replicas and
   gives every replica its speaker; the parts overlap, so their labels are joined.
-- «chunks» — the labels of the parts as they are: the way it worked before and the fallback of the other two.
+- «chunks» — the labels of the parts as they are: the way it worked before and the fallback of the other two. Parts
+  that overlap are linked by the words both heard; parts the speech detector cut in pauses share no words, so there
+  «Спикер 1» of one part and of the next are joined by the number only — the other two ways are needed to link them.
 
 Which way is best is measured on references (diarization_eval.py, «Точность разметки голосов»).
 """
 from __future__ import annotations
 
 import base64
+import bisect
 import concurrent.futures
 import json
 import logging
@@ -36,16 +39,18 @@ METHODS = {
     "gemini": "Gemini слушает всю запись",
 }
 HINTS = {
-    "chunks": "Каждый кусок 45–90 с размечается отдельно, куски сшиваются по общим словам.",
-    "voice": "Отпечаток голоса каждой метки в каждой минуте, затем все отпечатки встречи собираются по сходству.",
+    "chunks": "Каждый кусок 45–90 с размечается отдельно, куски сшиваются по общим словам. Куски, разрезанные "
+              "детектором речи в паузах, общих слов не имеют — их метки связываются только по номеру.",
+    "voice": "Отпечаток голоса каждой метки в каждом куске расшифровки, затем все отпечатки встречи собираются "
+             "по сходству.",
     "gemini": "Модель слушает запись по полчаса вместе с репликами и называет говорящего каждой реплики.",
 }
 DEFAULT_METHOD = "chunks"
 DEFAULT_THRESHOLD = 0.5
 THRESHOLDS = tuple(round(0.3 + 0.05 * k, 2) for k in range(11))  # 0.30 … 0.80, tried on references
-VOICE_WINDOW = 60.0          # seconds of the recording per voice print of a label
+VOICE_WINDOW = 60.0          # seconds of the recording per voice print of a label, when the transcript has no parts
 VOICE_WORKERS = 4            # parallel requests to the voice service
-SAME_WINDOW_JOIN = 0.8       # two labels of one minute become one person only when their prints are this alike
+SAME_WINDOW_JOIN = 0.7       # two labels of one part become one person only when their prints are this alike
 COUNT_SLACK = 0.15           # with a known number of participants, merge down to it while this much below the threshold
 TINY_SECONDS = 3.0           # a voice with less speech joins its closest voice when that one is at most 0.2 less alike
 GEMINI_WINDOW = 30 * 60.0
@@ -217,18 +222,69 @@ def _cut(source, folder: pathlib.Path, start: float, seconds: float, name: str) 
     return target
 
 
-def voice_groups(audio_path, segments: list, total: float, progress=None, window: float = VOICE_WINDOW) -> list:
-    """One voice print per label in every minute: [{"window", "label", "embedding", "seconds"}], and one per short
-    replica: [{"window", "label": "#index", "short": index, "embedding", "seconds"}].
+def mark_parts(segments: list, starts: list) -> list:
+    """A transcript made before the replicas carried their part («part»): each replica gets the part of the earlier
+    recognition it falls in, by the parts' starts (transcribe.part_starts). Nothing changes without the starts or when
+    the replicas know their parts already."""
+    starts = sorted(float(value) for value in starts or [])
+    if len(starts) < 2 or has_parts(segments):
+        return segments
+    for item in segments or []:
+        if isinstance(item, dict):
+            item["part"] = max(0, bisect.bisect_right(starts, _number(item.get("start")) + 0.05) - 1)
+    return segments
 
-    Each minute goes to the voice service as its own short MP3 with the speech intervals of its labels; a short replica
+
+def has_parts(segments: list) -> bool:
+    return any(isinstance(item, dict) and _part(item) is not None for item in segments or [])
+
+
+def _part(item: dict):
+    value = item.get("part")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def windows_of(segments: list, rows: list, window: float = VOICE_WINDOW) -> tuple[dict, bool]:
+    """({replica index: its window}, by parts): the transcription part a replica was heard in when the transcript knows
+    its parts (transcribe.py), otherwise the minute of the recording.
+
+    The labels «Спикер N» are the parts' own: the STT numbers the voices of every part anew, and parts cut in pauses
+    share no words to link them by. So a label is one person only inside its part — a print of a minute that crosses
+    the cut would blend two people. A replica without a part (words heard again later) goes with the replica before it."""
+    parts = {index: _part(segments[index]) for index, _, _, _ in rows}
+    if not rows or sum(value is not None for value in parts.values()) * 2 < len(rows):
+        return {index: int(start // window) for index, start, _, _ in rows}, False
+    out, last, waiting = {}, None, []
+    for index, _, _, _ in rows:
+        value = parts[index]
+        if value is None:
+            if last is None:
+                waiting.append(index)
+            else:
+                out[index] = last
+            continue
+        for earlier in waiting:
+            out[earlier] = value
+        waiting, last = [], value
+        out[index] = value
+    return out, True
+
+
+def voice_groups(audio_path, segments: list, total: float, progress=None, window: float = VOICE_WINDOW) -> list:
+    """One voice print per label in every transcription part (or minute, see windows_of):
+    [{"window", "label", "embedding", "seconds"}], and one per short replica:
+    [{"window", "label": "#index", "short": index, "embedding", "seconds"}].
+
+    Each part goes to the voice service as its own short MP3 with the speech intervals of its labels; a short replica
     is sent apart from its label (it is often another person's «да»), so voice_labels can follow its own voice. Replicas
     named by confirmed samples (voiceprint) are left as they are."""
-    rows = [row for row in _rows(segments, total) if segments[row[0]].get("speaker_source") != "voiceprint"]
+    all_rows = _rows(segments, total)
+    numbers, by_part = windows_of(segments, all_rows, window)
+    rows = [row for row in all_rows if segments[row[0]].get("speaker_source") != "voiceprint"]
     by_window = {}
     for index, start, end, label in rows:
         if label:
-            by_window.setdefault(int(start // window), []).append((index, start, end, label))
+            by_window.setdefault(numbers[index], []).append((index, start, end, label))
     jobs = []
     for number, items in sorted(by_window.items()):
         spans, shorts = [], []
@@ -251,6 +307,7 @@ def voice_groups(audio_path, segments: list, total: float, progress=None, window
         raise DiarizationError("В расшифровке нет реплик длиннее секунды — сравнивать голоса не по чему.")
     folder = pathlib.Path(tempfile.mkdtemp(prefix="sysai_voices_"))
     groups, done, failures = [], [0], []
+    unit = "кусков" if by_part else "минут"
 
     def run(job):
         number, begin, finish, payload = job
@@ -271,7 +328,7 @@ def voice_groups(audio_path, segments: list, total: float, progress=None, window
                     continue
                 done[0] += 1
                 if progress and (done[0] % 10 == 0 or done[0] == len(jobs)):
-                    progress(f"Голоса по всей записи: {done[0]} из {len(jobs)} минут")
+                    progress(f"Голоса по всей записи: {done[0]} из {len(jobs)} {unit}")
                 for label, info in (payload.get("speakers") or {}).items():
                     try:
                         vector = speaker_id._normalise_embedding((info or {}).get("embedding"))
@@ -286,7 +343,7 @@ def voice_groups(audio_path, segments: list, total: float, progress=None, window
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     if failures and len(failures) * 4 > len(jobs):  # a quarter of the minutes lost: the clustering would be guesswork
-        raise DiarizationError(f"Сервис голосов не ответил по {len(failures)} из {len(jobs)} минут: {failures[0]}")
+        raise DiarizationError(f"Сервис голосов не ответил по {len(failures)} из {len(jobs)} {unit}: {failures[0]}")
     if not any("short" not in group for group in groups):
         raise DiarizationError("Сервис голосов не вернул ни одного отпечатка голоса.")
     groups.sort(key=lambda group: (group["window"], "short" in group, group.get("short", 0), group["label"]))
@@ -421,13 +478,14 @@ def voice_labels(segments: list, groups: list, threshold: float, people: int = 0
         votes.setdefault(group["label"], {}).setdefault(p, 0.0)
         votes[group["label"]][p] += max(0.1, _number(group.get("seconds")))
     rows = _rows(segments, total)
+    numbers, _ = windows_of(segments, rows, window)
     chosen = {}
     spare = {}
     for index, start, end, label in rows:
         if segments[index].get("speaker_source") == "voiceprint" or not label:
             continue
-        p = key_person.get((int(start // window), label))
-        if p is None and label in votes:  # too little speech in this minute: where the label usually goes
+        p = key_person.get((numbers[index], label))
+        if p is None and label in votes:  # too little speech in this part: where the label usually goes
             p = max(votes[label].items(), key=lambda item: item[1])[0]
         if p is None:  # a label never long enough for a print stays a voice of its own
             p = spare.setdefault(label, f"x{len(spare)}")

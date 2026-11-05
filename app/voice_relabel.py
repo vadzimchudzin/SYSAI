@@ -192,9 +192,11 @@ def _auto_after(auto: list, after: list) -> list:
 
 
 def propose(transcript: list, path, method: str, settings: dict, total: float, employees, people: int = 0,
-            auto: list | None = None, meeting_id: int | None = None, allowed=None, progress=None) -> dict:
-    """The new labelling of a transcript, as patches and «было → стало» (nothing is saved)."""
-    work = [dict(seg) if isinstance(seg, dict) else seg for seg in transcript]
+            auto: list | None = None, meeting_id: int | None = None, allowed=None, progress=None,
+            parts: list | None = None) -> dict:
+    """The new labelling of a transcript, as patches and «было → стало» (nothing is saved). `parts`: where the parts
+    of the recognition began, for a transcript whose replicas do not carry their part (diarize.mark_parts)."""
+    work = diarize.mark_parts([dict(seg) if isinstance(seg, dict) else seg for seg in transcript], parts)
     details, known = {}, {}
     if method == "voice":
         groups = diarize.voice_groups(path, work, total, progress)
@@ -335,11 +337,16 @@ def _run(meeting_id: int, method: str) -> None:
             for employee in employees:
                 _ = employee.name, employee.aliases, employee.position
             s.expunge_all()  # the meeting and the people are read once; the run writes through other sessions
+        parts = []
+        if method == "voice" and not diarize.has_parts(transcript):  # recognised before the replicas kept their part
+            from . import transcribe
+            parts = transcribe.part_starts(meeting_id)
         _progress(meeting_id, "Скачиваю запись")
         path, temporary = diarization_runs.recording(meeting)
         try:
             proposal = propose(transcript, path, method, settings, total, employees, people, auto=auto,
-                               meeting_id=meeting_id, allowed=allowed, progress=lambda text: _progress(meeting_id, text))
+                               meeting_id=meeting_id, allowed=allowed, progress=lambda text: _progress(meeting_id, text),
+                               parts=parts)
         finally:
             if temporary:
                 pathlib.Path(path).unlink(missing_ok=True)

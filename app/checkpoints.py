@@ -49,3 +49,11 @@ class Store:
                 else:
                     s.add(ProcessingCheckpoint(**values))
             s.commit()
+
+
+def rows(meeting_id, stage) -> list:
+    """[(part, data, id)] of every saved result of one stage of a meeting, oldest first."""
+    with SessionLocal() as s:
+        found = (s.query(ProcessingCheckpoint.part, ProcessingCheckpoint.data, ProcessingCheckpoint.id)
+                 .filter_by(meeting_id=meeting_id, stage=stage).order_by(ProcessingCheckpoint.id).all())
+        return [(part, json.loads(json.dumps(data, allow_nan=False)), row_id) for part, data, row_id in found]
