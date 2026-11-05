@@ -1,6 +1,6 @@
-/* SYSAI landing: the live voice under the wordmark (pixel wave like the sign-in page, with speech bubbles) and the
-   record-to-tasks scheme. Lines are measured from the real blocks, so they follow any layout; signals run along them
-   and every block they reach changes its state. Vanilla JS, no dependencies. */
+/* SYSAI landing: the live voice under the wordmark, the pixel waveform of the record, and the scheme from a record to tasks.
+   The scheme lines are bezier bundles measured from the real blocks; they are drawn while the page scrolls, and every signal
+   is a small pixel sound wave running along a line, in the same pixel style as the voice. Vanilla JS, no dependencies. */
 (() => {
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -10,8 +10,9 @@
   const NS = 'http://www.w3.org/2000/svg';
   const mk = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
   const watch = (el, cb, threshold = .1) => { if ('IntersectionObserver' in window) new IntersectionObserver(([en]) => cb(en.isIntersecting), { threshold }).observe(el); else cb(true); };
+  const bg = $('#l-bg');
 
-  /* ---------- 1. the voice: a timeline of two speakers scrolls through a grid of pixels ---------- */
+  /* ---------- 1. the voice under the wordmark: a timeline of two speakers scrolls through a grid of pixels ---------- */
   const vx = $('#vx');
   if (vx) (() => {
     const cv = $('.vx-cv', vx), ctx = cv && cv.getContext('2d', { alpha: true }); if (!ctx) return;
@@ -42,6 +43,7 @@
       ctx.clearRect(0, 0, W, H);
       ptr.x += (ptr.tx - ptr.x) * .18; ptr.e += ((ptr.inside ? 1 : 0) - ptr.e) * .07;
       const cols = Math.ceil(W / cell), rows = Math.floor(H / cell), oy = (H - rows * cell) / 2, mid = H / 2, [cur] = phraseAt(t);
+      if (bg) { const w = cur ? cur.who : ''; if ((bg.dataset.spk || '') !== w) bg.dataset.spk = w; } /* the stage light follows the speaker */
       /* soft light behind the playhead in the color of the speaker */
       const lc = cur ? COL[cur.who] : QUIET, oval = (x, r, k, stops) => { ctx.save(); ctx.translate(x, mid); ctx.scale(1, k); const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
         stops.forEach(([o, c]) => g.addColorStop(o, c)); ctx.fillStyle = g; ctx.fillRect(-r, -r, 2 * r, 2 * r); ctx.restore(); };
@@ -115,166 +117,206 @@
     document.addEventListener('visibilitychange', () => run(vx._vis));
   })();
 
-  /* ---------- 2. the scheme: a request comes in at the top and flows down ---------- */
+  /* ---------- 2. the record: a matrix of pixels fills while the meeting is recorded, coral is the director, blue is Ivan ---------- */
+  function recWave(cv) {
+    const ctx = cv && cv.getContext('2d'); if (!ctx) return null;
+    const COL = { d: [248, 120, 138], i: [115, 167, 255] }, SEG = [[0, 'd'], [.21, 'i'], [.35, 'd'], [.57, 'i'], [.71, 'd'], [.89, 'i']];
+    const spk = x => { let w = 'd'; for (const [a, k] of SEG) if (x >= a) w = k; return w; };
+    let W = 0, H = 0, cell = 3, cols = 0, rows = 0, oy = 0, amp = [], who = [];
+    function build() {
+      const r = cv.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2); W = r.width; H = r.height; if (!W || !H) return;
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      cols = Math.floor(W / cell); rows = Math.floor(H / cell); oy = (H - rows * cell) / 2; amp = []; who = [];
+      let seed = 7; const rnd = () => (seed = seed * 16807 % 2147483647) / 2147483647;
+      for (let c = 0; c < cols;) { /* words of a few columns with short pauses between them */
+        const n = 3 + Math.floor(rnd() * 7), peak = .35 + .65 * rnd();
+        for (let j = 0; j < n && c < cols; j++, c++) { amp[c] = peak * (.45 + .55 * Math.sin(Math.PI * (j + .5) / n)) * (.7 + .3 * rnd()); who[c] = spk(c / cols); }
+        for (let j = rnd() < .3 ? 2 : 1; j > 0 && c < cols; j--, c++) { amp[c] = 0; who[c] = spk(c / cols); }
+      }
+      SEG.forEach(([a]) => { const c0 = Math.round(a * cols); for (let k = -2; k <= 1; k++) if (amp[c0 + k] != null) amp[c0 + k] = 0; });
+    }
+    function draw(fill, live, scan, t) {
+      if (!W) return; ctx.clearRect(0, 0, W, H);
+      const mid = H / 2, head = Math.floor(fill * cols);
+      for (let c = 0; c < cols; c++) {
+        const x = c * cell + cell / 2;
+        if (c >= head || amp[c] <= 0) { if (c % 2 === 0) { ctx.fillStyle = c >= head ? 'rgba(240,238,230,.13)' : 'rgba(240,238,230,.08)'; ctx.fillRect(x - .6, mid - .6, 1.2, 1.2); } continue; }
+        const rgb = COL[who[c]], near = live ? Math.exp(-Math.pow((head - c) / 6, 2)) : 0, sc = scan >= 0 ? Math.exp(-Math.pow((c - scan * cols) / 7, 2)) : 0;
+        let a0 = amp[c]; if (near > .03) a0 = clamp(a0 * (.65 + .6 * Math.abs(Math.sin(t * 13 + c * 1.3))), 0, 1);
+        const A = Math.max(cell * .6, a0 * (H / 2 - 1));
+        for (let r = 0; r < rows; r++) {
+          const y = oy + r * cell + cell / 2, rel = Math.abs(y - mid) / A; if (rel > 1) continue;
+          const edge = 1 - rel, a = clamp(.26 + .5 * edge + .35 * near + .5 * sc, .05, 1), s = cell * (.56 + .24 * edge);
+          ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`; ctx.fillRect(x - s / 2, y - s / 2, s, s);
+        }
+      }
+      if (live && head < cols) { ctx.fillStyle = 'rgba(240,238,230,.75)'; ctx.fillRect(head * cell, 3, 1, H - 6); }
+    }
+    return { build, draw };
+  }
+
+  /* ---------- 3. the scheme: a request comes in at the top and flows down ---------- */
   const lx = $('#lx'), core = $('#lx-core');
   if (lx && core) (() => {
-    const svg = $('#lx-svg'), stageEl = $('#lx-stage');
-    const defs = mk('defs', {}, svg);
-    mk('feGaussianBlur', { stdDeviation: 2.6 }, mk('filter', { id: 'lx-blur', x: '-50%', y: '-50%', width: '200%', height: '200%' }, defs));
-    mk('feGaussianBlur', { stdDeviation: .8 }, mk('filter', { id: 'lx-blur2', x: '-50%', y: '-50%', width: '200%', height: '200%' }, defs));
-    const base = mk('g', {}, svg), sigLayer = mk('g', {}, svg);
-    const lines = {}, knots = {}, routes = {}, seen = new Set(), lit = new Set();
-    const rec = $('#lx-rec'), recSt = $('.lx-st', rec), srcs = $$('.lx-src', lx), mem = $('#lx-mem'), modelsEl = $('#lx-models'), outCol = $('.lx-out', lx);
-    const hcard = $('#lx-herm .lx-hcard'), hrows = $$('#lx-herm .lx-hrow').map(el => ({ el, k: el.dataset.k, st: $('.lx-st', el) }));
-    const H = Object.fromEntries(hrows.map(r => [r.k, r]));
-    const models = Object.fromEntries($$('.lx-m', core).map(m => [m.dataset.m, m]));
-    const agents = $$('.lx-ag', core).map(el => ({ el, k: el.dataset.a, st: $('.lx-st', el), uses: (el.dataset.uses || '').split(' ').filter(Boolean) }));
-    const A = Object.fromEntries(agents.map(a => [a.k, a]));
-    const MEM = ['who', 'sec', 'ast'];
-    const branches = $$('.lx-br', lx).map(el => ({ el, k: el.dataset.k, node: $('.lx-node', el), st: $('.lx-node .lx-st', el), subs: $$('.lx-sub', el), row: 0,
-      tone: el.dataset.tone === 'b' ? 'var(--lx-blue)' : 'var(--lx-coral)' }));
+    const svg = $('#lx-svg'), stageEl = $('#lx-stage'), defs = mk('defs', {}, svg);
+    const gBase = mk('g', {}, svg), gOv = mk('g', {}, svg), gKn = mk('g', {}, svg), gSig = mk('g', {}, svg);
+    const CORAL = 'var(--lx-coral)', BLUE = 'var(--lx-blue)', VIOLET = 'var(--lx-violet)', AMBER = 'var(--lx-amber)', GREEN = 'var(--lx-green)';
+    const GLOW = { gemini: '#6f9bff', openai: '#e9e7e0', claude: '#d97757', mistral: '#ff8a1f', eleven: '#f0eee6' };
+    const rec = $('#lx-rec'), recSt = $('.lx-st', rec), srcs = $$('.lx-src', lx), mem = $('#lx-mem'), herm = $('#lx-herm'), hh = $('.lx-hh', herm);
+    const hrows = $$('.lx-hrow', herm).map(el => ({ el, k: el.dataset.k, st: $('.lx-st', el) })), HR = Object.fromEntries(hrows.map(r => [r.k, r]));
+    const models = {}; $$('[data-m]', lx).forEach(el => (models[el.dataset.m] = models[el.dataset.m] || []).push(el));
+    const modelRow = Object.fromEntries($$('.lx-m', lx).map(m => [m.dataset.m, m]));
+    const agents = $$('.lx-ag', core).map(el => ({ el, k: el.dataset.a, st: $('.lx-st', el), ic: $('.lx-ic', el), uses: (el.dataset.uses || '').split(' ').filter(Boolean) }));
+    const A = Object.fromEntries(agents.map(a => [a.k, a])), MEM = ['who', 'sec', 'ast'];
+    const branches = $$('.lx-br', lx).map(el => ({ el, k: el.dataset.k, node: $('.lx-node', el), ic: $('.lx-node .lx-ic', el), st: $('.lx-node .lx-st', el),
+      subs: $$('.lx-sub', el), side: el.closest('.lx-out').dataset.side, tone: el.dataset.tone === 'b' ? BLUE : CORAL }));
     const B = Object.fromEntries(branches.map(b => [b.k, b]));
-    const R = 10, VIOLET = 'var(--lx-violet)', BLUE = 'var(--lx-blue)', CORAL = 'var(--lx-coral)', GREEN = 'var(--lx-green)', AMBER = 'var(--lx-amber)';
-    const box = (el, host) => { const r = el.getBoundingClientRect(), p = host.getBoundingClientRect(); const l = r.left - p.left, t = r.top - p.top; return { l, t, r: l + r.width, b: t + r.height, w: r.width, h: r.height, cx: l + r.width / 2, cy: t + r.height / 2 }; };
+    const RIBBON = ['boss', 'ivan', 'maria', 'drive', 'cal', 'chat', 'b24']; /* left to right: the top rows peel off first, so no strand crosses another */
+    const wave = recWave($('#lx-wave'));
     const f = v => v.toFixed(1);
-    const glow = m => (models[m] && getComputedStyle(models[m]).getPropertyValue('--glow').trim()) || '#f0eee6';
+    /* boxes from offsets: they ignore the transforms of the reveal animation */
+    const box = el => { let l = 0, t = 0, e = el; while (e && e !== lx) { l += e.offsetLeft; t += e.offsetTop; const p = e.offsetParent; if (p && p !== lx) { l += p.clientLeft; t += p.clientTop; } e = p; }
+      const w = el.offsetWidth, h = el.offsetHeight; return { l, t, r: l + w, b: t + h, w, h, cx: l + w / 2, cy: t + h / 2 }; };
 
-    function line(key, d, cls, tone) {
-      let l = lines[key]; if (!l) { l = lines[key] = mk('path', { class: 'lx-ln ' + (cls || '') }, base); if (tone) l.style.setProperty('--tone', tone); }
-      l.setAttribute('d', d); seen.add('l:' + key); return l;
+    /* lines: a hairline base drawn on scroll, an overlay colored by the signals, a pixel knot on every end */
+    const L = {}, alias = {}, seen = new Set();
+    const get = key => L[alias[key] || key];
+    function route(key, d, tone, o = {}) {
+      let l = L[key];
+      if (!l) { l = L[key] = { key, prog: 0, ov: null, base: mk('path', { class: 'lx-ln' }, gBase), k0: mk('rect', { class: 'lx-kn', width: 3, height: 3 }, gKn), k1: mk('rect', { class: 'lx-kn', width: 3, height: 3 }, gKn) }; }
+      l.tone = tone; l.hidden = !!o.hidden; l.base.style.visibility = o.hidden ? 'hidden' : '';
+      for (const k of [l.k0, l.k1]) k.style.setProperty('--tone', tone);
+      l.k0.style.display = o.hidden || o.k0 === false ? 'none' : ''; l.k1.style.display = o.hidden || o.k1 === false ? 'none' : '';
+      if (l.d !== d) {
+        l.d = d; l.base.setAttribute('d', d); if (l.ov) l.ov.setAttribute('d', d); l.lut = null;
+        l.len = l.base.getTotalLength(); const bb = l.base.getBBox(); l.y0 = bb.y; l.y1 = bb.y + bb.height;
+        const p0 = l.base.getPointAtLength(0), p1 = l.base.getPointAtLength(l.len);
+        l.k0.setAttribute('x', f(p0.x - 1.5)); l.k0.setAttribute('y', f(p0.y - 1.5)); l.k1.setAttribute('x', f(p1.x - 1.5)); l.k1.setAttribute('y', f(p1.y - 1.5));
+        paint(l); if (l.lit) lit(l, l.lit[0], l.lit[1]);
+      }
+      seen.add(key); return l;
     }
-    /* a knot is lit together with the line of the same key; n tells apart several knots of one line */
-    function knot(key, x, y, tone, r = 2.6, n = 0) {
-      const id = key + '#' + n; let k = knots[id]; if (!k) { k = knots[id] = mk('circle', { class: 'lx-knot' }, base); k._key = key; if (tone) k.style.setProperty('--tone', tone); }
-      k.setAttribute('cx', f(x)); k.setAttribute('cy', f(y)); k.setAttribute('r', r); seen.add('k:' + id); return k;
+    function paint(l) {
+      const p = l.prog;
+      if (p >= .999) { l.base.style.strokeDasharray = ''; l.base.style.strokeDashoffset = ''; }
+      else { l.base.style.strokeDasharray = `${f(l.len)} ${f(l.len + 4)}`; l.base.style.strokeDashoffset = f(l.len * (1 - p)); }
+      l.k0.classList.toggle('in', p > .01); l.k1.classList.toggle('in', p > .985);
     }
+    const grow = (l, p) => { if (p > l.prog + 1e-4) { l.prog = Math.min(1, p); if (!l.hidden) paint(l); } };
+    function lit(l, a, b, tone) { /* the colored part between the lengths a and b */
+      if (!l.ov) l.ov = mk('path', { class: 'lx-ov off', d: l.d }, gOv);
+      if (tone) l.ov.style.setProperty('--tone', tone); else if (!l.ov.style.getPropertyValue('--tone')) l.ov.style.setProperty('--tone', l.tone);
+      a = clamp(a, 0, l.len); b = clamp(b, a, l.len); l.lit = [a, b];
+      l.ov.style.strokeDasharray = `0 ${f(a)} ${f(b - a)} ${f(l.len + 4)}`; l.ov.classList.remove('off');
+    }
+    function unlit(l) { if (l && l.ov) { l.ov.classList.add('off'); l.lit = null; } if (l) { l.k0.classList.remove('lit'); l.k1.classList.remove('lit'); } }
     function sweep() {
-      for (const k in lines) if (!seen.has('l:' + k)) { lines[k].remove(); delete lines[k]; }
-      for (const k in knots) if (!seen.has('k:' + k)) { knots[k].remove(); delete knots[k]; }
+      for (const k in L) if (!seen.has(k)) { const l = L[k]; l.base.remove(); if (l.ov) l.ov.remove(); l.k0.remove(); l.k1.remove(); delete L[k]; }
+      seen.clear();
     }
-    function light(key, on = true) { if (on) lit.add(key); else lit.delete(key); if (lines[key]) lines[key].classList.toggle('lit', on); for (const id in knots) if (knots[id]._key === key) knots[id].classList.toggle('lit', on); }
-    function relight() { for (const k in lines) lines[k].classList.toggle('lit', lit.has(k)); for (const id in knots) knots[id].classList.toggle('lit', lit.has(knots[id]._key)); }
 
-    /* down from (x0,y0) to the level yb, across to x1, down to y1, with rounded corners */
-    function vhv(x0, y0, yb, x1, y1) {
-      const dx = x1 - x0; if (Math.abs(dx) < 1) return `M${f(x0)},${f(y0)} V${f(y1)}`;
-      const s = Math.sign(dx), r = Math.max(1, Math.min(R, Math.abs(dx) / 2, yb - y0, y1 - yb));
-      return `M${f(x0)},${f(y0)} V${f(yb - r)} Q${f(x0)},${f(yb)} ${f(x0 + s * r)},${f(yb)} H${f(x1 - s * r)} Q${f(x1)},${f(yb)} ${f(x1)},${f(yb + r)} V${f(y1)}`;
-    }
-    /* a drop from a bus at the level yb into the top of a block; s is the side the bus comes from, 0 for a straight drop */
-    const drop = (x, yb, y1, s) => s ? `M${f(x + s * R)},${f(yb)} Q${f(x)},${f(yb)} ${f(x)},${f(yb + R)} V${f(y1)}` : `M${f(x)},${f(yb)} V${f(y1)}`;
-    /* an elbow from a rail at x that runs down into a block edge at (x1,y1) */
-    const elbowIn = (x, y1, x1) => `M${f(x)},${f(y1 - R)} Q${f(x)},${f(y1)} ${f(x + R)},${f(y1)} H${f(x1)}`;
-    const railTo = (x, y0, y1, x1) => `M${f(x)},${f(y0)} V${f(y1 - R)} Q${f(x)},${f(y1)} ${f(x + R)},${f(y1)} H${f(x1)}`;
-    const hcurve = (x0, y0, x1, y1) => { const dx = (x1 - x0) * .55; return `M${f(x0)},${f(y0)} C${f(x0 + dx)},${f(y0)} ${f(x1 - dx)},${f(y1)} ${f(x1)},${f(y1)}`; };
-    const chevronDown = (x, y) => `M${f(x - 3.5)},${f(y - 6)} L${f(x)},${f(y - 1.5)} L${f(x + 3.5)},${f(y - 6)}`;
-    const chevronRight = (x, y) => `M${f(x - 6)},${f(y - 3.5)} L${f(x - 1.5)},${f(y)} L${f(x - 6)},${f(y + 3.5)}`;
+    const vS = (x0, y0, x1, y1, k = .55) => { const dy = y1 - y0; return `M${f(x0)},${f(y0)} C${f(x0)},${f(y0 + dy * k)} ${f(x1)},${f(y1 - dy * k)} ${f(x1)},${f(y1)}`; };
+    const hS = (x0, y0, x1, y1, k = .5) => { const dx = x1 - x0; return `M${f(x0)},${f(y0)} C${f(x0 + dx * k)},${f(y0)} ${f(x1 - dx * k)},${f(y1)} ${f(x1)},${f(y1)}`; };
+    /* a strand of the ribbon: straight down, then a long soft turn into the side of a block */
+    const peel = (x, y0, x1, y1, D) => { D = clamp(D, 8, y1 - y0); return `M${f(x)},${f(y0)} V${f(y1 - D)} C${f(x)},${f(y1 - D * .36)} ${f(x + (x1 - x) * .4)},${f(y1)} ${f(x1)},${f(y1)}`; };
+    const rail = (x, y0, x1, y1, r = 10) => `M${f(x)},${f(y0)} V${f(y1 - r)} Q${f(x)},${f(y1)} ${f(x + r)},${f(y1)} H${f(x1)}`;
 
     let mode = '';
+    function trees() {
+      branches.forEach(b => { if (!b.subs.length) return; const ib = box(b.ic); let prev = null, y = ib.b + 1;
+        b.subs.forEach(v => { const s = box(v), key = `sub-${b.k}-${v.dataset.k}`;
+          if (prev && Math.abs(prev.cy - s.cy) < 3) route(key, `M${f(prev.r)},${f(s.cy)} H${f(s.l)}`, b.tone, { k0: false });
+          else { route(key, rail(ib.cx, y, s.l, s.cy, 8), b.tone, { k0: false }); y = s.cy - 8; }
+          prev = s; }); });
+      const ic = box($('.lx-ic', hh)); let y = ic.b + 1;
+      hrows.forEach(r => { const q = box(r.el); route('hr-' + r.k, rail(ic.cx, y, q.l, q.cy, 8), VIOLET, { k0: false }); y = q.cy - 8; });
+    }
     function layout() {
-      svg.setAttribute('viewBox', `0 0 ${lx.clientWidth} ${lx.clientHeight}`); seen.clear(); for (const k in routes) delete routes[k];
-      const wide = getComputedStyle(modelsEl).position === 'absolute';
-      const c = box(core, lx), rb = box(rec, lx), ag = agents.map(a => box(a.el, lx)), nodes = branches.map(b => box(b.node, lx));
-      const narrow = !wide && ag.length > 1 && Math.abs(ag[1].cy - ag[0].cy) > 4;
-      mode = wide ? 'wide' : narrow ? 'narrow' : 'mid';
-      const cx = rb.cx, a0 = ag[0], z = ag[ag.length - 1], ob = box(outCol, lx);
-
-      /* sources: five drops merge into one line down to the record */
-      if (wide) {
-        const sb = srcs.map(s => box(s, lx)), yb = sb[0].b + Math.min(22, (rb.t - sb[0].b) / 2), xs = sb.map(s => s.cx);
-        sb.forEach((s, i) => { const side = Math.abs(s.cx - cx) < 1 ? 0 : Math.sign(s.cx - cx);
-          line('f-' + i, side ? `M${f(s.cx)},${f(s.b)} V${f(yb - R)} Q${f(s.cx)},${f(yb)} ${f(s.cx - side * R)},${f(yb)}` : `M${f(s.cx)},${f(s.b)} V${f(yb)}`, 'dash', BLUE);
-          knot('f-' + i, s.cx, s.b, BLUE, 2.4); routes['src-' + i] = vhv(s.cx, s.b, yb, cx, rb.t); });
-        line('bus', `M${f(Math.min(...xs) + R)},${f(yb)} H${f(Math.max(...xs) - R)}`, 'dash', BLUE);
-        line('drop', `M${f(cx)},${f(yb)} V${f(rb.t)}`, 'dash', BLUE); knot('drop', cx, rb.t, BLUE, 2.4);
+      svg.setAttribute('viewBox', `0 0 ${lx.clientWidth} ${lx.clientHeight}`);
+      for (const k in alias) delete alias[k];
+      mode = getComputedStyle(lx).display === 'grid' ? 'wide' : 'narrow';
+      const rb = box(rec), cb = box(core), cx = Math.round(rb.cx) + .5, ag = agents.map(a => box(a.el)), ic = agents.map(a => box(a.ic));
+      /* five sources bundle into the record */
+      srcs.forEach((s, i) => { const b = box(s); route('src-' + i, vS(b.cx, b.b + (mode === 'wide' ? 0 : 4), cx + (i - 2) * 5, rb.t), BLUE); });
+      /* two voices go down into the core */
+      route('rec-d', `M${f(cx - 3)},${f(rb.b)} V${f(cb.t)}`, CORAL); route('rec-i', `M${f(cx + 3)},${f(rb.b)} V${f(cb.t)}`, BLUE);
+      /* the chain of agents inside the core */
+      for (let i = 1; i < ic.length; i++) route('chain-' + (i - 1), `M${f(ic[i - 1].cx)},${f(ic[i - 1].b + 4)} V${f(ic[i].t - 4)}`, VIOLET, { k0: false, k1: false });
+      if (mode === 'wide') {
+        /* models cross over to the agents that use them */
+        agents.forEach((a, i) => { const n = a.uses.length; a.uses.forEach((m, j) => { const mb = box(modelRow[m]);
+          route(`web-${a.k}-${m}`, hS(mb.r, mb.cy, ag[i].l, ag[i].cy + (j - (n - 1) / 2) * 5), GLOW[m]); }); });
+        /* memory and Hermes on the right */
+        const mi = box($('.lx-ic', mem)), mb = box(mem), hb = box(herm), hc = box($('.lx-ic', hh));
+        MEM.forEach((k, j) => { const q = ag[agents.indexOf(A[k])]; route('mem-' + k, hS(mb.l, mi.cy + (j - 1) * 5, q.r, q.cy + (k === 'ast' ? -4 : 0)), GREEN); });
+        const q = ag[agents.length - 1]; route('herm', hS(q.r, q.cy + 4, hb.l, hc.cy), VIOLET);
+        /* the ribbon: seven strands leave the core and peel off to the rows on both sides */
+        RIBBON.forEach((k, idx) => { const b = B[k], n = box(b.node), x = cx + (idx - 3) * 6;
+          route('br-' + k, peel(x, cb.b, b.side === 'l' ? n.r : n.l, n.cy, 92), b.tone); });
       } else {
-        const ib = box($('.lx-in', lx), lx), d = `M${f(cx)},${f(ib.b + 4)} V${f(rb.t)}`;
-        line('drop', d, 'dash', BLUE); knot('drop', cx, ib.b + 4, BLUE, 2.2); knot('drop', cx, rb.t, BLUE, 2.4, 1); srcs.forEach((s, i) => { routes['src-' + i] = d; });
+        /* one rail on the left: memory, Hermes and every output hang on it */
+        const rx = 14.5, y0 = cb.b, items = [['mem', mem, box($('.lx-ic', mem)).cy, GREEN], ['herm', herm, box(hh).cy, VIOLET], ...branches.map(b => ['br-' + b.k, b.node, box(b.node).cy, b.tone])];
+        let bot = y0;
+        items.forEach(([key, el, ay, tone]) => { const e = box(el); route(key, rail(rx, y0, e.l, ay, 12), tone, { hidden: true }); route('stub-' + key, rail(rx, ay - 24, e.l, ay, 12), tone, { k0: false }); bot = Math.max(bot, ay - 24); });
+        route('rail', `M${f(rx)},${f(y0)} V${f(bot)}`, 'rgba(240,238,230,.5)', { k1: false });
+        MEM.forEach(k => { alias['mem-' + k] = 'mem'; });
       }
-      /* the record goes down the spine into the first agent */
-      const yIn = wide ? a0.t : c.t;
-      routes.rec = `M${f(cx)},${f(rb.b)} V${f(yIn)}`; line('entry', routes.rec, '', CORAL);
-      knot('entry', cx, rb.b, CORAL, 2.4); knot('entry', cx, c.t, CORAL, wide ? 2.6 : 3, 1); if (wide) knot('entry', cx, a0.t, CORAL, 3, 2);
-      /* the chain of agents */
-      agents.forEach((a, i) => { if (!i) return; const p = ag[i - 1], q = ag[i], key = 'chain-' + (i - 1); let d, arrow;
-        if (wide) { d = `M${f(cx)},${f(p.b)} V${f(q.t)}`; arrow = chevronDown(cx, q.t); }
-        else if (narrow) { const x = p.l + 26; d = `M${f(x)},${f(p.b)} V${f(q.t)}`; arrow = chevronDown(x, q.t); }
-        else { d = `M${f(p.r)},${f(p.cy)} H${f(q.l)}`; arrow = chevronRight(q.l, q.cy); }
-        line(key, d, '', VIOLET); routes[key] = d; line(key + 'v', arrow, 'arrow', VIOLET); });
-      /* the exit and the tree of outputs */
-      if (wide) {
-        routes.exit = `M${f(cx)},${f(z.b)} V${f(c.b)}`; line('exit', routes.exit, '', AMBER); knot('exit', cx, z.b, AMBER, 2.6); knot('exit', cx, c.b, AMBER, 3, 1);
-        const rows = []; nodes.forEach((n, i) => { const row = rows.find(r => Math.abs(r.t - n.t) < 6); if (row) row.items.push(i); else rows.push({ t: n.t, items: [i] }); });
-        rows.sort((p, q) => p.t - q.t);
-        const capB = box($('.lx-cap', outCol), lx).b; let above = capB, yPrev = c.b;
-        rows.forEach((row, ri) => {
-          const yb = (above + row.t) / 2, xs = row.items.map(i => nodes[i].cx), x0 = Math.min(...xs), x1 = Math.max(...xs);
-          line(ri ? 'trunk' + ri : 'trunk', `M${f(cx)},${f(yPrev)} V${f(yb)}`, 'trunk'); knot(ri ? 'trunk' + ri : 'trunk', cx, yb, null, 2.2);
-          if (x1 - x0 > 2 * R) line('bus-' + ri, `M${f(Math.min(x0 + R, cx))},${f(yb)} H${f(Math.max(x1 - R, cx))}`, 'trunk');
-          row.items.forEach(i => { const n = nodes[i], b = branches[i], outer = n.cx === x0 || n.cx === x1, side = Math.abs(n.cx - cx) < 1 || !outer ? 0 : Math.sign(n.cx - cx);
-            b.row = ri; line('br-' + b.k, drop(n.cx, yb, n.t, side ? -side : 0), '', b.tone); knot('br-' + b.k, n.cx, n.t, b.tone, 2.4);
-            routes['br-' + b.k] = vhv(cx, c.b, yb, n.cx, n.t); });
-          yPrev = yb; above = Math.max(...row.items.map(i => box(branches[i].el, lx).b)); });
-      } else {
-        const tx = ob.l + 14, y0 = c.b; let bot = y0;
-        knot('exit', tx, y0, null, 3);
-        branches.forEach((b, i) => { const n = nodes[i]; b.row = 0; line('br-' + b.k, elbowIn(tx, n.cy, n.l), '', b.tone); knot('br-' + b.k, n.l, n.cy, b.tone, 2.4);
-          bot = Math.max(bot, n.cy - R); routes['br-' + b.k] = railTo(tx, y0, n.cy, n.l); });
-        if (hcard) { const hb = box(hcard, lx), y1 = box($('.lx-hh', hcard), lx).cy;
-          line('herm', elbowIn(tx, y1, hb.l), '', VIOLET); knot('herm', hb.l, y1, VIOLET, 2.4); bot = Math.max(bot, y1 - R); routes.herm = railTo(tx, y0, y1, hb.l); }
-        line('trunk', `M${f(tx)},${f(y0)} V${f(bot)}`, 'trunk');
-      }
-      /* small trees under the blocks */
-      branches.forEach((b, i) => { if (!b.subs.length) return; const n = nodes[i], sx = n.l + 17; let y = n.b, prev = null;
-        b.subs.forEach(v => { const s = box(v.firstElementChild || v, lx), key = `sub-${b.k}-${v.dataset.k}`;
-          if (prev && Math.abs(prev.cy - s.cy) < 3) line(key, `M${f(prev.r)},${f(s.cy)} H${f(s.l)}`, 'dash', b.tone);
-          else { line(key, railTo(sx, y, s.cy, s.l), 'dash', b.tone); y = s.cy - R; }
-          routes[key] = railTo(sx, n.b, s.cy, s.l); prev = s; }); });
-      /* Hermes: a link from the assistant that passes under the memory rail, then a small tree of the agents on the computers */
-      if (hcard) {
-        if (wide) { const hb = box(hcard, lx), mb = box(mem, lx), y0 = z.cy + 8, y1 = box($('.lx-hh', hcard), lx).cy,
-            xr = (c.r + mb.l) / 2, xh = Math.min(xr + 14, hb.l - R - 2), r = Math.max(1, Math.min(R, Math.abs(y1 - y0) / 2)), s = Math.sign(y1 - y0) || 1,
-            d = `M${f(z.r)},${f(y0)} H${f(xh - r)} Q${f(xh)},${f(y0)} ${f(xh)},${f(y0 + s * r)} V${f(y1 - s * r)} Q${f(xh)},${f(y1)} ${f(xh + r)},${f(y1)} H${f(hb.l)}`;
-          line('herm', d, '', VIOLET); knot('herm', z.r, y0, VIOLET, 2.2); knot('herm', hb.l, y1, VIOLET, 2.6, 1); routes.herm = d; }
-        const ic = box($('.lx-hh .lx-ic', hcard), lx); let y = ic.b;
-        hrows.forEach(r => { const q = box(r.el, lx), key = 'hr-' + r.k; line(key, railTo(ic.cx, y, q.cy, q.l), 'dash', VIOLET); routes[key] = railTo(ic.cx, ic.b, q.cy, q.l); y = q.cy - R; });
-      }
-      /* models into the agents that use them */
-      if (!narrow) agents.forEach((a, i) => { const q = ag[i], n = a.uses.length;
-        a.uses.forEach((m, j) => { if (!models[m]) return; const mb = box(models[m], lx), key = `web-${a.k}-${m}`, tone = glow(m); let d, x1, y1;
-          if (wide) { x1 = q.l; y1 = q.cy + (j - (n - 1) / 2) * 7; d = hcurve(mb.r, mb.cy, x1, y1); knot('m-' + m, mb.r, mb.cy, tone, 2.2); }
-          else { const x0 = mb.cx, y0 = mb.b + 3; x1 = q.cx + (j - (n - 1) / 2) * 12; y1 = q.t; const dy = y1 - y0; d = `M${f(x0)},${f(y0)} C${f(x0)},${f(y0 + dy * .55)} ${f(x1)},${f(y1 - dy * .55)} ${f(x1)},${f(y1)}`; }
-          line(key, d, 'web', `color-mix(in srgb,${tone} 85%,#fff)`); routes[key] = d; knot(key, x1, y1, tone, 1.8); }); });
-      /* memory: a rail on the right of the chain (wide) or short lines up from the bar (stacked) */
-      const mb = box(mem, lx);
-      if (wide) { const xr = (c.r + mb.l) / 2, yTop = mb.cy, yBot = Math.max(...MEM.map(k => ag[agents.indexOf(A[k])].cy));
-        line('mem-rail', `M${f(xr)},${f(yBot - R)} V${f(yTop + R)} Q${f(xr)},${f(yTop)} ${f(xr + R)},${f(yTop)} H${f(mb.l)}`, 'dash', GREEN); knot('mem-rail', mb.l, yTop, GREEN, 2.4);
-        MEM.forEach(k => { const q = ag[agents.indexOf(A[k])], key = 'mem-' + k;
-          line(key, `M${f(q.r)},${f(q.cy)} H${f(xr - R)} Q${f(xr)},${f(q.cy)} ${f(xr)},${f(q.cy - R)}`, 'dash', GREEN); knot(key, q.r, q.cy, GREEN, 2.2);
-          routes[key] = `M${f(mb.l)},${f(yTop)} H${f(xr + R)} Q${f(xr)},${f(yTop)} ${f(xr)},${f(yTop + R)} V${f(q.cy - R)} Q${f(xr)},${f(q.cy)} ${f(xr - R)},${f(q.cy)} H${f(q.r)}`; });
-      } else if (!narrow) MEM.forEach(k => { const q = ag[agents.indexOf(A[k])], key = 'mem-' + k, d = `M${f(q.cx)},${f(mb.t)} V${f(q.b)}`;
-        line(key, d, 'dash', GREEN); routes[key] = d; knot(key, q.cx, mb.t, GREEN, 2.2); });
-      sweep(); relight();
+      trees(); sweep(); measure(); reveal(true);
     }
 
-    /* signals: a short bright tail with a soft glow running along a route */
+    /* scroll: the front runs a bit above the bottom of the screen, lines grow behind it and never shrink back */
+    const rv = $$('.lx-rv'), rvTop = new Map(); let lxTop = 0, F = -1e9;
+    function measure() { const sy = scrollY; lxTop = lx.getBoundingClientRect().top + sy; rv.forEach(el => rvTop.set(el, el.getBoundingClientRect().top + sy)); }
+    function reveal(instant) {
+      const fr = scrollY + innerHeight * .86; if (fr > F) F = fr; const fl = F - lxTop;
+      for (const k in L) { const l = L[k]; if (l.prog < 1) grow(l, clamp((fl - l.y0) / Math.max(l.y1 - l.y0, 150), 0, 1)); }
+      rv.forEach(el => { if (!el.classList.contains('in') && F > rvTop.get(el) + 24) { el.classList.add('in'); if (instant) el.classList.add('now'); } });
+    }
+
+    /* signals: a short pixel sound wave runs along a line; the line takes its color behind it */
+    const grads = {};
+    function gradFor(tone) { if (grads[tone]) return grads[tone]; const id = 'lxg' + Object.keys(grads).length, g = mk('radialGradient', { id }, defs);
+      const s0 = mk('stop', { offset: 0 }, g), s1 = mk('stop', { offset: 1 }, g); s0.style.stopColor = s1.style.stopColor = tone; s0.style.stopOpacity = .45; s1.style.stopOpacity = 0; return (grads[tone] = id); }
     const sigs = []; let now = 0;
     function signal(key, tone, ms = 900, done, reverse = false) {
-      const d = routes[key]; if (!d) { if (done) done(); return; }
-      const g = mk('g', {}, sigLayer), gl = mk('path', { d, class: 'lx-sig-glow' }, g), tail = mk('path', { d, class: 'lx-sig-tail' }, g), head = mk('circle', { r: 2.4, class: 'lx-sig-head' }, g), dot = mk('circle', { r: 1.6 }, g);
-      gl.style.stroke = tail.style.stroke = head.style.fill = tone; dot.style.fill = '#fff';
-      sigs.push({ g, glow: gl, tail, head, dot, key, d, len: tail.getTotalLength(), t0: now, ms, done, reverse, fired: false });
+      const l = get(key); if (!l || !l.len) { if (done) done(); return; }
+      const g = mk('g', { class: 'lx-sig' }, gSig); g.style.color = tone;
+      const glow = mk('circle', { r: 15, fill: `url(#${gradFor(tone)})` }, g);
+      sigs.push({ l, g, glow, p3: mk('path', { class: 'p3' }, g), p2: mk('path', { class: 'p2' }, g), p1: mk('path', { class: 'p1' }, g), tone, t0: now, ms, done, reverse, fired: false, seed: Math.random() * 6.3 });
     }
+    function lutOf(l) { if (l.lut) return l.lut; const n = Math.max(2, Math.ceil(l.len / 2)), a = new Float32Array((n + 1) * 2);
+      for (let i = 0; i <= n; i++) { const p = l.base.getPointAtLength(l.len * i / n); a[2 * i] = p.x; a[2 * i + 1] = p.y; } return (l.lut = { n, a }); }
+    function at(l, s) { const { n, a } = lutOf(l), u = clamp(s / l.len, 0, 1) * n, i = Math.min(n - 1, Math.floor(u)), k = u - i;
+      const x0 = a[2 * i], y0 = a[2 * i + 1], x1 = a[2 * i + 2], y1 = a[2 * i + 3], m = Math.hypot(x1 - x0, y1 - y0) || 1;
+      return [x0 + (x1 - x0) * k, y0 + (y1 - y0) * k, -(y1 - y0) / m, (x1 - x0) / m]; }
+    const CELL = 3, BODY = 27, TAIL = 30, AMP = 7.4;
+    const sq = (x, y, s) => `M${f(x - s / 2)} ${f(y - s / 2)}h${s}v${s}h-${s}z`;
     function drawSigs() {
+      const ts = now / 1000;
       for (let i = sigs.length - 1; i >= 0; i--) {
-        const s = sigs[i], d = routes[s.key];
-        if (d && d !== s.d) { s.d = d; s.glow.setAttribute('d', d); s.tail.setAttribute('d', d); s.len = s.tail.getTotalLength(); }
-        const raw = (now - s.t0) / s.ms, e = inOut(clamp(raw, 0, 1)), pos = s.reverse ? s.len * (1 - e) : s.len * e, trail = Math.min(64, s.len * .45);
-        const a = s.reverse ? pos : Math.max(0, pos - trail), b = s.reverse ? Math.min(s.len, pos + trail) : pos;
-        for (const p of [s.glow, s.tail]) { p.style.strokeDasharray = `${Math.max(.01, b - a)} ${s.len + 10}`; p.style.strokeDashoffset = -a; }
-        const pt = s.tail.getPointAtLength(pos); for (const c of [s.head, s.dot]) { c.setAttribute('cx', pt.x); c.setAttribute('cy', pt.y); }
-        if (raw >= 1 && !s.fired) { s.fired = true; if (s.done) s.done(); }
-        if (raw >= 1) { const k = 1 - clamp((raw - 1) * s.ms / 300, 0, 1); s.g.style.opacity = k; if (k <= 0) { s.g.remove(); sigs.splice(i, 1); } }
+        const s = sigs[i], l = s.l;
+        if (L[l.key] !== l) { s.g.remove(); sigs.splice(i, 1); if (!s.fired && s.done) s.done(); continue; }
+        const raw = (now - s.t0) / s.ms, e = inOut(clamp(raw, 0, 1)), dir = s.reverse ? -1 : 1, pos = s.reverse ? l.len * (1 - e) : l.len * e;
+        /* a signal never runs ahead of the scroll: past the drawn part of its line it fades out */
+        const lim = l.prog * l.len, vis = clamp(1 - (pos - lim) / 24, 0, 1), tf = raw > 1 ? 1 - clamp((raw - 1) * s.ms / 260, 0, 1) : 1, fade = tf * vis;
+        if (raw <= 1) { if (s.reverse) { if (pos < lim) lit(l, pos, lim, s.tone); } else if (lim > 0) lit(l, 0, Math.min(pos, lim), s.tone); }
+        const cells = new Map(), put = (x, y, lv) => { const id = (Math.round(y / CELL) + 64) * 8192 + Math.round(x / CELL) + 512; if ((cells.get(id) || 0) < lv) cells.set(id, lv); };
+        for (let u = 0; u <= BODY; u += 2) {
+          const a = pos - dir * u; if (a < 0 || a > lim) continue;
+          const [x, y, nx, ny] = at(l, a), env = Math.pow(Math.sin(Math.PI * u / BODY), 1.3);
+          const osc = .3 + .7 * Math.abs(Math.sin(a * .36 + ts * 11 + s.seed)) * (.75 + .25 * Math.sin(a * .11 - ts * 4));
+          const K = Math.floor(env * osc * AMP * fade / CELL + .45), core = Math.max(1, K * .5);
+          for (let k = -K; k <= K; k++) put(x + nx * k * CELL, y + ny * k * CELL, Math.abs(k) < core ? 3 : 2);
+        }
+        for (let u = BODY; u <= BODY + TAIL; u += CELL) { const a = pos - dir * u; if (a < 0 || a > lim) continue;
+          if (fract(Math.sin(Math.floor(a / CELL) * 12.9898 + Math.floor(ts * 14) * 78.233) * 43758.5453) < (1 - (u - BODY) / TAIL) * fade) { const [x, y] = at(l, a); put(x, y, 1); } }
+        let d1 = '', d2 = '', d3 = '';
+        for (const [id, lv] of cells) { const gx = id % 8192 - 512, gy = Math.floor(id / 8192) - 64, x = gx * CELL, y = gy * CELL;
+          if (lv === 3) d1 += sq(x, y, 2.4); else if (lv === 2) d2 += sq(x, y, 2.1); else d3 += sq(x, y, 1.8); }
+        s.p1.setAttribute('d', d1); s.p2.setAttribute('d', d2); s.p3.setAttribute('d', d3);
+        const [hx, hy] = at(l, pos); s.glow.setAttribute('cx', f(hx)); s.glow.setAttribute('cy', f(hy)); s.glow.setAttribute('opacity', fade.toFixed(2));
+        if (raw >= 1 && !s.fired) { s.fired = true; if (vis > 0) (s.reverse ? l.k0 : l.k1).classList.add('lit'); if (s.done) s.done(); }
+        if (tf <= 0) { s.g.remove(); sigs.splice(i, 1); }
       }
     }
 
@@ -283,86 +325,88 @@
     const status = (o, s, text) => { const st = o.st || o; st.dataset.s = s; say(st, text); };
     const stage = (text, s = 'run') => { stageEl.className = 'lx-stage ' + s; say(stageEl, text); };
     const hit = (el, ms = 1500) => { if (!el) return; el.classList.add('hit'); clearTimeout(el._h); el._h = setTimeout(() => el.classList.remove('hit'), ms); };
-    const model = (keys, on = true) => keys.forEach(k => { if (models[k]) models[k].classList.toggle('on', on); light('m-' + k, on); });
+    const model = (keys, on = true) => keys.forEach(k => (models[k] || []).forEach(el => el.classList.toggle('on', on)));
     function agentOn(a, text) {
       a.el.classList.remove('ok'); a.el.classList.add('run'); status(a, 'run', text); model(a.uses);
-      a.uses.forEach((m, j) => { light(`web-${a.k}-${m}`); setTimeout(() => signal(`web-${a.k}-${m}`, glow(m), 700), j * 110); });
-      if (MEM.includes(a.k)) { mem.classList.add('on'); light('mem-' + a.k); light('mem-rail'); setTimeout(() => signal('mem-' + a.k, GREEN, mode === 'wide' ? 900 : 600), 250); }
+      a.uses.forEach((m, j) => setTimeout(() => signal(`web-${a.k}-${m}`, GLOW[m], 750), j * 120));
+      if (MEM.includes(a.k)) { mem.classList.add('on'); setTimeout(() => signal('mem-' + a.k, GREEN, mode === 'wide' ? 850 : 650, null, mode === 'wide'), 260); }
     }
     function agentOk(a, text) { a.el.classList.remove('run'); a.el.classList.add('ok'); status(a, 'ok', text); model(a.uses, false);
-      a.uses.forEach(m => light(`web-${a.k}-${m}`, false)); light('mem-' + a.k, false); light('mem-rail', false); }
-    function to(k, s, text, ms = 900, tone) { const b = B[k]; if (!b) return; light('exit'); light('trunk'); if (b.row) light('trunk' + b.row); light('bus-' + b.row);
-      signal('br-' + k, tone || b.tone, ms, () => { light('br-' + k); hit(b.node); status(b, s, text); }); }
-    function sub(k, key, tone, reverse, done) { const b = B[k], v = b && b.subs.find(x => x.dataset.k === key); if (!v) return; light(`sub-${k}-${key}`);
-      const fin = () => { v.classList.add('on'); if (done) done(); };
-      if (reverse) { v.classList.add('on'); signal(`sub-${k}-${key}`, tone || b.tone, 700, done, true); } else signal(`sub-${k}-${key}`, tone || b.tone, 600, fin); }
-    /* a task goes to the agent of a person on his computer */
-    function agentPc(k, s, text) { const r = H[k]; if (!r) return; light('herm');
-      signal('herm', VIOLET, 900, () => { hit(hcard); light('hr-' + k); signal('hr-' + k, VIOLET, 500, () => { r.el.classList.add('on'); status(r, s, text); }); }); }
+      a.uses.forEach(m => unlit(get(`web-${a.k}-${m}`))); if (mode === 'wide') unlit(get('mem-' + a.k)); }
+    function to(k, s, text, ms = 1200, tone) { const b = B[k]; if (!b) return; const go = () => { hit(b.node); status(b, s, text); };
+      signal('br-' + k, tone || b.tone, ms, go); }
+    function sub(k, key, tone, reverse, done) { const b = B[k], v = b && b.subs.find(x => x.dataset.k === key); if (!v) return;
+      if (reverse) { v.classList.add('on'); signal(`sub-${k}-${key}`, tone || b.tone, 700, done, true); } else signal(`sub-${k}-${key}`, tone || b.tone, 600, () => { v.classList.add('on'); if (done) done(); }); }
+    function agentPc(k, s, text) { const r = HR[k]; if (!r) return;
+      signal('herm', VIOLET, 900, () => { hit(herm); signal('hr-' + k, VIOLET, 500, () => { r.el.classList.add('on'); status(r, s, text); }); }); }
 
-    /* the recording: two voices, coral is the director, blue is Ivan */
-    const barsEl = $('#lx-bars'), bars = [];
-    if (barsEl) { let seed = 11; const rnd = () => (seed = seed * 16807 % 2147483647) / 2147483647;
-      for (let i = 0; i < 44; i++) { const x = i / 44, e = document.createElement('i'), blue = (x > .22 && x < .36) || (x > .58 && x < .72) || x > .9; if (blue) e.className = 'b';
-        barsEl.appendChild(e); bars.push({ e, a: .25 + .75 * Math.pow(rnd(), .7), p: rnd() * 6.3, v: 2 + rnd() * 3 }); } }
-    let live = true, loop = 0;
-
+    let live = false, scan = -1, scanT0 = 0, loop = 0, recT0 = 0;
     const STEPS = [
-      [0, () => { live = true; status(recSt, 'run', 'запись'); stage('слушает планёрку'); }],
-      [400, () => { const i = loop % srcs.length, s = srcs[i]; if (!s) return; hit(s, 1700); light('f-' + i); light('bus'); light('drop'); signal('src-' + i, BLUE, 1300); }],
-      [2000, () => { live = false; status(recSt, 'ok', 'записано'); hit(rec, 1300); light('entry');
-        signal('rec', CORAL, mode === 'wide' ? 800 : 600, () => { core.classList.add('on'); agentOn(A.ear, 'слушает'); stage('Слух: два движка сверяют текст'); }); }],
-      [4900, () => { agentOk(A.ear, 'текст'); light('chain-0'); light('chain-0v'); signal('chain-0', VIOLET, 450, () => { agentOn(A.who, 'узнаёт'); stage('Кто говорит: голоса из памяти'); }); }],
-      [6500, () => { agentOk(A.who, '2 голоса'); light('chain-1'); light('chain-1v'); signal('chain-1', VIOLET, 450, () => { agentOn(A.sec, 'пишет'); stage('Секретарь: протокол и задачи'); }); }],
-      [8100, () => { agentOk(A.sec, 'протокол'); light('chain-2'); light('chain-2v'); signal('chain-2', VIOLET, 450, () => { agentOn(A.ast, 'в работе'); stage('Ассистент: руководителю на проверку'); }); }],
-      [8900, () => { light('exit'); signal('exit', AMBER, 320, () => to('boss', 'run', 'на проверке', 1000)); }],
-      [10300, () => sub('boss', 'dec')], [10550, () => sub('boss', 'tasks')], [10800, () => sub('boss', 'risk')],
-      [11500, () => { status(B.boss, 'ok', 'одобрен'); hit(B.boss.node); stage('Ассистент: рассылает задачи'); }],
-      [11800, () => { [['ivan', 'sent', 'доставлено'], ['maria', 'run', 'уточняет'], ['b24', 'sent', 'создано'], ['chat', 'sent', 'отправлено'], ['cal', 'sent', 'в календаре'], ['drive', 'sent', 'сохранено']]
-          .forEach(([k, s, t], i) => setTimeout(() => to(k, s, t, 1000), i * 170)); }],
-      [12600, () => { agentPc('ivan', 'run', 'взял задачу'); stage('Ассистент: задача — агенту Ивана'); }],
-      [13900, () => sub('maria', 'ask', BLUE)],
-      [15200, () => sub('maria', 'reply', CORAL, true, () => { status(B.maria, 'ok', 'срок пт'); hit(B.maria.node); })],
-      [15700, () => { agentPc('maria', 'sent', 'срок в плане'); stage('Ассистент: срок в Битрикс24'); }],
-      [16000, () => to('b24', 'sent', 'срок обновлён', 900, BLUE)],
-      [16800, () => { sub('ivan', 'remind', CORAL); status(H.ivan, 'run', 'в работе'); }],
-      [17700, () => { agentOk(A.ast, 'готово'); mem.classList.remove('on'); stage('готово · 7 получателей · 2 агента', 'ok'); }]
+      [0, () => { live = true; recT0 = now; status(recSt, 'run', 'запись'); stage('слушает планёрку'); }],
+      [300, () => { const i = loop % srcs.length, s = srcs[i]; if (!s) return; hit(s, 1900); signal('src-' + i, BLUE, 1500, () => hit(rec, 1200)); }],
+      [2100, () => { live = false; scan = 0; scanT0 = now; status(recSt, 'ok', 'записано'); signal('rec-d', CORAL, 900);
+        signal('rec-i', BLUE, 900, () => { core.classList.add('on'); agentOn(A.ear, 'слушает'); stage('Слух: сверяет два движка'); }); }],
+      [4800, () => { agentOk(A.ear, 'текст'); signal('chain-0', VIOLET, 520, () => { agentOn(A.who, 'узнаёт'); stage('Кто говорит: голоса из памяти'); }); }],
+      [6400, () => { agentOk(A.who, '2 голоса'); signal('chain-1', VIOLET, 520, () => { agentOn(A.sec, 'пишет'); stage('Секретарь: протокол и задачи'); }); }],
+      [8000, () => { agentOk(A.sec, 'протокол'); signal('chain-2', VIOLET, 520, () => { agentOn(A.ast, 'в работе'); stage('Ассистент: протокол на проверку'); }); }],
+      [8800, () => to('boss', 'run', 'на проверке', 1300)],
+      [10400, () => sub('boss', 'dec')], [10650, () => sub('boss', 'tasks')], [10900, () => sub('boss', 'risk')],
+      [11600, () => { status(B.boss, 'ok', 'одобрен'); hit(B.boss.node); stage('Ассистент: рассылает задачи'); }],
+      [11900, () => { [['ivan', 'sent', 'доставлено'], ['maria', 'run', 'уточняет'], ['b24', 'sent', 'создано'], ['chat', 'sent', 'отправлено'], ['cal', 'sent', 'в календаре'], ['drive', 'sent', 'сохранено']]
+        .forEach(([k, s, t], i) => setTimeout(() => to(k, s, t, 1250), i * 170)); }],
+      [12900, () => { agentPc('ivan', 'run', 'взял задачу'); stage('Ассистент: задача агенту Ивана'); }],
+      [14100, () => sub('maria', 'ask', BLUE)],
+      [15400, () => sub('maria', 'reply', CORAL, true, () => { status(B.maria, 'ok', 'срок пт'); hit(B.maria.node); })],
+      [15900, () => { agentPc('maria', 'sent', 'срок в плане'); stage('Ассистент: срок в Битрикс24'); }],
+      [16200, () => to('b24', 'sent', 'срок обновлён', 1100, BLUE)],
+      [17000, () => { sub('ivan', 'remind', CORAL); status(HR.ivan, 'run', 'в работе'); }],
+      [17900, () => { agentOk(A.ast, 'готово'); mem.classList.remove('on'); stage('готово · 7 получателей · 2 агента', 'ok'); }]
     ];
-    const LOOP = 20500;
+    const LOOP = 22100; /* the full picture holds for about four seconds, then the story starts again */
     function reset() {
-      sigs.splice(0).forEach(s => s.g.remove()); lit.clear(); relight(); core.classList.remove('on'); mem.classList.remove('on'); model(Object.keys(models), false);
+      sigs.splice(0).forEach(s => s.g.remove()); for (const k in L) unlit(L[k]);
+      core.classList.remove('on'); mem.classList.remove('on'); model(Object.keys(models), false);
       agents.forEach(a => { a.el.classList.remove('run', 'ok'); status(a, 'wait', 'ждёт'); });
       branches.forEach(b => { status(b, 'wait', b.k === 'boss' ? 'готовится' : 'ждёт'); b.node.classList.remove('hit'); b.subs.forEach(v => v.classList.remove('on')); });
-      hrows.forEach(r => { r.el.classList.remove('on'); status(r, 'wait', 'ждёт'); }); if (hcard) hcard.classList.remove('hit');
-      status(recSt, 'run', 'запись');
+      hrows.forEach(r => { r.el.classList.remove('on'); status(r, 'wait', 'ждёт'); }); herm.classList.remove('hit');
+      status(recSt, 'run', 'запись'); stage('ждёт запись', '');
     }
-    let t0 = 0, next = 0, started = false;
+    let t0 = 0, next = 0, started = false, waveDirty = true;
     function tick() {
-      const t = now - t0;
+      const t = now - t0; if (t < 0) return;
       while (next < STEPS.length && STEPS[next][0] <= t) STEPS[next++][1]();
+      if (wave) {
+        if (scan >= 0) { scan = (now - scanT0) / 900; if (scan > 1.2) { scan = -1; waveDirty = true; } }
+        if (live || scan >= 0 || waveDirty) { wave.draw(live ? clamp((now - recT0) / 2000, 0, 1) : 1, live, scan, now / 1000); waveDirty = false; }
+      }
       if (t > LOOP) { reset(); loop++; t0 = now; next = 0; }
-      const s = now / 1000; bars.forEach(b => { const h = live ? b.a * (.3 + .7 * Math.abs(Math.sin(s * b.v + b.p))) : b.a * .72; b.e.style.transform = `scaleY(${Math.max(.08, h).toFixed(3)})`; b.e.style.opacity = live ? .95 : .55; });
     }
 
-    let pending = 0; const relayout = () => { if (!pending) pending = requestAnimationFrame(() => { pending = 0; layout(); }); };
-    layout(); if ('ResizeObserver' in window) { const ro = new ResizeObserver(relayout); [lx, core, outCol, hcard].forEach(el => el && ro.observe(el)); } else addEventListener('resize', relayout);
+    let pending = 0; const relayout = () => { if (!pending) pending = requestAnimationFrame(() => { pending = 0; layout(); if (wave) { wave.build(); waveDirty = true; if (reduced || !started) wave.draw(started || reduced ? 1 : 0, false, -1, 0); } }); };
+    if (wave) { wave.build(); wave.draw(reduced ? 1 : 0, false, -1, 0); }
+    layout();
+    if (!reduced) document.documentElement.classList.add('lx-armed');
+    let sp = 0; addEventListener('scroll', () => { if (!sp) sp = requestAnimationFrame(() => { sp = 0; reveal(false); }); }, { passive: true });
+    if ('ResizeObserver' in window) { const ro = new ResizeObserver(relayout); [lx, core].forEach(el => ro.observe(el)); } else addEventListener('resize', relayout);
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(relayout);
+    addEventListener('load', relayout);
     if (reduced) {
-      agents.forEach(a => { a.el.classList.add('ok'); status(a, 'ok', 'готово'); }); branches.forEach(b => { status(b, b.k === 'boss' ? 'ok' : 'sent', b.k === 'boss' ? 'одобрен' : 'готово'); b.subs.forEach(v => v.classList.add('on')); });
+      for (const k in L) { grow(L[k], 1); lit(L[k], 0, L[k].len); L[k].k1.classList.add('lit'); }
+      agents.forEach(a => { a.el.classList.add('ok'); status(a, 'ok', 'готово'); });
+      branches.forEach(b => { status(b, b.k === 'boss' ? 'ok' : 'sent', b.k === 'boss' ? 'одобрен' : 'готово'); b.subs.forEach(v => v.classList.add('on')); });
       hrows.forEach(r => { r.el.classList.add('on'); status(r, 'ok', r.k === 'ivan' ? 'в работе' : 'срок в плане'); });
-      status(recSt, 'ok', 'записано'); stage('готово · 7 получателей · 2 агента', 'ok'); bars.forEach(b => { b.e.style.transform = `scaleY(${(b.a * .72).toFixed(3)})`; });
-      for (const k in lines) light(k); for (const id in knots) knots[id].classList.add('lit'); return;
+      status(recSt, 'ok', 'записано'); stage('готово · 7 получателей · 2 агента', 'ok'); return;
     }
     let raf = 0, vis = false, last = 0;
     function frame() { const ts = performance.now(); now += Math.min(64, ts - last); last = ts; tick(); drawSigs(); raf = vis && !document.hidden ? requestAnimationFrame(frame) : 0; }
     const run = () => { if (vis && !document.hidden && !raf) { last = performance.now(); raf = requestAnimationFrame(frame); } };
-    watch(lx, v => { vis = v; if (v && !started) { started = true; t0 = now + 300; } run(); }, .15);
+    watch(lx, v => { vis = v; if (v && !started) { started = true; t0 = now + 250; } run(); }, .12);
     document.addEventListener('visibilitychange', run);
   })();
 
-  /* ---------- 3. the steps: the small trees light up one branch after another ---------- */
+  /* ---------- 4. the steps: the lists light up one line after another ---------- */
   const stepsEl = $('#lx-steps');
-  if (stepsEl) { const items = $$('.tree li', stepsEl);
+  if (stepsEl) { const items = $$('.l-step li', stepsEl);
     if (reduced) items.forEach(li => li.classList.add('on'));
     else { let k = 0, iv = 0; const run = () => { items.forEach((li, i) => li.classList.toggle('on', i < k)); k = k >= items.length + 3 ? 0 : k + 1; };
       watch(stepsEl, v => { clearInterval(iv); if (v) iv = setInterval(run, 520); }, .3); } }
