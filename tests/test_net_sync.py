@@ -15,7 +15,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "sync"))
 
-from sysai_agent import core, hermes, hubsync, mcpwrap, rules as R, signing  # noqa: E402
+from sysai_agent import __version__ as SYNC_VERSION, cli, core, hermes, hook, hubsync, mcpwrap, paths, rules as R, signing, update  # noqa: E402,E501
 
 from app import settings_store  # noqa: E402
 from app.db import Department, SessionLocal, User  # noqa: E402
@@ -130,17 +130,25 @@ def test_connect_pins_the_key_and_keeps_the_token_private(pc):
         core.connect("http://testserver", "AAAA-BBBB", pc["home"], transport=pc["send"])
 
 
-def test_sync_applies_only_its_keys_and_keeps_the_persons(pc):
+LAUNCHER = "C:\\Users\\a\\.local\\bin\\sysai-agent.exe"
+
+
+def test_sync_applies_only_its_keys_and_keeps_the_persons(pc, monkeypatch):
+    monkeypatch.setattr(core, "launcher", lambda: LAUNCHER)
     profile = pc["profile"]
     profile.mkdir(parents=True)
     own = {"display": {"skin": "mono"}, "model": {"default": "openai/gpt-4o", "provider": "openrouter"},
            "mcp_servers": {"mine": {"command": "my-mcp"}}, "skills": {"external_dirs": ["C:/my-skills"], "own": 1},
-           "auxiliary": {"web_extract": {"model": "x"}}, "sysai": {"stale": True}}
+           "auxiliary": {"web_extract": {"model": "x"}}, "sysai": {"stale": True},
+           "hooks": {"post_tool_call": [{"command": "my-hook"}], "pre_tool_call": [{"command": "rm-guard"}]}}
     (profile / "config.yaml").write_text(yaml.safe_dump(own, allow_unicode=True), encoding="utf-8")
     (profile / "SOUL.md").write_text("Мой характер", encoding="utf-8")
     (profile / ".env").write_text("OPENAI_API_KEY=mine\nSYSAI_AGENT_TOKEN=old\n", encoding="utf-8")
+    mine = {"event": "post_tool_call", "command": "my-hook", "approved_at": "2026-01-01T00:00:00+00:00"}
+    stale = {"event": "pre_tool_call", "command": '"D:\\old\\sysai-agent.exe" hook', "approved_by": "SYSAI"}
+    (profile / hermes.ALLOWLIST).write_text(json.dumps({"approvals": [mine, stale]}), encoding="utf-8")
     report = core.sync_once(pc["home"], transport=pc["send"])
-    assert report["errors"] == [] and set(report["changed"]) == {"config.yaml", ".env", "SOUL.md"}
+    assert report["errors"] == [] and set(report["changed"]) == {"config.yaml", ".env", "SOUL.md", hermes.ALLOWLIST}
     cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
     home = str(pc["home"])
     assert cfg["display"] == {"skin": "mono"} and cfg["skills"]["own"] == 1  # the person's own stays
@@ -150,6 +158,15 @@ def test_sync_applies_only_its_keys_and_keeps_the_persons(pc):
     assert "mine" not in cfg["mcp_servers"] and cfg["fallback_providers"] == []
     assert cfg["skills"]["external_dirs"] == [home + "/hub"] and "sysai" not in cfg
     assert cfg["memory"]["memory_enabled"] is True and cfg["security"]["redact_secrets"] is True
+    # every action of Hermes's own tools is asked of the synchronizer, by its full path; the consent is given for it
+    guard = f'"{LAUNCHER}" hook'
+    [entry] = cfg["hooks"]["pre_tool_call"]
+    assert entry["command"] == guard and entry["fail_closed"] is True and entry["timeout"] == access.HOOK_TIMEOUT
+    assert {"terminal", "execute_code", "write_file", "patch"} <= set(entry["matcher"].split("|"))
+    assert cfg["hooks"]["post_tool_call"] == [{"command": "my-hook"}]  # the person's other hooks stay
+    consent = json.loads((profile / hermes.ALLOWLIST).read_text(encoding="utf-8"))["approvals"]
+    assert consent[0] == mine and [e["command"] for e in consent] == ["my-hook", guard]  # the stale one of SYSAI went
+    assert consent[1]["event"] == "pre_tool_call" and consent[1]["approved_by"] == "SYSAI"
     assert yaml.safe_load((profile / hermes.CONFIG_BACKUP).read_text(encoding="utf-8")) == own
     env = (profile / ".env").read_text(encoding="utf-8")
     assert "OPENAI_API_KEY=mine" in env and f"SYSAI_AGENT_TOKEN={pc['token']}" in env and "=old" not in env
@@ -167,12 +184,13 @@ def test_sync_applies_only_its_keys_and_keeps_the_persons(pc):
     with SessionLocal() as s:
         row = s.query(NetAgentAccess).filter(NetAgentAccess.agent_id == pc["agent_id"]).one()
         agent = s.get(NetAgent, pc["agent_id"])
-        assert row.applied_rev == rev and agent.versions["sysai-agent"] == "0.1.1" and agent.versions["hermes"] == "0.9.1"
+        assert row.applied_rev == rev and agent.versions["sysai-agent"] == SYNC_VERSION and agent.versions["hermes"] == "0.9.1"
         assert agent.last_error == "" and agent.last_seen_at is not None
     again = core.sync_once(pc["home"], transport=pc["send"])
     assert again["changed"] == [] and (profile / hermes.SOUL_BACKUP).read_text(encoding="utf-8") == "Мой характер"
     status = core.status(pc["home"])
     assert status["connected"] and status["access_rev"] == rev and status["hermes"]["soul"] is True
+    assert status["hermes"]["hook"] is True
 
 
 def test_nothing_is_applied_when_the_signature_does_not_match(pc):
@@ -307,6 +325,10 @@ def test_the_rules_on_the_computer_are_the_servers(pc):
     for command in ("rm -rf /", "RM   -RF  /tmp", "dir", "format c:"):
         assert R.command_denied(rules, command) == access.command_denied(rules, command), command
     assert R.tool_allowed({"mcp": {"x": ["*"]}}, "x", "any") and not R.tool_allowed({"mcp": {"x": ["a"]}}, "x", "b")
+    whole = access.normalize({"folders": {"read": ["*"], "write": ["D:\\ОПО"], "deny": ["C:\\Windows"]}})
+    for path, write, allowed in (("C:\\Users\\a\\x.txt", False, True), ("C:\\Users\\a\\x.txt", True, False),
+                                 ("C:\\Windows\\win.ini", False, False), ("D:\\ОПО\\1", True, True), ("", False, False)):
+        assert R.path_allowed(whole, path, write) == access.path_allowed(whole, path, write) == allowed, path
 
 
 def test_a_restart_waits_only_for_a_running_gateway_and_the_pulse_is_kept(pc, monkeypatch):
@@ -388,15 +410,17 @@ def test_the_installer_and_the_wheel(client, net_on):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain") and "utf-8" in r.headers["content-type"]
     script = r.text
     name = installer.wheel_name()
-    assert name == "sysai_agent-0.1.1-py3-none-any.whl" and f"http://testserver/agents/api/sync/{name}" in script
+    assert installer.version() == SYNC_VERSION and name == f"sysai_agent-{SYNC_VERSION}-py3-none-any.whl"
+    assert f"http://testserver/agents/api/sync/{name}" in script
     assert "__SYSAI_" not in script and "hermes profile create $Agent --no-skills" in script
     assert "sysai-agent connect --server $Server --code $Code" in script and "CurrentVersion\\Run" in script
     w = client.get(f"/agents/api/sync/{name}")
     assert w.status_code == 200 and hashlib.sha256(w.content).hexdigest() == w.headers["x-sha256"]
     archive = zipfile.ZipFile(io.BytesIO(w.content))
     names = set(archive.namelist())
-    info = "sysai_agent-0.1.1.dist-info"
-    assert {"sysai_agent/cli.py", "sysai_agent/mcpwrap.py", f"{info}/METADATA", f"{info}/RECORD"} <= names
+    info = f"sysai_agent-{SYNC_VERSION}.dist-info"
+    assert {"sysai_agent/cli.py", "sysai_agent/mcpwrap.py", "sysai_agent/hook.py", "sysai_agent/update.py",
+            f"{info}/METADATA", f"{info}/RECORD"} <= names
     assert not any("__pycache__" in n for n in names)
     eps = archive.read(f"{info}/entry_points.txt").decode()
     assert "sysai-agent = sysai_agent.cli:main" in eps and "sysai-agentw = sysai_agent.cli:main_windowless" in eps
@@ -428,3 +452,167 @@ def test_an_old_synchronizer_is_seen_on_the_agent_page(client, net_agent):
         s.get(NetAgent, net_agent["id"]).versions = {"hermes": "0.12.0", "sync": installer.version()}
         s.commit()
     assert "на сервере синхронизатор" not in client.get(f"/agents/{net_agent['id']}").text
+
+
+def _ask(home, tool, args, cwd=""):
+    """One question of Hermes to the hook, as Hermes asks it (agent/shell_hooks.py): the refusal or ""."""
+    payload = {"hook_event_name": "pre_tool_call", "tool_name": tool, "tool_input": args, "session_id": "s1",
+               "cwd": cwd, "extra": {}}
+    out = io.BytesIO()
+    assert hook.main(home, stdin=io.BytesIO(json.dumps(payload, ensure_ascii=False).encode("utf-8")), stdout=out) == 0
+    text = out.getvalue().decode("utf-8")
+    if not text:
+        return ""
+    answer = json.loads(text)
+    assert answer["action"] == "block" and answer["message"].startswith("SYSAI: ")
+    return answer["message"]
+
+
+def _matcher(profile):
+    cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
+    return set(cfg["hooks"]["pre_tool_call"][0]["matcher"].split("|"))
+
+
+def test_the_hook_checks_every_action_of_hermes_by_the_signed_rules(pc, tmp_path, monkeypatch):
+    home, profile, opo = pc["home"], pc["profile"], tmp_path / "ОПО"
+    projects = opo / "Проекты"
+    access.set_agent_access(pc["agent_id"], overrides={
+        "folders": {"read": [str(opo)], "write": [str(projects)], "deny": [str(opo / "Секрет")]},
+        "internet": {"mode": "list", "sites": ["se.com"]}, "commands": {"run": True, "deny": ["format *"]}})
+    core.sync_once(home, transport=pc["send"])
+    assert {"read_file", "search_files", "web_search", "web_extract", "browser_.*", "vision_analyze"} <= _matcher(profile)
+    assert "process_manage" not in _matcher(profile)  # commands are open: processes and the screen are not asked about
+    assert _ask(home, "read_file", {"path": str(opo / "ТЗ.pdf")}) == ""
+    assert _ask(home, "read_file", {"path": "ТЗ.pdf"}, cwd=str(opo)) == ""  # relative: from the folder Hermes works in
+    assert "/etc/passwd" in _ask(home, "read_file", {"path": "/etc/passwd"})
+    assert "не разрешена" in _ask(home, "read_file", {"path": "../Секрет/a.txt"}, cwd=str(projects))  # «..» leads nowhere
+    assert "не разрешена" in _ask(home, "search_files", {"pattern": "x"}, cwd="/")  # no path: where Hermes stands
+    assert "запись в" in _ask(home, "write_file", {"path": str(opo / "ТЗ.pdf"), "content": "x"})
+    assert _ask(home, "patch", {"path": str(projects / "24-017" / "отчёт.md")}) == ""
+    for place in (home / "access.json", home / "hub" / "x" / "SKILL.md", profile / "config.yaml", profile / "SOUL.md"):
+        assert "меняет только SYSAI" in _ask(home, "write_file", {"path": str(place)}), place
+    assert _ask(home, "terminal", {"command": "dir", "workdir": str(opo)}) == ""
+    assert "«format *»" in _ask(home, "terminal", {"command": "FORMAT   c:"})
+    assert "«format *»" in _ask(home, "terminal", {"items": [{"command": "dir"}, {"command": "format d:"}]})
+    for command in (f"cat {home}/access.json", "sysai-agent stop", "taskkill /im sysai-agentw.exe",
+                    "hermes -p opo-pc config set model x", "hermes hooks revoke"):
+        assert "меняет только SYSAI" in _ask(home, "terminal", {"command": command}), command
+    assert _ask(home, "terminal", {"command": "sysai-agent status"}) == "" and _ask(home, "terminal", {"command": "hermes --version"}) == ""
+    assert "меняет только SYSAI" in _ask(home, "execute_code", {"code": f"import os; os.remove(r'{profile / 'SOUL.md'}')"})
+    assert "только сайты из списка" in _ask(home, "web_search", {"query": "Modicon M580"})
+    assert "evil.example" in _ask(home, "web_extract", {"urls": ["https://www.se.com/ru", "https://evil.example/x"]})
+    assert _ask(home, "web_extract", {"urls": ["https://se.com/x"]}) == ""
+    assert "браузер" in _ask(home, "browser_navigate", {"url": "https://se.com"})
+    assert "evil.example" in _ask(home, "vision_analyze", {"image_url": "https://evil.example/a.png"})
+    assert _ask(home, "vision_analyze", {"image_url": str(opo / "схема.png")}) == ""
+    assert _ask(home, "process_manage", {"action": "list"}) == ""
+    log = (home / "logs" / "hook.log").read_text(encoding="utf-8")
+    assert "запрещено read_file" in log and "/etc/passwd" in log
+    # the whole computer, no commands: reading and the internet are not asked about, the screen and processes are
+    access.set_agent_access(pc["agent_id"], overrides={
+        "folders": {"read": ["*"], "write": ["*"], "deny": []}, "internet": {"mode": "all", "sites": []},
+        "commands": {"run": False}})
+    core.sync_once(home, transport=pc["send"])
+    assert not {"read_file", "search_files", "web_search", "browser_.*"} & _matcher(profile)
+    assert {"process_manage", "computer_use", "terminal", "write_file"} <= _matcher(profile)
+    assert _ask(home, "write_file", {"path": str(tmp_path / "где угодно.txt")}) == ""
+    assert _ask(home, "write_file", {"path": str(home / "proposals" / "opo" / "x" / "SKILL.md")}) == ""  # the agent's own
+    assert "меняет только SYSAI" in _ask(home, "write_file", {"path": str(home / "state.json")})
+    assert "не разрешены" in _ask(home, "terminal", {"command": "dir"})
+    assert "Команд на ПК" in _ask(home, "computer_use", {"action": "screenshot"})
+    assert _ask(home, "web_search", {"query": "x"}) == "" and _ask(home, "read_file", {"path": "/etc/hosts"}) == ""
+    # what the hook trusts: the file the synchronizer verified, or the signature; anything else refuses everything
+    raw = (home / "access.json").read_bytes()
+    forged = json.loads(raw)
+    forged["doc"]["rules"]["commands"] = {"run": True, "deny": []}
+    (home / "access.json").write_text(json.dumps(forged, ensure_ascii=False), encoding="utf-8")
+    assert "нет подписанных доступов" in _ask(home, "terminal", {"command": "dir"})
+    assert "нет подписанных доступов" in _ask(home, "write_file", {"path": str(tmp_path / "x.txt")})
+    (home / "access.json").write_bytes(raw)
+    state = json.loads((home / "state.json").read_text(encoding="utf-8"))
+    state.pop("access_sha")
+    (home / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert _ask(home, "write_file", {"path": str(tmp_path / "x.txt")}) == ""  # signed by the pinned key: trusted
+    monkeypatch.setattr(hook, "check", lambda *a, **k: 1 / 0)
+    assert "проверка SYSAI не удалась" in _ask(home, "write_file", {"path": str(tmp_path / "x.txt")})  # fail closed
+
+
+def test_the_hook_takes_windows_paths_as_windows_does(monkeypatch):
+    monkeypatch.setattr(paths, "WINDOWS", True)
+    rules = access.normalize({"folders": {"read": ["*"], "write": ["D:\\ОПО\\Проекты"], "deny": ["C:\\Users\\a\\Documents\\Личное"]},
+                              "commands": {"run": True, "deny": []}, "internet": {"mode": "off"}})
+    home = Path("C:/Users/a/AppData/Local/SYSAI")
+    profile = Path("C:/Users/a/AppData/Local/hermes/profiles/opo-pc")
+
+    def ask(tool, args, cwd=""):
+        return hook.check(rules, tool, args, cwd, home, profile)
+    assert ask("read_file", {"path": "C:\\Windows\\win.ini"}) == "" and ask("read_file", {"path": "file:///C:/Users/a/x.txt"}) == ""
+    assert "Личное" in ask("read_file", {"path": "Личное\\паспорт.pdf"}, cwd="C:\\Users\\a\\Documents")
+    assert ask("write_file", {"path": "отчёт.docx"}, cwd="d:\\опо\\проекты\\24-017") == ""
+    assert "запись в C:\\Users" in ask("write_file", {"path": "C:\\Users\\a\\x.txt"})
+    assert "меняет только SYSAI" in ask("write_file", {"path": "c:/users/a/appdata/local/sysai/access.json"})
+    for command in ("Remove-Item $env:LOCALAPPDATA\\SYSAI\\access.json", "del %LOCALAPPDATA%\\SYSAI\\state.json",
+                    "notepad C:\\Users\\a\\AppData\\Local\\hermes\\profiles\\opo-pc\\config.yaml", "sysai-agent.exe stop",
+                    "Stop-Process -Name sysai-agentw"):
+        assert ask("terminal", {"command": command}) == hook.SETTINGS_NOTE, command
+    assert ask("terminal", {"command": "Get-ChildItem C:\\Users\\a\\Documents"}) == ""
+    assert "интернет агенту закрыт" in ask("web_search", {"query": "x"})
+
+
+def test_hermes_asks_the_hook_through_the_command_line(pc, monkeypatch):
+    core.sync_once(pc["home"], transport=pc["send"])
+    access.set_agent_access(pc["agent_id"], overrides={"commands": {"run": False}})
+    core.sync_once(pc["home"], transport=pc["send"])
+    monkeypatch.setenv("SYSAI_HOME", str(pc["home"]))
+    payload = {"hook_event_name": "pre_tool_call", "tool_name": "terminal", "tool_input": {"command": "dir"}}
+    stdin = type("In", (), {"buffer": io.BytesIO(json.dumps(payload).encode("utf-8"))})()
+    stdout = type("Out", (), {"buffer": io.BytesIO()})()
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    assert cli.main(["hook"]) == 0
+    assert json.loads(stdout.buffer.getvalue().decode("utf-8"))["action"] == "block"
+
+
+def test_the_synchronizer_updates_itself_only_to_the_wheel_sysai_signed(pc, monkeypatch):
+    home = pc["home"]
+    monkeypatch.setattr(installer, "version", lambda: "9.9.9")  # SYSAI gives out a newer synchronizer
+    monkeypatch.setattr(installer, "_cache", {})
+    monkeypatch.setattr(paths, "WINDOWS", True)
+    monkeypatch.setattr(hermes, "gateway_running", lambda profile_dir: False)
+    started = []
+    monkeypatch.setattr(update.subprocess, "Popen", lambda args, **kw: started.append((args, kw)))
+    assert update.newer("9.9.9") and update.newer("0.10.0", "0.9.9") and not update.newer(SYNC_VERSION) and not update.newer("")
+
+    def run(transport=pc["send"]):
+        naps = []
+        assert core.run(home, every=1, transport=transport, cycles=2, sleep=naps.append) == 0
+        return naps
+    settings_store.set_many({"agents_auto_update": False})  # «обновлять сами» off: the computer only learns of it
+    assert run() == [1] and started == []
+    state = json.loads((home / "state.json").read_text(encoding="utf-8"))
+    assert state["offer"]["version"] == "9.9.9" and state["offer"]["auto_update"] is False
+    settings_store.set_many({"agents_auto_update": True})
+
+    def broken(method, url, headers, body, timeout):
+        status, got, data = pc["send"](method, url, headers, body, timeout)
+        return status, got, (data + b"x" if url.endswith(".whl") else data)
+    assert run(broken) == [1] and started == []  # not the wheel SYSAI signed: never installed
+    assert not list((home / "updates").glob("*.whl"))
+    assert run() == [1] and started == []  # and not tried again before update.RETRY
+    state = json.loads((home / "state.json").read_text(encoding="utf-8"))
+    state["update_at"] = 0
+    (home / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert run() == []  # the loop leaves at once: the helper waits for it
+    [(args, kw)] = started
+    wheel = home / "updates" / "sysai_agent-9.9.9-py3-none-any.whl"
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == installer.wheel()[2]
+    assert args[0] == "powershell" and args[-2:] == ["-File", str(home / update.SCRIPT)] and kw["creationflags"] == update.DETACHED
+    helper = (home / update.SCRIPT).read_text(encoding="utf-8")
+    assert helper.startswith("\ufeff") and f"Wait-Process -Id {os.getpid()}" in helper
+    assert f"uv tool install --force --python 3.12 '{wheel}'" in helper and "-ArgumentList 'run'" in helper
+    assert "taskkill" not in helper and "Stop-Process" not in helper  # nothing is stopped by force
+    state = json.loads((home / "state.json").read_text(encoding="utf-8"))
+    assert state["update_to"] == "9.9.9" and not (home / "run.lock").exists()
+    assert run() == [1] and len(started) == 1  # once: the helper is at work
+    monkeypatch.setattr(paths, "WINDOWS", False)  # elsewhere the synchronizer is updated by whoever installed it
+    assert core.self_update(home, None, {"version": "9.9.9"}, {}) is False

@@ -10,7 +10,8 @@
   (хранит его в Windows Credential Manager), забирает подписанные доступы (`/agents/api/config`), проверяет подпись,
   применяет настройки Hermes и `SOUL.md` и перезапускает шлюз Hermes, держит навыки и инструменты SYSAI_Hub в папках
   только для чтения, отправляет предложения навыков, шлёт пульс. MCP-серверы хаба запускает под охраной доступов
-  (`sysai-agent mcp <имя>`). Подробно — [sync/README.md](sync/README.md).
+  (`sysai-agent mcp <имя>`), каждое действие самого Hermes проверяет хуком (`sysai-agent hook`), обновляется сам до
+  версии, подписанной SYSAI. Подробно — [sync/README.md](sync/README.md).
 
 Будет:
 

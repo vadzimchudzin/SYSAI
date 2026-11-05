@@ -5,6 +5,8 @@ import ntpath
 import re
 from urllib.parse import urlparse
 
+WHOLE_PC = "*"  # in «Папки»: the whole computer
+
 
 def tool_allowed(rules: dict, server: str, tool: str) -> bool:
     tools = (rules.get("mcp") or {}).get(server) or []
@@ -32,13 +34,16 @@ def _norm(path) -> str:
 
 
 def path_allowed(rules: dict, path, write: bool = False) -> bool:
-    """Inside a «read» (or «write») folder and outside every forbidden one; Windows paths, any case."""
+    """Inside a «read» (or «write») folder and outside every forbidden one; Windows paths, any case; «*» — the whole
+    computer."""
     target = _norm(path)
     if not target:
         return False
     folders = rules.get("folders") or {}
 
     def inside(root):
+        if str(root or "").strip() == WHOLE_PC:
+            return True
         root = _norm(root)
         return bool(root) and (target == root or target.startswith(root + "\\"))
     if any(inside(p) for p in folders.get("deny") or []):

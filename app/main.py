@@ -3046,7 +3046,7 @@ async def settings_save(request: Request):
               "include_transcript_in_pdf", "dialogue_enabled", "allow_deadline_proposals",
               "bitrix_enabled", "ai_employee", "ticnote_enabled", "voice_debug_mode", "voice_memory",
               "silence_working_hours", "speech_detector", "speech_doubts", "stt_keyterms", "stt_diarize",
-              "agents_on", "opo_on"):
+              "agents_on", "agents_auto_update", "opo_on"):
         if k in f or f.get("present_" + k) == "1":
             updates[k] = bool(f.get(k))
     for k in ("approver_chat_ids", "report_chat_ids", "secretary_chat_ids", "full_access_chat_ids", "director_chat_ids"):

@@ -2,5 +2,6 @@
 
 Trades the connection code for the agent's token, takes the signed rules from SYSAI, checks the signature, applies
 them to the Hermes profile (config.yaml, .env, SOUL.md), keeps SYSAI_Hub skills and tools on the computer, sends the
-skills the agent wrote as proposals, reports its pulse and wraps the hub's MCP servers with the same rules."""
-__version__ = "0.1.1"
+skills the agent wrote as proposals, reports its pulse and wraps the hub's MCP servers with the same rules. Checks
+every action of Hermes's own tools by those rules (`sysai-agent hook`) and updates itself to the version SYSAI signed."""
+__version__ = "0.2.0"

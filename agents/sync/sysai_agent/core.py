@@ -1,5 +1,6 @@
 """Connection, one synchronization and the pulse; the loop of «sysai-agent run»."""
 import datetime as dt
+import hashlib
 import logging
 import logging.handlers
 import os
@@ -9,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, fsutil, hermes, hubsync, paths, secret, signing
+from . import __version__, fsutil, hermes, hubsync, paths, secret, signing, update
 from .client import ApiError, Client
 
 log = logging.getLogger("sysai_agent")
@@ -137,7 +138,9 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     doc = signed["doc"]
     if doc.get("agent") != cfg["agent"]:
         raise SyncError(f"Настройки для другого агента ({doc.get('agent')}): ничего не применено")
-    fsutil.write_json(home / "access.json", signed)  # the MCP servers check their calls by it
+    fsutil.write_json(home / "access.json", signed)  # the MCP servers and the hook check the calls by it
+    state["access_sha"] = hashlib.sha256((home / "access.json").read_bytes()).hexdigest()  # verified: the hook trusts it
+    state["offer"] = update.offer(doc)
     harness = doc.get("harness_config") or {}
     fsutil.write_json(home / "sysai.json", harness.get("sysai") or {})
     profile_dir = paths.hermes_profile_dir(cfg)
@@ -250,6 +253,10 @@ def run(home: Path | None = None, every: int = EVERY, transport=None, cycles: in
                         log.info("Синхронизировано: %s", describe(report))
                     for e in report["errors"]:
                         log.warning("%s", e)
+                    state = fsutil.read_json(home / "state.json", {}) or {}
+                got = update.due(state)
+                if got and self_update(home, client, got, state):
+                    return 0
             except (SyncError, ApiError, OSError) as exc:
                 failed = True
                 log.warning("%s", exc)
@@ -260,6 +267,23 @@ def run(home: Path | None = None, every: int = EVERY, transport=None, cycles: in
                 return 0
     finally:
         lock.unlink(missing_ok=True)
+
+
+def self_update(home: Path, client: Client, got: dict, state: dict) -> bool:
+    """The version SYSAI signed, downloaded and checked, goes to the helper; True — the loop leaves for it."""
+    if not paths.WINDOWS:
+        return False
+    try:
+        wheel = update.fetch(home, client, got)
+    except (update.UpdateError, ApiError, OSError) as exc:
+        state.update(update_to=got["version"], update_at=time.time())  # not again before update.RETRY
+        fsutil.write_json(home / "state.json", state)
+        log.warning("Обновление синхронизатора: %s", exc)
+        return False
+    if update.start(home, wheel, got["version"], state):
+        log.info("Обновляюсь до %s: синхронизатор перезапустится сам (журнал — logs\\update.log)", got["version"])
+        return True
+    return False
 
 
 def _wait(home: Path, seconds: int, sleep) -> bool:

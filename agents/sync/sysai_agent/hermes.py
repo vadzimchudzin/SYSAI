@@ -16,12 +16,15 @@ from . import fsutil, paths
 # whole keys SYSAI owns; and parts of shared sections
 OWNED = ("model", "fallback_providers", "delegation", "approvals", "memory", "mcp_servers")
 OWNED_PARTS = {"providers": ("sysai",), "auxiliary": ("vision", "compression"), "skills": ("external_dirs", "create_dir"),
-               "security": ("redact_secrets",)}
+               "security": ("redact_secrets",), "hooks": ("pre_tool_call",)}
 ENV_MARK = "# SYSAI: строки ниже ведёт синхронизатор"
 CONFIG_HEAD = ("# model, delegation, fallback_providers, approvals, memory, mcp_servers, providers.sysai, auxiliary.vision,\n"
-               "# auxiliary.compression, skills.external_dirs, skills.create_dir, security.redact_secrets ведёт SYSAI\n"
-               "# (синхронизатор перезапишет их правки); остальное — ваше.\n")
+               "# auxiliary.compression, skills.external_dirs, skills.create_dir, security.redact_secrets,\n"
+               "# hooks.pre_tool_call ведёт SYSAI (синхронизатор перезапишет их правки); остальное — ваше.\n")
 CONFIG_BACKUP = "config.before-sysai.yaml"
+# Hermes runs a shell hook only after consent per (event, command); the synchronizer gives it for its own hook
+ALLOWLIST = "shell-hooks-allowlist.json"
+HOOK_EVENT = "pre_tool_call"
 SOUL_BACKUP = "SOUL.before-sysai.md"
 NO_WINDOW = 0x08000000 if paths.WINDOWS else 0  # CREATE_NO_WINDOW: no console flashing from the background
 
@@ -31,8 +34,11 @@ def expand(obj, home: Path, launcher: str = ""):
     so the MCP servers start whatever PATH Hermes passes. ${SYSAI_AGENT_TOKEN} stays: Hermes takes it from .env."""
     if isinstance(obj, dict):
         out = {k: expand(v, home, launcher) for k, v in obj.items()}
-        if launcher and out.get("command") == "sysai-agent":
+        command = out.get("command")
+        if launcher and command == "sysai-agent":
             out["command"] = launcher
+        elif launcher and isinstance(command, str) and command.startswith("sysai-agent "):  # a hook: one command line
+            out["command"] = f'"{launcher}"' + command[len("sysai-agent"):]
         return out
     if isinstance(obj, list):
         return [expand(v, home, launcher) for v in obj]
@@ -108,6 +114,8 @@ def apply(profile_dir: Path, harness_config: dict, soul: str, home: Path, token:
         fsutil.atomic_write(path, CONFIG_HEAD + yaml.safe_dump(merged, allow_unicode=True, sort_keys=False,
                                                                 default_flow_style=False, width=1000))
         changed.append("config.yaml")
+    if allow_hooks(profile_dir, merged):
+        changed.append(ALLOWLIST)
     env_path = profile_dir / ".env"
     env_now = fsutil.read_text(env_path)
     env_new = env_text(env_now, {"SYSAI_AGENT_TOKEN": token, "SYSAI_HOME": str(home), "SYSAI_URL": server})
@@ -123,6 +131,38 @@ def apply(profile_dir: Path, harness_config: dict, soul: str, home: Path, token:
             fsutil.atomic_write(soul_path, soul)
             changed.append("SOUL.md")
     return changed
+
+
+def our_hooks(config: dict) -> list:
+    """The command lines of the synchronizer's hooks in a Hermes configuration."""
+    hooks = config.get("hooks") if isinstance(config, dict) else None
+    entries = hooks.get(HOOK_EVENT) if isinstance(hooks, dict) else None
+    return [e["command"] for e in entries or [] if isinstance(e, dict) and isinstance(e.get("command"), str)
+            and "sysai-agent" in e["command"]]
+
+
+def allow_hooks(profile_dir: Path, config: dict) -> bool:
+    """The consent Hermes asks for at the first run of a shell hook — given for the synchronizer's own hook only (the
+    person's consents stay; ours that are no longer in the configuration go). True — the file changed."""
+    path = Path(profile_dir) / ALLOWLIST
+    data = fsutil.read_json(path, None)
+    data = data if isinstance(data, dict) else {}
+    approvals = data.get("approvals") if isinstance(data.get("approvals"), list) else []
+    ours = our_hooks(config)
+
+    def stale(e):
+        return (isinstance(e, dict) and e.get("event") == HOOK_EVENT and "sysai-agent" in str(e.get("command") or "")
+                and e.get("command") not in ours)
+    keep = [e for e in approvals if not stale(e)]
+    have = {e.get("command") for e in keep if isinstance(e, dict) and e.get("event") == HOOK_EVENT}
+    import datetime as dt
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    keep += [{"event": HOOK_EVENT, "command": c, "approved_at": stamp, "script_mtime_at_approval": None,
+              "approved_by": "SYSAI"} for c in ours if c not in have]
+    if keep == approvals:
+        return False
+    fsutil.atomic_write(path, json.dumps({**data, "approvals": keep}, ensure_ascii=False, indent=2))
+    return True
 
 
 def own_skills(profile_dir: Path) -> set:
@@ -228,7 +268,7 @@ def profile_info(profile_dir: Path) -> dict:
     return {"config": bool(cfg), "model": (data.get("model") or {}).get("default", "") if isinstance(data.get("model"), dict) else "",
             "mcp": sorted((data.get("mcp_servers") or {}).keys()) if isinstance(data.get("mcp_servers"), dict) else [],
             "soul": (Path(profile_dir) / "SOUL.md").exists(), "gateway": gateway_running(profile_dir),
-            "dir": str(profile_dir)}
+            "hook": bool(our_hooks(data)), "dir": str(profile_dir)}
 
 
 def dump(obj) -> str:
