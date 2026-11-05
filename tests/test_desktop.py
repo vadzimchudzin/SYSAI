@@ -331,6 +331,7 @@ def test_desktop_json_follows_the_synchronizer(pc, electron):
         s.commit()
     core.sync_once(home, transport=pc["send"], restart=False)
     assert D.installed(home)["person"] == "Мария Сидорова"
+    assert D.installed(home)["python"] == sys.executable, "the window runs the hub tools of «Холст» with it"
 
 
 def test_sysai_agent_desktop_installs_and_opens_the_window(pc, electron, monkeypatch, tmp_path, capsys):

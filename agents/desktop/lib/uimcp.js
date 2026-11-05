@@ -2,7 +2,8 @@
 // The MCP server of this window, which the window hands to every session it starts: Hermes runs it as
 // `electron.exe lib/uimcp.js` with ELECTRON_RUN_AS_NODE=1 (nothing else to install, nothing of the synchronizer held
 // open). The agent shows files to the person in the window, opens them in their programs, starts programs and shows
-// files in their folder; each call goes to the window through the bridge (bridge.json in the SYSAI folder), and the
+// files in their folder, opens a project of EasyBuilder Pro on «Холст» and edits it there together with the person
+// (each helper with a cursor of its own); each call goes to the window through the bridge (bridge.json in the SYSAI folder), and the
 // window checks it by the signed rules first (lib/rules.js). MCP over stdio: JSON-RPC 2.0, a message per line.
 const fs = require('node:fs');
 const http = require('node:http');
@@ -49,9 +50,75 @@ const TOOLS = [
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
 ];
+const WHO = { type: 'string', description: 'Кто работает на холсте: «Агент» — вы сами; помощник (подагент) — своё имя, '
+  + 'например «Помощник 1». У каждого свой курсор и цвет' };
+const WINDOW = { type: ['string', 'integer'], description: 'Окно проекта: номер или имя, например 23 или «Нория 3»' };
+const EDIT = { type: 'object', properties: {
+  op: { type: 'string', enum: ['text', 'move', 'tag', 'rename_window', 'clone_window', 'clone_object'] },
+  window: { ...WINDOW, description: 'Окно: номер или имя (по умолчанию — окно на холсте)' },
+  object: { type: 'integer', description: 'index объекта (canvas_look)' },
+  old: { type: 'string' }, new: { type: 'string' }, dx: { type: 'integer' }, dy: { type: 'integer' },
+  number: { type: 'integer', description: 'clone_window: номер нового окна' },
+  to: { type: 'string', description: 'clone_object: окно, куда положить копию' } },
+required: ['op'], additionalProperties: false };
+TOOLS.push(
+  {
+    name: 'canvas_open',
+    title: 'Открыть проект на холсте',
+    description: 'Открыть проект EasyBuilder Pro (.cmtp/.emtp) на холсте окна «Агент SYSAI», справа от разговора: окно '
+      + 'панели так, как его покажет панель (фон, фигуры, тексты, картинки). Человек видит окно и ваш курсор и правит '
+      + 'вместе с вами. window — номер или имя окна (по умолчанию — последнее открытое здесь или 10).',
+    inputSchema: { type: 'object', properties: { path: { ...PATH, description: 'Полный путь к проекту, например C:\\Projects\\velyuta.cmtp' },
+      window: WINDOW }, required: ['path'], additionalProperties: false },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'canvas_look',
+    title: 'Что на холсте',
+    description: 'Что сейчас на холсте: проект, окно (номер, имя, размер, фон), его объекты коротко (index, вид, рамка '
+      + 'bbox, текст, теги), окна проекта; куда показывает мышью и что выделил человек (person: pointer, over, selected); '
+      + 'последние правки — кто что сделал; курсоры агента и помощников. Смотрите перед правкой: «вот этот» — это '
+      + 'выделенный или тот, что под мышью. Подробный вид объектов — cmtp_scene.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'canvas_window',
+    title: 'Другое окно на холсте',
+    description: 'Показать на холсте другое окно открытого проекта (номер или имя).',
+    inputSchema: { type: 'object', properties: { window: WINDOW }, required: ['window'], additionalProperties: false },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'canvas_cursor',
+    title: 'Показать курсором',
+    description: 'Навести свой курсор на объект (object — index) или точку окна (x, y в пикселях панели) и сказать '
+      + 'человеку, что делаете (say — коротко). К тому, что вы правите через canvas_edit, курсор идёт и сам.',
+    inputSchema: { type: 'object', properties: { who: WHO, object: { type: 'integer', description: 'index объекта' },
+      x: { type: 'integer' }, y: { type: 'integer' }, say: { type: 'string', description: 'Что делаете — коротко' } },
+    additionalProperties: false },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'canvas_edit',
+    title: 'Править на холсте',
+    description: 'Править проект, открытый на холсте, — прямо в его файле: каждая правка сразу видна человеку, ваш курсор '
+      + 'идёт к объекту, человек может отменить («Отменить», Ctrl+Z). Правки — как у cmtp_edit: text (old → new, '
+      + 'object — только в нём), move (object, dx, dy), tag (old → new), rename_window (new), clone_window (new, number), '
+      + 'clone_object (object, dx, dy, to); window по умолчанию — окно на холсте. Правки идут по порядку; не прошла одна '
+      + '— файл не меняется. Нужна запись в папку проекта (SYSAI → Доступы).',
+    inputSchema: { type: 'object', properties: { who: WHO, edits: { type: 'array', minItems: 1, maxItems: 50, items: EDIT } },
+      required: ['edits'], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+);
 const ROUTES = { show_file: 'show', open_file: 'open', show_in_folder: 'reveal' };
+const CANVAS = new Set(['canvas_open', 'canvas_look', 'canvas_window', 'canvas_cursor', 'canvas_edit']);
 const INSTRUCTIONS = 'Человек говорит с вами в окне «Агент SYSAI». Готовый или найденный файл показывайте ему в окне '
-  + '(show_file), а не пересказывайте; открыть в программе — open_file. Доступы — те же, что дал SYSAI.';
+  + '(show_file), а не пересказывайте; открыть в программе — open_file. Проект EasyBuilder Pro (.cmtp/.emtp) '
+  + 'открывайте на холсте (canvas_open): человек видит окно панели и ваш курсор и правит вместе с вами; перед правкой '
+  + 'смотрите canvas_look (что он выделил, куда показывает), правьте canvas_edit — у каждого помощника свой who. '
+  + 'Доступы — те же, что дал SYSAI.';
 
 function out(msg) {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -93,7 +160,42 @@ function post(route, body) {
 
 const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
 
+async function canvasCall(name, a) {
+  let body = {};
+  if (name === 'canvas_open') {
+    const p = typeof a.path === 'string' ? a.path.trim() : '';
+    if (!p) return text('нужен путь к проекту (path)', true);
+    body = { path: p };
+    if (a.window !== undefined && a.window !== null && a.window !== '') body.window = a.window;
+  } else if (name === 'canvas_window') {
+    if (a.window === undefined || a.window === null || a.window === '') return text('какое окно показать (window)?', true);
+    body = { window: a.window };
+  } else if (name === 'canvas_cursor') {
+    for (const k of ['who', 'object', 'x', 'y', 'say']) if (a[k] !== undefined && a[k] !== null) body[k] = a[k];
+  } else if (name === 'canvas_edit') {
+    if (!Array.isArray(a.edits) || !a.edits.length) return text('нужен список правок (edits)', true);
+    body = { who: a.who, edits: a.edits };
+  }
+  const { status, body: got } = await post(name, body);
+  if (status !== 200) return text(String(got.error || `окно ответило ${status}`), true);
+  delete got.ok;
+  if (name === 'canvas_look') return text(JSON.stringify(got));
+  if (name === 'canvas_cursor') {
+    const c = got.cursor || {};
+    return text(`Курсор «${c.who}» — на (${c.x}, ${c.y})${c.say ? `: ${c.say}` : ''}`);
+  }
+  if (name === 'canvas_edit') {
+    const objs = Array.isArray(got.objects) && got.objects.length ? `, объекты ${got.objects.map((i) => `#${i}`).join(', ')}` : '';
+    return { ...text(`${got.text || 'Готово'}\nНа холсте — окно ${got.window}${objs}. Человек может отменить правку.`),
+      structuredContent: { results: got.results || [], window: got.window, objects: got.objects || [] } };
+  }
+  const w = got.window || {};
+  return text(`На холсте: ${got.file}, окно ${w.number} «${w.name}» (${w.width}×${w.height}, объектов: ${got.objects}; `
+    + `окон в проекте: ${got.windows}). Человек видит его справа от разговора.`);
+}
+
 async function call(name, args) {
+  if (CANVAS.has(name)) return canvasCall(name, args && typeof args === 'object' ? args : {});
   const route = ROUTES[name];
   if (!route) return text(`нет такого инструмента: ${name}`, true);
   const p = args && typeof args.path === 'string' ? args.path.trim() : '';

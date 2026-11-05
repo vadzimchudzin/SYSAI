@@ -5,6 +5,7 @@ import { h, icon, clear, when, group, basename, debounce } from './dom.js';
 import { Conversation } from './chat.js';
 import { Preview } from './preview.js';
 import { Explorer, StorageView } from './explorer.js';
+import { CanvasView, isProject } from './canvas.js';
 import { Composer } from './composer.js';
 import { openMenu, toast } from './ui.js';
 
@@ -353,6 +354,11 @@ async function openPath(p, line) {
     pane.explorer.go(info.path);
     return;
   }
+  if (isProject(info.path)) { // проект EasyBuilder — на холст
+    pane.show('canvas');
+    pane.canvas.open(info.path);
+    return;
+  }
   pane.show('preview');
   pane.preview.show({ path: info.path, line });
 }
@@ -374,9 +380,11 @@ class Pane {
       open: (p, item) => { this.show('preview'); this.preview.show({ path: p, stored: item }); },
       attach: (p) => composer.attach(p),
     });
-    this.sections = { preview: this.preview, files: this.explorer, storage: this.storage };
+    this.canvas = new CanvasView({ focus: () => this.show('canvas'), mention: (t) => composer.fill(t) });
+    this.sections = { preview: this.preview, canvas: this.canvas, files: this.explorer, storage: this.storage };
     this.tabs = {};
-    for (const [key, label, ico] of [['preview', 'Просмотр', 'eye'], ['files', 'Файлы', 'monitor'], ['storage', 'Хранилище', 'cloud']]) {
+    for (const [key, label, ico] of [['preview', 'Просмотр', 'eye'], ['canvas', 'Холст', 'canvas'], ['files', 'Файлы', 'monitor'],
+      ['storage', 'Хранилище', 'cloud']]) {
       this.tabs[key] = h('button', { class: 'tab', onclick: () => this.show(key) }, icon(ico, 'sm'), h('span', { text: label }));
     }
     this.maxBtn = h('button', { class: 'icon-btn sm', title: 'Развернуть', onclick: () => this.setMax(!this.max) }, icon('max', 'sm'));
@@ -394,6 +402,7 @@ class Pane {
     if (this.body.firstChild !== section.el) this.body.replaceChildren(section.el);
     if (tab === 'files') this.explorer.start();
     if (tab === 'storage') this.storage.start();
+    if (tab === 'canvas') this.canvas.start();
     if (!this.opened) {
       this.opened = true;
       this.el.hidden = false;
@@ -724,7 +733,7 @@ async function main() {
   api.win.onShow(({ path, line }) => openPath(path, line));
   api.win.onNotice(({ text, kind }) => toast(text, kind || 'info', 15000));
   const reopen = localStorage.getItem('sysai.pane.open');
-  if (reopen === 'files' || reopen === 'storage') pane.show(reopen);
+  if (reopen === 'files' || reopen === 'storage' || reopen === 'canvas') pane.show(reopen);
   onAcpState(await api.acp.state().catch(() => ({ state: 'error', message: 'нет связи с основным процессом окна' })));
   api.ready();
 }

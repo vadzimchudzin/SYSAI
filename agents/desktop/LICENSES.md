@@ -13,6 +13,7 @@ Electron (MIT, © Electron contributors; Chromium и его компоненты
 | Inter | renderer/fonts/inter-* | SIL OFL 1.1 |
 | JetBrains Mono | renderer/fonts/jetbrains-mono-* | SIL OFL 1.1 |
 | Source Serif 4 | renderer/fonts/source-serif-4-* | SIL OFL 1.1 |
+| Droid Sans (шрифт панелей Weintek) | renderer/hmi/DroidSans*.ttf | Apache-2.0 |
 | Значки по мотивам Lucide | renderer/js/dom.js | ISC |
 
 ## marked — MIT
@@ -87,10 +88,11 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## DOMPurify, SheetJS — Apache License 2.0
+## DOMPurify, SheetJS, Droid Sans — Apache License 2.0
 
 DOMPurify: Copyright (c) Cure53 and other contributors (https://github.com/cure53/DOMPurify).
 SheetJS Community Edition: Copyright (C) 2013-present SheetJS LLC (https://sheetjs.com).
+Droid Sans: Copyright (C) 2008 The Android Open Source Project.
 
 ```text
                                  Apache License

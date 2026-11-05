@@ -326,8 +326,10 @@ test('the MCP server of the window: tools, calls through the bridge, refusals as
     server.notify('notifications/initialized');
     assert.deepEqual((await server.rpc('ping', {})).result, {});
     const listed = await server.rpc('tools/list', {});
-    assert.deepEqual(listed.result.tools.map((t) => t.name), ['show_file', 'open_file', 'show_in_folder']);
-    for (const t of listed.result.tools) assert.deepEqual(t.inputSchema.required, ['path']);
+    assert.deepEqual(listed.result.tools.map((t) => t.name), ['show_file', 'open_file', 'show_in_folder', 'canvas_open',
+      'canvas_look', 'canvas_window', 'canvas_cursor', 'canvas_edit']);
+    for (const t of listed.result.tools.slice(0, 4)) assert.deepEqual(t.inputSchema.required, ['path']);
+    assert.match(init.result.instructions, /canvas_open/);
     const shown = await server.rpc('tools/call', { name: 'show_file', arguments: { path: '/x/отчёт.md', line: 4 } });
     assert.equal(shown.result.isError, undefined);
     assert.match(shown.result.content[0].text, /отчёт\.md/);
@@ -400,4 +402,265 @@ test('storage: what SYSAI says is what the window shows', async () => {
   await assert.rejects(storage.list({ server: '', token: 't' }), /не подключён/);
   const down = async () => { throw new TypeError('fetch failed'); };
   await assert.rejects(storage.list({ server: 'https://s', token: 't' }, '', '', { fetchImpl: down }), /нет связи/);
+});
+
+// ------------------------------------------------------------------------------------------------ the canvas
+const canvasLib = require('../lib/canvas');
+
+const FAKE_CMTP = path.join(__dirname, 'fake-cmtp.js');
+const label = (text, x, y) => ({ text, font: 'Arial', size: 20, x, y, color: '#ffffff', align: 'center' });
+const PROJECT = {
+  windows: [
+    { number: 3, name: 'Служебное', width: 400, height: 300, objects: [{ kind: 'Window', bbox: [0, 0, 399, 299], labels: [], tags: [] }] },
+    { number: 10, name: 'Главное', width: 800, height: 480, background: '#0080c0', objects: [
+      { kind: 'Window', bbox: [0, 0, 799, 479], labels: [], tags: [], fill: '#0080c0' },
+      { kind: 'Rect', bbox: [10, 10, 300, 60], labels: [], tags: [], fill: '#005480', frame: '#ffffff', frame_width: 2 },
+      { kind: 'Text', bbox: [20, 15, 200, 55], labels: [label('Нория 3', 20, 15)], tags: [] },
+      { kind: 'ToggleSwitch', bbox: [400, 20, 470, 50], labels: [label('', 400, 20)], tags: ['GVL.OFF_DSL'], shape: 'abc' },
+      { kind: 'BitLamp', bbox: [500, 20, 540, 60], labels: [], tags: ['GVL.RUN'], picture: [{ image: 'aa11', transparent: null }] },
+    ] },
+    { number: 23, name: 'Нория 3', width: 600, height: 1015, objects: [{ kind: 'Window', bbox: [0, 0, 599, 1014], labels: [], tags: [] }] },
+  ],
+};
+
+function canvasHome(extra = {}) {
+  const home = tmp();
+  const file = path.join(home, 'Проекты', 'велута.cmtp');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(PROJECT));
+  const events = { state: [], cursors: [], edited: [], notice: [] };
+  const cv = new canvasLib.Canvas({ home, cache: path.join(home, 'desktop', 'cache', 'canvas'), watch: 40,
+    tool: { command: process.execPath, args: [FAKE_CMTP], cwd: __dirname, env: extra }, ...extra.opts });
+  for (const k of Object.keys(events)) cv.on(k, (v) => events[k].push(v));
+  return { home, file, cv, events, read: () => JSON.parse(fs.readFileSync(file, 'utf8')) };
+}
+
+const until = async (fn, ms = 4000) => {
+  const end = Date.now() + ms;
+  while (!fn()) {
+    if (Date.now() > end) throw new Error('не дождался');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+
+test('canvas: opens a project at window 10, with its pictures as file URLs', async () => {
+  const { file, cv, events } = canvasHome();
+  try {
+    await assert.rejects(cv.open(file.replace('.cmtp', '.txt')), /\.cmtp или \.emtp/);
+    await assert.rejects(cv.open(path.join(path.dirname(file), 'нет.cmtp')), /нет такого файла/);
+    const got = await cv.open(file);
+    assert.deepEqual(got, { open: true, file, window: { number: 10, name: 'Главное', width: 800, height: 480 }, objects: 4, windows: 3 });
+    const st = cv.state();
+    assert.equal(st.name, 'велута.cmtp');
+    assert.deepEqual(st.windows.map((w) => w.number), [3, 10, 23]);
+    assert.equal(st.scene.window.background, '#0080c0');
+    assert.equal(st.scene.objects[4].picture[0].key, 'aa11');
+    assert.match(st.scene.images.aa11, /^file:\/\/.*aa11\.png$/);
+    assert.ok(events.state.length >= 1 && events.state.at(-1).scene);
+    assert.equal((await cv.show('Нория')).window.number, 23, 'a window by a part of its name');
+    await assert.rejects(cv.show('нет такого'), /нет окна/);
+    assert.equal((await cv.show(3)).window.number, 3);
+    await cv.close();
+    assert.equal((await cv.open(file)).window.number, 3, 'the window last shown in this project');
+    assert.equal((await cv.open(file, '10')).window.number, 10);
+  } finally {
+    cv.stop();
+  }
+});
+
+test('canvas: the agent edits in the file, its cursor goes there, the person undoes', async () => {
+  const { file, cv, events, read } = canvasHome();
+  try {
+    await cv.open(file);
+    const out = await cv.edit('Агент', [{ op: 'move', object: 2, dx: 30, dy: 5 }, { op: 'text', object: 2, old: 'Нория 3', new: 'Нория 4' }]);
+    assert.deepEqual(out.objects, [2]);
+    assert.equal(out.window, 10);
+    assert.equal(out.undo, 1);
+    assert.deepEqual(read().windows[1].objects[2].bbox, [50, 20, 230, 60], 'written into the project itself');
+    assert.equal(read().windows[1].objects[2].labels[0].text, 'Нория 4');
+    assert.deepEqual(cv.state().scene.objects[2].bbox, [50, 20, 230, 60], 'the canvas shows it');
+    const c = cv.state().cursors.find((x) => x.who === 'Агент');
+    assert.deepEqual([c.x, c.y], [140, 40], 'the cursor at the edited object');
+    assert.match(c.say, /сдвиг #2 на \(30, 5\); текст #2 «Нория 3» → «Нория 4»/);
+    assert.equal(events.edited.at(-1).who, 'Агент');
+    assert.deepEqual(events.edited.at(-1).objects, [2]);
+    assert.ok(events.cursors.length >= 2, 'the cursor moved before the edit and after');
+    assert.equal(cv.state().history.at(-1).who, 'Агент');
+    // a refused edit leaves the file as it was
+    const before = fs.readFileSync(file, 'utf8');
+    await assert.rejects(cv.edit('Помощник 1', [{ op: 'text', old: 'нет такого', new: 'x' }]), /не найден/);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.equal(cv.state().undo, 1);
+    await assert.rejects(cv.edit('Агент', [{ op: 'drop', object: 1 }]), /op — одно из/);
+    await assert.rejects(cv.edit('Агент', [{ op: 'move', object: 'два' }]), /целое число/);
+    await assert.rejects(cv.edit('Агент', []), /список правок/);
+    // the person undoes
+    const undone = await cv.undo();
+    assert.match(undone.undone, /сдвиг #2/);
+    assert.deepEqual(read().windows[1].objects[2].bbox, [20, 15, 200, 55]);
+    assert.equal(read().windows[1].objects[2].labels[0].text, 'Нория 3');
+    assert.deepEqual(cv.state().scene.objects[2].bbox, [20, 15, 200, 55]);
+    await assert.rejects(cv.undo(), /отменять нечего/);
+    assert.deepEqual(fs.readdirSync(path.join(cv.cache, 'undo')), [], 'the copy for undo is gone');
+  } finally {
+    cv.stop();
+  }
+});
+
+test('canvas: copies — of an object (selected next), of a window (shown); edits one at a time', async () => {
+  const { file, cv, read } = canvasHome();
+  try {
+    await cv.open(file);
+    const copy = await cv.edit('Человек', [{ op: 'clone_object', object: 3, dx: 0, dy: 40 }]);
+    assert.deepEqual(copy.objects, [5]);
+    assert.deepEqual(cv.state().scene.objects[5].bbox, [400, 60, 470, 90]);
+    assert.equal(cv.state().cursors.length, 0, 'the person has no drawn cursor: it is the mouse');
+    const win = await cv.edit('Агент', [{ op: 'clone_window', window: 10, new: 'Нория 5' }]);
+    assert.equal(win.window, 24);
+    assert.equal(cv.state().window, 24, 'the new window is shown');
+    assert.deepEqual(cv.state().windows.map((w) => w.name), ['Служебное', 'Главное', 'Нория 3', 'Нория 5']);
+    // two helpers at once: their edits go one after another
+    await Promise.all([
+      cv.edit('Помощник 1', [{ op: 'move', window: 24, object: 1, dx: 1 }]),
+      cv.edit('Помощник 2', [{ op: 'move', window: 24, object: 1, dx: 2 }]),
+    ]);
+    assert.deepEqual(read().windows[3].objects[1].bbox, [13, 10, 303, 60]);
+    const colors = cv.state().cursors.map((c) => c.color);
+    assert.equal(new Set(colors).size, colors.length, 'each one its own colour');
+    assert.equal(cv.state().undo, 4);
+    // an edit of another window shows that window
+    await cv.edit('Агент', [{ op: 'rename_window', window: 23, new: 'Нория 3 (старая)' }]);
+    assert.equal(cv.state().window, 23);
+  } finally {
+    cv.stop();
+  }
+});
+
+test('canvas: what the agent sees — the person\'s pointer and selection, the last edits, the cursors', async () => {
+  const { file, cv } = canvasHome();
+  try {
+    assert.deepEqual(cv.look(), { open: false, hint: 'на холсте нет проекта — откройте его (canvas_open)' });
+    await cv.open(file);
+    cv.pointer({ x: 430, y: 30, selected: [2, 3, 'x'] });
+    cv.cursor('Помощник 1', { object: 4, say: 'смотрю лампу' });
+    assert.throws(() => cv.cursor('Человек', { x: 1, y: 1 }), /мышь/);
+    assert.throws(() => cv.cursor('Агент', { object: 99 }), /нет объекта #99/);
+    assert.throws(() => cv.cursor('Агент', {}), /куда навести/);
+    const far = cv.cursor('Агент', { x: 5000, y: -3 });
+    assert.deepEqual([far.x, far.y], [800, 0], 'inside the window');
+    await cv.edit('Агент', [{ op: 'tag', object: 3, old: 'GVL.OFF_DSL', new: 'GVL.OFF_DSL_2' }]);
+    const seen = cv.look();
+    assert.equal(seen.window.number, 10);
+    assert.equal(seen.objects.length, 4, 'the window itself is not an object to edit');
+    assert.deepEqual(seen.objects[1], { index: 2, kind: 'Text', bbox: [20, 15, 200, 55], text: 'Нория 3' });
+    assert.deepEqual(seen.person.pointer, { x: 430, y: 30 });
+    assert.equal(seen.person.over.index, 3);
+    assert.deepEqual(seen.person.over.tags, ['GVL.OFF_DSL_2']);
+    assert.deepEqual(seen.person.selected.map((o) => o.index), [2, 3]);
+    assert.equal(seen.recent.at(-1).who, 'Агент');
+    assert.match(seen.recent.at(-1).text, /тег #3 GVL\.OFF_DSL → GVL\.OFF_DSL_2/);
+    assert.deepEqual(seen.cursors.map((c) => c.who).sort(), ['Агент', 'Помощник 1']);
+    assert.equal(seen.cursors.find((c) => c.who === 'Помощник 1').say, 'смотрю лампу');
+    assert.deepEqual(seen.windows.map((w) => w.number), [3, 10, 23]);
+  } finally {
+    cv.stop();
+  }
+});
+
+test('canvas: a change from outside (EasyBuilder saved) redraws it and drops the undo copies', async () => {
+  const { file, cv, events } = canvasHome();
+  try {
+    await cv.open(file);
+    await cv.edit('Агент', [{ op: 'move', object: 1, dx: 4 }]);
+    assert.equal(cv.state().undo, 1);
+    const p = JSON.parse(fs.readFileSync(file, 'utf8'));
+    p.windows[1].objects[2].labels[0].text = 'Из EasyBuilder';
+    await new Promise((r) => setTimeout(r, 30));
+    fs.writeFileSync(file, JSON.stringify(p));
+    await until(() => events.notice.length);
+    await until(() => cv.state().scene.objects[2].labels[0].text === 'Из EasyBuilder');
+    assert.match(events.notice[0].text, /изменён снаружи/);
+    assert.equal(cv.state().undo, 0, 'undo would wipe the change made outside');
+    // its own edits are not news
+    await cv.edit('Агент', [{ op: 'move', object: 1, dx: 4 }]);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(events.notice.length, 1);
+  } finally {
+    cv.stop();
+  }
+});
+
+test('canvas: the tool — where it is, which Python, what is said when it is missing or falls', async () => {
+  const home = tmp();
+  assert.equal(canvasLib.toolSpec(home), null);
+  const none = new canvasLib.Canvas({ home, cache: path.join(home, 'cache') });
+  const file = path.join(home, 'a.cmtp');
+  fs.writeFileSync(file, '{}');
+  await assert.rejects(none.open(file), /ebpro-cmtp нет на этом компьютере/);
+  const dir = path.join(home, 'tools', 'ebpro-cmtp');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'server.py'), '');
+  assert.deepEqual(canvasLib.toolSpec(home), { command: process.platform === 'win32' ? 'python' : 'python3', args: [path.join(dir, 'server.py')], cwd: dir });
+  const sync = process.execPath;
+  config.writeJson(path.join(home, 'desktop', 'desktop.json'), { python: sync });
+  assert.equal(canvasLib.toolSpec(home).command, sync, 'the synchronizer\'s Python');
+  const own = path.join(dir, 'python-own');
+  fs.writeFileSync(own, '');
+  config.writeJson(path.join(home, 'state.json'), { tools: { 'ebpro-cmtp': { python: own } } });
+  assert.equal(canvasLib.toolSpec(home).command, own, 'the tool\'s own environment first');
+  // the tool falls: said, and started again for the next call
+  const { file: f2, cv } = canvasHome({ FAKE_CMTP_CRASH: 'cmtp_scene' });
+  try {
+    await assert.rejects(cv.open(f2), /ebpro-cmtp остановился \(код 3\)/);
+    const t = new canvasLib.Tool({ command: path.join(home, 'нет-python'), args: [] });
+    await assert.rejects(t.call('cmtp_windows', {}), /не найден Python/);
+  } finally {
+    cv.stop();
+  }
+  assert.equal(canvasLib.describe([{ op: 'move', object: 1, dx: 2, dy: 0 }, { op: 'move', object: 4, dx: 2, dy: 0 }]), 'сдвиг #1, #4 на (2, 0)');
+  assert.deepEqual(canvasLib.normalize([{ op: 'move', object: '3', dx: 1 }], 10), [{ op: 'move', window: '10', object: 3, dx: 1 }]);
+});
+
+test('the MCP server of the window: the canvas tools go to the window and say what is on the canvas', async () => {
+  const home = tmp();
+  const calls = [];
+  const look = { open: true, file: '/x/велута.cmtp', window: { number: 23, name: 'Нория 3' }, person: { selected: [{ index: 9 }] } };
+  const bridge = new Bridge({ file: path.join(home, 'desktop', 'bridge.json'), handlers: {
+    canvas_open: async (b) => { calls.push(['open', b]); return { open: true, file: b.path, window: { number: 23, name: 'Нория 3', width: 600, height: 1015 }, objects: 48, windows: 88 }; },
+    canvas_look: async (b) => { calls.push(['look', b]); return look; },
+    canvas_window: async (b) => { calls.push(['window', b]); return { open: true, file: '/x/велута.cmtp', window: { number: 10, name: 'Главное', width: 800, height: 480 }, objects: 5, windows: 88 }; },
+    canvas_cursor: async (b) => { calls.push(['cursor', b]); return { cursor: { who: b.who, x: 140, y: 40, say: b.say } }; },
+    canvas_edit: async (b) => {
+      calls.push(['edit', b]);
+      if (b.who === 'Чужой') throw new Error('SYSAI: папка /x агенту не разрешена на запись (SYSAI → Доступы → Папки)');
+      return { text: '1. объект #9 сдвинут', results: [{ op: 'move', window: 23, object: 9 }], window: 23, objects: [9], undo: 1 };
+    },
+  } });
+  const server = mcp(home);
+  try {
+    await bridge.start();
+    await server.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
+    const opened = await server.rpc('tools/call', { name: 'canvas_open', arguments: { path: ' /x/велута.cmtp ', window: 23 } });
+    assert.match(opened.result.content[0].text, /^На холсте: \/x\/велута\.cmtp, окно 23 «Нория 3» \(600×1015, объектов: 48; окон в проекте: 88\)/);
+    const seen = await server.rpc('tools/call', { name: 'canvas_look', arguments: {} });
+    assert.deepEqual(JSON.parse(seen.result.content[0].text), look);
+    await server.rpc('tools/call', { name: 'canvas_window', arguments: { window: 'Главное' } });
+    const cur = await server.rpc('tools/call', { name: 'canvas_cursor', arguments: { who: 'Помощник 1', object: 9, say: 'вот он' } });
+    assert.equal(cur.result.content[0].text, 'Курсор «Помощник 1» — на (140, 40): вот он');
+    const edited = await server.rpc('tools/call', { name: 'canvas_edit', arguments: { who: 'Агент', edits: [{ op: 'move', object: 9, dx: 10 }] } });
+    assert.match(edited.result.content[0].text, /объект #9 сдвинут\nНа холсте — окно 23, объекты #9/);
+    assert.deepEqual(edited.result.structuredContent, { results: [{ op: 'move', window: 23, object: 9 }], window: 23, objects: [9] });
+    const refused = await server.rpc('tools/call', { name: 'canvas_edit', arguments: { who: 'Чужой', edits: [{ op: 'move', object: 9 }] } });
+    assert.equal(refused.result.isError, true);
+    assert.match(refused.result.content[0].text, /^SYSAI: папка/);
+    for (const [name, args] of [['canvas_open', {}], ['canvas_window', {}], ['canvas_edit', { edits: [] }]]) {
+      assert.equal((await server.rpc('tools/call', { name, arguments: args })).result.isError, true, name);
+    }
+    assert.deepEqual(calls.map((c) => c[0]), ['open', 'look', 'window', 'cursor', 'edit', 'edit']);
+    assert.deepEqual(calls[0][1], { path: '/x/велута.cmtp', window: 23 });
+    assert.deepEqual(calls[3][1], { who: 'Помощник 1', object: 9, say: 'вот он' });
+  } finally {
+    bridge.stop();
+    await server.close();
+  }
 });

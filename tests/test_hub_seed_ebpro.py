@@ -5,6 +5,7 @@ No EasyBuilder samples are needed here: a project is built in the test from the 
 import io
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -362,3 +363,58 @@ def test_mcp_server_over_stdio(tmp_path):
         proc.stdin.close()
         proc.wait(timeout=10)
     assert proc.returncode == 0
+
+
+CANVAS = r"""
+const { Canvas } = require('./lib/canvas');
+const a = JSON.parse(process.env.CANVAS_TEST);
+(async () => {
+  const cv = new Canvas({ home: a.home, cache: a.cache, tool: { command: a.python, args: [a.server], cwd: a.cwd }, watch: 60000 });
+  const out = { open: await cv.open(a.file) };
+  const s = cv.state();
+  out.kinds = s.scene.objects.map((o) => o.kind);
+  out.images = Object.values(s.scene.images);
+  out.edit = await cv.edit('Агент', [{ op: 'move', object: 1, dx: 5, dy: 7 }, { op: 'text', object: 2, old: 'Нория 3', new: 'Нория 33' }]);
+  require('node:fs').copyFileSync(a.file, a.mid);
+  out.cursor = cv.state().cursors[0];
+  out.look = cv.look();
+  out.copy = await cv.edit('Помощник 1', [{ op: 'clone_object', object: 3, dx: 0, dy: 60 }]);
+  out.objects = cv.state().scene.objects.length;
+  out.undo = [await cv.undo(), await cv.undo()];
+  cv.stop();
+  process.stdout.write(JSON.stringify(out));
+})().catch((e) => { process.stderr.write(String(e.stack)); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="нужен Node.js")
+def test_the_window_s_canvas_draws_and_edits_with_this_tool(tmp_path):
+    """«Холст» окна «Агент SYSAI» (agents/desktop/lib/canvas.js) runs this very server: the scene, edits in place, undo."""
+    from urllib.parse import unquote, urlparse
+    desk = SEED.parent.parent.parent / "agents" / "desktop"
+    src = tmp_path / "велута.cmtp"
+    src.write_bytes(_look_project())
+    original = src.read_bytes()
+    env = {**os.environ, "CANVAS_TEST": json.dumps({"home": str(tmp_path / "home"), "cache": str(tmp_path / "cache"),
+           "python": sys.executable, "server": str(SEED / "server.py"), "cwd": str(SEED), "file": str(src),
+           "mid": str(tmp_path / "после правки.cmtp")})}
+    r = subprocess.run([shutil.which("node"), "-e", CANVAS], cwd=desk, env=env, capture_output=True, text=True,
+                       encoding="utf-8", timeout=120)
+    assert r.returncode == 0, r.stderr[-3000:]
+    out = json.loads(r.stdout)
+    assert out["open"] == {"open": True, "file": str(src), "window": {"number": 0, "name": "Экран", "width": 800, "height": 480},
+                           "objects": 4, "windows": 1}
+    assert out["kinds"] == ["Window", "Rect", "Text", "BitLamp", "ToggleSwitch"]
+    assert len(out["images"]) == 2 and all(Path(unquote(urlparse(u).path.lstrip("/") if os.name == "nt" else urlparse(u).path)).is_file()
+                                           for u in out["images"])
+    assert out["edit"]["objects"] == [1, 2] and out["edit"]["window"] == 0 and out["edit"]["undo"] == 1
+    assert (out["cursor"]["who"], out["cursor"]["x"], out["cursor"]["y"]) == ("Агент", 160, 42), "at the moved rectangle"
+    rect, text = out["look"]["objects"][:2]
+    assert rect["bbox"] == [15, 17, 305, 67] and text["text"] == "Нория 33"
+    assert out["look"]["recent"][-1]["who"] == "Агент"
+    assert out["copy"]["objects"] == [5] and out["objects"] == 6
+    w = ebpcmtp.Project.load(tmp_path / "после правки.cmtp").window("Экран")
+    assert w["objects"][1]["bbox"] == [15, 17, 305, 67], "the project itself was edited"
+    assert [lb["text"] for lb in w["objects"][2]["labels"]] == ["Нория 33"]
+    assert [u["undone"].split(" ")[0] for u in out["undo"]] == ["копия", "сдвиг"]
+    assert src.read_bytes() == original, "undone to the very bytes"

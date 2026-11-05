@@ -53,6 +53,9 @@ const P = {
   paperclip: '<path d="m20 11.5-7.8 7.8a5 5 0 0 1-7.1-7.1l8.1-8.1a3.3 3.3 0 0 1 4.7 4.7l-8.1 8.1a1.7 1.7 0 0 1-2.4-2.4l7.4-7.4"/>',
   dot: '<circle cx="12" cy="12" r="3.2" fill="currentColor" stroke="none"/>',
   sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+  canvas: '<rect x="3" y="3.5" width="18" height="13.5" rx="2"/><path d="M7 7.5h4.5M7 10.5h2.5"/><path d="M13 10v10.2l2.6-2.4 1.8 3.9 1.7-.8-1.8-3.8h3.5z" fill="currentColor" stroke-width="1.2"/>',
+  undo: '<path d="M9 13.5 4.5 9 9 4.5"/><path d="M4.5 9h10a5 5 0 0 1 0 10H11"/>',
+  minus: '<path d="M5 12h14"/>',
 };
 
 export function icon(name, cls = '') {

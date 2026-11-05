@@ -1,0 +1,6 @@
+/* Шрифты окон панели на холсте: Droid Sans (Apache-2.0) — им панель cMT рисует «Droid Sans Fallback», шрифт
+   EasyBuilder по умолчанию (в самом Fallback нет ни латиницы, ни кириллицы). */
+@font-face { font-family: "Droid Sans Fallback"; src: url(./DroidSans.ttf) format("truetype"); font-weight: 400; font-style: normal; }
+@font-face { font-family: "Droid Sans Fallback"; src: url(./DroidSans-Bold.ttf) format("truetype"); font-weight: 700; font-style: normal; }
+@font-face { font-family: "Droid Sans"; src: url(./DroidSans.ttf) format("truetype"); font-weight: 400; font-style: normal; }
+@font-face { font-family: "Droid Sans"; src: url(./DroidSans-Bold.ttf) format("truetype"); font-weight: 700; font-style: normal; }
