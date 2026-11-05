@@ -98,7 +98,7 @@ def _draw(tag, shape, bbox):
 def _window(name, w, h, layer, objs):
     lay = layer.encode()
     return (b"\x01\x00\x00\x00" + _cs(name) + struct.pack("<II", w, h) + bytes(10) + b"\x01\x00\x00\x00\x00\x00" + bytes(range(16))
-            + struct.pack("<H", len(lay)) + lay + struct.pack("<I", len(objs)) + b"".join(objs) + b"\x30\x00\x00\x00" + bytes(8))
+            + struct.pack("<H", len(lay)) + lay + struct.pack("<I", len(objs)) + b"".join(objs))
 
 
 def _tag(name, typ):
@@ -120,11 +120,13 @@ def _ui_payload() -> bytes:
     ])
     popup = _window("Нория 1", 600, 400, "Слой 1", [
         _part(0x2D, (0, 0, 599, 399)),
-        _part(0x15, (40, 300, 140, 340), labels=[("Пуск", "Arial", 20, 40, 300)]),
         _draw(b"\x05\x80", 2, (0, 100, 599, 102)),   # CDrawObject is map index 5: class, 3 widgets, class
+        _part(0x15, (40, 300, 140, 340), labels=[("Пуск", "Arial", 20, 40, 300)]),
     ])
     tags = _tag("GVL.A", "BOOL") + _tag("GVL.B", "BOOL") + _tag("GVL.N", "INT")
-    body = b"\x00" * 8 + main + popup + bytes(300) + tags
+    # settings after the windows: one MFC class (map index 10 = 1 + 2 classes + 7 objects) and its uses
+    settings = b"\xff\xff\x01\x00\x0a\x00CTagObject" + bytes(12) + (b"\x0a\x80" + bytes(14)) * 3
+    body = b"\x00" * 8 + main + popup + bytes(2000) + tags + settings
     return body + b"\x00" * ((-len(body)) % 16)
 
 
@@ -138,12 +140,12 @@ def test_windows_and_objects():
     assert [(w["number"], w["name"], w["width"], w["height"], w["layer"]) for w in ws] == [
         (0, "Главное", 1024, 768, "Layer 1"), (1, "Нория 1", 600, 400, "Слой 1")]
     assert [o["kind"] for o in ws[0]["objects"]] == ["Window", "Text", "ToggleSwitch", "Rect"]
-    assert [o["kind"] for o in ws[1]["objects"]] == ["Window", "Text", "Line"]
+    assert [o["kind"] for o in ws[1]["objects"]] == ["Window", "Line", "Text"]
     title, sw, rect = ws[0]["objects"][1:]
     assert title["bbox"] == [100, 20, 220, 60] and title["labels"] == [
         {"text": "Нория 1", "font": "Arial", "size": 24, "x": 100, "y": 20}]
     assert [(a["slot"], a["tag"]) for a in sw["addresses"]] == [(1, "GVL.A"), (2, "GVL.A")] and sw["bbox"] == [300, 100, 380, 140]
-    assert rect["bbox"] == [10, 10, 500, 90] and ws[1]["objects"][2]["bbox"] == [0, 100, 599, 102]
+    assert rect["bbox"] == [10, 10, 500, 90] and ws[1]["objects"][1]["bbox"] == [0, 100, 599, 102]
     assert p.window("Нория 1")["number"] == 1 and p.window(0)["name"] == p.window("0")["name"] == "Главное"
     assert p.opcua_tags() == [{"name": "GVL.A", "type": "BOOL", "node": "ns:2;s:GVL.A"},
                               {"name": "GVL.B", "type": "BOOL", "node": "ns:2;s:GVL.B"},
@@ -156,17 +158,19 @@ def test_windows_and_objects():
 def test_edits_text_move_tag_window_name():
     p = _ui_project()
     assert p.edit_text("Главное", "Нория 1", "Нория 1 — сушилка, линия загрузки") == 1   # longer: everything after shifts
-    assert p.move_object("Главное", 1, 50, 5) == [150, 25, 270, 65]
+    r = p.window("Главное")["objects"][1]["bbox"][2]
+    assert 500 < r < 800                                 # and the Text frame widens with it
+    assert p.move_object("Главное", 1, 50, 5) == [150, 25, r + 50, 65]
     assert p.retag("Главное", "GVL.A", "GVL.B") == 2
     p.rename_window("Нория 1", "Нория 1 SYSAI")
     q = ebpcmtp.Project.load(p.dump())
     w0, w1 = q.windows()
     title, sw = w0["objects"][1:3]
     assert title["labels"] == [{"text": "Нория 1 — сушилка, линия загрузки", "font": "Arial", "size": 24, "x": 150, "y": 25}]
-    assert title["bbox"] == [150, 25, 270, 65]
+    assert title["bbox"] == [150, 25, r + 50, 65]
     assert [a["tag"] for a in sw["addresses"]] == ["GVL.B", "GVL.B"] and sw["addresses"][0]["node"] == "ns:2;s:GVL.B"
-    assert w1["name"] == "Нория 1 SYSAI" and [o["kind"] for o in w1["objects"]] == ["Window", "Text", "Line"]
-    assert w1["objects"][1]["labels"][0]["text"] == "Пуск" and len(q.opcua_tags()) == 3
+    assert w1["name"] == "Нория 1 SYSAI" and [o["kind"] for o in w1["objects"]] == ["Window", "Line", "Text"]
+    assert w1["objects"][2]["labels"][0]["text"] == "Пуск" and len(q.opcua_tags()) == 3
     with pytest.raises(ValueError):
         q.retag("Главное", "GVL.B", "GVL.NOPE")       # not in the tag table
     with pytest.raises(ValueError):
@@ -176,6 +180,31 @@ def test_edits_text_move_tag_window_name():
     with pytest.raises(ValueError):
         q.move_object("Главное", 1, -500, 0)          # would leave the window
     assert ebpcmtp.cstring("x" * 300)[:6] == b"\xff\xfe\xff\xff\x2c\x01"   # long CString: FF + u16 length
+
+
+def test_clone_window_and_objects():
+    p = _ui_project()
+    assert p.clone_window("Нория 1", "Нория 2", number=5) == 5
+    q = ebpcmtp.Project.load(p.dump())
+    ws = q.windows()
+    assert [(w["number"], w["name"]) for w in ws] == [(0, "Главное"), (1, "Нория 1"), (5, "Нория 2")]
+    assert [o["kind"] for o in ws[2]["objects"]] == ["Window", "Line", "Text"] and ws[2]["guid"] != ws[1]["guid"]
+    assert q.payload.count(b"\x0d\x80" + bytes(14)) == 3            # settings class 10 -> 13: three objects more
+    assert q.clone_object("Главное", 1, dy=100) == 4
+    assert q.clone_object("Главное", 3, to="Нория 2", dx=5) == 3     # the CDrawObject definition -> a reference
+    r = ebpcmtp.Project.load(q.dump())
+    w0, w5 = r.window("Главное"), r.window(5)
+    copy = w0["objects"][4]
+    assert w0["declared"] == 5 and copy["kind"] == "Text" and copy["bbox"] == [100, 120, 220, 160]
+    assert copy["labels"] == [{"text": "Нория 1", "font": "Arial", "size": 24, "x": 100, "y": 120}]
+    assert w5["declared"] == 4 and w5["objects"][3]["kind"] == "Rect" and w5["objects"][3]["bbox"] == [15, 10, 505, 90]
+    assert r.payload.count(b"\x0f\x80" + bytes(14)) == 3 and r.payload.count(ebpcmtp._DRAW_DEF) == 1
+    with pytest.raises(ValueError):
+        r.clone_window("Нория 1", number=5)          # taken
+    with pytest.raises(ValueError):
+        r.clone_object("Главное", 0)                 # the window object itself
+    with pytest.raises(ValueError):
+        r.clone_object("Главное", 1, dy=-500)        # would leave the window
 
 
 def test_mcp_server_over_stdio(tmp_path):
@@ -225,10 +254,13 @@ def test_mcp_server_over_stdio(tmp_path):
             {"op": "text", "window": "Главное", "old": "Нория 1", "new": "Нория 2"},
             {"op": "move", "window": "0", "object": 1, "dx": 10, "dy": 0},
             {"op": "tag", "window": "Главное", "old": "GVL.A", "new": "GVL.B", "object": 2},
-            {"op": "rename_window", "window": "Нория 1", "new": "Нория 2"}])
+            {"op": "rename_window", "window": "Нория 1", "new": "Нория 2"},
+            {"op": "clone_window", "window": "Нория 2", "new": "Нория 3", "number": 7},
+            {"op": "clone_object", "window": "Главное", "object": 1, "to": "7", "dy": 50}])
         assert not err, text
         q = ebpcmtp.Project.load(out.read_bytes())
-        assert [w["name"] for w in q.windows()] == ["Главное", "Нория 2"]
+        assert [(w["number"], w["name"]) for w in q.windows()] == [(0, "Главное"), (1, "Нория 2"), (7, "Нория 3")]
+        assert q.window(7)["objects"][3]["labels"][0]["text"] == "Нория 2"
         assert q.windows()[0]["objects"][1]["labels"][0]["text"] == "Нория 2" and q.windows()[0]["objects"][1]["bbox"][0] == 110
         err, text = call(16, "cmtp_edit", path=str(ui), out_file=str(tmp_path / "bad.cmtp"), edits=[
             {"op": "text", "window": "Главное", "old": "Нория 1", "new": "x"},

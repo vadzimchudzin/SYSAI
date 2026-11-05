@@ -42,8 +42,10 @@ object-graph authoring is a separate, larger effort (see README).
 from __future__ import annotations
 import bisect
 import collections
+import math
 import re
 import struct
+import uuid
 from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -176,8 +178,8 @@ class Project:
 
     # -- windows and objects (EasyBuilder Pro 6.10 inner blob) ------------------
     def windows(self) -> list:
-        """Windows in stream order (the position is the EasyBuilder window number
-        in the checked projects), each with its objects -- see parse_windows()."""
+        """Windows in stream order, each with its EasyBuilder number (counted by
+        the number slots, empty numbers included) and objects -- see parse_windows()."""
         cache = getattr(self, '_windows_cache', None)
         if cache is None or cache[0] is not self.payload:
             cache = (self.payload, parse_windows(self.payload))
@@ -185,15 +187,16 @@ class Project:
         return cache[1]
 
     def window(self, ref) -> dict:
-        """A window by exact name, or by number (int or digit string)."""
+        """A window by exact name, or by its EasyBuilder number (int or digit string)."""
         ws = self.windows()
         for w in ws:
             if w['name'] == ref:
                 return w
         if isinstance(ref, int) or (isinstance(ref, str) and ref.strip().isdigit()):
             n = int(ref)
-            if 0 <= n < len(ws):
-                return ws[n]
+            for w in ws:
+                if w['number'] == n:
+                    return w
         raise ValueError(f'no window {ref!r} in the project')
 
     def opcua_tags(self) -> list:
@@ -220,13 +223,21 @@ class Project:
 
     def edit_text(self, window, old: str, new: str, index=None) -> int:
         """Replace a text of a window (a Text, a state label, a title...) with a
-        text of ANY length; EasyBuilder re-fits the frame on load (checked in
-        6.10). index limits it to one object. Returns how many were replaced."""
+        text of ANY length. EasyBuilder keeps the frame as it is, so the frame of a
+        Text object is widened for a longer text (estimated from the character
+        widths). index limits it to one object. Returns how many were replaced."""
         w, objs = self._objects(window, index)
         hits = [(s, e) for o in objs for s, e, t in o['_texts'] if t == old]
         if not hits:
             raise ValueError(f'text {old!r} not found in window {w["name"]!r}')
-        self._splice([(s, e, cstring(new)) for s, e in hits])
+        edits = [(s, e, cstring(new)) for s, e in hits]
+        ratio = _text_em(new) / max(_text_em(old), 0.3)
+        for o in objs:
+            if o['kind'] == 'Text' and o['bbox'] and ratio > 1 and any(t == old for _, _, t in o['_texts']):
+                l, t, r, b = o['bbox']
+                edits.append((o['_bbox_at'], o['_bbox_at'] + 16,
+                              struct.pack('<IIII', l, t, l + math.ceil((r - l) * ratio) + 4, b)))
+        self._splice(edits)
         return len(hits)
 
     def move_object(self, window, index: int, dx: int, dy: int) -> list:
@@ -270,6 +281,86 @@ class Project:
         if r is None or r[0] != w['name']:
             raise ValueError('window name not where expected')
         self._splice([(w['offset'], r[1], cstring(new))])
+
+    # -- new windows and objects (copies of existing ones) ------------------------
+    def clone_window(self, src, name=None, number=None) -> int:
+        """Copy a window (all its objects) to a free window number (default: the
+        first one after the last window), optionally under a new name. The copy
+        gets a new GUID, like EasyBuilder's own copy. Returns the new number."""
+        pay, ws = self.payload, self.windows()
+        w = self.window(src)
+        if w['declared'] != len(w['objects']):
+            raise ValueError(f'window {w["name"]!r}: not every object is recognised, copying it is not safe')
+        used = {x['number']: x for x in ws}
+        number = max(used) + 1 if number is None else int(number)
+        if number in used:
+            raise ValueError(f'window number {number} is taken by {used[number]["name"]!r}')
+        if not 3 <= number <= 1999:
+            raise ValueError('window numbers go from 3 to 1999')
+        prev = max((x for x in ws if x['number'] < number), key=lambda x: x['number'])
+        nxt = min((x for x in ws if x['number'] > number), key=lambda x: x['number'], default=None)
+        at = prev['_rec_end'] + 4 * (number - prev['number'] - 1)
+        if nxt is not None:
+            limit = nxt['offset'] - 4
+        else:   # the empty slots after the last window: keep clear of the settings after them
+            limit = re.compile(rb'\x00*').match(pay, prev['_rec_end']).end() - 1024
+        if at + 4 > limit or pay[at:at + 4] != bytes(4):
+            raise ValueError(f'no free slot for window number {number}')
+        info = _map_info(pay, ws)
+        rec = _clone_bytes(pay, w['offset'], w['_rec_end'], info)
+        body = bytearray(rec[_cstr_at(rec, 0)[1]:])
+        body[24:40] = uuid.uuid4().bytes
+        data = _SLOT + cstring(w['name'] if name is None else name) + bytes(body)
+        self._insert(info, [(at, 4, data, w['declared'])])
+        if not any(x['number'] == number and x['guid'] == body[24:40].hex() for x in self.windows()):
+            self.payload = pay      # the empty slots before it cannot be told from the end of the window before
+            raise ValueError(f'window number {number} cannot be placed reliably; take {prev["number"] + 1}')
+        return number
+
+    def clone_object(self, window, index: int, to=None, dx: int = 0, dy: int = 0) -> int:
+        """Copy one object (tags, texts, look) to the end of the object list of the
+        same window or of window `to`, shifted by dx, dy. Returns the copy's index."""
+        pay, ws = self.payload, self.windows()
+        w, (o,) = self._objects(window, index)
+        if o['kind'] == 'Window':
+            raise ValueError('the window object itself cannot be copied (use clone_window)')
+        d = w if to is None else self.window(to)
+        for x in (w, d):
+            if x['declared'] != len(x['objects']):
+                raise ValueError(f'window {x["name"]!r}: not every object is recognised, inserting is not safe')
+        info = _map_info(pay, ws)
+        s, e = o['offset'], o['offset'] + o['length']
+        rec = bytearray(_clone_bytes(pay, s, e, info))
+        cut = (e - s) - len(rec)        # a class definition at the start became a 2-byte reference
+        if dx or dy:
+            if o['bbox'] is None:
+                raise ValueError(f'object #{index} has no frame to shift')
+            l, t, r, b = o['bbox']
+            nb = [l + dx, t + dy, r + dx, b + dy]
+            if min(nb) < 0:
+                raise ValueError('the copy would get negative coordinates')
+            struct.pack_into('<IIII', rec, o['_bbox_at'] - s - cut, *nb)
+            for at, x, y in o['_label_pos']:
+                if l - 5 <= x <= r + 5 and t - 5 <= y <= b + 5:
+                    struct.pack_into('<II', rec, at - s - cut, x + dx, y + dy)
+        cnt = d['_first'] - 4
+        self._insert(info, [(d['_rec_end'], 0, bytes(rec), 1)],
+                     [(cnt, cnt + 4, struct.pack('<I', d['declared'] + 1))])
+        return len(d['objects'])
+
+    def _insert(self, info, inserts, extra=()) -> None:
+        """Splice records in ([(offset, bytes replaced, data, map entries)]) and
+        renumber the classes defined after them; checked after the fact."""
+        old = self.payload
+        edits = _renumber_edits(old, info, [(at, k) for at, _, _, k in inserts])
+        self._splice(edits + [(at, at + rm, data) for at, rm, data, _ in inserts] + list(extra))
+        try:
+            new = _map_info(self.payload, self.windows())
+            if new['counts'] != info['counts']:
+                raise ValueError('class references do not add up after the insert')
+        except ValueError as exc:
+            self.payload = old
+            raise ValueError(f'{exc}; the project is left unchanged') from None
 
 
 # Convenience module-level API --------------------------------------------------
@@ -533,7 +624,8 @@ def parse_windows(pay: bytes) -> list:
     """Every window with its objects. Object dicts: index, kind, type, bbox
     [l, t, r, b], labels [{text, font, size, x, y}], texts, addresses
     [{slot, device, atype, address, tag?, node?}], offset, length (+ private
-    _fields used by the editors)."""
+    _fields used by the editors). Window numbers follow the slot table: an
+    unused number is an empty 4-byte slot between two windows."""
     cs = cstrings(pay)
     starts = [c[0] for c in cs]
     heads = _heads(pay)
@@ -542,7 +634,7 @@ def parse_windows(pay: bytes) -> list:
     for o, e, name in cs:
         hdr = _window_header(pay, e)
         if hdr:
-            wins.append({'number': len(wins), 'name': name, 'offset': o, **hdr})
+            wins.append({'number': len(wins), 'position': len(wins), 'name': name, 'offset': o, **hdr})
     for i, w in enumerate(wins):
         end = wins[i + 1]['offset'] if i + 1 < len(wins) else len(pay)
         a, z = bisect.bisect_left(hoffs, w['_first']), bisect.bisect_left(hoffs, end)
@@ -556,9 +648,218 @@ def parse_windows(pay: bytes) -> list:
             objs.append(_parse_object(pay, cs, starts, o, oe, cls, typ, hl, len(objs)))
         w['objects'] = objs
         w['_end'] = end
+    _number_windows(pay, wins)
     return wins
+
+
+# Window slots. From window 3 on every used window number is the flag 01 00 00 00 + the window
+# record, an unused number is 00 00 00 00 (checked against EasyBuilder 6.10: «Пневмозаслонки» is
+# 78 and «Screen Saver» 80 with one empty slot after each). A record ends after its last object;
+# an object ends a fixed number of bytes after its last label (per object type, learnt from the
+# objects that are followed by another object), which tells the record end from empty slots.
+_SLOT = b'\x01\x00\x00\x00'
+
+
+def _object_tails(wins) -> dict:
+    t = collections.defaultdict(collections.Counter)
+    for w in wins:
+        for o in w['objects'][:-1]:
+            if o['_label_pos']:
+                at = max(p[0] for p in o['_label_pos'])
+                t[(o['kind'], o['type'])][o['offset'] + o['length'] - (at + 8)] += 1
+    return t
+
+
+def _record_end(pay, w, limit, tails, last):
+    """(record end, empty slots between it and limit) for window w."""
+    o = w['objects'][-1] if w['objects'] else None
+    if not o or not o['_label_pos'] or w['declared'] != len(w['objects']):
+        return limit, 0
+    base = max(p[0] for p in o['_label_pos']) + 8
+    meas = limit - base
+    cands = sorted(tails.get((o['kind'], o['type']), ()))
+    if last:
+        ge = [t for t in cands if t >= meas and not any(pay[limit:base + t])]
+        if ge:
+            return base + ge[0], 0
+    ok = [t for t in cands if t <= meas and (meas - t) % 4 == 0 and not any(pay[base + t:limit])]
+    if not ok:
+        return limit, 0
+    return base + ok[-1], (meas - ok[-1]) // 4
+
+
+def _number_windows(pay, wins) -> None:
+    tails, n = _object_tails(wins), 0
+    for i, w in enumerate(wins):
+        last = i + 1 == len(wins)
+        flag = not last and pay[wins[i + 1]['offset'] - 4:wins[i + 1]['offset']] == _SLOT
+        limit = w['_end'] if last else wins[i + 1]['offset'] - (4 if flag else 0)
+        end, gap = _record_end(pay, w, limit, tails, last)
+        w['number'], w['_rec_end'] = n, end
+        if w['objects']:    # the last object ends with the record, not at the next window
+            lo = w['objects'][-1]
+            lo['length'] = max(0, end - lo['offset'])
+        n += 1 + (gap if flag else 0)
 
 
 def public(d: dict) -> dict:
     """A window / object dict without the private editor fields and offsets."""
-    return {k: v for k, v in d.items() if not k.startswith('_') and k not in ('offset', 'length', 'objects')}
+    return {k: v for k, v in d.items()
+            if not k.startswith('_') and k not in ('offset', 'length', 'objects', 'position')}
+
+
+def _text_em(s: str) -> float:
+    """Rough width of a text in em (Arial-like proportions)."""
+    w = 0.0
+    for ch in s:
+        if ch in ' .,:;\'"!|()[]{}/\\-iIjlftr1':
+            w += 0.32
+        elif ch in 'mwMWШЩЖЮшщжюФфЫы@%':
+            w += 0.85
+        elif ch.isdigit():
+            w += 0.56
+        elif ch.isupper():
+            w += 0.68
+        else:
+            w += 0.55
+    return w
+
+
+_ANY_DEF = re.compile(rb'\xff\xff[\x00-\x09]\x00([\x03-\x40])\x00(?=[A-Za-z_])')
+
+
+def class_defs(pay: bytes) -> list:
+    """Every MFC class definition (FF FF, u16 schema, u16 length, name) as (offset, name, end)."""
+    out = []
+    for m in _ANY_DEF.finditer(pay):
+        n, p = m.group(1)[0], m.end()
+        s = pay[p:p + n]
+        if len(s) == n and all(48 <= c < 58 or 65 <= c < 91 or 97 <= c < 123 or c == 95 for c in s):
+            out.append((m.start(), s.decode(), p + n))
+    return out
+
+
+def _plain_ref(pay: bytes, k: int) -> bool:
+    """A 16-bit class reference candidate sits among plain data (zeros, ASCII, FF/FE)."""
+    ctx = pay[k - 8:k] + pay[k + 2:k + 10]
+    if sum(1 for c in ctx if c == 0 or 0x20 <= c < 0x7f or c in (0xff, 0xfe)) < 10:
+        return False
+    return _CSTR_PREFIX not in pay[k - 2:k + 3]
+
+
+def _image_spans(pay: bytes) -> list:
+    spans = []
+    for sig in (b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff'):
+        i = pay.find(sig)
+        while i != -1:
+            ln = struct.unpack_from('<I', pay, i - 4)[0] if i >= 4 else 0
+            if 0 < ln <= len(pay) - i:
+                spans.append((i, i + ln))
+                i = pay.find(sig, i + ln)
+            else:
+                i = pay.find(sig, i + 1)
+    return sorted(spans)
+
+
+# Inserting records. CArchive numbers every class (at its FF FF definition) and every object it
+# writes, in stream order from 1; a later use of a class is 0x8000 | its number. K inserted objects
+# add K to every class defined after them, so their references are rewritten: classes defined
+# between the windows (CCharDouble, CTrendLimit...) -- number computed, references found by value;
+# classes of the settings after the windows (CTagObject, CDataLog, CMail*...) -- the 16-bit values
+# of their number range among plain data (exactly the 1464 references EasyBuilder 6.10 rewrote when
+# copying a window). The computed number of the first settings class must be the most used value.
+def _map_info(pay: bytes, wins: list) -> dict:
+    if not wins:
+        raise ValueError('no windows in the project')
+    defs, wend = class_defs(pay), wins[-1]['_rec_end']
+    tail = [d for d in defs if d[0] >= wend]
+    if not tail:
+        raise ValueError('the settings after the windows were not found')
+    heads = _heads(pay)
+    imgs = _image_spans(pay)
+    istarts = [s for s, _ in imgs]
+
+    def in_image(k):
+        j = bisect.bisect_right(istarts, k) - 1
+        return j >= 0 and k < imgs[j][1]
+
+    def objects_before(pos):
+        n = 0
+        for w in wins:
+            if w['_rec_end'] <= pos:
+                n += w['declared']
+                continue
+            if w['_first'] <= pos:
+                n += sum(1 for o in w['objects'] if o['offset'] < pos)
+            break
+        return n
+
+    nested = []
+    for d, name, e in defs:
+        if d >= wend:
+            break
+        if name in ('CPartObject', 'CDrawObject'):
+            continue
+        idx = 1 + sum(1 for x in defs if x[0] < d) + objects_before(d) + \
+            sum(1 + sum(1 for k in c['refs'] if k < d) for c in nested)
+        tb, refs = struct.pack('<H', 0x8000 | idx), []
+        k = pay.find(tb, e)
+        while k != -1:
+            if _plain_ref(pay, k) and not in_image(k):
+                refs.append(k)
+            k = pay.find(tb, k + 1)
+        nested.append({'name': name, 'def': d, 'tag': 0x8000 | idx, 'refs': refs})
+    first = 0x8000 | (1 + sum(1 for x in defs if x[0] < tail[0][0]) + sum(w['declared'] for w in wins)
+                      + sum(1 + len(c['refs']) for c in nested))
+
+    def most_used(start, span, lo, hi):
+        c = collections.Counter()
+        for k in range(start, min(len(pay) - 1, start + span)):
+            if pay[k + 1] & 0x80:
+                v = pay[k] | pay[k + 1] << 8
+                if lo <= v < hi and _plain_ref(pay, k):
+                    c[v] += 1
+        return c.most_common(1)[0][0] if c else None
+
+    lo = most_used(tail[0][0], 1 << 16, first, 0xffff)
+    if lo != first:
+        raise ValueError(f'class numbering does not add up (expected {first:#x}, found {lo and hex(lo)})')
+    hi = most_used(tail[-1][0], 1 << 20, lo, lo + 0x1000) or lo
+    trefs = [k for k in range(tail[0][0], len(pay) - 1)
+             if pay[k + 1] & 0x80 and lo <= (pay[k] | pay[k + 1] << 8) <= hi and _plain_ref(pay, k)]
+    return {'defs': defs, 'nested': nested, 'tail_refs': trefs, 'range': (lo, hi),
+            'ptag': next((pay[h[0]:h[0] + 2] for h in heads if h[1] == 'P' and h[3] == 3), None),
+            'dtag': next((pay[h[0]:h[0] + 2] for h in heads if h[1] == 'D' and h[3] == 2), None),
+            'first_defs': max(pay.find(_PART_DEF), pay.find(_DRAW_DEF)),
+            'counts': (len(trefs), tuple(len(c['refs']) for c in nested))}
+
+
+def _clone_bytes(pay: bytes, s: int, e: int, info: dict) -> bytes:
+    """Bytes of a window / object record to insert again (its class definitions -> references)."""
+    for c in info['nested']:
+        if s <= c['def'] < e or any(s <= k < e for k in c['refs']):
+            raise ValueError(f'it holds sub-objects ({c["name"]}); copying those is not supported yet')
+    for d, name, _ in info['defs']:
+        if s <= d < e and name not in ('CPartObject', 'CDrawObject'):
+            raise ValueError(f'it defines class {name}; copying it is not supported')
+    rec = pay[s:e]
+    for cdef, tag in ((_PART_DEF, info['ptag']), (_DRAW_DEF, info['dtag'])):
+        if cdef in rec:
+            if tag is None:
+                raise ValueError('no class reference to copy the definition from')
+            rec = rec.replace(cdef, tag)
+    return rec
+
+
+def _renumber_edits(pay: bytes, info: dict, inserts) -> list:
+    """2-byte edits renumbering the class references for [(offset, entries)] inserted."""
+    if any(at <= info['first_defs'] for at, _ in inserts):
+        raise ValueError('inserting before the first widget / shape definition is not supported')
+    edits = []
+    for c in info['nested']:
+        add = sum(k for at, k in inserts if at <= c['def'])
+        edits += [(k, k + 2, struct.pack('<H', c['tag'] + add)) for k in c['refs']] if add else []
+    add = sum(k for _, k in inserts)
+    if info['range'][1] + add > 0xffff:
+        raise ValueError('too many objects for 16-bit class references')
+    return edits + [(k, k + 2, struct.pack('<H', (pay[k] | pay[k + 1] << 8) + add)) for k in info['tail_refs']]

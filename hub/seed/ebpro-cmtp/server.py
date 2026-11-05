@@ -118,19 +118,26 @@ TOOLS = [
         "title": "Править окна",
         "description": "Правки готовых окон по списку и сборка нового файла проекта (исходник не меняется). "
                        "Виды правок (op): text — заменить текст в окне на любой длины (old → new, object — только "
-                       "в этом объекте); move — сдвинуть объект (object, dx, dy в пикселях); tag — перепривязать "
+                       "в этом объекте; рамка «Текста» расширяется под длинный текст); move — сдвинуть объект "
+                       "(object, dx, dy в пикселях); tag — перепривязать "
                        "объекты окна с тега OPC UA old на тег new (тот же тип, тег должен быть в таблице проекта; "
-                       "object — только этот объект); rename_window — новое имя окна (new). Правки идут по порядку; "
-                       "если одна не прошла — файл не пишется. Новые объекты и окна пока не добавляются.",
+                       "object — только этот объект); rename_window — новое имя окна (new); clone_window — копия "
+                       "окна window под номером number (по умолчанию — следующий после последнего) с именем new; "
+                       "clone_object — копия объекта object в конец того же окна или окна to, со сдвигом dx, dy "
+                       "(копию потом правят text/tag/move: её index — следующий после последнего). Правки идут по "
+                       "порядку; если одна не прошла — файл не пишется.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
             "out_file": {"type": "string", "description": r"Куда записать новый проект, например C:\Projects\topol_v2.cmtp"},
             "edits": {"type": "array", "minItems": 1, "description": "Правки по порядку", "items": {
                 "type": "object", "properties": {
-                    "op": {"type": "string", "enum": ["text", "move", "tag", "rename_window"]},
+                    "op": {"type": "string", "enum": ["text", "move", "tag", "rename_window", "clone_window",
+                                                      "clone_object"]},
                     "window": {"type": "string", "description": "Имя окна или номер"},
                     "object": {"type": "integer", "description": "index объекта из cmtp_objects"},
                     "old": {"type": "string"}, "new": {"type": "string"},
-                    "dx": {"type": "integer"}, "dy": {"type": "integer"}},
+                    "dx": {"type": "integer"}, "dy": {"type": "integer"},
+                    "number": {"type": "integer", "description": "clone_window: номер нового окна"},
+                    "to": {"type": "string", "description": "clone_object: окно, куда положить копию"}},
                 "required": ["op", "window"], "additionalProperties": False}}},
             "required": ["path", "out_file", "edits"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
@@ -226,6 +233,12 @@ def _call(name, args):
                     elif op == "rename_window":
                         p.rename_window(win, str(e["new"]))
                         done.append(f"{n}. окно {win!r} → {e['new']!r}")
+                    elif op == "clone_window":
+                        num = p.clone_window(win, e.get("new"), e.get("number"))
+                        done.append(f"{n}. окно {win!r} скопировано → {num} : {p.window(num)['name']}")
+                    elif op == "clone_object":
+                        k = p.clone_object(win, int(e["object"]), e.get("to"), int(e.get("dx") or 0), int(e.get("dy") or 0))
+                        done.append(f"{n}. объект #{e['object']} скопирован → #{k} в окне {e.get('to') or win!r}")
                     else:
                         return _text(f"правка {n}: нет такого op: {op!r}", True)
                 except KeyError as exc:
@@ -259,7 +272,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.1.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.2.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})
