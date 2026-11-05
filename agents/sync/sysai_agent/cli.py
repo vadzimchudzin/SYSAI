@@ -1,4 +1,4 @@
-"""sysai-agent connect | sync | run | status | stop | mcp <name> | hook | version."""
+"""sysai-agent connect | sync | run | status | stop | desktop | mcp <name> | hook | version."""
 import argparse
 import json
 import os
@@ -29,6 +29,9 @@ def _parser() -> argparse.ArgumentParser:
     m.add_argument("name")
     sub.add_parser("hook", help="проверить действие Hermes по доступам SYSAI (так его спрашивает Hermes перед действием)")
     sub.add_parser("stop", help="остановить фоновую синхронизацию (до следующего входа в Windows)")
+    d = sub.add_parser("desktop", help="открыть окно агента «Агент SYSAI» (поставит его, если его нет)")
+    d.add_argument("--install-only", action="store_true", help="только поставить или обновить окно и ярлыки (так делает установщик)")
+    d.add_argument("files", nargs="*", help="файлы — сразу показать в окне")
     sub.add_parser("version", help="версия")
     return p
 
@@ -87,6 +90,13 @@ def main(argv=None) -> int:
             return 1 if report["errors"] else 0
         if args.cmd == "run":
             return core.run(home, every=max(30, args.every))
+        if args.cmd == "desktop":
+            from . import desktop
+            try:
+                return desktop.cli(home, args.files, args.install_only)
+            except (desktop.DesktopError, OSError) as exc:
+                core.log.error("Окно агента: %s", exc)
+                return 1
     except core.SyncError as exc:
         core.log.error("%s", exc)
         return 1
@@ -125,6 +135,9 @@ def _print_status(info: dict) -> None:
         print(f"Совпадают по имени со своими навыками профиля: {', '.join(info['conflicts'])}")
     if info["restart_pending"]:
         print("Hermes ждёт перезапуска (идёт задача?) — синхронизатор повторит")
+    window = info.get("desktop") or {}
+    print(f"Окно агента «Агент SYSAI»: {window['version']} (Electron {window['electron']})" if window.get("version") else
+          "Окно агента «Агент SYSAI»: не установлено (sysai-agent desktop)")
     if info["error"]:
         print(f"Последняя ошибка: {info['error']}")
     print(f"Папка SYSAI: {info['home']}")

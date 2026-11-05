@@ -166,8 +166,9 @@ $env:SYSAI_CODE='ABCD-EFGH'; irm https://<SYSAI>/agents/api/install.ps1 | iex
 uv (Astral), синхронизатор — `uv tool install` колеса `GET /agents/api/sync/sysai_agent-<версия>-py3-none-any.whl`
 (SYSAI собирает его из `agents/sync`, sha256 — в `X-SHA256`), меняет код на токен (`sysai-agent connect`), ставит
 Hermes, если его нет, создаёт профиль Hermes по имени агента без встроенных навыков (`--no-skills`), делает первую
-синхронизацию и включает фоновую — при входе в Windows (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, без
-окна). Повторный запуск с новым кодом обновляет то же самое.
+синхронизацию, ставит окно «Агент SYSAI» (`sysai-agent desktop --install-only`, ярлык на рабочем столе) и включает
+фоновую синхронизацию — при входе в Windows (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, без окна).
+Повторный запуск с новым кодом обновляет то же самое.
 
 **Обновления — сами.** Синхронизатор с версии 0.2.0 обновляется сам до версии, которую SYSAI подписал в документе
 агента (Настройки → «Обновлять агентов на ПК сами», по умолчанию вкл.): скачивает колесо, сверяет sha256 с
@@ -198,6 +199,15 @@ MCP-серверы хаба Hermes запускает через `sysai-agent mc
 (сейчас), `sysai-agent stop` (остановить фон), журналы — `%LOCALAPPDATA%\SYSAI\logs\sync.log`, `hook.log`
 (что хук запретил), `update.log`. Подробно —
 [agents/sync/README.md](../../agents/sync/README.md).
+
+**Окно «Агент SYSAI»** (`agents/desktop`, Electron): разговор с агентом этого ПК (Hermes по ACP) — видно, что агент
+делает, его вопросы и разрешения, можно остановить; список разговоров; справа — просмотр файлов (Word, Excel, CSV,
+PDF, картинки, видео, текст и код), проводник ПК и Хранилище SYSAI. Агент показывает в окне файлы и открывает
+программы через MCP-сервер окна — в пределах тех же доступов (папки на чтение; программы — только с «Командами на
+ПК» и вне запрещённых шаблонов). SYSAI отдаёт сборку окна (`GET /agents/api/desktop/<файл>`) и копию Electron
+(`GET /agents/api/desktop/electron/<файл>`, скачивается сервером один раз); их sha256 — в подписанном документе
+агента (`desktop`), синхронизатор сверяет их и обновляет окно сам вместе с собой. Подробно —
+[agents/desktop/README.md](../../agents/desktop/README.md).
 
 ## Меню
 

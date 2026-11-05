@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <!-- Nothing from the internet: the scripts are these files, pictures and documents are the computer's own. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' file: data: blob:; media-src file: blob:; frame-src file:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark">
+  <title>Агент SYSAI</title>
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-top drag">
+        <span class="brand"><span class="tile" id="brand-tile"><i></i><i></i><i></i></span><span><span class="s">SYS</span><span class="a">AI</span></span><span class="sub">Агент</span></span>
+      </div>
+      <div class="side-actions">
+        <button class="new-chat" id="new-chat" title="Новый разговор (Ctrl+N)"></button>
+        <button class="nav-item" id="nav-files" data-tab="files"></button>
+        <button class="nav-item" id="nav-storage" data-tab="storage"></button>
+      </div>
+      <div class="side-search"><label class="field" id="search-field"><input id="search" type="search" placeholder="Поиск разговоров" autocomplete="off" spellcheck="false"></label></div>
+      <nav class="sessions" id="sessions" aria-label="Разговоры"></nav>
+      <div class="side-foot" id="side-foot"></div>
+    </aside>
+    <div class="resizer side-r" id="side-resizer" title="Потяните, чтобы изменить ширину"></div>
+    <main class="main" id="main">
+      <header class="topbar drag" id="topbar">
+        <div class="top-title" id="top-title"></div>
+        <div class="top-actions" id="top-actions"></div>
+      </header>
+      <div class="thread" id="thread"></div>
+      <button class="to-bottom" id="to-bottom" hidden title="К последнему сообщению"></button>
+      <div class="composer-wrap" id="composer-wrap"></div>
+    </main>
+    <div class="resizer pane-r" id="pane-resizer" hidden title="Потяните, чтобы изменить ширину"></div>
+    <section class="pane" id="pane" hidden>
+      <div class="pane-head drag" id="pane-head"></div>
+      <div class="pane-body" id="pane-body"></div>
+    </section>
+  </div>
+  <footer class="statusbar" id="statusbar"></footer>
+</body>
+</html>

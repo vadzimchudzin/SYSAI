@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, fsutil, hermes, hubsync, paths, secret, signing, update
+from . import __version__, desktop, fsutil, hermes, hubsync, paths, secret, signing, update
 from .client import ApiError, Client
 
 log = logging.getLogger("sysai_agent")
@@ -52,13 +52,16 @@ def load_agent(home: Path) -> dict:
 _hermes_version = {"at": 0.0, "value": ""}
 
 
-def versions() -> dict:
+def versions(home: Path | None = None) -> dict:
     """Shown on the agent's page; Hermes is asked once an hour."""
     if time.time() - _hermes_version["at"] > 3600:
         _hermes_version.update(at=time.time(), value=hermes.version())
     out = {"sysai-agent": __version__, "python": platform.python_version()}
     if _hermes_version["value"]:
         out["hermes"] = _hermes_version["value"]
+    window = desktop.installed(home) if home else {}
+    if window.get("version"):
+        out["desktop"] = window["version"]
     return out
 
 
@@ -141,6 +144,12 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     fsutil.write_json(home / "access.json", signed)  # the MCP servers and the hook check the calls by it
     state["access_sha"] = hashlib.sha256((home / "access.json").read_bytes()).hexdigest()  # verified: the hook trusts it
     state["offer"] = update.offer(doc)
+    state["desktop_offer"] = desktop.offer(doc)  # the window «Агент SYSAI»: installed by the loop, in the background
+    state["person"] = str(doc.get("person") or "")
+    try:
+        desktop.refresh(home, state)
+    except OSError as exc:
+        report["errors"].append(f"Окно агента: {exc}")
     harness = doc.get("harness_config") or {}
     fsutil.write_json(home / "sysai.json", harness.get("sysai") or {})
     profile_dir = paths.hermes_profile_dir(cfg)
@@ -195,7 +204,7 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
 
 
 def pulse(home: Path, client: Client, state: dict, error: str | None = None) -> dict:
-    data = {"access_rev": state.get("access_rev", ""), "versions": versions(), "host": platform.node(),
+    data = {"access_rev": state.get("access_rev", ""), "versions": versions(home), "host": platform.node(),
             "hub": hubsync.summary(state), "error": state.get("error", "") if error is None else error}
     answer = client.json("POST", "/agents/api/heartbeat", data)
     state["pulse_at"] = now()
@@ -257,6 +266,11 @@ def run(home: Path | None = None, every: int = EVERY, transport=None, cycles: in
                 got = update.due(state)
                 if got and self_update(home, client, got, state):
                     return 0
+                offered = desktop.due(home, state)  # after the synchronizer's own update: the new one installs it
+                if offered:
+                    state["desktop_try"] = {"sha256": offered["sha256"], "at": time.time()}  # not again before RETRY
+                    fsutil.write_json(home / "state.json", state)
+                    desktop.install_quietly(home, client, offered)  # minutes at most, once per build
             except (SyncError, ApiError, OSError) as exc:
                 failed = True
                 log.warning("%s", exc)
@@ -335,7 +349,8 @@ def status(home: Path | None = None) -> dict:
            "server": cfg.get("server", ""), "version": __version__, "access_rev": state.get("access_rev", ""),
            "hub_rev": state.get("hub_rev", ""), "synced_at": state.get("synced_at", ""), "pulse_at": state.get("pulse_at", ""),
            "error": state.get("error", ""), "skills": sorted(state.get("skills") or {}), "tools": sorted(state.get("tools") or {}),
-           "conflicts": state.get("conflicts") or [], "restart_pending": bool(state.get("restart_pending"))}
+           "conflicts": state.get("conflicts") or [], "restart_pending": bool(state.get("restart_pending")),
+           "desktop": desktop.summary(home)}
     if cfg.get("agent"):
         out["hermes"] = hermes.profile_info(paths.hermes_profile_dir(cfg))
     return out

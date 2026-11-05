@@ -15,7 +15,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "sync"))
 
-from sysai_agent import __version__ as SYNC_VERSION, cli, core, hermes, hook, hubsync, mcpwrap, paths, rules as R, signing, update  # noqa: E402,E501
+from sysai_agent import __version__ as SYNC_VERSION, cli, core, desktop, hermes, hook, hubsync, mcpwrap, paths, rules as R, signing, update  # noqa: E402,E501
 
 from app import settings_store  # noqa: E402
 from app.db import Department, SessionLocal, User  # noqa: E402
@@ -579,6 +579,7 @@ def test_the_synchronizer_updates_itself_only_to_the_wheel_sysai_signed(pc, monk
     monkeypatch.setattr(installer, "_cache", {})
     monkeypatch.setattr(paths, "WINDOWS", True)
     monkeypatch.setattr(hermes, "gateway_running", lambda profile_dir: False)
+    monkeypatch.setattr(desktop, "due", lambda home, state, now=None: {})  # the window: tests/test_desktop.py
     started = []
     monkeypatch.setattr(update.subprocess, "Popen", lambda args, **kw: started.append((args, kw)))
     assert update.newer("9.9.9") and update.newer("0.10.0", "0.9.9") and not update.newer(SYNC_VERSION) and not update.newer("")

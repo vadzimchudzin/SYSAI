@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from .. import config, settings_store, storage
 from ..db import Department, Employee, SessionLocal, User
-from . import access, agents, enabled, files, gateway, hub, installer, journal, mcp, soul, spend, trace
+from . import access, agents, desktop, enabled, files, gateway, hub, installer, journal, mcp, soul, spend, trace
 from .models import NetAgent, NetAgentToken, NetSkill
 
 router = APIRouter()
@@ -774,6 +774,35 @@ def api_sync_wheel(filename: str):
         return _api_error(404, f"Нет такой сборки синхронизатора: сейчас {name}", "not_found")
     return Response(blob, media_type="application/zip", headers={"X-SHA256": sha, "Cache-Control": "no-store",
                                                                  "Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/agents/api/desktop/{filename}")
+def api_desktop_app(filename: str):
+    """The window «Агент SYSAI» (the app without Electron: the synchronizer downloads Electron itself and checks
+    both by the sha256 in the signed document)."""
+    if not enabled():
+        return _api_error(404, "Not Found", "not_found")
+    name, blob, sha = desktop.build()
+    if filename != name:
+        return _api_error(404, f"Нет такой сборки окна агента: сейчас {name}", "not_found")
+    return Response(blob, media_type="application/zip", headers={"X-SHA256": sha, "Cache-Control": "no-store",
+                                                                 "Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/agents/api/desktop/electron/{filename}")
+def api_desktop_electron(filename: str):
+    """Electron for the window, from SYSAI's checked copy (computers that reach SYSAI but not the internet); while
+    SYSAI is still downloading it — 503, the computer takes it from the release addresses in the document."""
+    if not enabled():
+        return _api_error(404, "Not Found", "not_found")
+    if filename != desktop.ELECTRON["file"]:
+        return _api_error(404, f"Нет такой сборки Electron: сейчас {desktop.ELECTRON['file']}", "not_found")
+    path = desktop.electron_path()
+    if path is None:
+        desktop.prefetch()
+        return _api_error(503, "SYSAI ещё скачивает Electron для окна агента", "not_ready", {"Retry-After": "600"})
+    return FileResponse(path, media_type="application/zip", filename=filename,
+                        headers={"X-SHA256": desktop.ELECTRON["sha256"], "Cache-Control": "no-store"})
 
 
 @router.post("/agents/api/connect")

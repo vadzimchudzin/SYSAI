@@ -612,18 +612,24 @@ def document(agent_id: int, server: str = "", session=None) -> dict:
         character = soul.for_agent(agent.name, (user.display_name or user.username) if user else "",
                                    user.username if user else "", dept.name if dept else "")
         offer = synchronizer_offer()
+        from . import desktop
+        window = desktop.offer(offer["auto_update"])
+        person = (user.display_name or user.username) if user else ""
         rev = hashlib.sha256(_canonical({"agent": agent.name, "harness": agent.harness, "rules": rules,
                                          "tools": [(t["name"], t["version"]) for t in tools], "cache": cache,
                                          "soul": soul.digest(character),
-                                         "sync": [offer["version"], offer["auto_update"]]})).hexdigest()[:12]
+                                         "sync": [offer["version"], offer["auto_update"]],
+                                         "desktop": [window["sha256"], window["electron"]["sha256"]],
+                                         "person": person})).hexdigest()[:12]
         server = (server or config.PUBLIC_URL or "").rstrip("/")
-        doc = {"agent": agent.name, "agent_id": agent.id, "user": user.username if user else "", "role": user.role if user else "",
+        doc = {"agent": agent.name, "agent_id": agent.id, "user": user.username if user else "", "person": person,
+               "role": user.role if user else "",
                "department": dept.name if dept else "", "harness": agent.harness, "rev": rev, "server": server,
                "profile": {"code": profile.code, "name": profile.name, "version": profile.version} if profile else
                {"code": "", "name": "без профиля", "version": 0},
                "rules": rules,
                "harness_config": render_hermes(agent.name, rules, server, tools, cache) if agent.harness == "hermes" else None,
-               "soul": character, "synchronizer": offer, "issued_at": now().isoformat(timespec="seconds")}
+               "soul": character, "synchronizer": offer, "desktop": window, "issued_at": now().isoformat(timespec="seconds")}
         return {"rev": rev, "rules": rules, "profile": doc["profile"], "doc": doc,
                 "overrides": row.overrides if row else {}, "applied_rev": row.applied_rev if row else "",
                 "applied_at": row.applied_at if row else None}
