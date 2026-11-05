@@ -9,7 +9,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ebpcmtp import Project  # noqa: E402
+from ebpcmtp import Project, public  # noqa: E402
 
 PROTOCOL = "2025-06-18"
 PATH = {"type": "string", "description": r"Полный путь к файлу проекта, например C:\Projects\topol.emtp"}
@@ -80,11 +80,66 @@ TOOLS = [
             "required": ["path", "out_file", "old", "new"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
+    {
+        "name": "cmtp_windows",
+        "title": "Окна проекта",
+        "description": "Список окон проекта EasyBuilder Pro: номер, имя, размер, сколько объектов. С этого начинают "
+                       "разбор экранов примера. filter — показать только окна с подстрокой в имени.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+                        "filter": {"type": "string", "description": "Подстрока имени окна"}},
+                        "required": ["path"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "cmtp_objects",
+        "title": "Объекты окна",
+        "description": "Объекты одного окна по порядку: index, вид (Text, ToggleSwitch, SetBit, NumericInput, "
+                       "FunctionKey, Picture, Rect…; «?» — вид угадан), рамка bbox [лево, верх, право, низ], подписи "
+                       "(текст, шрифт, размер, x, y), прочие тексты и адреса (теги OPC UA, локальные адреса). "
+                       "window — имя окна или его номер. kind — показать только объекты этого вида.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+                        "window": {"type": "string", "description": "Имя окна (точно) или номер, например «Нория 3» или 23"},
+                        "kind": {"type": "string", "description": "Только объекты этого вида, например ToggleSwitch"}},
+                        "required": ["path", "window"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "cmtp_tags",
+        "title": "Теги OPC UA",
+        "description": "Таблица тегов OPC UA проекта (что HMI читает из ПЛК): имя, тип (BOOL, INT, UINT, UDINT…), "
+                       "узел. Нужна, чтобы привязать объекты к нужным тегам. filter — подстрока имени.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+                        "filter": {"type": "string", "description": "Подстрока имени тега"}},
+                        "required": ["path"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "cmtp_edit",
+        "title": "Править окна",
+        "description": "Правки готовых окон по списку и сборка нового файла проекта (исходник не меняется). "
+                       "Виды правок (op): text — заменить текст в окне на любой длины (old → new, object — только "
+                       "в этом объекте); move — сдвинуть объект (object, dx, dy в пикселях); tag — перепривязать "
+                       "объекты окна с тега OPC UA old на тег new (тот же тип, тег должен быть в таблице проекта; "
+                       "object — только этот объект); rename_window — новое имя окна (new). Правки идут по порядку; "
+                       "если одна не прошла — файл не пишется. Новые объекты и окна пока не добавляются.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+            "out_file": {"type": "string", "description": r"Куда записать новый проект, например C:\Projects\topol_v2.cmtp"},
+            "edits": {"type": "array", "minItems": 1, "description": "Правки по порядку", "items": {
+                "type": "object", "properties": {
+                    "op": {"type": "string", "enum": ["text", "move", "tag", "rename_window"]},
+                    "window": {"type": "string", "description": "Имя окна или номер"},
+                    "object": {"type": "integer", "description": "index объекта из cmtp_objects"},
+                    "old": {"type": "string"}, "new": {"type": "string"},
+                    "dx": {"type": "integer"}, "dy": {"type": "integer"}},
+                "required": ["op", "window"], "additionalProperties": False}}},
+            "required": ["path", "out_file", "edits"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    },
 ]
 
-INSTRUCTIONS = ("Инструменты для проектов EasyBuilder Pro (.cmtp/.emtp). Чтобы разобрать присланный пример: "
-                "cmtp_info → cmtp_labels → cmtp_extract_images. Чтобы собрать по образцу: правьте расшифрованный "
-                "блок и cmtp_pack, или cmtp_relabel для быстрой замены подписи. Доступы к папкам даёт SYSAI.")
+INSTRUCTIONS = ("Инструменты для проектов EasyBuilder Pro (.cmtp/.emtp). Разобрать пример: cmtp_info → cmtp_windows → "
+                "cmtp_objects (окно) → cmtp_tags; картинки — cmtp_extract_images. Собрать по образцу: cmtp_edit "
+                "(тексты любой длины, сдвиг, перепривязка тегов, имя окна) в новый файл. Доступы к папкам даёт SYSAI.")
 
 
 def _text(s, is_error=False):
@@ -100,7 +155,8 @@ def _call(name, args):
             p = Project.load(args["path"])
             return _text(json.dumps({"path": args["path"], "version": p.version, "revision": p.revision,
                 "revision_min": p.revision_min, "encrypted": p.encrypted, "payload_bytes": len(p.payload),
-                "images": sum(1 for _ in p.images())}, ensure_ascii=False))
+                "images": sum(1 for _ in p.images()), "windows": len(p.windows()),
+                "opcua_tags": len(p.opcua_tags())}, ensure_ascii=False))
         if name == "cmtp_labels":
             p = Project.load(args["path"])
             flt = (args.get("filter") or "").lower()
@@ -134,6 +190,50 @@ def _call(name, args):
             p.replace_label(off, args["old"], args["new"])
             p.save(args["out_file"])
             return _text(f"Заменено {args['old']!r} → {args['new']!r} → {args['out_file']}")
+        if name == "cmtp_windows":
+            p = Project.load(args["path"])
+            flt = (args.get("filter") or "").lower()
+            rows = [{"number": w["number"], "name": w["name"], "width": w["width"], "height": w["height"],
+                     "objects": len(w["objects"])} for w in p.windows() if not flt or flt in w["name"].lower()]
+            return _text(json.dumps({"count": len(rows), "windows": rows}, ensure_ascii=False))
+        if name == "cmtp_objects":
+            p = Project.load(args["path"])
+            w = p.window(args["window"])
+            kind = args.get("kind")
+            objs = [public(o) for o in w["objects"] if not kind or o["kind"] == kind]
+            head = dict(public(w), objects=len(w["objects"]))
+            return _text(json.dumps({"window": head, "objects": objs}, ensure_ascii=False))
+        if name == "cmtp_tags":
+            p = Project.load(args["path"])
+            flt = (args.get("filter") or "").lower()
+            rows = [t for t in p.opcua_tags() if not flt or flt in t["name"].lower()]
+            return _text(json.dumps({"count": len(rows), "tags": rows[:5000]}, ensure_ascii=False))
+        if name == "cmtp_edit":
+            p = Project.load(args["path"])
+            done = []
+            for n, e in enumerate(args.get("edits") or [], 1):
+                op, win = e.get("op"), e.get("window")
+                try:
+                    if op == "text":
+                        k = p.edit_text(win, str(e["old"]), str(e["new"]), e.get("object"))
+                        done.append(f"{n}. текст {e['old']!r} → {e['new']!r}: {k} шт.")
+                    elif op == "move":
+                        bb = p.move_object(win, int(e["object"]), int(e.get("dx") or 0), int(e.get("dy") or 0))
+                        done.append(f"{n}. объект #{e['object']} сдвинут, рамка {bb}")
+                    elif op == "tag":
+                        k = p.retag(win, str(e["old"]), str(e["new"]), e.get("object"))
+                        done.append(f"{n}. тег {e['old']} → {e['new']}: {k} адрес(ов)")
+                    elif op == "rename_window":
+                        p.rename_window(win, str(e["new"]))
+                        done.append(f"{n}. окно {win!r} → {e['new']!r}")
+                    else:
+                        return _text(f"правка {n}: нет такого op: {op!r}", True)
+                except KeyError as exc:
+                    return _text(f"правка {n} ({op}): не хватает поля {exc}; файл не записан", True)
+                except ValueError as exc:
+                    return _text(f"правка {n} ({op}): {exc}; файл не записан", True)
+            p.save(args["out_file"])
+            return _text("\n".join(done + [f"Записано → {args['out_file']}"]))
         return _text(f"нет такого инструмента: {name}", True)
     except FileNotFoundError as exc:
         return _text(f"файл не найден: {exc}", True)
@@ -159,7 +259,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.0.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.1.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})
