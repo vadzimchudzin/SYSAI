@@ -518,14 +518,20 @@ def view(meeting: Meeting) -> dict:
 
 def link(meeting: Meeting, download: bool = False) -> str | None:
     """Presigned link to the kept copy (None when there is none). Raises storage.StorageError on broken settings."""
-    key = str((meeting.recording or {}).get("key") or "")
-    if not view(meeting).get("playable") or not key.startswith(PREFIX):
+    if not kept(meeting):
         return None
+    key = str((meeting.recording or {}).get("key") or "")
     filename = ""
     if download:
         when = meeting.meeting_date.strftime("%d.%m.%Y") if meeting.meeting_date else ""
         filename = " ".join(part for part in ((meeting.title or "Совещание").strip()[:80], when) if part) + ".mp3"
     return storage.download_url(key, PLAY_SECONDS, filename=filename)
+
+
+def kept(meeting: Meeting) -> bool:
+    """The copy is in the storage and can be read now (nothing is asked from the storage to say so)."""
+    key = str((meeting.recording or {}).get("key") or "")
+    return bool(view(meeting).get("playable")) and key.startswith(PREFIX)
 
 
 def usage() -> dict:

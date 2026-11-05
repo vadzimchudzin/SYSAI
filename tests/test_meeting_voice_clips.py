@@ -9,10 +9,15 @@ import wave
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+import functools
+import http.server
+import threading
+from urllib.parse import unquote
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
-from app import accounts, config, db, main, settings_store, speaker_id
+from app import accounts, audio_archive, config, db, main, settings_store, speaker_id
 from app.db import Employee, EmployeeVoiceSample, EmployeeVoiceprint, Meeting, Recording, SessionLocal, User, now
 
 
@@ -50,9 +55,9 @@ def embedding_result(*args):
     return dict(embedding=[1.0]+[0.0]*191, model_version='real-model-v1', waveform=[], sample_blob_path=None, duration_seconds=8)
 
 
-def valid_sample(eid=1, source='source', content='content', vector=None, model='real-model-v1'):
+def valid_sample(eid=1, source='source', content='content', vector=None, model='real-model-v1', meeting=1):
     return SimpleNamespace(employee_id=eid, id=1, source_kind='meeting_confirmed',
-        source_meeting_id=1, source_start=0, source_end=8, source_audio_sha256=source,
+        source_meeting_id=meeting, source_start=0, source_end=8, source_audio_sha256=source,
         content_sha256=content, embedding_status='ready', encrypted_audio=b'sealed',
         encrypted_embedding=speaker_id.encrypt_voiceprint(json.dumps(vector or ([1.0]+[0.0]*191))),
         embedding_dimensions=192, model_version=model, confirmed_by='1', consent_at=now(),
@@ -216,8 +221,10 @@ def test_concurrent_confirmation_db_unique(client,tmp_path):
 
 
 def test_independence_readiness_validity_ambiguity_and_empty_roster():
-    refs=[valid_sample(source=str(i),content=str(i)) for i in range(3)]
+    refs=[valid_sample(source=str(i),content=str(i),meeting=i+1) for i in range(3)]
     assert speaker_id.independent_sample_count(refs)==3
+    # one meeting is one recording, even when its original and its kept copy (R2) gave different hashes
+    assert speaker_id.independent_sample_count([valid_sample(source=str(i),content=str(i)) for i in range(3)])==1
     result=speaker_id.identification_readiness({1:refs})
     assert result['collection_sufficient'] and not result['identity_validated'] and not result['calibrated']
     assert not speaker_id.identification_readiness({1:refs,2:[]})['ready']
@@ -227,6 +234,75 @@ def test_independence_readiness_validity_ambiguity_and_empty_roster():
     for bad in [dict(consent_at=None),dict(confirmed_by=''),dict(embedding_status='pending'),dict(encrypted_embedding=b'x'),dict(model_version='unknown'),dict(expires_at=now()-dt.timedelta(seconds=1))]:
         r=valid_sample();vars(r).update(bad)
         assert not speaker_id.sample_has_usable_embedding(r)
+
+
+class _Quiet(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def kept_copy(tmp_path):
+    """The meeting's copy in the storage of recordings (R2), served over HTTP as a presigned link would be."""
+    folder = tmp_path / 'bucket'
+    folder.mkdir()
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(_Quiet, directory=str(folder)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield folder, f'http://127.0.0.1:{server.server_address[1]}'
+    server.shutdown()
+    server.server_close()
+
+
+def test_samples_are_cut_from_the_copy_kept_in_r2_once_the_original_is_gone(client, tmp_path, monkeypatch, kept_copy):
+    folder, base = kept_copy
+    eid, mid, original = seed(tmp_path)
+    audio_archive.compress(original, folder / 'kept.mp3', 60)  # what the archive keeps: speech MP3, 16 kHz, 32 kbit/s
+    original.unlink()  # the pipeline deletes the original once the meeting is processed
+    with SessionLocal() as s:
+        m = s.get(Meeting, mid)
+        m.audio_path = ''
+        m.recording_status = 'stored'
+        m.recording = {'key': 'recordings/kept.mp3', 'size': (folder / 'kept.mp3').stat().st_size,
+                       'expires_at': (now() + dt.timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%SZ')}
+        s.commit()
+    monkeypatch.setattr(audio_archive, 'link', lambda meeting, download=False: f'{base}/kept.mp3')
+    monkeypatch.setattr(config, 'voice_service_enabled', lambda: True)
+    monkeypatch.setattr(speaker_id, 'embed_voice_sample', embedding_result)
+    assert 'id="voice-sample-clips"' in client.get(f'/meetings/{mid}?voice_enroll=1').text
+    preview = client.get(f'/meetings/{mid}/speaker-clip?start=0&end=8')
+    assert preview.status_code == 200
+    with wave.open(io.BytesIO(preview.content)) as w:
+        assert w.getnframes() == 8 * 16000
+    assert post(client, eid, mid).status_code == 303
+    row = samples()[0]
+    assert row.embedding_status == 'ready' and row.source_meeting_id == mid
+    assert row.source_audio_sha256 == hashlib.sha256((folder / 'kept.mp3').read_bytes()).hexdigest()
+    with wave.open(io.BytesIO(speaker_id.decrypt_sample_audio(row))) as w:
+        assert w.getnframes() == 8 * 16000
+
+
+def test_no_recording_anywhere_or_a_failed_download_saves_nothing(client, tmp_path, monkeypatch, kept_copy):
+    folder, base = kept_copy
+    eid, mid, original = seed(tmp_path)
+    original.unlink()
+    with SessionLocal() as s:
+        s.get(Meeting, mid).audio_path = ''
+        s.commit()
+    assert 'id="voice-sample-clips"' not in client.get(f'/meetings/{mid}?voice_enroll=1').text
+    preview = client.get(f'/meetings/{mid}/speaker-clip?start=0&end=8')
+    assert preview.status_code == 404 and 'хранилище записей' in preview.text
+    monkeypatch.setattr(audio_archive, 'link', lambda meeting, download=False: f'{base}/gone.mp3')
+    answer = post(client, eid, mid)
+    assert answer.status_code == 303 and samples() == []
+    assert 'R2' in unquote(answer.headers['location'])
+
+
+def test_matching_counts_one_meeting_once():
+    refs = [dict(source_audio_sha256=str(i), source_meeting_id=7) for i in range(3)] + [dict(source_audio_sha256='x', source_meeting_id=8)]
+    assert len(speaker_id._independent(refs)) == 2
+    assert len(speaker_id._independent([dict(source_audio_sha256=str(i)) for i in range(3)])) == 3
+    assert speaker_id._independent([dict(source_audio_sha256='')]) == []
 
 
 def add_user(username='other',role='user'):

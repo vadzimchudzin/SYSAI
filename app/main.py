@@ -3801,6 +3801,53 @@ def _voice_meeting(session, request, mid):
     return meeting
 
 
+VOICE_NO_AUDIO = "Записи этого совещания нет ни на сервере, ни в хранилище записей (R2): образец вырезать не из чего."
+VOICE_DOWNLOAD_LIMIT = 400 * 1024 * 1024  # a kept copy is ~14 MB per hour (audio_archive.py)
+
+
+def _voice_audio_available(meeting) -> bool:
+    """A recording to cut voice samples from: the file on the server or the copy kept in the storage (R2)."""
+    local = str(meeting.audio_path or "")
+    return bool(local and pathlib.Path(local).is_file()) or audio_archive.kept(meeting)
+
+
+def _voice_audio(meeting) -> str:
+    """Where a voice sample is cut from: the file on the server, else the copy kept in the storage (R2) as a presigned
+    link ffmpeg reads (it fetches only the part it needs); "" when there is neither. The original is deleted once the
+    meeting is processed (pipeline._finish_processing), so the kept copy is the usual source."""
+    local = str(meeting.audio_path or "")
+    if local and pathlib.Path(local).is_file():
+        return local
+    try:
+        return audio_archive.link(meeting) or ""
+    except storage.StorageError as exc:
+        log.warning("recording of meeting %s cannot be read from the storage: %s", meeting.id, exc)
+        return ""
+
+
+def _voice_audio_file(source: str, folder: pathlib.Path) -> pathlib.Path | None:
+    """The recording as a file: the one on the server, or the kept copy downloaded into `folder` (None when the
+    download fails). A confirmed sample keeps the hash of the whole recording it was cut from."""
+    if not source.startswith(("https://", "http://")):
+        return pathlib.Path(source)
+    target = folder / "recording.mp3"
+    try:
+        size = 0
+        with httpx.stream("GET", source, timeout=120, follow_redirects=True) as response:
+            response.raise_for_status()
+            with target.open("wb") as out:
+                for block in response.iter_bytes(1 << 20):
+                    size += len(block)
+                    if size > VOICE_DOWNLOAD_LIMIT:
+                        raise ValueError("the kept copy is larger than expected")
+                    out.write(block)
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        log.warning("kept recording could not be downloaded for a voice sample: %s", exc)
+        target.unlink(missing_ok=True)
+        return None
+    return target
+
+
 def _candidate(meeting, start, end, speaker=None):
     start, end = speaker_id._finite(start), speaker_id._finite(end)
     if start is None or end is None or start < 0 or not 5 <= end - start <= 30:
@@ -3819,7 +3866,7 @@ def _meeting_voice_enrollment_context(session, meeting, manual=False):
     readiness = speaker_id.identification_readiness(by_employee)
     if not (debug or manual) or meeting.status in ("queued", "transcribing", "analyzing"):
         return [], debug, readiness
-    if not meeting.audio_path or not pathlib.Path(meeting.audio_path).is_file():
+    if not _voice_audio_available(meeting):
         return [], debug, readiness
     # Stop collecting for sufficiently sampled known people, never hide an unknown
     # just because another subset of employees has enough samples.
@@ -3841,9 +3888,9 @@ def meeting_speaker_clip(request: Request, mid: int, start: float, end: float):
     with SessionLocal() as session:
         meeting = _voice_meeting(session, request, mid)
         clip = _candidate(meeting, start, end)
-        source = meeting.audio_path
-        if not source or not pathlib.Path(source).is_file():
-            raise HTTPException(404, "Аудиозапись недоступна.")
+        source = _voice_audio(meeting)
+        if not source:
+            raise HTTPException(404, VOICE_NO_AUDIO)
     with tempfile.TemporaryDirectory(prefix="sysai_clip_") as tmp:
         target = pathlib.Path(tmp) / "clip.wav"
         if speaker_id.extract_interval(source, target, clip["start"], clip["end"]) is None:
@@ -3865,22 +3912,24 @@ def meeting_confirm_speaker_clip(request: Request, mid: int, speaker: str = Form
         clip = _candidate(meeting, start, end, speaker)
         if consent not in ("yes", "1", "on", "true") or listened != "yes":
             return _meeting_redirect(mid, "Нужно прослушать фрагмент, подтвердить один голос и отдельное согласие сотрудника.")
-        source = pathlib.Path(meeting.audio_path or "")
-        if not meeting.audio_path or not source.is_file():
-            return _meeting_redirect(mid, "Аудиозапись недоступна.")
-        # Lock employee before provider work so a simultaneous revoke wins serially.
-        employee = session.query(Employee).filter_by(id=employee_id, active=True).with_for_update().one_or_none()
-        if employee is None:
-            return _meeting_redirect(mid, "Активный сотрудник не найден.")
-        owners = _meeting_audio_owner(session, meeting)
-        access_owner = owners[0].owner if owners else ""
-        import hashlib
-        source_hash = hashlib.sha256()
-        before = source.stat()
-        with source.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                source_hash.update(block)
+        reference = _voice_audio(meeting)
+        if not reference:
+            return _meeting_redirect(mid, VOICE_NO_AUDIO)
         with tempfile.TemporaryDirectory(prefix="sysai_confirm_clip_") as tmp:
+            source = _voice_audio_file(reference, pathlib.Path(tmp))
+            if source is None or not source.is_file():
+                return _meeting_redirect(mid, "Не удалось скачать запись из хранилища записей (R2). Попробуйте ещё раз.")
+            # Lock employee before provider work so a simultaneous revoke wins serially.
+            employee = session.query(Employee).filter_by(id=employee_id, active=True).with_for_update().one_or_none()
+            if employee is None:
+                return _meeting_redirect(mid, "Активный сотрудник не найден.")
+            owners = _meeting_audio_owner(session, meeting)
+            access_owner = owners[0].owner if owners else ""
+            source_hash = hashlib.sha256()
+            before = source.stat()
+            with source.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    source_hash.update(block)
             target = pathlib.Path(tmp) / "clip.wav"
             extracted = speaker_id.extract_interval(source, target, clip["start"], clip["end"])
             after = source.stat()

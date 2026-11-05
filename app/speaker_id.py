@@ -227,10 +227,26 @@ def enrolled_embeddings() -> list[dict]:
                 "sample_id": row.id,
                 "model_version": row.model_version,
                 "source_audio_sha256": row.source_audio_sha256,
+                "source_meeting_id": row.source_meeting_id,
                 "content_sha256": row.content_sha256,
                 "embedding": embedding,
             })
     return profiles
+
+
+def _independent(refs: list) -> list:
+    """One reference per independent recording. A second sample of the same recording is no new evidence, and neither
+    is one of the same meeting: its original and its copy kept in the storage (R2) have different hashes."""
+    picked, sources, meetings = [], set(), set()
+    for ref in refs:
+        source, meeting = ref.get("source_audio_sha256"), ref.get("source_meeting_id")
+        if not source or source in sources or (meeting is not None and meeting in meetings):
+            continue
+        picked.append(ref)
+        sources.add(source)
+        if meeting is not None:
+            meetings.add(meeting)
+    return picked
 
 
 def _cosine_similarity(first: list[float], second: list[float]) -> float:
@@ -370,12 +386,7 @@ def identify_embedded_segments(
                 continue
             # One representative per independent recording; all rivals remain in
             # ambiguity scoring even before they have enough enrollment evidence.
-            sources = {}
-            for ref in refs:
-                key = ref.get("source_audio_sha256")
-                if key and key not in sources:
-                    sources[key] = ref
-            refs = list(sources.values())
+            refs = _independent(refs)
             if not refs:
                 continue
             similarities = sorted((_cosine_similarity(observed, r["embedding"]) for r in refs), reverse=True)
@@ -396,11 +407,12 @@ def identify_embedded_segments(
     live_by_employee = {}
     for profile in live:
         if profile.get("model_version") == payload.get("model_version"):
-            live_by_employee.setdefault(profile["employee_id"], set()).add(profile.get("source_audio_sha256"))
+            live_by_employee.setdefault(profile["employee_id"], []).append(profile)
     duplicate_ids = {match[0] for match in recognized.values()
                      if sum(other[0] == match[0] for other in recognized.values()) > 1}
     recognized = {speaker: match for speaker, match in recognized.items()
-                  if match[0] not in duplicate_ids and len(live_by_employee.get(match[0], set())) >= READY_INDEPENDENT_SAMPLES}
+                  if match[0] not in duplicate_ids
+                  and len(_independent(live_by_employee.get(match[0], []))) >= READY_INDEPENDENT_SAMPLES}
 
     result = []
     for segment in segments:
@@ -691,16 +703,20 @@ def sample_has_usable_embedding(row):
 
 
 def independent_sample_count(samples):
-    """One distinct PCM clip per independent source recording, never repeated fragments."""
-    hashes, sources = set(), set()
+    """One distinct PCM clip per independent source recording, never repeated fragments; one meeting is one
+    recording, whether its sample was cut from the original or from the copy kept in the storage."""
+    hashes, sources, meetings = set(), set(), set()
     for row in samples:
         if not sample_has_usable_embedding(row):
             continue
         content, source = row.content_sha256, getattr(row, "source_audio_sha256", "")
-        if not source or content in hashes or source in sources:
+        meeting = getattr(row, "source_meeting_id", None)
+        if not source or content in hashes or source in sources or (meeting is not None and meeting in meetings):
             continue
         hashes.add(content)
         sources.add(source)
+        if meeting is not None:
+            meetings.add(meeting)
     return len(sources)
 
 
