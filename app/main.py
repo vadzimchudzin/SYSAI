@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_folders, mail_reply, mail_route, memory, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
+from . import (accounts, agent, agent_checks, agent_skills, assistant, audio_archive, bitrix, bitrix_sync, calendars, cases, dialog_memory, diarization_eval, diarization_runs, diarize, doc_intake, doc_templates, doctext, entities, mail, mail_folders, mail_reply, mail_route, memory, org_tree, transcribe, config, llm, deadlines, meeting_alerts, participants, pipeline, progress,
                progress_board, render, report_archive, settings_store, speaker_hints, speaker_id, tables, voice_memory, voice_relabel, gdrive,
                server_watch, storage, stt_compare, telegram, transcript_edit, userbot, notion, voice, voice_diagram)
 from .analyze import mmss
@@ -4028,15 +4028,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
         from . import access
         access_levels = {employee.id: access.level_of(employee) for employee in employees}
 
-        department_positions = {}
         department_heads = {}
-        for index, department in enumerate(departments):
-            department_positions[department.id] = (
-                max(0, min(20000, round(float(department.map_x)))) if department.map_x is not None
-                else 480 + (index // 5) * 760,
-                max(0, min(20000, round(float(department.map_y)))) if department.map_y is not None
-                else 120 + (index % 5) * 315,
-            )
+        for department in departments:
             department_heads[department.id] = next(
                 (membership for membership in department.memberships
                  if membership.is_primary and membership.employee is not None and membership.employee.active),
@@ -4059,11 +4052,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
                 employee for employee in employees if employee.id not in assigned
             ]
 
-        graph_relations = s.query(OrgRelation).all()
         map_departments = []
-        furthest_right, furthest_bottom = 1400, 1100
         for department in departments:
-            x, y = department_positions[department.id]
             members = [
                 m for m in department.memberships
                 if m.employee is not None and m.employee.active
@@ -4075,41 +4065,21 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
                 "members": members,
                 "head_name": department_heads[department.id].employee.name
                     if department_heads[department.id] else "",
-                "map_x": x, "map_y": y,
             })
-            furthest_right = max(furthest_right, x + 340)
-            furthest_bottom = max(furthest_bottom, y + 190)
+
+        # The designated director heads the tree. This is a picture only: it grants no access.
+        director = next(
+            (e for e in employees
+             if " ".join((e.name or "").split()).casefold() == "корнюшко сергей михайлович"),
+            None,
+        )
 
         # A person is rendered exactly once, regardless of how many departments
-        # they belong to or lead. Legacy membership coordinates are used only as
-        # a one-time fallback until the employee is next moved on the canvas.
+        # they belong to or lead; the tree below decides where the card hangs.
         map_employees = []
         map_edges = []
-        slots_by_department = {}
-        for index, employee in enumerate(employees):
+        for employee in employees:
             memberships = employee_memberships.get(employee.id, [])
-            first_membership = next(
-                (m for m in memberships if m.map_x is not None and m.map_y is not None),
-                None,
-            )
-            anchor = next((m for m in memberships if m.is_primary), memberships[0] if memberships else None)
-            if employee.map_x is not None and employee.map_y is not None:
-                employee_x, employee_y = float(employee.map_x), float(employee.map_y)
-            elif first_membership is not None:
-                employee_x, employee_y = float(first_membership.map_x), float(first_membership.map_y)
-            elif anchor is not None:
-                dept_x, dept_y = department_positions[anchor.department_id]
-                slot = slots_by_department.get(anchor.department_id, 0)
-                slots_by_department[anchor.department_id] = slot + 1
-                employee_x = dept_x + 390 + (slot // 7) * 330
-                employee_y = dept_y + 12 + (slot % 7) * 108
-            else:
-                employee_x = 420 + (index // 8) * 330
-                employee_y = 980 + (index % 8) * 110
-
-            employee_x = max(0, min(20000, round(employee_x)))
-            employee_y = max(0, min(20000, round(employee_y)))
-            position = employee.position or ""
             manager_departments = [
                 m.department.name for m in memberships
                 if m.is_primary and m.department is not None
@@ -4122,18 +4092,16 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
                 for m in memberships if m.department is not None
             ]
             map_employees.append({
-                "id": employee.id, "name": employee.name, "position": position,
+                "id": employee.id, "name": employee.name, "position": employee.position or "",
                 "access_level": access_levels.get(employee.id, "employee"),
-                "is_director": " ".join((employee.name or "").split()).casefold()
-                    == "корнюшко сергей михайлович",
-                "map_x": employee_x, "map_y": employee_y,
+                "is_director": director is not None and employee.id == director.id,
                 "department_summary": ", ".join(department_names),
                 "role_summary": " · ".join(department_roles),
                 "manager_summary": ", ".join(manager_departments),
                 "department_ids": [m.department_id for m in memberships],
+                "also_summary": "",
+                "line_label": "",
             })
-            furthest_right = max(furthest_right, employee_x + 330)
-            furthest_bottom = max(furthest_bottom, employee_y + 150)
 
             for membership in memberships:
                 if membership.is_primary:
@@ -4151,9 +4119,8 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
 
         valid_employee_ids = {e.id for e in employees}
         valid_department_ids = {d.id for d in departments}
-        employee_parent_ids = set()
-        company_linked_employee_ids = set()
-        for relation in graph_relations:
+        tree_relations = []
+        for relation in s.query(OrgRelation).order_by(OrgRelation.id).all():
             if relation.source_type not in {"company", "employee", "department"}:
                 continue
             if relation.target_type not in {"employee", "department"}:
@@ -4166,58 +4133,54 @@ def departments_view(request: Request, edit: int = 0, msg: str = "",
                 continue
             if relation.target_type == "department" and relation.target_id not in valid_department_ids:
                 continue
-            source_key = f"{relation.source_type}:{relation.source_id}"
+            source_key = "company:1" if relation.source_type == "company" else f"{relation.source_type}:{relation.source_id}"
             target_key = f"{relation.target_type}:{relation.target_id}"
             kind = "block" if relation.target_type == "department" else "reporting"
+            # An unnamed link shows its type in words; plain subordination needs no caption.
+            label = relation.label or _ORG_RELATION_TYPE_LABELS.get(relation.relation_type, "")
             map_edges.append({
                 "source": source_key, "target": target_key,
-                "kind": kind, "label": relation.label or relation.relation_type,
-                "relation_id": relation.id,
+                "kind": kind, "label": label, "relation_id": relation.id,
             })
-            if relation.target_type == "employee":
-                employee_parent_ids.add(relation.target_id)
-                if relation.source_type == "company":
-                    company_linked_employee_ids.add(relation.target_id)
+            tree_relations.append({"id": relation.id, "source": source_key, "target": target_key, "label": label})
 
-        # The designated director is the initial root link until the graph is
-        # explicitly configured in the constructor. This does not grant access.
-        director = next(
-            (e for e in employees
-             if " ".join((e.name or "").split()).casefold() == "корнюшко сергей михайлович"),
-            None,
+        map_tree = org_tree.build(
+            [{"id": d.id, "name": d.name} for d in departments],
+            [{"id": e.id, "name": e.name, "memberships": [
+                {"id": m.id, "department_id": m.department_id, "is_primary": bool(m.is_primary), "role": m.role or ""}
+                for m in employee_memberships.get(e.id, [])]} for e in employees],
+            tree_relations,
+            director.id if director is not None else None,
         )
-        if director is not None and director.id not in company_linked_employee_ids:
-            map_edges.append({
-                "source": "company:1", "target": f"employee:{director.id}",
-                "kind": "director", "label": "Директор",
-            })
-            employee_parent_ids.add(director.id)
-
-        # Staff without a department or explicit reporting line remain visible
-        # as direct company reports; no active employee is dropped from the map.
-        for employee in employees:
-            if not employee_memberships.get(employee.id) and employee.id not in employee_parent_ids:
-                map_edges.append({
-                    "source": "company:1", "target": f"employee:{employee.id}",
-                    "kind": "company-member", "label": "Прямое подчинение",
-                })
-
-        map_root_x = max(0, min(20000, round(float(settings_store.get("org_map_root_x") or 85))))
-        map_root_y = max(0, min(20000, round(float(settings_store.get("org_map_root_y") or 735))))
-        map_board_width = max(3200, furthest_right + 520, map_root_x + 750)
-        map_board_height = max(2200, furthest_bottom + 420, map_root_y + 600)
+        department_names = {d.id: d.name for d in departments}
+        line_labels = {
+            node["key"]: node["label"] for node in map_tree["nodes"]
+            if node["kind"] == "reporting" and node.get("relation_id")
+            and node["label"] not in {"", "Подчинение", "Директор"}  # default captions say nothing new
+        }
+        for person in map_employees:
+            person["also_summary"] = ", ".join(
+                department_names[i] for i in map_tree["secondary"].get(person["id"], []) if i in department_names)
+            # The caption of the line a person hangs on («Помощник директора») is shown on the card itself,
+            # unless the position already says it.
+            line_label = line_labels.get(f"employee:{person['id']}", "")
+            person["line_label"] = "" if line_label.casefold() in person["position"].casefold() else line_label
 
     return page(
         request, "departments.html", departments=departments, edit=edit, msg=msg, view=view,
         open_add=open_add, map_departments=map_departments, map_employees=map_employees,
-        map_unassigned=[e for e in map_employees if not e["department_ids"]],
-        map_edges=map_edges, map_board_width=map_board_width, map_board_height=map_board_height,
-        map_root_x=map_root_x, map_root_y=map_root_y, map_member_count=len(map_employees),
+        map_unassigned=[e for e in map_employees if not e["department_ids"] and not e["is_director"]],
+        map_edges=map_edges, map_tree={"nodes": map_tree["nodes"], "cross": map_tree["cross"]},
+        map_free_count=sum(1 for node in map_tree["nodes"] if node["parent"] == org_tree.FREE),
+        map_member_count=len(map_employees),
         available_employees_by_department=available_employees_by_department,
         department_heads=department_heads,
         silence_people=[{"id": e.id, "name": e.name} for e in employees if e.telegram_chat_id],
         silence_defaults=_silence_defaults(),
     )
+
+
+_ORG_RELATION_TYPE_LABELS = {"deputy": "Заместитель", "project_lead": "Курирует направление"}
 
 
 @app.post("/departments/map/position")
@@ -4382,6 +4345,8 @@ async def department_map_relation(request: Request):
             s.add(relation)
         if label:
             relation.label = label
+        elif relation_type in _ORG_RELATION_TYPE_LABELS:
+            relation.label = _ORG_RELATION_TYPE_LABELS[relation_type]
         elif target_type == "department" and source_type == "department":
             relation.label = "Связь отделов"
         elif target_type == "department" and source_type == "company":

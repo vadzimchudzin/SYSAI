@@ -523,7 +523,9 @@ def test_department_map_marks_reviewers_red_and_director_with_crown(client, monk
     assert "is-director" in response.text and "director-crown" in response.text
 
 
-def test_department_map_free_canvas_persists_employee_and_department_positions(client):
+def test_department_map_saves_positions_but_lays_out_a_tree(client):
+    import json
+    import re
     with SessionLocal() as session:
         department = Department(name="Свободная доска — отдел")
         employee = Employee(name="Сотрудник свободной доски")
@@ -552,9 +554,14 @@ def test_department_map_free_canvas_persists_employee_and_department_positions(c
 
     page = client.get("/departments?view=map")
     assert page.status_code == 200
-    assert 'left:1430px;top:870px' in page.text
-    assert 'left:1890px;top:1120px' in page.text
+    # The map is laid out as a tree by itself: saved coordinates no longer pin the cards.
+    assert 'left:1430px;top:870px' not in page.text
+    assert 'left:1890px;top:1120px' not in page.text
     assert page.text.count('data-node-key="employee:%s"' % employee_id) == 1
+    raw = re.search(r'<script type="application/json" id="org-map-tree">(.*?)</script>', page.text, re.S).group(1)
+    nodes = {node["key"]: node for node in json.loads(raw)["nodes"]}
+    assert nodes["employee:%s" % employee_id]["parent"] == "department:%s" % department_id
+    assert nodes["employee:%s" % employee_id]["label"] == "Инженер"
 
 
 def test_department_map_keeps_existing_department_membership_when_assigning_to_another(client):
@@ -627,7 +634,9 @@ def test_department_map_opens_fullscreen_and_supports_background_pan(client):
     assert 'class="card department-create"' not in response.text
 
 
-def test_department_map_company_root_can_be_moved_and_remembers_position(client):
+def test_department_map_company_root_position_is_saved_and_root_tops_the_tree(client):
+    import json
+    import re
     from app import settings_store
     with SessionLocal() as session:
         session.add(Department(name="Подразделение для перемещаемого корня"))
@@ -642,9 +651,12 @@ def test_department_map_company_root_can_be_moved_and_remembers_position(client)
 
     page = client.get("/departments?view=map")
     assert page.status_code == 200
-    assert 'left:4300px;top:2700px' in page.text
     assert 'data-node-kind="company"' in page.text
-    assert 'width:5050px' in page.text and 'height:3300px' in page.text
+    assert 'left:4300px;top:2700px' not in page.text and 'width:5050px' not in page.text
+    raw = re.search(r'<script type="application/json" id="org-map-tree">(.*?)</script>', page.text, re.S).group(1)
+    nodes = json.loads(raw)["nodes"]
+    assert nodes[0] == {"key": "company:1", "parent": None, "kind": "company", "label": ""}
+    assert all(node["parent"] for node in nodes[1:])
 
 
 def test_department_map_payload_describes_people_and_department_accents(client):
@@ -672,3 +684,31 @@ def test_department_map_payload_describes_people_and_department_accents(client):
     assert person["position"] == "Начальник" and person["editable"] in (True, False)
     assert len(payload["accents"]) >= 6
     assert f'data-node-key="employee:{head_id}"' in page.text and 'data-head="1"' in page.text
+
+
+def test_department_map_card_shows_caption_of_its_line(client):
+    with SessionLocal() as session:
+        boss = Employee(name="Подпись линии — руководитель")
+        helper = Employee(name="Подпись линии — помощник", position="Секретарь")
+        deputy = Employee(name="Подпись линии — заместитель", position="Заместитель руководителя")
+        session.add_all([boss, helper, deputy])
+        session.commit()
+        boss_id, helper_id, deputy_id = boss.id, helper.id, deputy.id
+
+    for target_id, relation_type, label in ((helper_id, "project_lead", ""), (deputy_id, "deputy", "")):
+        response = client.post("/departments/map/relation", json={
+            "source_type": "employee", "source_id": boss_id, "target_id": target_id,
+            "relation_type": relation_type, "label": label,
+        })
+        assert response.status_code == 200
+    with SessionLocal() as session:
+        labels = {r.target_id: r.label for r in session.query(OrgRelation).filter_by(source_id=boss_id)}
+    # An unnamed line takes the words of its type instead of a generic «Подчинение».
+    assert labels == {helper_id: "Курирует направление", deputy_id: "Заместитель"}
+
+    page = client.get("/departments?view=map")
+    assert page.status_code == 200
+    assert '<small class="org-map-line-label">Курирует направление</small>' in page.text
+    # The position already says it, so the caption is not repeated on the card.
+    assert '<small class="org-map-line-label">Заместитель</small>' not in page.text
+    assert '"label": "deputy"' not in page.text and '"label": "project_lead"' not in page.text

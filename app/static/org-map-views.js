@@ -26,7 +26,7 @@ window.SysaiOrgMapViews = function (ctx) {
     const relRows = rels.map(r => {
       const other = r.source === `employee:${emp.id}` ? r.target : r.source;
       const dir = r.source === `employee:${emp.id}` ? '→' : '←';
-      return `<div class="org-insp-row"><span class="dot" style="--accent:#d9b98a"></span><div class="main"><b>${dir} ${esc(nodeTitle(nodeByKey.get(other)))}</b><small>${esc(r.label || 'Связь')}</small></div>
+      return `<div class="org-insp-row"><span class="dot" style="--accent:#d9b98a"></span><div class="main"><b>${dir} ${esc(nodeTitle(nodeByKey.get(other)))}</b><small>${esc(r.label || (String(r.target).startsWith('department:') ? 'Связь отделов' : 'Подчинение'))}</small></div>
         <button type="button" class="org-icon-btn is-danger" data-del-rel="${r.id}" title="Удалить связь">${ICON_X}</button></div>`;
     }).join('');
     return `<header class="org-insp-head">
@@ -107,7 +107,8 @@ window.SysaiOrgMapViews = function (ctx) {
   }
   function companyHtml() {
     const heads = data.employees.filter(e => e.memberships.some(m => m.is_primary)).length;
-    const free = data.employees.filter(e => !e.memberships.length);
+    // The director needs no department: he is not «без подразделения».
+    const free = data.employees.filter(e => !e.memberships.length && !nodeByKey.get(`employee:${e.id}`)?.classList.contains('is-director'));
     return `<header class="org-insp-head">
         <button type="button" class="org-insp-close" aria-label="Закрыть">×</button>
         <div class="org-insp-id"><span class="org-insp-swatch" style="--accent:#d98e8a"></span>
