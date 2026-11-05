@@ -114,6 +114,21 @@ TOOLS = [
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
+        "name": "cmtp_scene",
+        "title": "Как выглядит окно",
+        "description": "Окно так, как его покажет панель: размер и цвет фона; у каждого объекта по порядку рисования — "
+                       "рамка bbox, заливка и цвет рамки у фигур и текстов, подписи по состояниям (текст, шрифт, размер "
+                       "в пунктах, x, y, цвет, выравнивание), картинки состояний из библиотеки проекта (picture: GUID "
+                       "файла и прозрачный цвет) или shape — фигура из библиотеки EasyBuilder, которой нет в проекте. "
+                       "images_dir — выложить туда картинки окна (BMP с прозрачным цветом — в PNG с прозрачностью); "
+                       "images — какой файл у какой картинки. window — имя окна или номер.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+                        "window": {"type": "string", "description": "Имя окна (точно) или номер"},
+                        "images_dir": {"type": "string", "description": "Папка для картинок окна (в разрешённой на запись)"}},
+                        "required": ["path", "window"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    },
+    {
         "name": "cmtp_edit",
         "title": "Править окна",
         "description": "Правки готовых окон по списку и сборка нового файла проекта (исходник не меняется). "
@@ -149,6 +164,21 @@ INSTRUCTIONS = ("Инструменты для проектов EasyBuilder Pro 
                 "(тексты любой длины, сдвиг, перепривязка тегов, имя окна) в новый файл. Доступы к папкам даёт SYSAI.")
 
 
+_CACHE = {}   # path -> (mtime_ns, size, Project): reading tools on an unchanged file do not decrypt it again
+
+
+def _load(path):
+    st = os.stat(path)
+    key = os.path.abspath(path)
+    got = _CACHE.get(key)
+    if got and got[0] == st.st_mtime_ns and got[1] == st.st_size:
+        return got[2]
+    p = Project.load(path)
+    _CACHE.clear()
+    _CACHE[key] = (st.st_mtime_ns, st.st_size, p)
+    return p
+
+
 def _text(s, is_error=False):
     r = {"content": [{"type": "text", "text": s}]}
     if is_error:
@@ -159,13 +189,13 @@ def _text(s, is_error=False):
 def _call(name, args):
     try:
         if name == "cmtp_info":
-            p = Project.load(args["path"])
+            p = _load(args["path"])
             return _text(json.dumps({"path": args["path"], "version": p.version, "revision": p.revision,
                 "revision_min": p.revision_min, "encrypted": p.encrypted, "payload_bytes": len(p.payload),
                 "images": sum(1 for _ in p.images()), "windows": len(p.windows()),
                 "opcua_tags": len(p.opcua_tags())}, ensure_ascii=False))
         if name == "cmtp_labels":
-            p = Project.load(args["path"])
+            p = _load(args["path"])
             flt = (args.get("filter") or "").lower()
             rows = [{"offset": o, "text": s} for o, s in p.labels() if not flt or flt in s.lower()]
             return _text(json.dumps({"count": len(rows), "labels": rows[:2000]}, ensure_ascii=False))
@@ -198,55 +228,67 @@ def _call(name, args):
             p.save(args["out_file"])
             return _text(f"Заменено {args['old']!r} → {args['new']!r} → {args['out_file']}")
         if name == "cmtp_windows":
-            p = Project.load(args["path"])
+            p = _load(args["path"])
             flt = (args.get("filter") or "").lower()
             rows = [{"number": w["number"], "name": w["name"], "width": w["width"], "height": w["height"],
                      "objects": len(w["objects"])} for w in p.windows() if not flt or flt in w["name"].lower()]
             return _text(json.dumps({"count": len(rows), "windows": rows}, ensure_ascii=False))
         if name == "cmtp_objects":
-            p = Project.load(args["path"])
+            p = _load(args["path"])
             w = p.window(args["window"])
             kind = args.get("kind")
             objs = [public(o) for o in w["objects"] if not kind or o["kind"] == kind]
             head = dict(public(w), objects=len(w["objects"]))
             return _text(json.dumps({"window": head, "objects": objs}, ensure_ascii=False))
         if name == "cmtp_tags":
-            p = Project.load(args["path"])
+            p = _load(args["path"])
             flt = (args.get("filter") or "").lower()
             rows = [t for t in p.opcua_tags() if not flt or flt in t["name"].lower()]
             return _text(json.dumps({"count": len(rows), "tags": rows[:5000]}, ensure_ascii=False))
+        if name == "cmtp_scene":
+            p = _load(args["path"])
+            return _text(json.dumps(p.scene(args["window"], args.get("images_dir") or None), ensure_ascii=False))
         if name == "cmtp_edit":
             p = Project.load(args["path"])
-            done = []
+            done, results = [], []
             for n, e in enumerate(args.get("edits") or [], 1):
                 op, win = e.get("op"), e.get("window")
                 try:
+                    num = p.window(win)["number"] if op != "clone_window" else None
+                    res = {"op": op, "window": num}
                     if op == "text":
                         k = p.edit_text(win, str(e["old"]), str(e["new"]), e.get("object"))
                         done.append(f"{n}. текст {e['old']!r} → {e['new']!r}: {k} шт.")
+                        res.update(object=e.get("object"), count=k)
                     elif op == "move":
                         bb = p.move_object(win, int(e["object"]), int(e.get("dx") or 0), int(e.get("dy") or 0))
                         done.append(f"{n}. объект #{e['object']} сдвинут, рамка {bb}")
+                        res.update(object=int(e["object"]), bbox=bb)
                     elif op == "tag":
                         k = p.retag(win, str(e["old"]), str(e["new"]), e.get("object"))
                         done.append(f"{n}. тег {e['old']} → {e['new']}: {k} адрес(ов)")
+                        res.update(object=e.get("object"), count=k)
                     elif op == "rename_window":
                         p.rename_window(win, str(e["new"]))
                         done.append(f"{n}. окно {win!r} → {e['new']!r}")
                     elif op == "clone_window":
                         num = p.clone_window(win, e.get("new"), e.get("number"))
                         done.append(f"{n}. окно {win!r} скопировано → {num} : {p.window(num)['name']}")
+                        res.update(window=num)
                     elif op == "clone_object":
                         k = p.clone_object(win, int(e["object"]), e.get("to"), int(e.get("dx") or 0), int(e.get("dy") or 0))
                         done.append(f"{n}. объект #{e['object']} скопирован → #{k} в окне {e.get('to') or win!r}")
+                        res.update(window=p.window(e["to"])["number"] if e.get("to") else num, object=k)
                     else:
                         return _text(f"правка {n}: нет такого op: {op!r}", True)
+                    results.append(res)
                 except KeyError as exc:
                     return _text(f"правка {n} ({op}): не хватает поля {exc}; файл не записан", True)
                 except ValueError as exc:
                     return _text(f"правка {n} ({op}): {exc}; файл не записан", True)
             p.save(args["out_file"])
-            return _text("\n".join(done + [f"Записано → {args['out_file']}"]))
+            return dict(_text("\n".join(done + [f"Записано → {args['out_file']}"])),
+                        structuredContent={"results": results, "out_file": args["out_file"]})
         return _text(f"нет такого инструмента: {name}", True)
     except FileNotFoundError as exc:
         return _text(f"файл не найден: {exc}", True)
@@ -272,7 +314,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.2.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.3.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})

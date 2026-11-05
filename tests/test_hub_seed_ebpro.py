@@ -19,7 +19,7 @@ sys.path.insert(0, str(SEED))
 import ebpcmtp  # noqa: E402
 
 TOOLS = ["cmtp_info", "cmtp_labels", "cmtp_extract_images", "cmtp_unpack", "cmtp_pack", "cmtp_relabel",
-         "cmtp_windows", "cmtp_objects", "cmtp_tags", "cmtp_edit"]
+         "cmtp_windows", "cmtp_objects", "cmtp_tags", "cmtp_scene", "cmtp_edit"]
 
 
 def _png() -> bytes:
@@ -91,8 +91,8 @@ def _part(typ, bbox, first=False, devices=("Local HMI",) * 3, atypes=b"\x08\x08\
     return rec + b"\x02" * 8
 
 
-def _draw(tag, shape, bbox):
-    return tag + bytes([shape]) + b"\x00\x00\x00\x00\x01" + bytes(21) + b"\x2f\xc8\x37\xf0" + struct.pack("<IIII", *bbox) + b"\x00\xff\xff\xff\x00" + bytes(8)
+def _draw(tag, shape, bbox, attrs=b"\x00\xff\xff\xff\x00"):
+    return tag + bytes([shape]) + b"\x00\x00\x00\x00\x01" + bytes(21) + b"\x2f\xc8\x37\xf0" + struct.pack("<IIII", *bbox) + attrs + bytes(8)
 
 
 def _window(name, w, h, layer, objs):
@@ -207,6 +207,84 @@ def test_clone_window_and_objects():
         r.clone_object("Главное", 1, dy=-500)        # would leave the window
 
 
+# -- how a window looks: the picture library, the picture objects of the widgets, colours -----------------------------
+IMG, IMG2, PIC = bytes(range(16, 32)), bytes(range(32, 48)), bytes(range(48, 64))
+SHAPE = bytes.fromhex("51546f194dad57e29f1ab6efb338d5ee")   # a shape of EasyBuilder's own library (a UUID v5)
+
+
+def _bmp(rgb=(0, 210, 255)):
+    """2x2, 24 bits, bottom-up: the bottom left pixel white, the rest of the colour."""
+    c = bytes(rgb[::-1])
+    pix = b"\xff\xff\xff" + c + bytes(2) + c + c + bytes(2)
+    return (b"BM" + struct.pack("<IHHI", 54 + len(pix), 0, 0, 54)
+            + struct.pack("<IiiHHIIiiII", 40, 2, 2, 1, 24, 0, len(pix), 2835, 2835, 0, 0) + pix)
+
+
+def _attrs(fill_on, fill, frame, width):
+    return bytes([fill_on]) + bytes(fill) + b"\x00" + bytes(frame) + b"\x00" + bytes(35) + bytes([width])
+
+
+def _wid(typ, bbox, attrs, labels=(), pic=b"", first=False):
+    rec = (PART_DEF if first else b"\x01\x80") + bytes([typ]) + _cs("") + b"\x00\x04\x00\x00\x01" + bytes(7)
+    rec += b"".join(_cs(d) for d in ("Local HMI",) * 3) + bytes(20) + b"\x08\x08\x00" + b"".join(_cs(a) for a in ("0",) * 3)
+    rec += b"\x02\x02\x02\x01" * 6 + bytes(4) + struct.pack("<IIII", *bbox) + attrs
+    for text, font, size, x, y, rgb, align in labels:
+        rec += _cs(text) + _cs(font) + bytes([size]) + struct.pack("<II", x, y) + bytes(rgb) + b"\x00" + bytes([align, 0, 0])
+    return rec + pic + b"\x02" * 8
+
+
+def _look_payload() -> bytes:
+    png, bmp = _png(), _bmp()
+    lib = (struct.pack("<I", 2) + b"\xff" + IMG + struct.pack("<I", len(png)) + png
+           + b"\xff" + IMG2 + struct.pack("<I", len(bmp)) + bmp)
+    groups = (b"\x04\x00\x00\x00" + PIC + b"\x01\x04\x01\x00\x00\x00" + struct.pack("<I", 2)
+              + b"\x02\x04\x01\x00\x01\x00" + IMG + struct.pack("<II", 0, 0) + b"\xff\xff\xff\x00"
+              + b"\x02\x04\x01\x00\x01\x00" + IMG2 + struct.pack("<II", 1, 0) + bytes((0, 210, 255, 0)))
+    plain = _attrs(0, (240, 240, 240), (240, 240, 240), 1)
+    win = _window("Экран", 800, 480, "Слой 1", [
+        _wid(0x2D, (0, 0, 799, 479), _attrs(0, (0, 128, 192), (192, 192, 192), 1), first=True),
+        _draw(DRAW_DEF, 4, (10, 10, 300, 60), _attrs(1, (0, 84, 128), (255, 255, 255), 2)),
+        _wid(0x15, (20, 15, 120, 50), plain, [("Нория 3", "Droid Sans Fallback", 20, 20, 15, (255, 255, 255), 0)]),
+        _wid(0x17, (400, 100, 460, 160), plain, [("", "Arial", 12, 400, 100, (0, 0, 0), 1)] * 2, pic=PIC),
+        _wid(0x1B, (500, 100, 580, 140), plain, [("Пуск", "Arial", 12, 510, 110, (0, 0, 0), 1)], pic=SHAPE),
+    ])
+    # the settings after the window: class 8 = 1 + 2 classes + 5 objects
+    settings = b"\xff\xff\x01\x00\x0a\x00CTagObject" + bytes(12) + (b"\x08\x80" + bytes(14)) * 3
+    body = b"\x00" * 8 + lib + groups + bytes(16) + win + bytes(2000) + _tag("GVL.A", "BOOL") + settings
+    return body + b"\x00" * ((-len(body)) % 16)
+
+
+def _look_project() -> bytes:
+    return ebpcmtp.Project(378, "6.10.02.300", True, _look_payload()).dump()
+
+
+def test_scene_pictures_and_colours(tmp_path):
+    from PIL import Image
+    p = ebpcmtp.Project.load(_look_project())
+    assert {g: v["format"] for g, v in p.pictures().items()} == {IMG.hex(): "png", IMG2.hex(): "bmp"}
+    sc = p.scene("Экран", tmp_path / "img")
+    assert sc["window"] == {"number": 0, "name": "Экран", "width": 800, "height": 480, "background": "#0080c0"}
+    win, rect, text, lamp, sw = sc["objects"]
+    assert [o["kind"] for o in sc["objects"]] == ["Window", "Rect", "Text", "BitLamp", "ToggleSwitch"]
+    assert (rect["fill"], rect["frame"], rect["frame_width"], rect["bbox"]) == ("#005480", "#ffffff", 2, [10, 10, 300, 60])
+    assert text["fill"] is None and text["labels"] == [{"text": "Нория 3", "font": "Droid Sans Fallback", "size": 20,
+                                                        "x": 20, "y": 15, "color": "#ffffff", "align": "left"}]
+    assert [(s["image"], s["transparent"]) for s in lamp["picture"]] == [(IMG.hex(), None), (IMG2.hex(), "#00d2ff")]
+    assert len(lamp["labels"]) == 2 and lamp["labels"][0]["align"] == "center"
+    assert sw["shape"] == SHAPE.hex() and "picture" not in sw and sw["labels"][0]["text"] == "Пуск"
+    files = sc["images"]
+    assert set(files) == {IMG.hex(), IMG2.hex() + "-00d2ff"} == {s["key"] for s in lamp["picture"]}
+    assert open(files[IMG.hex()], "rb").read() == _png()
+    im = Image.open(files[IMG2.hex() + "-00d2ff"])          # the bitmap with its transparent colour -> PNG with alpha
+    assert im.mode == "RGBA" and im.getpixel((0, 1)) == (255, 255, 255, 255)
+    assert im.getpixel((1, 1))[3] == im.getpixel((0, 0))[3] == 0
+    data, kind = p.picture(IMG2.hex())
+    assert kind == "png" and Image.open(io.BytesIO(data)).getpixel((1, 1)) == (0, 210, 255, 255)
+    with pytest.raises(ValueError):
+        p.picture("00" * 16)
+    assert p.scene("Экран")["images"] == {}                # nothing written without images_dir
+
+
 def test_mcp_server_over_stdio(tmp_path):
     src = tmp_path / "topol.emtp"
     src.write_bytes(_project())
@@ -266,6 +344,20 @@ def test_mcp_server_over_stdio(tmp_path):
             {"op": "text", "window": "Главное", "old": "Нория 1", "new": "x"},
             {"op": "tag", "window": "Главное", "old": "GVL.A", "new": "GVL.N"}])
         assert err and "правка 2" in text and not (tmp_path / "bad.cmtp").exists()
+        look = tmp_path / "look.cmtp"
+        look.write_bytes(_look_project())
+        err, text = call(17, "cmtp_scene", path=str(look), window="0", images_dir=str(tmp_path / "li"))
+        sc = json.loads(text)
+        assert not err and sc["window"]["background"] == "#0080c0" and len(sc["images"]) == 2
+        res = rpc(18, "tools/call", {"name": "cmtp_edit", "arguments": {"path": str(look), "out_file": str(look), "edits": [
+            {"op": "move", "window": "Экран", "object": 2, "dx": 5, "dy": 0},
+            {"op": "clone_object", "window": "Экран", "object": 2, "dy": 100}]}})["result"]
+        assert not res.get("isError"), res
+        assert res["structuredContent"]["results"] == [{"op": "move", "window": 0, "object": 2, "bbox": [25, 15, 125, 50]},
+                                                       {"op": "clone_object", "window": 0, "object": 5}]
+        err, text = call(19, "cmtp_scene", path=str(look), window="Экран")      # the same file, edited in place
+        assert [o["bbox"] for o in json.loads(text)["objects"][2::3]] == [[25, 15, 125, 50], [25, 115, 125, 150]]
+        assert not list(tmp_path.glob("*.sysai-tmp"))
     finally:
         proc.stdin.close()
         proc.wait(timeout=10)

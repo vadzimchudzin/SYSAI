@@ -1,11 +1,11 @@
 ---
 name: ebpro-cmtp
 kind: mcp
-description: Читает и правит проекты Weintek EasyBuilder Pro (.cmtp/.emtp) — окна и объекты (виды, рамки, подписи, теги), таблица тегов OPC UA, картинки; правки в новый файл (тексты любой длины, сдвиг, перепривязка тегов, имена окон, копии окон и объектов), расшифровка и сборка.
-version: 1.2.0
+description: Читает и правит проекты Weintek EasyBuilder Pro (.cmtp/.emtp) — окна и объекты (виды, рамки, подписи, теги), как окно выглядит на панели (цвета, картинки состояний), таблица тегов OPC UA, картинки; правки в новый файл (тексты любой длины, сдвиг, перепривязка тегов, имена окон, копии окон и объектов), расшифровка и сборка.
+version: 1.3.0
 run: python server.py
 platform: any
-tools: cmtp_info, cmtp_labels, cmtp_extract_images, cmtp_unpack, cmtp_pack, cmtp_relabel, cmtp_windows, cmtp_objects, cmtp_tags, cmtp_edit
+tools: cmtp_info, cmtp_labels, cmtp_extract_images, cmtp_unpack, cmtp_pack, cmtp_relabel, cmtp_windows, cmtp_objects, cmtp_tags, cmtp_scene, cmtp_edit
 requires: python>=3.11
 ---
 # EasyBuilder Pro: проекты .cmtp / .emtp
@@ -33,7 +33,8 @@ requires: python>=3.11
 Синхронизатор ставит папку в `%SYSAI_HOME%\tools\ebpro-cmtp` и запускает `python server.py` на своём Python
 (нужна только cryptography — она у синхронизатора уже есть, ничего не скачивается). Доступ к папкам проверяет SYSAI.
 
-Разбор примера: `cmtp_info` → `cmtp_windows` → `cmtp_objects` (по окну) → `cmtp_tags`; картинки — `cmtp_extract_images`.
+Разбор примера: `cmtp_info` → `cmtp_windows` → `cmtp_objects` (по окну) → `cmtp_tags`; картинки — `cmtp_extract_images`;
+как окно выглядит на панели — `cmtp_scene` (по нему окно «Агент SYSAI» рисует холст).
 Сборка по образцу: `cmtp_edit` со списком правок → новый файл; исходник не меняется. Номера окон — из `cmtp_windows`
 (`number`), номера объектов — из `cmtp_objects` (`index`); после копий смотри их заново.
 
@@ -47,9 +48,24 @@ requires: python>=3.11
 - `addresses` — адреса: slot 1 — чтение, 2 — запись, 3 — доп. (видимость и т. п.), 0 — прочие адреса внутри объекта;
   у тегов OPC UA — `tag` (имя) и `node`. Пустые и «0» не показываются.
 
+## Как выглядит окно (cmtp_scene)
+
+- `window` — номер, имя, размер и `background` (цвет фона окна); `objects` — по порядку рисования (как в EasyBuilder:
+  ниже по списку — поверх).
+- У фигур и текстов: `fill` (цвет заливки, `null` — без заливки), `frame` и `frame_width` (рамка); у линии `bbox` —
+  её концы [x1, y1, x2, y2].
+- `labels` — подписи по состояниям (0, 1, …): текст, шрифт, `size` в пунктах (в пикселях ×4/3), x, y — левый верхний
+  угол текста, `color`, `align`.
+- `picture` — картинки состояний из библиотеки проекта: `image` (GUID файла), `transparent` (прозрачный цвет BMP),
+  `key` — имя файла в `images_dir`; `shape` — GUID фигуры из библиотеки самого EasyBuilder: её в проекте нет,
+  нарисовать её точно может только EasyBuilder.
+- Разобрано по проекту cMT 6.10: цвета (R G B), прозрачность BMP, размеры шрифтов сверены по рамкам 321 текста.
+
 ## Правки (cmtp_edit)
 
-`edits` — список, выполняется по порядку; если одна правка не прошла — файл не пишется.
+`edits` — список, выполняется по порядку; если одна правка не прошла — файл не пишется. `out_file` может быть тем
+же файлом (так правит холст окна «Агент SYSAI»): файл пишется целиком через временный рядом и подменяется разом.
+В ответе, кроме текста, — `structuredContent.results`: по правке окно, объект (у копии — её новый index), рамка.
 
 - `{"op": "text", "window": "Нория 3", "old": "Нория 3", "new": "Нория 11"}` — любой длины; если новый текст
   длиннее, рамка объекта «Текст» расширяется вправо по ширине символов (сужения нет). `object` — только в этом объекте.

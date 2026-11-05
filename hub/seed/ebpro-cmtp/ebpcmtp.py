@@ -43,9 +43,11 @@ from __future__ import annotations
 import bisect
 import collections
 import math
+import os
 import re
 import struct
 import uuid
+import zlib
 from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -127,7 +129,16 @@ class Project:
         return bytes(out)
 
     def save(self, path) -> None:
-        open(path, 'wb').write(self.dump())
+        """Written whole or not at all: a temporary file next to it, then put in its place."""
+        path = os.fspath(path)
+        tmp = f'{path}.sysai-tmp'
+        with open(tmp, 'wb') as f:
+            f.write(self.dump())
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            os.remove(tmp)
+            raise
 
     # -- content helpers ------------------------------------------------------
     def labels(self):
@@ -175,6 +186,69 @@ class Project:
                         i += ln
                         continue
                 i += 1
+
+    # -- the look of a window: to draw it as the panel shows it -----------------
+    def _library(self):
+        cache = getattr(self, '_lib_cache', None)
+        if cache is None or cache[0] is not self.payload:
+            lib, end = picture_library(self.payload)
+            ws = self.windows()
+            stop = ws[0]['offset'] if ws and ws[0]['offset'] > end else len(self.payload)
+            cache = (self.payload, lib, picture_groups(self.payload, lib, end, stop) if lib else {})
+            self._lib_cache = cache
+        return cache[1], cache[2]
+
+    def pictures(self) -> dict:
+        """The picture library: {GUID hex: {offset, length, format}}."""
+        lib, _ = self._library()
+        return {g.hex(): {'offset': o, 'length': n, 'format': picture_format(self.payload[o:o + 4])}
+                for g, (o, n) in lib.items()}
+
+    def picture(self, guid: str, transparent: str = None):
+        """(bytes, format) of a library picture; a bitmap with a transparent colour comes as PNG with alpha."""
+        lib, _ = self._library()
+        try:
+            o, n = lib[bytes.fromhex(guid)]
+        except (KeyError, ValueError):
+            raise ValueError(f'no picture {guid} in the project') from None
+        data = self.payload[o:o + n]
+        kind = picture_format(data)
+        if kind == 'bmp':
+            try:
+                return bmp_png(data, transparent), 'png'
+            except (ValueError, IndexError, struct.error):
+                return data, kind
+        return data, kind
+
+    def scene(self, window, images_dir=None) -> dict:
+        """How the window looks on the panel: size and background colour; per object (in drawing order) its
+        frame, the colours of a shape (fill — None when not filled, frame, frame width), its labels state by
+        state (text, font, size in points, x, y, colour, alignment), the pictures of its states (library
+        files, transparent colour) or `shape` — an EasyBuilder library shape the project does not keep.
+        images_dir: the window's pictures are written there (<GUID>[-<colour>].<ext>), `images` maps them."""
+        w = self.window(window)
+        _, groups = self._library()
+        objs = [_look(self.payload, o, w, groups) for o in w['objects']]
+        bg = next((o.get('fill') for o in objs if o['kind'] == 'Window' and o.get('fill')), None)
+        out = {'window': {'number': w['number'], 'name': w['name'], 'width': w['width'], 'height': w['height'],
+                          'background': bg}, 'objects': objs, 'images': {}}
+        for o in objs:
+            for st in o.get('picture') or ():
+                st['key'] = st['image'] + ('-' + st['transparent'][1:] if st['transparent'] else '')
+        if images_dir is not None:
+            os.makedirs(images_dir, exist_ok=True)
+            for o in objs:
+                for st in o.get('picture') or ():
+                    key = st['key']
+                    if key in out['images']:
+                        continue
+                    data, kind = self.picture(st['image'], st['transparent'])
+                    path = os.path.join(images_dir, f'{key}.{kind}')
+                    if not os.path.exists(path) or os.path.getsize(path) != len(data):
+                        with open(path, 'wb') as f:
+                            f.write(data)
+                    out['images'][key] = path
+        return out
 
     # -- windows and objects (EasyBuilder Pro 6.10 inner blob) ------------------
     def windows(self) -> list:
@@ -574,7 +648,8 @@ def _address(slot, device, atype, address):
 
 def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
     obj = {'index': index, 'kind': None, 'type': typ, 'bbox': None, 'labels': [], 'texts': [], 'addresses': [],
-           'offset': o, 'length': end - o, '_bbox_at': None, '_texts': [], '_addr': [], '_label_pos': []}
+           'offset': o, 'length': end - o, '_bbox_at': None, '_texts': [], '_addr': [], '_label_pos': [],
+           '_lab': []}
     if cls == 'D':
         obj['kind'] = DRAW_KINDS.get(typ, f'draw_{typ}')
         at = o + hl + 31
@@ -606,6 +681,7 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
             if 1 <= size and x <= 8000 and y <= 8000:
                 obj['_texts'].append((s, e, t))
                 obj['_label_pos'].append((nxt[1] + 1, x, y))
+                obj['_lab'].append((t, nxt[2], size))
                 if t:
                     obj['labels'].append({'text': t, 'font': nxt[2], 'size': size, 'x': x, 'y': y})
                 i += 2
@@ -759,6 +835,145 @@ def _image_spans(pay: bytes) -> list:
             else:
                 i = pay.find(sig, i + 1)
     return sorted(spans)
+
+
+# The picture library (before the windows): u32 count, then per picture FF, its GUID, u32 length and the file
+# (PNG, BMP, JPEG). After it the picture objects the widgets point to, by GUID: 01 04 01 00 00 00, u32 count of
+# states, per state 02 04 01 00 [01 00], the GUID of its file, u32 «transparent colour on», u32 0, the colour.
+# A widget names its picture object (or an EasyBuilder shape, not kept in the project) 15 bytes after the
+# x of its last label; labels: text, font, size (pt), u32 x, u32 y, colour (R G B 0), alignment.
+_PIC_START = re.compile(rb'\xff[\x00-\xff]{20}(?:\x89PNG|BM|\xff\xd8\xff|GIF8)')
+_PIC_GROUP = re.compile(rb'([\x00-\xff]{16})\x01\x04\x01\x00\x00\x00([\x00-\xff]{4})')
+_PIC_STATE = b'\x02\x04\x01\x00'
+
+
+def picture_library(pay: bytes):
+    """({GUID: (offset, length)}, end) of the project's picture library ({}, 0 — none found)."""
+    for m in _PIC_START.finditer(pay):
+        s = m.start()
+        n = struct.unpack_from('<I', pay, s - 4)[0] if s >= 4 else 0
+        if not 0 < n <= 100000:
+            continue
+        out, at = {}, s
+        for _ in range(n):
+            if at + 21 > len(pay) or pay[at] != 0xff:
+                break
+            ln = struct.unpack_from('<I', pay, at + 17)[0]
+            if at + 21 + ln > len(pay):
+                break
+            out[bytes(pay[at + 1:at + 17])] = (at + 21, ln)
+            at += 21 + ln
+        else:
+            return out, at
+    return {}, 0
+
+
+def picture_groups(pay: bytes, lib: dict, start: int, stop: int) -> dict:
+    """{GUID of a picture object: [(GUID of the file, transparent colour '#rrggbb' or None) per state]}."""
+    out = {}
+    for m in _PIC_GROUP.finditer(pay, start, stop):
+        at, n, states = m.end(), struct.unpack('<I', m.group(2))[0], []
+        for _ in range(n if n <= 256 else 0):
+            if pay[at:at + 4] != _PIC_STATE:
+                break
+            at += 4
+            if pay[at:at + 16] not in lib and pay[at:at + 2] == b'\x01\x00':
+                at += 2
+            g = bytes(pay[at:at + 16])
+            if g not in lib:
+                break
+            on = struct.unpack_from('<I', pay, at + 16)[0]
+            states.append((g, _rgb(pay, at + 24) if on else None))
+            at += 28
+        if n and len(states) == n:
+            out[bytes(m.group(1))] = states
+    return out
+
+
+def _rgb(pay: bytes, i: int) -> str:
+    return '#%02x%02x%02x' % (pay[i], pay[i + 1], pay[i + 2])
+
+
+def picture_format(data: bytes) -> str:
+    for sig, kind in ((b'\x89PNG', 'png'), (b'BM', 'bmp'), (b'\xff\xd8\xff', 'jpg'), (b'GIF8', 'gif')):
+        if data[:len(sig)] == sig:
+            return kind
+    return 'bin'
+
+
+def bmp_png(data: bytes, transparent: str = None) -> bytes:
+    """A Windows bitmap (1/4/8/24/32 bits, uncompressed) as PNG; pixels of the transparent colour get alpha 0."""
+    if data[:2] != b'BM' or len(data) < 54:
+        raise ValueError('not a bitmap')
+    off, = struct.unpack_from('<I', data, 10)
+    hsize, w, h, _, bits, comp = struct.unpack_from('<IiiHHI', data, 14)
+    if comp not in (0, 3) or bits not in (1, 4, 8, 24, 32) or not 0 < w <= 10000 or not 0 < abs(h) <= 10000:
+        raise ValueError('this bitmap is not supported')
+    pal = []
+    if bits <= 8:
+        n = struct.unpack_from('<I', data, 46)[0] or 1 << bits
+        p = 14 + hsize
+        pal = [(data[p + 4 * i + 2], data[p + 4 * i + 1], data[p + 4 * i]) for i in range(n)]
+    key = tuple(int(transparent[i:i + 2], 16) for i in (1, 3, 5)) if transparent else None
+    stride = (bits * w + 31) // 32 * 4
+    rows = []
+    for y in range(abs(h)):
+        src = off + (abs(h) - 1 - y if h > 0 else y) * stride
+        row = bytearray(b'\x00')
+        for x in range(w):
+            if bits >= 24:
+                q = src + x * (bits // 8)
+                rgb = (data[q + 2], data[q + 1], data[q])
+            else:
+                v = (data[src + x * bits // 8] >> (8 - bits - x * bits % 8)) & ((1 << bits) - 1)
+                rgb = pal[v] if v < len(pal) else (0, 0, 0)
+            row += bytes(rgb) + (b'\x00' if rgb == key else b'\xff')
+        rows.append(bytes(row))
+
+    def chunk(kind, body):
+        return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body) & 0xffffffff)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, abs(h), 8, 6, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(b''.join(rows), 6)) + chunk(b'IEND', b''))
+
+
+def _attrs_at(pay: bytes, o: dict, w: dict):
+    """Where the shape attributes start (fill on, fill colour, frame colour … frame width at +44), or None."""
+    if o['_bbox_at'] is not None:
+        return o['_bbox_at'] + 16
+    if o['kind'] == 'Window':
+        k = pay.find(struct.pack('<IIII', 0, 0, w['width'] - 1, w['height'] - 1), o['offset'], o['offset'] + o['length'])
+        return k + 16 if k >= 0 else None
+    return None
+
+
+_ALIGN = {0: 'left', 1: 'center', 2: 'right', 3: 'right'}
+
+
+def _look(pay: bytes, o: dict, w: dict, groups: dict) -> dict:
+    """How one object looks (see Project.scene)."""
+    end = o['offset'] + o['length']
+    d = {'index': o['index'], 'kind': o['kind'], 'bbox': o['bbox'],
+         'tags': [a.get('tag') or a['address'] for a in o['addresses']]}
+    a = _attrs_at(pay, o, w)
+    if a is not None and a + 45 <= end:
+        if o['kind'] == 'Window':
+            d['fill'] = _rgb(pay, a + 1)
+        elif o['kind'] in ('Rect', 'Line', 'Text') or o['kind'].startswith('draw_'):
+            d['fill'] = _rgb(pay, a + 1) if pay[a] else None
+            d['frame'], d['frame_width'] = _rgb(pay, a + 5), pay[a + 44]
+    d['labels'] = [{'text': t, 'font': f, 'size': size, 'x': x, 'y': y,
+                    'color': _rgb(pay, at + 8) if at + 12 < end else '#000000',
+                    'align': _ALIGN.get(pay[at + 12], 'left') if at + 12 < end else 'left'}
+                   for (at, x, y), (t, f, size) in zip(o['_label_pos'], o['_lab'])]
+    slot = o['_label_pos'][-1][0] + 15 if o['_label_pos'] else None
+    g = bytes(pay[slot:slot + 16]) if slot is not None and slot + 16 <= end else b''
+    if g not in groups:   # not at its place: the first picture object named anywhere in the record
+        g = next((bytes(pay[k:k + 16]) for k in range(o['offset'], end - 15) if bytes(pay[k:k + 16]) in groups), g)
+    if g in groups:
+        d['picture'] = [{'image': i.hex(), 'transparent': t} for i, t in groups[g]]
+    elif len(g) == 16 and any(g) and g[6] >> 4 == 5 and g[8] >> 6 == 2:
+        d['shape'] = g.hex()      # a shape of EasyBuilder's own library: drawn by EasyBuilder, not kept here
+    return d
 
 
 # Inserting records. CArchive numbers every class (at its FF FF definition) and every object it
