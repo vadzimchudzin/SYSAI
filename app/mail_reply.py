@@ -12,6 +12,7 @@ words, nor in the knowledge base are named under the draft («проверь: �
 import datetime as dt
 import json
 import logging
+import os
 import re
 import smtplib
 import ssl
@@ -96,7 +97,7 @@ class SmtpBox:
                 conn.starttls(context=context)
                 conn.ehlo()
         except (OSError, smtplib.SMTPException) as exc:
-            raise ReplyError(f"сервер отправки {host}:{port} не отвечает: {mail._short(exc)}") from exc
+            raise ReplyError(f"сервер отправки {host}:{port} не отвечает: {mail._short(exc)}" + _render_note(exc)) from exc
         try:
             conn.login(self.cfg["address"], self.cfg["password"])
         except smtplib.SMTPAuthenticationError as exc:
@@ -123,6 +124,15 @@ class SmtpBox:
             _quit(conn)
         if refused:
             raise ReplyError("сервер не принял адрес: " + ", ".join(refused))
+
+
+def _render_note(exc) -> str:
+    """On free Render the ports of mail (25, 465, 587) are closed for the way out since 26.09.2025: the server does not
+    answer at all. Said plainly, so nobody looks for a mistake in the password."""
+    if not os.environ.get("RENDER") or not isinstance(exc, (OSError, TimeoutError)) or isinstance(exc, smtplib.SMTPException):
+        return ""
+    return (" — бесплатный Render с 26.09.2025 не выпускает почту наружу (порты 25, 465 и 587 закрыты): отправка "
+            "заработает на платном тарифе Render или на своём сервере; читать почту (IMAP, порт 993) это не мешает")
 
 
 def _smtp(cfg: dict):

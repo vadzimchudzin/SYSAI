@@ -571,3 +571,42 @@ def test_the_imap_client_reads_only_and_asks_for_what_is_new(monkeypatch):
         mail.ImapBox(cfg).label("1", [(7, ["Счёт"])])
     with pytest.raises(mail.MailError, match="почта не пустила"):
         mail.ImapBox({**cfg, "password": "wrong"}).test()
+
+
+def test_yandex_says_what_to_check_when_it_does_not_let_in(monkeypatch):
+    """Yandex answers «invalid credentials or IMAP is disabled» for several reasons: the person gets all of them, the
+    switch of the organization (Yandex 360) first; its session code is not shown."""
+    import imaplib
+    FakeImap.instances.clear()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", FakeImap)
+    cfg = {"address": "office@stroydom.by", "password": "wrong", "imap_host": "imap.yandex.ru", "imap_port": 993,
+           "folder": "INBOX"}
+    with pytest.raises(mail.MailError) as caught:
+        mail.ImapBox(cfg).test()
+    text = str(caught.value)
+    assert text.startswith("Яндекс не пустил ([AUTHENTICATIONFAILED] Invalid credentials)")
+    for step in ("admin.yandex.ru", "Почтовые программы", "Пароли приложений и OAuth-токены", "пароль приложения", "капчу"):
+        assert step in text
+    answer = "[AUTHENTICATIONFAILED] LOGIN invalid credentials or IMAP is disabled sc=IRNHv00skeA0_2026-11-05-13-27_"
+    assert "sc=" not in mail.login_failed("imap.ya.ru", answer) and "IMAP is disabled" in mail.login_failed("imap.ya.ru", answer)
+    assert mail.login_failed("imap.gmail.com", "x").startswith("почта не пустила")
+    assert mail.is_yandex("imap.yandex.com") and mail.is_yandex("IMAP.YANDEX.RU") and not mail.is_yandex("imap.notyandex.ru.evil.com")
+    assert "admin.yandex.ru" in mail.PRESETS["yandex"]["hint"] and "капчу" in mail.PRESETS["yandex"]["hint"]
+
+
+def test_free_render_closes_the_ports_of_mail_and_it_is_said_plainly(monkeypatch):
+    import smtplib
+    from app import mail_reply
+
+    def closed(*args, **kwargs):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(smtplib, "SMTP_SSL", closed)
+    cfg = {"address": "office@stroydom.by", "password": "p", "smtp_host": "smtp.yandex.ru", "smtp_port": 465}
+    monkeypatch.delenv("RENDER", raising=False)
+    with pytest.raises(mail_reply.ReplyError) as caught:
+        mail_reply.SmtpBox(cfg).test()
+    assert "Render" not in str(caught.value) and "не отвечает" in str(caught.value)
+    monkeypatch.setenv("RENDER", "true")
+    with pytest.raises(mail_reply.ReplyError) as caught:
+        mail_reply.SmtpBox(cfg).test()
+    assert "бесплатный Render" in str(caught.value) and "465" in str(caught.value)
