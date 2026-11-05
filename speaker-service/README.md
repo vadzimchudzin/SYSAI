@@ -11,6 +11,16 @@ A separate Vercel Python API that computes voice embeddings for SYSAI. It does n
 
 All endpoints except health require `X-SYSAI-Voice-Token`. Do not expose the token to browser JavaScript.
 
+### What SYSAI actually calls
+
+- `POST /v1/identify` — the main use: a print of every label in every transcription part for «Свой сервис голосов» (app/diarize.py), the voices remembered between meetings (app/voice_memory.py) and matching to confirmed employee samples during transcription (app/speaker_id.py).
+- `POST /v1/embed` with `purpose=segment` only — the print of an employee sample confirmed on a meeting page. Nothing is stored here: the sample's audio is kept encrypted in SYSAI's database (since 30 Oct 2026).
+- `DELETE /v1/sample` — removes the Blob copies of samples uploaded by the first version (20–30 Oct 2026), when such a sample is deleted.
+
+Not called by SYSAI any more, left from the first version: `purpose=profile` of `/v1/embed` (stores the upload in Blob), `POST /v1/promote` and `DELETE /v1/candidate` (the first `/v1/identify` stored 5–30 s clips of meeting voices under `candidates/` in Blob; nothing deletes them). Blob is needed only to clean up those old copies.
+
+SYSAI refuses prints of a model listed in `OUTDATED_MODELS` (app/speaker_id.py): with a service not redeployed since the features were fixed, «Свой сервис голосов» falls back to the part labels with a message to redeploy.
+
 ## Required Vercel configuration
 
 - `SYSAI_VOICE_SERVICE_TOKEN`: long random secret shared only with the Render backend.

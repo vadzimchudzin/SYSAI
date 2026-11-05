@@ -306,7 +306,7 @@ def voice_groups(audio_path, segments: list, total: float, progress=None, window
     if not jobs:
         raise DiarizationError("В расшифровке нет реплик длиннее секунды — сравнивать голоса не по чему.")
     folder = pathlib.Path(tempfile.mkdtemp(prefix="sysai_voices_"))
-    groups, done, failures = [], [0], []
+    groups, done, failures, outdated = [], [0], [], []
     unit = "кусков" if by_part else "минут"
 
     def run(job):
@@ -323,6 +323,10 @@ def voice_groups(audio_path, segments: list, total: float, progress=None, window
             for future in concurrent.futures.as_completed([pool.submit(run, job) for job in jobs]):
                 try:
                     number, payload = future.result()
+                except speaker_id.OutdatedServiceError as exc:  # every part would get the same wrong prints
+                    outdated.append(str(exc))
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    break
                 except speaker_id.SpeakerIdentityError as exc:
                     failures.append(str(exc))
                     continue
@@ -342,6 +346,8 @@ def voice_groups(audio_path, segments: list, total: float, progress=None, window
                     groups.append(group)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+    if outdated:
+        raise DiarizationError(outdated[0])
     if failures and len(failures) * 4 > len(jobs):  # a quarter of the minutes lost: the clustering would be guesswork
         raise DiarizationError(f"Сервис голосов не ответил по {len(failures)} из {len(jobs)} {unit}: {failures[0]}")
     if not any("short" not in group for group in groups):

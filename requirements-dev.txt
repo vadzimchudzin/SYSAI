@@ -1,3 +1,4 @@
 -r requirements.txt
 pytest==8.3.5
 PyYAML==6.0.3  # the tests of the synchronizer (agents/sync); on the PCs it comes with the wheel
+soundfile==0.13.1  # the tests of the voice service (tests/test_speaker_service.py import speaker-service/app.py)

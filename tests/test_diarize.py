@@ -177,6 +177,18 @@ def test_voice_groups_give_up_when_the_service_loses_many_minutes(monkeypatch, t
         diarize.voice_groups(record, [seg("Спикер 1", 0, 30), seg("Спикер 2", 70, 100)], 100)
 
 
+def test_voice_groups_stop_at_an_outdated_voice_service(monkeypatch, tmp_path):
+    record = tmp_path / "meeting.mp3"
+    record.write_bytes(b"audio")
+    monkeypatch.setattr(diarize, "_cut", fake_cut)
+
+    def embed(path, segments, min_seconds=None):
+        raise speaker_id.OutdatedServiceError("Сервис голосов на Vercel — старая версия (x). Передеплойте speaker-service.")
+    monkeypatch.setattr(speaker_id, "embed_speakers", embed)
+    with pytest.raises(diarize.DiarizationError, match="старая версия"):
+        diarize.voice_groups(record, [seg("Спикер 1", 60 * k, 60 * k + 30) for k in range(12)], 720)
+
+
 def test_gemini_parts_are_joined_by_the_replicas_both_heard(monkeypatch, tmp_path):
     record = tmp_path / "meeting.mp3"
     record.write_bytes(b"audio")

@@ -38,6 +38,21 @@ class SpeakerIdentityError(RuntimeError):
     """Configuration, audio preparation, or external provider failure."""
 
 
+class OutdatedServiceError(SpeakerIdentityError):
+    """The voice service still runs a version whose prints are wrong (OUTDATED_MODELS): it has to be redeployed."""
+
+
+def _fresh(model) -> str:
+    """The model of a voice service answer. An outdated one is refused: its prints make every voice alike, so the
+    meeting's people would be glued into one and a sample would never match."""
+    model = str(model or "")
+    if model in OUTDATED_MODELS:
+        raise OutdatedServiceError(
+            f"Сервис голосов на Vercel — старая версия ({model}): её отпечатки неверные, все голоса в них похожи. "
+            "Передеплойте speaker-service.")
+    return model
+
+
 def _fernet() -> Fernet:
     # A stable key derived from the application's secret; a key rotation requires re-enrollment.
     derived = base64.urlsafe_b64encode(hashlib.sha256(config.SECRET_KEY.encode("utf-8")).digest())
@@ -133,6 +148,7 @@ def embed_voice_sample(sample_path: str | pathlib.Path, employee_id: int) -> dic
         ) from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise SpeakerIdentityError("Не удалось связаться с сервисом идентификации Vercel") from exc
+    _fresh(payload.get("model_version"))
     embedding = _normalise_embedding(payload.get("embedding"))
     pathname = payload.get("sample_blob_path")
     if pathname:
@@ -297,6 +313,7 @@ def embed_speakers(path: str | pathlib.Path, segments: list[dict], min_seconds: 
         raise SpeakerIdentityError("Не удалось связаться с сервисом голосов") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("speakers"), dict):
         raise SpeakerIdentityError("Сервис голосов вернул некорректный ответ")
+    _fresh(payload.get("model_version"))
     return payload
 
 

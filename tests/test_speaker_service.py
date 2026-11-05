@@ -67,3 +67,33 @@ def test_features_match_speechbrain(service):
 def test_new_prints_are_a_new_model_version(service):
     assert service.MODEL_VERSION not in speaker_id.OUTDATED_MODELS
     assert "speechbrain-ecapa-voxceleb-onnx-a9cb932" in speaker_id.OUTDATED_MODELS
+
+
+class _Answer:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
+
+
+def test_an_outdated_voice_service_is_refused(monkeypatch, tmp_path):
+    """A service not redeployed since the fix gives prints where every voice is alike: they are not used."""
+    clip = tmp_path / "part.mp3"
+    clip.write_bytes(b"mp3")
+    answer = {"model_version": "speechbrain-ecapa-voxceleb-onnx-a9cb932",
+              "speakers": {"Спикер 1": {"embedding": [1.0] + [0.0] * 191, "duration_seconds": 5}},
+              "embedding": [1.0] + [0.0] * 191, "duration_seconds": 8, "waveform": None, "sample_blob_path": None}
+    monkeypatch.setattr(speaker_id, "_voice_service_request_url", lambda path: "https://voice.example" + path)
+    monkeypatch.setattr(speaker_id, "_voice_service_headers", lambda: {})
+    monkeypatch.setattr(speaker_id.httpx, "post", lambda *args, **kwargs: _Answer(answer))
+    with pytest.raises(speaker_id.OutdatedServiceError, match="Передеплойте speaker-service"):
+        speaker_id.embed_speakers(clip, [{"speaker": "Спикер 1", "start": 0, "end": 5}])
+    with pytest.raises(speaker_id.OutdatedServiceError):
+        speaker_id.embed_voice_sample(clip, 1)
+    answer["model_version"] = "speechbrain-ecapa-voxceleb-onnx-a9cb932-fbank2"
+    assert speaker_id.embed_speakers(clip, [{"speaker": "Спикер 1", "start": 0, "end": 5}])["speakers"]
+    assert speaker_id.embed_voice_sample(clip, 1)["model_version"].endswith("-fbank2")
