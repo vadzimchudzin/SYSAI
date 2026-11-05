@@ -297,6 +297,10 @@ def test_the_departments_and_the_folders_are_set_on_the_page(client, fbox):
     assert settings_store.get("mail_folder_rules")[-1] == {"kind": "", "senders": "@nalog.gov.by", "keywords": "",
                                                            "folder": "Налоговая"}
     assert "error=" in client.post("/mail/folder-rules", data={"folder": "Всё"}, follow_redirects=False).headers["location"]
+    # the same condition once more would never work (the first rule wins): refused, with the folder it already has
+    twin = client.post("/mail/folder-rules", data={"senders": "@NALOG.gov.by", "folder": "Другая"}, follow_redirects=False)
+    assert "error=" in twin.headers["location"] and "Налоговая" in client.get(twin.headers["location"]).text
+    assert [r["folder"] for r in settings_store.get("mail_folder_rules")].count("Другая") == 0
     client.post("/mail/folder-rules/1/up")
     assert [x["folder"] for x in settings_store.get("mail_folder_rules")] == ["Налоговая", "Рассылки"]
     page = client.get("/mail").text.replace("<b>", "").replace("</b>", "")

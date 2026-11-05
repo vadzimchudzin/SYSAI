@@ -10,6 +10,7 @@ import copy
 import fnmatch
 import hashlib
 import json
+import ntpath
 import re
 from types import SimpleNamespace
 
@@ -247,8 +248,12 @@ def command_denied(rules: dict, command: str) -> str:
 
 def path_allowed(rules: dict, path: str, write: bool = False) -> bool:
     """Inside a «read» (or «write») folder and outside every forbidden one; Windows paths, any case."""
-    def norm(p):
-        return re.sub(r"[\\/]+", "\\\\", str(p).strip()).rstrip("\\").lower()
+    def norm(p):  # as the synchronizer on the computer does (sysai_agent/rules.py): «..» collapsed — no way out
+        text = str(p or "").strip()
+        if not text:
+            return ""
+        text = ntpath.normpath(text.replace("/", "\\"))
+        return re.sub(r"\\+", r"\\", text).rstrip("\\").lower()
     target = norm(path)
     if not target:
         return False
@@ -458,13 +463,11 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None, cache=()) ->
     tiers = rules["models"]["tiers"] or ["cheap"]
     main, workers = _main_and_workers(tiers, rules["models"].get("main"), rules["models"].get("workers"))
     deny = rules["commands"]["deny"] if rules["commands"]["run"] else ["*"]
+    # only what can start: the built-in server and the hub MCP servers the synchronizer installs; a name allowed in
+    # the rules without such a tool (not in the hub, «по запросу» and not taken yet) would only be a broken server
     mcp = {}
-    for name in rules["mcp"]:
-        if name == "sysai":
-            mcp[name] = {"url": f"{server}/mcp", "headers": {"Authorization": "Bearer ${SYSAI_AGENT_TOKEN}"}}
-        else:
-            mcp[name] = {"command": "sysai-agent", "args": ["mcp", name],
-                         "env": {"SYSAI_ACCESS_FILE": "${SYSAI_HOME}/access.json", "SYSAI_URL": server}}
+    if "sysai" in rules["mcp"]:
+        mcp["sysai"] = {"url": f"{server}/mcp", "headers": {"Authorization": "Bearer ${SYSAI_AGENT_TOKEN}"}}
     hub_tools = []
     for tool in tools or []:
         spec = tool.get("spec") or {}

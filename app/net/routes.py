@@ -1,6 +1,7 @@
 """Addresses of the agent network. Pages for people (/agents, /agents/access, /hub, /files) and the API of agents
 (/agents/api/*, /mcp, /v1/*). Every address answers 404 while the setting «agents_on» is off."""
 import asyncio
+import functools
 import json
 import weakref
 from urllib.parse import quote
@@ -281,7 +282,8 @@ async def agent_action(request: Request, agent_id: int, action: str):
             agents.revoke(agent_id, by=me["username"])
             return _back(f"/agents/{agent_id}", msg="Агент отключён: токен отозван, MCP и шлюз ему отказывают")
         if action == "enable":
-            agents.enable(agent_id, by=me["username"])
+            if not agents.enable(agent_id, by=me["username"], boss=boss):
+                return _back(f"/agents/{agent_id}", msg="Агент уже включён")
             return _back(f"/agents/{agent_id}", msg="Агент включён: получите новый код подключения")
         if action == "debug":
             on = str(form.get("on") or "") == "1"
@@ -785,8 +787,8 @@ async def api_connect(request: Request):
     if not isinstance(data, dict):
         return _api_error(400, "Нужен JSON-объект", "invalid_request")
     try:
-        agent, token = agents.exchange(str(data.get("code") or ""), str(data.get("host") or ""), str(data.get("harness") or ""),
-                                       data.get("versions"), _ip(request))
+        agent, token = await _in_thread(agents.exchange, str(data.get("code") or ""), str(data.get("host") or ""),
+                                        str(data.get("harness") or ""), data.get("versions"), _ip(request))
     except agents.AgentError as exc:
         return _api_error(400, str(exc), "bad_code")
     server = _server(request)
@@ -804,14 +806,14 @@ def api_config(request: Request):
 
 @router.post("/agents/api/heartbeat")
 async def api_heartbeat(request: Request):
-    ctx, problem = _agent_ctx(request)
+    ctx, problem = await _in_thread(_agent_ctx, request)  # the base is not asked inside the event loop
     if problem:
         return problem
     try:
         data = await request.json()
     except ValueError:
         data = {}
-    return agents.heartbeat(ctx, data)
+    return await _in_thread(agents.heartbeat, ctx, data)
 
 
 @router.get("/agents/api/hub/manifest")
@@ -840,7 +842,7 @@ def api_skill_zip(request: Request, part: str, name: str, version: str):
 
 @router.post("/agents/api/hub/proposals")
 async def api_propose(request: Request):
-    ctx, problem = _agent_ctx(request)
+    ctx, problem = await _in_thread(_agent_ctx, request)
     if problem:
         return problem
     try:
@@ -862,12 +864,13 @@ async def api_propose(request: Request):
                                   "invalid_request")
             files = {**{str(p): str(v) for p, v in (data.get("files") or {}).items()}, doc: str(text)}
             changelog, why = str(data.get("changelog") or ""), str(data.get("why") or "")
-        name, version = hub.propose(ctx, files, changelog, why)
+        name, version = await _in_thread(hub.propose, ctx, files, changelog, why)
     except hub.HubError as exc:
         return _api_error(400, str(exc), "rejected")
     except (ValueError, AttributeError):
         return _api_error(400, "Нужен JSON или multipart с zip", "invalid_request")
-    return {"skill": name, "kind": (hub.card(name) or {}).get("kind", "skill"), "version": version, "status": "review"}
+    card = await _in_thread(hub.card, name)
+    return {"skill": name, "kind": (card or {}).get("kind", "skill"), "version": version, "status": "review"}
 
 
 # ----------------------------------------------------------------------------- the storage, for the synchronizer
@@ -915,7 +918,7 @@ def api_file_raw(request: Request, path: str, v: int = 0):
 @router.put("/agents/api/files/raw")
 async def api_file_put(request: Request, path: str, note: str = ""):
     import os
-    rights, problem = _agent_files(request)
+    rights, problem = await _in_thread(_agent_files, request)
     if problem:
         return problem
     declared = _int(request.headers.get("content-length"))
@@ -924,7 +927,8 @@ async def api_file_put(request: Request, path: str, note: str = ""):
     try:
         tmp, _ = await _spool(request.stream(), files.MAX_UPLOAD)
         try:
-            result = files.put(rights, path, source=tmp, note=note, mime=request.headers.get("content-type", "").split(";")[0])
+            result = await _in_thread(functools.partial(files.put, rights, path, source=tmp, note=note,
+                                                        mime=request.headers.get("content-type", "").split(";")[0]))
         finally:
             os.unlink(tmp)
     except files.FilesError as exc:
@@ -936,7 +940,7 @@ async def api_file_put(request: Request, path: str, note: str = ""):
 # ============================================================================= MCP
 @router.post("/mcp")
 async def mcp_post(request: Request):
-    ctx, problem = _agent_ctx(request)
+    ctx, problem = await _in_thread(_agent_ctx, request)
     if problem:
         return problem
     raw = await request.body()
@@ -977,7 +981,7 @@ def v1_models(request: Request):
 
 @router.post("/v1/chat/completions")
 async def v1_chat(request: Request):
-    ctx, problem = _agent_ctx(request)
+    ctx, problem = await _in_thread(_agent_ctx, request)
     if problem:
         return problem
     try:

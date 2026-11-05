@@ -29,7 +29,8 @@ def test_builtin_profiles_and_the_hermes_configuration(client, net_agent):
     assert hermes["auxiliary"]["vision"]["extra_body"] == {"sysai": {"role": "vision"}}
     assert hermes["mcp_servers"]["sysai"]["url"] == "https://sysai.example/mcp"
     assert hermes["delegation"]["model"] == "sysai/cheap" and hermes["delegation"]["max_spawn_depth"] == 1
-    assert set(hermes["mcp_servers"]) == {"sysai", "plc-kit", "machine-expert", "cad"}
+    # allowed servers that are not in the hub would never start: only SYSAI and the delivered hub servers are there
+    assert set(hermes["mcp_servers"]) == {"sysai"} and {"plc-kit", "machine-expert", "cad"} <= set(doc["rules"]["mcp"])
     assert hermes["skills"]["external_dirs"] and hermes["skills"]["create_dir"]
     assert "sya_" not in str(hermes)  # the token never sits in the configuration
     yaml = access.to_yaml(hermes)
@@ -100,6 +101,10 @@ def test_command_folder_and_tool_checks():
     assert not access.path_allowed(rules, "D:\\ТО\\Пакет 3\\схема.pdf", write=True)
     assert not access.path_allowed(rules, "C:\\Windows\\System32\\drivers\\etc\\hosts")
     assert not access.path_allowed(rules, "D:\\ОПО-чужое\\x.txt")
+    # «..» is collapsed as on the computer: no way out of an allowed folder into a forbidden one
+    assert not access.path_allowed(rules, "D:\\ОПО\\Проекты\\..\\..\\Windows\\win.ini")
+    assert not access.path_allowed(rules, "d:/ОПО/Проекты/../../ТО/Пакет 3/схема.pdf", write=True)
+    assert access.path_allowed(rules, "D:\\ОПО\\Проекты\\Линия 1\\..\\Линия 2\\main.st", write=True)
     assert access.tool_allowed(rules, "plc-kit", "anything") and not access.tool_allowed(viewer, "plc-kit", "parse")
     assert access.tool_allowed(viewer, "sysai", "whoami") and not access.tool_allowed(viewer, "sysai", "people")
 

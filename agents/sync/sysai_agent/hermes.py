@@ -159,13 +159,30 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def gateway_running(profile_dir: Path) -> bool:
-    record = fsutil.read_json(Path(profile_dir) / "gateway.pid", None)
+def _pid_of(record) -> int:
     pid = record.get("pid") if isinstance(record, dict) else record
     try:
-        return _alive(int(pid))
+        return int(pid)
     except (TypeError, ValueError):
+        return 0
+
+
+def gateway_running(profile_dir: Path) -> bool:
+    """A gateway serves this profile: its own (gateway.pid in the profile) or — Hermes 0.22 and later — the one
+    multiplexing gateway of the computer, started from the default profile: it keeps gateway.pid and
+    gateway_state.json (with «served_profiles») in the Hermes root, the profiles have no gateway.pid of their own."""
+    profile_dir = Path(profile_dir)
+    if _alive(_pid_of(fsutil.read_json(profile_dir / "gateway.pid", None))):
+        return True
+    root = profile_dir.parent.parent if profile_dir.parent.name == "profiles" else profile_dir
+    state = fsutil.read_json(root / "gateway_state.json", None)
+    if not isinstance(state, dict) or str(state.get("gateway_state") or "") == "stopped":
         return False
+    if root != profile_dir:
+        served = state.get("served_profiles")
+        if not isinstance(served, list) or profile_dir.name not in served:
+            return False  # the gateway of the default profile alone (an older Hermes, or this profile not served)
+    return _alive(_pid_of(fsutil.read_json(root / "gateway.pid", None))) or _alive(_pid_of(state))
 
 
 def _run(args: list, timeout: int = 180):

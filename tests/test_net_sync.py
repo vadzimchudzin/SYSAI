@@ -167,7 +167,7 @@ def test_sync_applies_only_its_keys_and_keeps_the_persons(pc):
     with SessionLocal() as s:
         row = s.query(NetAgentAccess).filter(NetAgentAccess.agent_id == pc["agent_id"]).one()
         agent = s.get(NetAgent, pc["agent_id"])
-        assert row.applied_rev == rev and agent.versions["sysai-agent"] == "0.1.0" and agent.versions["hermes"] == "0.9.1"
+        assert row.applied_rev == rev and agent.versions["sysai-agent"] == "0.1.1" and agent.versions["hermes"] == "0.9.1"
         assert agent.last_error == "" and agent.last_seen_at is not None
     again = core.sync_once(pc["home"], transport=pc["send"])
     assert again["changed"] == [] and (profile / hermes.SOUL_BACKUP).read_text(encoding="utf-8") == "Мой характер"
@@ -224,6 +224,11 @@ def test_a_broken_download_is_never_installed(client, pc, monkeypatch):
     assert "sha256 не сходится" in report["errors"][0] and not (pc["home"] / "hub" / "opo-intake").exists()
     with SessionLocal() as s:
         assert "sha256" in s.get(NetAgent, pc["agent_id"]).last_error
+    # not taken whole: the revision of the hub is not kept, so the next pulse sees it new and tries again
+    assert "hub_rev" not in json.loads((pc["home"] / "state.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(hubsync, "_download", real)
+    assert core.sync_once(pc["home"], transport=pc["send"])["hub"]["changed"] == ["opo-intake 1.0.0"]
+    assert json.loads((pc["home"] / "state.json").read_text(encoding="utf-8"))["hub_rev"]
     with pytest.raises(hubsync.HubError, match="недопустимый путь"):
         hubsync.unpack(_zip({"../evil.txt": "x"}), pc["home"] / "x")
 
@@ -304,6 +309,62 @@ def test_the_rules_on_the_computer_are_the_servers(pc):
     assert R.tool_allowed({"mcp": {"x": ["*"]}}, "x", "any") and not R.tool_allowed({"mcp": {"x": ["a"]}}, "x", "b")
 
 
+def test_a_restart_waits_only_for_a_running_gateway_and_the_pulse_is_kept(pc, monkeypatch):
+    restarts, running = [], [False]
+    monkeypatch.setattr(hermes, "restart", lambda *a: restarts.append(a) or (True, "Hermes перезапущен"))
+    monkeypatch.setattr(hermes, "gateway_running", lambda profile_dir: running[0])
+    report = core.sync_once(pc["home"], transport=pc["send"], restart=False)
+    assert report["changed"] and restarts == [] and "не запущен" in report["restart"]
+    state = json.loads((pc["home"] / "state.json").read_text(encoding="utf-8"))
+    assert "restart_pending" not in state and state["pulse_at"]  # Hermes reads the settings when it starts
+    assert report["access"] == state["access_rev"] and core.status(pc["home"])["pulse_at"] == state["pulse_at"]
+    running[0] = True
+    access.set_agent_access(pc["agent_id"], overrides={"commands": {"run": False}})
+    report = core.sync_once(pc["home"], transport=pc["send"], restart=False)  # «--no-restart»: it waits
+    assert report["changed"] == ["config.yaml"] and restarts == []
+    assert json.loads((pc["home"] / "state.json").read_text(encoding="utf-8"))["restart_pending"] is True
+    report = core.sync_once(pc["home"], transport=pc["send"])
+    assert report["changed"] == [] and len(restarts) == 1 and report["restart"] == "Hermes перезапущен"
+    assert "restart_pending" not in json.loads((pc["home"] / "state.json").read_text(encoding="utf-8"))
+    # only the rules for the MCP servers changed (not the files of the profile): the log still tells it
+    assert "доступы: abc" in core.describe({"changed": [], "hub": {}, "access": "abc"})
+
+
+def test_the_hermes_root_and_its_gateway_are_found_as_hermes_finds_them(tmp_path, monkeypatch):
+    from sysai_agent import paths
+    native = tmp_path / ".hermes"
+    monkeypatch.setattr(paths, "_native_hermes_home", lambda: native)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert paths.hermes_root() == native
+    monkeypatch.setenv("HERMES_HOME", str(native / "profiles" / "opo-pc"))
+    assert paths.hermes_root() == native  # a profile in the usual place: the usual root
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "opt" / "data"))
+    assert paths.hermes_root() == tmp_path / "opt" / "data"  # Docker, a root of its own
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "opt" / "data" / "profiles" / "x"))
+    assert paths.hermes_root() == tmp_path / "opt" / "data"
+    profile = native / "profiles" / "opo-pc"
+    profile.mkdir(parents=True)
+    alive = {4242}
+    monkeypatch.setattr(hermes, "_alive", lambda pid: pid in alive)
+    assert not hermes.gateway_running(profile)
+    (profile / "gateway.pid").write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+    assert hermes.gateway_running(profile)  # a gateway of the profile itself
+    (profile / "gateway.pid").unlink()
+    # Hermes 0.22: one gateway of the computer serves the profiles; its pid and its state are in the root
+    (native / "gateway.pid").write_text("4242", encoding="utf-8")
+    state = {"pid": 4242, "gateway_state": "running", "served_profiles": ["default"]}
+    (native / "gateway_state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert not hermes.gateway_running(profile)  # this profile is not served
+    state["served_profiles"].append("opo-pc")
+    (native / "gateway_state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert hermes.gateway_running(profile)
+    alive.clear()
+    assert not hermes.gateway_running(profile)  # its process is gone
+    alive.add(4242)
+    (native / "gateway_state.json").write_text(json.dumps({**state, "gateway_state": "stopped"}), encoding="utf-8")
+    assert not hermes.gateway_running(profile)
+
+
 def test_the_loop_pulses_and_resyncs_when_the_rules_change(pc):
     core.sync_once(pc["home"], transport=pc["send"])
     first = json.loads((pc["home"] / "state.json").read_text(encoding="utf-8"))["access_rev"]
@@ -327,14 +388,14 @@ def test_the_installer_and_the_wheel(client, net_on):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain") and "utf-8" in r.headers["content-type"]
     script = r.text
     name = installer.wheel_name()
-    assert name == "sysai_agent-0.1.0-py3-none-any.whl" and f"http://testserver/agents/api/sync/{name}" in script
+    assert name == "sysai_agent-0.1.1-py3-none-any.whl" and f"http://testserver/agents/api/sync/{name}" in script
     assert "__SYSAI_" not in script and "hermes profile create $Agent --no-skills" in script
     assert "sysai-agent connect --server $Server --code $Code" in script and "CurrentVersion\\Run" in script
     w = client.get(f"/agents/api/sync/{name}")
     assert w.status_code == 200 and hashlib.sha256(w.content).hexdigest() == w.headers["x-sha256"]
     archive = zipfile.ZipFile(io.BytesIO(w.content))
     names = set(archive.namelist())
-    info = "sysai_agent-0.1.0.dist-info"
+    info = "sysai_agent-0.1.1.dist-info"
     assert {"sysai_agent/cli.py", "sysai_agent/mcpwrap.py", f"{info}/METADATA", f"{info}/RECORD"} <= names
     assert not any("__pycache__" in n for n in names)
     eps = archive.read(f"{info}/entry_points.txt").decode()

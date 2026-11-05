@@ -43,7 +43,7 @@
     {% else %}
     <form method="post" action="/agents/{{ a.id }}/enable"><button class="btn primary">Включить</button></form>
     {% endif %}
-    {% if boss %}<form method="post" action="/agents/{{ a.id }}/delete" onsubmit="return confirm('Удалить агента {{ a.name }} вместе с журналом?')"><button class="btn ghost">Удалить</button></form>{% endif %}
+    {% if boss %}<form method="post" action="/agents/{{ a.id }}/delete" onsubmit="return confirm('Удалить агента {{ a.name }} вместе с журналом? Расходы останутся в отчёте как «удалённый агент».')"><button class="btn ghost">Удалить</button></form>{% endif %}
   </div>
   <h3 style="margin-top:16px">Токены</h3>
   <ul class="net-list">{% for t in tokens %}

@@ -4,13 +4,17 @@ A light implementation without the SDK: initialize, notifications (202), ping, t
 checks the agent's access (the same signed rules the computer applies) and the rights of its person; answers are
 short (summaries, pages), every call goes to the journal, calls are limited per minute."""
 import collections
+import datetime as dt
+import html
 import json
 import threading
 import time
 from urllib.parse import quote
 
+from sqlalchemy.exc import IntegrityError
+
 from .. import settings_store, telegram, userbot
-from ..db import Department, Employee, EmployeeDepartment, SessionLocal
+from ..db import Department, Employee, EmployeeDepartment, SessionLocal, Setting, now
 from . import access, files, hub, journal, trace
 from .agents import AgentCtx
 
@@ -18,6 +22,8 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "sysai", "title": "SYSAI", "version": "0.1.0"}
 MAX_BODY = 1024 * 1024
 NOTIFY_PER_HOUR = 20
+HELD_KEY = "agents_notify_held"  # messages of agents waiting for the end of the quiet time (one settings row)
+HELD_MAX = 300
 INSTRUCTIONS = ("SYSAI — сервер компании. Здесь: кто ты и что тебе можно (whoami), отделы и люди; хаб SYSAI_Hub — навыки, "
                 "MCP-серверы и программы всей сети: hub_search ищет, hub_get читает, hub_take берёт нужное «по запросу» "
                 "(синхронизатор поставит его на ПК), hub_drop отдаёт обратно, hub_propose — своё на проверку владельцу; "
@@ -58,7 +64,7 @@ def _whoami(ctx: AgentCtx, rules: dict, args: dict) -> dict:
     doc = access.document(ctx.agent_id)
     return {"agent": ctx.name, "user": ctx.username, "role": ctx.role, "department": doc["doc"]["department"],
             "profile": doc["profile"]["name"], "access_rev": doc["rev"],
-            "tools": [t for t in TOOLS if access.tool_allowed(rules, "sysai", t)],
+            "tools": [t["name"] for t in tools_list(rules, ctx)],
             "models": [f"sysai/{t}" for t in rules["models"]["tiers"]],
             "budget_day_usd": rules["models"]["budget_day_usd"], "rules": rules}
 
@@ -260,12 +266,86 @@ def _notify_me(ctx, rules, args):
     if not _rate_ok(_notes, ctx.agent_id, NOTIFY_PER_HOUR, 3600):
         raise ToolError(f"Не больше {NOTIFY_PER_HOUR} сообщений в час")
     message = f"🤖 {ctx.name}: {text[:3500]}"
-    transport = userbot if userbot.ai_mode() else telegram
+    item = {"agent_id": ctx.agent_id, "agent": ctx.name, "chat": chat, "text": message}
+    until = userbot.quiet_until() if userbot.ai_mode() else None  # the AI employee keeps the quiet hours
+    why = "Тихие часы"
     try:
-        transport.send_message(chat, message)
+        if until is None:
+            _deliver(chat, message)
+            return {"sent": True}
+    except userbot.QuietHours as exc:  # the quiet time or the hourly limit of the person: it waits
+        until = now() + dt.timedelta(seconds=max(60, int(exc.retry_after or 60)))
+        why = "Лимит сообщений человеку в час" if isinstance(exc, userbot.Busy) else why
     except Exception as exc:  # noqa: BLE001  the agent gets the reason instead of a crash
         raise ToolError(f"Сообщение не отправлено: {exc}") from exc
-    return {"sent": True}
+    _hold({**item, "due": until.isoformat(timespec="seconds")})
+    return {"sent": False, "held_until": until.isoformat(timespec="minutes"),
+            "message": f"{why}: сообщение отложено и уйдёт само в {userbot.local_time(until)}"}
+
+
+def _deliver(chat: str, message: str) -> None:
+    """From the AI employee's account the text goes as it is; the bot speaks Telegram HTML, so the text is escaped."""
+    if userbot.ai_mode():
+        userbot.send_message(chat, message)
+    else:
+        telegram.send_message(chat, html.escape(message, quote=False))
+
+
+def _hold(item: dict) -> None:
+    for _ in range(3):
+        with SessionLocal() as s:
+            row = s.get(Setting, HELD_KEY, with_for_update=True)
+            held = (json.loads(row.value) if row else []) + [item]
+            value = json.dumps(held[-HELD_MAX:], ensure_ascii=False)
+            if row is not None:
+                row.value = value
+            else:
+                s.add(Setting(key=HELD_KEY, value=value))
+            try:
+                s.commit()
+                return
+            except IntegrityError:  # another process made the row first: once more
+                s.rollback()
+
+
+def _due(item: dict) -> dt.datetime:
+    try:
+        when = dt.datetime.fromisoformat(str(item.get("due")))
+    except ValueError:
+        return now()
+    return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
+
+
+def held() -> list:
+    with SessionLocal() as s:
+        row = s.get(Setting, HELD_KEY)
+        return json.loads(row.value) if row else []
+
+
+def send_held() -> int:
+    """The background loop: what agents wrote in the quiet time goes out when it is over. A message is taken out of
+    the queue before it is sent (never twice); one that has to wait again goes back with its new time."""
+    stamp = now()
+    with SessionLocal() as s:
+        row = s.get(Setting, HELD_KEY, with_for_update=True)
+        queue = json.loads(row.value) if row else []
+        due = [h for h in queue if _due(h) <= stamp]
+        if not due:
+            return 0
+        row.value = json.dumps([h for h in queue if _due(h) > stamp], ensure_ascii=False)
+        s.commit()
+    sent = 0
+    for item in due:
+        try:
+            _deliver(item["chat"], item["text"])
+            sent += 1
+        except userbot.QuietHours as exc:
+            _hold({**item, "due": (now() + dt.timedelta(seconds=max(60, int(exc.retry_after or 60)))).isoformat(
+                timespec="seconds")})
+        except Exception as exc:  # noqa: BLE001  the journal tells what was lost
+            journal.log("mcp.notify_me", item.get("agent") or "", {"ok": False, "held": True, "error": str(exc)[:300]},
+                        actor=item.get("agent") or "", actor_kind="agent")
+    return sent
 
 
 def _log_event(ctx, rules, args):
@@ -321,19 +401,26 @@ TOOLS = {
     "files_write": ("Положить файл в хранилище (новая версия, если содержимое изменилось): text — текст или base64 — "
                     "двоичный, до 5 МБ; больше — PUT /agents/api/files/raw. note — что это или что изменилось.",
                     _schema({"path": _STR, "text": _STR, "base64": _STR, "note": _STR}, ["path"]), _files_write, False),
-    "notify_me": ("Сообщение своему человеку в Telegram (сообщение, не подтверждение).", _schema({"text": _STR}, ["text"]),
+    "notify_me": ("Сообщение своему человеку в Telegram (сообщение, не подтверждение). В тихие часы оно откладывается "
+                  "и уходит само (sent=false, held_until).", _schema({"text": _STR}, ["text"]),
                   _notify_me, False),
     "log_event": ("Запись в журнал SYSAI: что сделано и над чем. action=skill_used с details.skill — учёт навыка.",
                   _schema({"action": _STR, "target": _STR, "details": {"type": "object"}}, ["action"]), _log_event, False),
 }
 
 
-def tools_list(rules: dict) -> list:
+def tools_list(rules: dict, ctx: AgentCtx | None = None) -> list:
+    """The tools the access allows and that can work for this agent: no «people» without the directory in the rules,
+    no files_* without an open section of the storage — a tool that would only answer «нельзя» is not shown."""
+    storage = ctx is None or not files.for_agent(ctx, rules).nothing
     out = []
     for name, (description, schema, _fn, read_only) in TOOLS.items():
-        if access.tool_allowed(rules, "sysai", name):
-            out.append({"name": name, "description": description, "inputSchema": schema,
-                        "annotations": {"readOnlyHint": read_only}})
+        if not access.tool_allowed(rules, "sysai", name):
+            continue
+        if (name == "people" and not rules["data"]["people"]) or (name.startswith("files_") and not storage):
+            continue
+        out.append({"name": name, "description": description, "inputSchema": schema,
+                    "annotations": {"readOnlyHint": read_only}})
     return out
 
 
@@ -395,7 +482,7 @@ def handle_one(ctx: AgentCtx, msg) -> dict | None:
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": tools_list(access.rules_for(ctx.agent_id))}}
+        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": tools_list(access.rules_for(ctx.agent_id), ctx)}}
     if method == "tools/call":
         name = params.get("name")
         if not isinstance(name, str):

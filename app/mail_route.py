@@ -747,7 +747,8 @@ def view(s, row) -> dict:
             if case else None,
             "tasks": [{"id": t.id, "title": t.title, "deadline": t.deadline, "status": t.status} for t in tasks],
             "errors": int(route.get("errors") or 0), "check": route.get("check") or None,
-            "history": [{**h, "at": _when(h.get("at"))} for h in route.get("history") or []],
+            "history": [{**h, "at": _when(h.get("at")), "status_ru": STATUS_RU.get(h.get("status") or "", h.get("status") or "")}
+                        for h in route.get("history") or []],
             "draft": bool(route.get("draft")), "files": route.get("files") or 0}
 
 

@@ -234,6 +234,9 @@ def test_not_mine_brings_the_letter_back_withdraws_its_tasks_and_counts_an_error
         assert mail_route.accuracy(s) == {"total": 1, "wrong": 1, "ok": 0, "share": 100}
     told = [t for ref, t in tgacc.sent if ref == "@boss"]
     assert any("не по адресу (счета ведёт Иван)" in t and "Кому передать?" in t for t in told)
+    with SessionLocal() as s:  # the page tells the earlier route in words, not by its code
+        history = mail_route.view(s, s.get(MailMessage, row.id))["history"]
+    assert history and all(h["status_ru"] and h["status_ru"] != h.get("status") for h in history)
     # the leader passes it on from the chat and asks to remember
     mm.decisions.append(lambda f: {"reply": "Передал Ивану.", "actions": [
         {"type": "mail_pass", "mail_id": [x for x in f["mail_letters"] if x.get("waits_for_decision")][0]["id"],

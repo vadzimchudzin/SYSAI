@@ -126,7 +126,7 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     cfg = load_agent(home)
     client, token = client_for(home, cfg, transport)
     state = fsutil.read_json(home / "state.json", {}) or {}
-    report = {"agent": cfg["agent"], "changed": [], "hub": {}, "proposals": [], "errors": [], "restart": ""}
+    report = {"agent": cfg["agent"], "changed": [], "hub": {}, "proposals": [], "errors": [], "restart": "", "access": ""}
     try:
         signed = client.json("GET", "/agents/api/config")
     except ApiError as exc:
@@ -154,7 +154,10 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
         report["hub"] = hubsync.sync(home, client, manifest, state, profile_dir)
         report["errors"] += report["hub"]["errors"]
         state["conflicts"] = report["hub"]["conflicts"]
-        state["hub_rev"] = manifest.get("rev", "")
+        if report["hub"]["errors"]:  # not taken whole: the next pulse sees another revision and tries again
+            state.pop("hub_rev", None)
+        else:
+            state["hub_rev"] = manifest.get("rev", "")
     except ApiError as exc:
         report["errors"].append(f"SYSAI_Hub: {exc}")
     try:
@@ -162,11 +165,16 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     except ApiError as exc:
         report["errors"].append(f"Предложения в хаб: {exc}")
     if applied:
+        if doc.get("rev", "") != state.get("access_rev", ""):
+            report["access"] = doc.get("rev", "")
         state["access_rev"] = doc.get("rev", "")
         state["applied_at"] = now()
     if report["changed"] or (report["hub"] or {}).get("changed") or (report["hub"] or {}).get("removed"):
         state["restart_pending"] = True
-    if restart and state.get("restart_pending"):
+    if state.get("restart_pending") and not hermes.gateway_running(profile_dir):
+        state.pop("restart_pending", None)  # nothing to restart: Hermes reads the new settings when it starts
+        report["restart"] = "шлюз Hermes не запущен: новые настройки он возьмёт при запуске"
+    elif restart and state.get("restart_pending"):
         done, said = hermes.restart(cfg.get("profile") or cfg["agent"], profile_dir)
         report["restart"] = said
         if done:
@@ -175,11 +183,11 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
             log.info("Hermes не перезапущен (%s): попробую при следующей синхронизации", said)
     state["synced_at"] = now()
     state["error"] = "; ".join(report["errors"])[:2000]
-    fsutil.write_json(home / "state.json", state)
     try:
         report["pulse"] = pulse(home, client, state)
     except ApiError as exc:
         report["errors"].append(f"Пульс: {exc}")
+    fsutil.write_json(home / "state.json", state)  # after the pulse: its time is kept too («sysai-agent status»)
     return report
 
 
@@ -237,7 +245,8 @@ def run(home: Path | None = None, every: int = EVERY, transport=None, cycles: in
                 if need:
                     report = sync_once(home, transport)
                     last_full, failed = time.time(), False
-                    if report["changed"] or (report["hub"] or {}).get("changed") or report["proposals"]:
+                    if report["changed"] or (report["hub"] or {}).get("changed") or report["proposals"] or \
+                            report.get("access"):
                         log.info("Синхронизировано: %s", describe(report))
                     for e in report["errors"]:
                         log.warning("%s", e)
@@ -289,6 +298,8 @@ def describe(report: dict) -> str:
         parts.append("убрано: " + ", ".join(hub["removed"]))
     if report.get("proposals"):
         parts.append("предложено в хаб: " + ", ".join(report["proposals"]))
+    if report.get("access") and not report.get("changed"):
+        parts.append("доступы: " + report["access"])
     return "; ".join(parts) or "без изменений"
 
 

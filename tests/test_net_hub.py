@@ -345,3 +345,12 @@ def test_agents_propose_tools_through_the_api(client, net_agent):
                     json={"tool_md": TOOL, "files": {"server.py": "print('ok')\n"}, "why": "теги вручную — долго"})
     assert r.status_code == 200 and r.json()["kind"] == "mcp" and r.json()["status"] == "review"
     assert "На проверке (1)" in client.get("/hub").text
+
+
+def test_the_lists_of_a_tool_are_read_in_every_yaml_form():
+    for text in ('[read_tags, "check_addresses"]', "read_tags, check_addresses", "- read_tags\n- check_addresses"):
+        assert hub.tool_spec({"tools": text})["tools"] == ["read_tags", "check_addresses"], text
+    meta, _ = hub.parse_skill_md("---\nname: plc-kit\nkind: mcp\nrun: python server.py\n"
+                                 "tools: [read_tags, 'check_addresses']\nrequires:\n  - python\n  - TIA Portal\n---\n# ПЛК\n")
+    spec = hub.tool_spec(meta)
+    assert spec["tools"] == ["read_tags", "check_addresses"] and spec["requires"] == ["python", "TIA Portal"]
