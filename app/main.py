@@ -1961,7 +1961,7 @@ def mail_view(request: Request, kind: str = "", q: str = "", only: str = "", msg
     form = {k: stored.get(k) for k in MAIL_FORM_KEYS}
     return page(request, "mail.html", rows=rows, score=score, st=mail.status(), kinds=kinds, kinds_text=mail.kinds_text(),
                 presets=mail.PRESETS, form=form, has_password=bool(stored.get("mail_password")), kind=kind, q=q,
-                only=only, limit=limit, msg=_mail_msg(msg), error=error[:300], rules=rules, targets=targets,
+                only=only, limit=limit, msg=_mail_msg(msg), error=error[:700], rules=rules, targets=targets,
                 suggestions=hints, route_score=route_score, waiting=waiting, drafts=drafts, cards=cards,
                 route_form={k: stored.get(k) for k in MAIL_ROUTE_KEYS},
                 reply_form={k: stored.get(k) for k in MAIL_REPLY_KEYS}, smtp_ready=mail_reply.ready(),

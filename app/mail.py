@@ -51,10 +51,14 @@ PRESETS = {
               "hint": "Пароль приложения: myaccount.google.com → Безопасность → Пароли приложений (нужна двухэтапная "
                       "проверка). Обычный пароль Google не подойдёт."},
     "yandex": {"name": "Яндекс 360 / Яндекс Почта", "imap": ("imap.yandex.ru", 993), "smtp": ("smtp.yandex.ru", 465),
-               "hint": "Пароль приложения: id.yandex.ru → Безопасность → Пароли приложений → «Почта» (если пункта нет — "
-                       "администратор организации разрешает пароли приложений в admin.yandex.ru). В почте: Все настройки → "
-                       "Почтовые программы → включите «С сервера imap.yandex.ru по протоколу IMAP» и «Пароли приложений "
-                       "и OAuth-токены». Метки (ключевые слова) Яндекс не показывает — нагляднее «Папки в ящике»."},
+               "hint": "Яндекс 360 для бизнеса: администратор включает IMAP для всей организации — admin.yandex.ru → Почта → "
+                       "Настройки → «Использовать протоколы» → IMAP. В ящике: Все настройки → Почтовые программы → включите "
+                       "«С сервера imap.yandex.ru по протоколу IMAP» и «Пароли приложений и OAuth-токены». Пароль приложения: "
+                       "id.yandex.ru → Безопасность → Пароли приложений → «Почта» (если пункта нет — пароли приложений "
+                       "разрешает администратор организации). Адрес ящика — целиком, вместе с доменом. Если на сайте почты "
+                       "при входе просит капчу, Яндекс считает вход подозрительным: привяжите к аккаунту телефон, укажите "
+                       "настоящие имя и фамилию и подождите пару часов. Метки (ключевые слова) Яндекс не показывает — "
+                       "нагляднее «Папки в ящике»."},
     "mailru": {"name": "Mail.ru", "imap": ("imap.mail.ru", 993), "smtp": ("smtp.mail.ru", 465),
                "hint": "Пароль для внешних приложений: Настройки → Безопасность → Пароли для внешних приложений."},
     "outlook": {"name": "Outlook / Microsoft 365", "imap": ("outlook.office365.com", 993), "smtp": ("smtp.office365.com", 587),
@@ -327,6 +331,26 @@ def _short(exc) -> str:
     return " ".join(str(text).split())[:200]
 
 
+def is_yandex(host: str) -> bool:
+    host = str(host or "").lower().rstrip(".")
+    return host == "ya.ru" or host.endswith((".ya.ru", ".yandex.ru", ".yandex.com", ".yandex.by", ".yandex.kz"))
+
+
+def login_failed(host: str, answer: str) -> str:
+    """Why the box did not let us in, in words a person can act on. Yandex gives one answer («invalid credentials or IMAP
+    is disabled») for several reasons, so they are all listed, the most common for a company first: in Yandex 360 the
+    administrator switches IMAP on for the whole organization, the box itself has its own switch, the password has to be
+    an app password and the login the whole address; a box Yandex finds suspicious (a captcha on the site) is blocked."""
+    answer = re.sub(r"\s*sc=\S+", "", str(answer or "")).strip()
+    if is_yandex(host):
+        return ("Яндекс не пустил (" + answer + "). Проверьте по порядку: 1) Яндекс 360 для бизнеса — admin.yandex.ru → "
+                "Почта → Настройки → «Использовать протоколы»: IMAP включён; 2) в ящике: Все настройки → Почтовые программы → "
+                "«С сервера imap.yandex.ru по протоколу IMAP» и «Пароли приложений и OAuth-токены»; 3) пароль — пароль "
+                "приложения «Почта» с id.yandex.ru, а не пароль от ящика, адрес — целиком; 4) войдите в ящик на сайте: "
+                "если просит капчу — привяжите к аккаунту телефон и подождите пару часов")
+    return "почта не пустила: проверьте адрес и пароль приложения (" + answer + ")"
+
+
 def _logout(conn) -> None:
     try:
         conn.logout()
@@ -358,7 +382,7 @@ class ImapBox:
             raise MailError("в адресе или пароле есть русские буквы — нужен пароль приложения латиницей") from exc
         except imaplib.IMAP4.error as exc:
             _logout(conn)
-            raise MailError("почта не пустила: проверьте адрес и пароль приложения (" + _short(exc) + ")") from exc
+            raise MailError(login_failed(host, _short(exc))) from exc
         return conn
 
     def _select(self, conn, readonly: bool = True) -> tuple:
@@ -975,7 +999,7 @@ def check_now() -> dict:
             got, error = None, f"почта не ответила: {_short(exc)}"
         if got is None:
             log.warning("mailbox not read: %s", error)
-            state.update(checked_at=_iso(now()), ok=False, error=error[:300])
+            state.update(checked_at=_iso(now()), ok=False, error=error[:700])
             settings_store.set_many({"mail_state": state})
             return {"new": 0, "more": False, "error": error}
         new_ids, documents = [], []

@@ -1,6 +1,6 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="preload" href="/static/fonts/inter-normal-cyr.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/static/fonts/source-serif-4-normal-cyr.woff2" as="font" type="font/woff2" crossorigin>
+{% if not lean_fonts %}<link rel="preload" href="/static/fonts/inter-normal-cyr.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/source-serif-4-normal-cyr.woff2" as="font" type="font/woff2" crossorigin>{% endif %}
 <link rel="stylesheet" href="{{ asset('fonts.css') }}">
 <link rel="stylesheet" href="{{ asset('style.css') }}">
