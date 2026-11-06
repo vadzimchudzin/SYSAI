@@ -8,7 +8,7 @@ import struct
 import uuid
 
 from ebpcmtp import (FK_ACTIONS, Project, _ALIGN, _DRAW_DEF, _PART_DEF, _SLOT, _TAG, _check_range, _cstr_at,
-                     _map_info, _nested_classes, _text_em, class_defs, cstring, fk_action, opc_tag_name,
+                     _map_info, _nested_classes, _text_em, _attrs_at, class_defs, cstring, fk_action, opc_tag_name,
                      insert_point, opcua_table)
 
 SYSTEM_WINDOWS = 10         # windows 0-9 belong to EasyBuilder (common window, keypads' base, messages...)
@@ -182,6 +182,110 @@ def add_tags(p: Project, tags: list) -> list:
             raise ValueError('the tag table does not read back after adding; the project is left unchanged')
     _guarded(p, run)
     return added
+
+
+# -- object appearance and precise OPC UA binding -----------------------------------------------------------------
+def _color(value):
+    if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        raise ValueError('colour must be #RRGGBB')
+    return bytes.fromhex(value[1:])
+
+
+def style(p: Project, window, index: int, changes: dict) -> dict:
+    """Change known appearance fields only; other object and state data stay intact."""
+    w, (o,) = p._objects(window, index)
+    allowed = {'fill', 'frame', 'frame_width', 'text_color', 'font_size', 'label'}
+    if not isinstance(changes, dict) or set(changes) - allowed or not (set(changes) - {'label'}):
+        raise ValueError('no supported appearance properties')
+    edits, expected = [], {}
+    end = o['offset'] + o['length']
+    fields = set(changes) & {'fill', 'frame', 'frame_width'}
+    if fields:
+        if o['kind'] not in ('Window', 'Rect', 'Line'):
+            raise ValueError('fill and frame are only supported for Window, Rect and Line')
+        if o['kind'] == 'Window' and (fields - {'fill'} or changes.get('fill') is None):
+            raise ValueError('window supports only an opaque background fill')
+        a = _attrs_at(p.payload, o, w)
+        if a is None or a + 45 > end:
+            raise ValueError('object appearance is not recognised')
+        if 'fill' in changes:
+            fill = changes['fill']
+            if fill is None:
+                edits.append((a, a + 1, b'\x00'))
+                expected['fill'] = None
+            else:
+                rgb = _color(fill)
+                if o['kind'] != 'Window':
+                    edits.append((a, a + 1, b'\x01'))
+                edits.append((a + 1, a + 4, rgb))
+                expected['fill'] = '#' + rgb.hex()
+        if 'frame' in changes:
+            rgb = _color(changes['frame'])
+            edits.append((a + 5, a + 8, rgb))
+            expected['frame'] = '#' + rgb.hex()
+        if 'frame_width' in changes:
+            width = changes['frame_width']
+            if not isinstance(width, int) or isinstance(width, bool) or not 0 <= width <= 20:
+                raise ValueError('frame_width must be an integer from 0 to 20')
+            edits.append((a + 44, a + 45, bytes([width])))
+            expected['frame_width'] = width
+    lab_fields = set(changes) & {'text_color', 'font_size'}
+    label = changes.get('label', 0)
+    if lab_fields:
+        if not isinstance(label, int) or isinstance(label, bool) or not 0 <= label < len(o['_label_pos']):
+            raise ValueError('label state not found')
+        at = o['_label_pos'][label][0]
+        if at - 1 < o['offset'] or at + 13 > end:
+            raise ValueError('label properties are not recognised')
+        if 'text_color' in changes:
+            rgb = _color(changes['text_color'])
+            edits.append((at + 8, at + 11, rgb))
+            expected['text_color'] = '#' + rgb.hex()
+        if 'font_size' in changes:
+            size = changes['font_size']
+            if not isinstance(size, int) or isinstance(size, bool) or not 1 <= size <= 100:
+                raise ValueError('font_size must be an integer from 1 to 100 points')
+            edits.append((at - 1, at, bytes([size])))
+            expected['font_size'] = size
+    def run():
+        p._splice(edits)
+        look = p.scene(w['number'])['objects'][index]
+        for key, value in expected.items():
+            got = (look['labels'][label]['color'] if key == 'text_color' else
+                   look['labels'][label]['size'] if key == 'font_size' else look.get(key))
+            if got != value:
+                raise ValueError(f'appearance {key} does not read back; project unchanged')
+        return expected
+    return _guarded(p, run)
+
+
+def bind_tag(p: Project, window, index: int, slot: int, tag: str) -> dict:
+    """Rebind one already-OPC-UA slot to a tag of the same known type; never alter device or slot type."""
+    w, (o,) = p._objects(window, index)
+    if not isinstance(slot, int) or isinstance(slot, bool) or slot not in (1, 2, 3):
+        raise ValueError('slot must be 1, 2 or 3')
+    if len(o['_dev']) != 3 or len(o['_addr']) < 3:
+        raise ValueError('object address slots are not recognised')
+    start, end, address = o['_addr'][slot - 1]
+    old = opc_tag_name(address)
+    tags = {t['name']: t for t in p.opcua_tags()}
+    if old not in tags:
+        raise ValueError('slot must already contain an OPC UA tag from the project table')
+    if address != f'{old} ({tags[old]["node"]})':
+        raise ValueError('slot node differs from the project tag table; verify it in EasyBuilder')
+    if tag not in tags:
+        raise ValueError(f'tag {tag!r} is not in the OPC UA tag table')
+    if tags[old]['type'] != tags[tag]['type']:
+        raise ValueError(f'type mismatch: {old} is {tags[old]["type"]}, {tag} is {tags[tag]["type"]}')
+    def run():
+        p._splice([(start, end, cstring(f'{tag} ({tags[tag]["node"]})'))])
+        w2, (o2,) = p._objects(w['number'], index)
+        if len(o2['_addr']) < 3 or opc_tag_name(o2['_addr'][slot - 1][2]) != tag:
+            raise ValueError('address does not read back; project unchanged')
+        if [d[2] for d in o2['_dev']] != [d[2] for d in o['_dev']]:
+            raise ValueError('device changed unexpectedly; project unchanged')
+        return {'slot': slot, 'old': old, 'tag': tag, 'type': tags[tag]['type']}
+    return _guarded(p, run)
 
 
 # -- size ---------------------------------------------------------------------------------------------------------------

@@ -56,12 +56,14 @@ const WINDOW = { type: ['string', 'integer'], description: 'Окно проек�
 const NAMES = { type: 'object', additionalProperties: { type: 'string' } };
 const EDIT = { type: 'object', properties: {
   op: { type: 'string', enum: ['text', 'move', 'resize', 'tag', 'rename_window', 'clone_window', 'clone_object',
-    'delete_object', 'delete_window', 'link', 'add_tags', 'import_window', 'import_objects'] },
+    'delete_object', 'delete_window', 'link', 'add_tags', 'import_window', 'import_objects', 'style', 'bind_tag'] },
   window: { ...WINDOW, description: 'Окно: номер или имя (по умолчанию — окно на холсте; у import_* — окно донора)' },
   object: { type: 'integer', description: 'index объекта (canvas_look)' },
   objects: { type: 'array', items: { type: 'integer' }, description: 'import_objects: index объектов донора' },
   old: { type: 'string' }, new: { type: 'string' }, dx: { type: 'integer' }, dy: { type: 'integer' },
   width: { type: 'integer' }, height: { type: 'integer' },
+  fill: { type: ['string', 'null'] }, frame: { type: 'string' }, frame_width: { type: 'integer' },
+  text_color: { type: 'string' }, font_size: { type: 'integer' }, label: { type: 'integer' }, slot: { type: 'integer', enum: [1, 2, 3] },
   number: { type: 'integer', description: 'clone_window / import_window: номер нового окна' },
   to: { type: 'string', description: 'clone_object / import_objects: окно, куда положить (по умолчанию — на холсте); '
     + 'link: окно, куда ведёт кнопка' },
@@ -114,7 +116,7 @@ TOOLS.push(
     title: 'Править на холсте',
     description: 'Править проект, открытый на холсте, — прямо в его файле: каждая правка сразу видна человеку, ваш курсор '
       + 'идёт к объекту, человек может отменить («Отменить», Ctrl+Z). Правки — как у cmtp_edit: text (old → new, '
-      + 'object — только в нём), move (object, dx, dy), resize (object, width, height), tag (old → new), rename_window '
+      + 'object — только в нём), move (object, dx, dy), resize (object, width, height), style (fill, frame, frame_width, text_color, font_size, label), bind_tag (object, slot, new), tag (old → new), rename_window '
       + '(new), clone_window (new, number), clone_object (object, dx, dy, to), delete_object (object; удаляйте с '
       + 'большего index), delete_window, link (object → окно to), add_tags (tags), import_window (from, window донора, '
       + 'new, number), import_objects (from, window донора, objects, to, dx, dy; map_tags, map_windows, map_devices); '

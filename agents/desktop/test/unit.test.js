@@ -642,6 +642,13 @@ test('canvas: the tool — where it is, which Python, what is said when it is mi
   } finally {
     cv.stop();
   }
+  assert.deepEqual(canvasLib.normalize([{ op: 'style', object: 2, fill: null, frame: '#112233',
+    frame_width: 2, text_color: '#abcdef', font_size: 18, label: 0 },
+  { op: 'bind_tag', object: 3, slot: 1, new: 'GVL.RUN' }], 10), [
+    { op: 'style', window: '10', object: 2, frame_width: 2, font_size: 18, label: 0,
+      fill: null, frame: '#112233', text_color: '#abcdef' },
+    { op: 'bind_tag', window: '10', object: 3, slot: 1, new: 'GVL.RUN' },
+  ]);
   assert.equal(canvasLib.describe([{ op: 'move', object: 1, dx: 2, dy: 0 }, { op: 'move', object: 4, dx: 2, dy: 0 }]), 'сдвиг #1, #4 на (2, 0)');
   assert.deepEqual(canvasLib.normalize([{ op: 'move', object: '3', dx: 1 }], 10), [{ op: 'move', window: '10', object: 3, dx: 1 }]);
 });

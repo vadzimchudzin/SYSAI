@@ -318,6 +318,115 @@ def test_scene_pictures_and_colours(tmp_path):
     assert p.scene("Экран")["images"] == {}                # nothing written without images_dir
 
 
+def test_style_changes_only_known_appearance_fields():
+    import ebpedit
+    p = ebpcmtp.Project.load(_look_project())
+    before = p.scene("Экран")
+    assert ebpedit.style(p, "Экран", 1, {"fill": "#0aB123", "frame": "#123456", "frame_width": 3}) == {
+        "fill": "#0ab123", "frame": "#123456", "frame_width": 3}
+    assert ebpedit.style(p, "Экран", 2, {"text_color": "#102030", "font_size": 28}) == {
+        "text_color": "#102030", "font_size": 28}
+    assert ebpedit.style(p, "Экран", 0, {"fill": "#223344"}) == {"fill": "#223344"}
+    q = ebpcmtp.Project.load(p.dump())
+    scene = q.scene("Экран")
+    assert scene["window"]["background"] == "#223344"
+    assert (scene["objects"][1]["fill"], scene["objects"][1]["frame"], scene["objects"][1]["frame_width"]) == (
+        "#0ab123", "#123456", 3)
+    assert scene["objects"][2]["labels"][0]["size"] == 28
+    assert scene["objects"][2]["labels"][0]["color"] == "#102030"
+    assert scene["objects"][3:] == before["objects"][3:]
+    ebpedit.style(q, "Экран", 1, {"fill": None})
+    assert q.scene("Экран")["objects"][1]["fill"] is None
+    original = q.payload
+    for index, bad in [(1, {"fill": "red"}), (1, {"frame_width": -1}), (2, {"fill": "#ffffff"}),
+                       (2, {"font_size": 0}), (2, {"label": 8, "font_size": 15}), (0, {"fill": None})]:
+        with pytest.raises(ValueError):
+            ebpedit.style(q, "Экран", index, bad)
+        assert q.payload == original
+
+
+def test_bind_tag_one_existing_slot_only():
+    import ebpedit
+    p = _ui_project()
+    before = p.window("Главное")["objects"][2]
+    out = ebpedit.bind_tag(p, "Главное", 2, 1, "GVL.B")
+    assert out == {"slot": 1, "old": "GVL.A", "tag": "GVL.B", "type": "BOOL"}
+    q = ebpcmtp.Project.load(p.dump())
+    obj = q.window("Главное")["objects"][2]
+    assert [(a["slot"], a["tag"]) for a in obj["addresses"]] == [(1, "GVL.B"), (2, "GVL.A")]
+    assert [d[2] for d in obj["_dev"]] == [d[2] for d in before["_dev"]]
+    original = q.payload
+    for slot, tag in [(3, "GVL.A"), (1, "GVL.N"), (1, "missing"), (0, "GVL.A"), (True, "GVL.A")]:
+        with pytest.raises(ValueError):
+            ebpedit.bind_tag(q, "Главное", 2, slot, tag)
+        assert q.payload == original
+
+
+def test_mcp_style_and_tag_binding_are_atomic(tmp_path):
+    import server
+    src, dst = tmp_path / "in.cmtp", tmp_path / "out.cmtp"
+    src.write_bytes(_ui_project().dump())
+    args = {"path": str(src), "out_file": str(dst), "edits": [
+        {"op": "move", "window": "Главное", "object": 3, "dx": 5},
+        {"op": "bind_tag", "window": "Главное", "object": 2, "slot": 1, "new": "GVL.B"}]}
+    result = server._call("cmtp_edit", args)
+    assert not result.get("isError"), result
+    assert [r["op"] for r in result["structuredContent"]["results"]] == ["move", "bind_tag"]
+    q = ebpcmtp.Project.load(dst)
+    assert q.scene("Главное")["objects"][3]["bbox"] == [15, 10, 505, 90]
+    assert q.window("Главное")["objects"][2]["addresses"][0]["tag"] == "GVL.B"
+    saved = dst.read_bytes()
+    args["edits"].append({"op": "bind_tag", "window": "Главное", "object": 2, "slot": 2, "new": "GVL.N"})
+    result = server._call("cmtp_edit", args)
+    assert result.get("isError") and dst.read_bytes() == saved
+    assert src.read_bytes() == _ui_project().dump()
+    look = tmp_path / "look.cmtp"
+    look.write_bytes(_look_project())
+    result = server._call("cmtp_edit", {"path": str(look), "out_file": str(dst), "edits": [
+        {"op": "style", "window": "Экран", "object": 1, "fill": "#123456"}]})
+    assert not result.get("isError"), result
+    assert ebpcmtp.Project.load(dst).scene("Экран")["objects"][1]["fill"] == "#123456"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="нужен Node.js")
+def test_real_canvas_style_and_binding_with_undo(tmp_path):
+    desk = SEED.parent.parent.parent / "agents" / "desktop"
+    look, ui = tmp_path / "look.cmtp", tmp_path / "ui.cmtp"
+    look.write_bytes(_look_project())
+    ui.write_bytes(_ui_project().dump())
+    script = r"""
+const { Canvas } = require('./lib/canvas');
+const a = JSON.parse(process.env.CANVAS_TEST);
+(async () => {
+  const c = new Canvas({home:a.home, cache:a.cache, tool:{command:a.python,args:[a.server],cwd:a.cwd},watch:60000});
+  try {
+    await c.open(a.look, '0');
+    await c.edit('Агент', [{op:'style',object:1,fill:'#123456'}, {op:'style',object:2,font_size:29,text_color:'#abcdef'}]);
+    const style = c.state().scene.objects;
+    await c.undo();
+    const undone = c.state().scene.objects;
+    await c.open(a.ui, '0');
+    await c.edit('Агент', [{op:'bind_tag',object:2,slot:1,new:'GVL.B'}]);
+    const tags = c.state().scene.objects[2].tags;
+    await c.undo();
+    const old = c.state().scene.objects[2].tags;
+    process.stdout.write(JSON.stringify({fill:style[1].fill, label:style[2].labels[0],
+      undoFill:undone[1].fill,tags,old}));
+  } finally { c.stop(); }
+})().catch(e=>{process.stderr.write(String(e.stack));process.exit(1)});
+"""
+    env = {**os.environ, "CANVAS_TEST": json.dumps({"home": str(tmp_path / "home"), "cache": str(tmp_path / "cache"),
+           "python": sys.executable, "server": str(SEED / "server.py"), "cwd": str(SEED),
+           "look": str(look), "ui": str(ui)})}
+    r = subprocess.run([shutil.which("node"), "-e", script], cwd=desk, env=env, capture_output=True, text=True,
+                       encoding="utf-8", timeout=120)
+    assert r.returncode == 0, r.stderr[-3000:]
+    out = json.loads(r.stdout)
+    assert out["fill"] == "#123456" and out["undoFill"] == "#005480"
+    assert (out["label"]["size"], out["label"]["color"]) == (29, "#abcdef")
+    assert out["tags"] == ["GVL.B", "GVL.A"] and out["old"] == ["GVL.A", "GVL.A"]
+
+
 def test_check_warns_about_compact_opaque_widget():
     import ebpedit
     p = ebpcmtp.Project.load(_look_project())
@@ -404,7 +513,8 @@ def test_mcp_server_over_stdio(tmp_path):
         return result.get("isError", False), result["content"][0]["text"]
 
     try:
-        assert rpc(1, "initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"]["name"] == "ebpro-cmtp"
+        assert rpc(1, "initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"] == {
+            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.5.0"}
         assert [t["name"] for t in rpc(2, "tools/list")["result"]["tools"]] == TOOLS
         err, text = call(3, "cmtp_info", path=str(src))
         info = json.loads(text)
@@ -796,6 +906,26 @@ def test_render_draws_the_window():
     assert (w, h, bytes(rgba[:4])) == (3, 2, b"\x01\x02\x03\xff")
     w, h, rgba = ebprender.decode_bmp(_bmp(), "#00d2ff")
     assert (w, h) == (2, 2) and rgba[3] == 0 and bytes(rgba[8:12]) == b"\xff\xff\xff\xff"
+
+
+def test_render_selects_picture_states_without_connecting_to_plc(tmp_path):
+    from PIL import Image
+    import server
+    p = ebpcmtp.Project.load(_look_project())
+    im = Image.open(io.BytesIO(ebprender.render(p, "Экран", states={"3": 1}))).convert("RGB")
+    assert im.getpixel((430, 110)) == (0, 128, 192)  # transparent blue BMP reveals background
+    assert im.getpixel((405, 150)) == (255, 255, 255)
+    for states in ({"3": 2}, {"3": -1}, {"03": 0}, {"999": 0}, {"3": True}, {"2": 0}):
+        with pytest.raises(ValueError):
+            ebprender.render(p, "Экран", states=states)
+    src, dst = tmp_path / "p.cmtp", tmp_path / "state.png"
+    src.write_bytes(p.dump())
+    result = server._call("cmtp_render", {"path": str(src), "window": "Экран", "out_file": str(dst), "states": {"3": 1}})
+    assert not result.get("isError"), result
+    assert Image.open(dst).convert("RGB").getpixel((430, 110)) == (0, 128, 192)
+    dst.unlink()
+    result = server._call("cmtp_render", {"path": str(src), "window": "Экран", "out_file": str(dst), "states": {"3": 3}})
+    assert result.get("isError") and not dst.exists()
 
 
 def test_negative_draw_coordinates_render_and_resize():

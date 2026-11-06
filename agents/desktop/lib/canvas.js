@@ -19,7 +19,7 @@ const config = require('./config');
 const TOOL = 'ebpro-cmtp';
 const EXT = /\.(cmtp|emtp)$/i;
 const OPS = ['text', 'move', 'resize', 'tag', 'rename_window', 'clone_window', 'clone_object', 'delete_object',
-  'delete_window', 'link', 'add_tags', 'import_window', 'import_objects'];
+  'delete_window', 'link', 'add_tags', 'import_window', 'import_objects', 'style', 'bind_tag'];
 const WINDOW_OPS = new Set(['rename_window', 'clone_window', 'delete_window', 'import_window']);
 const DONOR_OPS = new Set(['import_window', 'import_objects']);
 const PERSON = 'Человек';
@@ -206,12 +206,13 @@ function normalize(edits, current) {
     if (e.op !== 'add_tags' && (win === undefined || win === null || win === '')) throw new Error(`правка ${n + 1}: какое окно (window)?`);
     const out = { op: e.op };
     if (e.op !== 'add_tags') out.window = String(win);
-    for (const k of ['object', 'dx', 'dy', 'number', 'width', 'height']) {
+    for (const k of ['object', 'dx', 'dy', 'number', 'width', 'height', 'frame_width', 'font_size', 'label', 'slot']) {
       const v = int(e[k]);
       if (Number.isNaN(v)) throw new Error(`правка ${n + 1}: ${k} — целое число`);
       if (v !== null) out[k] = v;
     }
     for (const k of ['old', 'new', 'to', 'from']) if (e[k] !== undefined && e[k] !== null) out[k] = String(e[k]);
+    for (const k of ['fill', 'frame', 'text_color']) if (Object.hasOwn(e, k)) out[k] = e[k] === null ? null : String(e[k]);
     if (e.op === 'import_objects' && e.to === undefined) out.to = String(current);
     if (Array.isArray(e.objects)) {
       out.objects = e.objects.map((v) => int(v));
@@ -239,6 +240,8 @@ function describe(edits) {
     const obj = Number.isInteger(e.object) ? ` #${e.object}` : '';
     if (e.op === 'text') return `текст${obj} «${clip(e.old, 30)}» → «${clip(e.new, 30)}»`;
     if (e.op === 'move') return `сдвиг${obj} на (${e.dx || 0}, ${e.dy || 0})`;
+    if (e.op === 'style') return `оформление${obj}`;
+    if (e.op === 'bind_tag') return `адрес${obj} слот ${e.slot} → ${clip(e.new, 40)}`;
     if (e.op === 'tag') return `тег${obj} ${clip(e.old, 40)} → ${clip(e.new, 40)}`;
     if (e.op === 'rename_window') return `имя окна ${e.window} → «${clip(e.new, 40)}»`;
     if (e.op === 'clone_window') return `копия окна ${e.window}${e.new ? ` «${clip(e.new, 40)}»` : ''}`;

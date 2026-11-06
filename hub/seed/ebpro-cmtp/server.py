@@ -164,12 +164,15 @@ TOOLS = [
                        "состояния, подписи шрифтами системы; фигуры библиотеки EasyBuilder — простыми кнопками, "
                        "полями и лампами) — посмотреть результат без EasyBuilder. out_file — куда записать .png; "
                        "scale — масштаб 0.1–2 (для окон 1920×1080 хватит 0.5); marks — номера объектов (index) в "
-                       "углу каждого, чтобы называть их в правках; show — вернуть картинку и в ответе.",
+                       "углу каждого, чтобы называть их в правках; states — какие состояния отдельных объектов показать; "
+                       "show — вернуть картинку и в ответе. Это статический предпросмотр без связи с ПЛК.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
                         "window": {"type": "string", "description": "Имя окна или номер"},
                         "out_file": {"type": "string", "description": r"Куда записать PNG, например C:\SYSAI\shots\w23.png"},
                         "scale": {"type": "number", "minimum": 0.1, "maximum": 2},
-                        "marks": {"type": "boolean"}, "show": {"type": "boolean"}},
+                        "marks": {"type": "boolean"}, "show": {"type": "boolean"},
+                        "states": {"type": "object", "description": "Индекс объекта → номер состояния картинки (с 0); это только предпросмотр",
+                                   "additionalProperties": {"type": "integer", "minimum": 0}}},
                         "required": ["path", "window", "out_file"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
@@ -180,7 +183,9 @@ TOOLS = [
                        "с блокировкой от одновременной записи). Правки идут по порядку; если одна не прошла — файл "
                        "не пишется. Виды (op): text — заменить текст в окне на любой длины (old → new, object — "
                        "только в этом объекте; рамка «Текста» расширяется); move — сдвинуть объект (object, dx, dy); "
-                       "resize — новый размер объекта (object, width, height в пикселях; угол на месте); tag — "
+                       "resize — новый размер объекта (object, width, height в пикселях; угол на месте); "
+                       "style — цвет заливки и рамки фигуры или фона окна, цвет и размер подписи состояния; "
+                       "bind_tag — один существующий слот OPC UA на тег того же типа (slot 1–3, new); tag — "
                        "перепривязать объекты окна с тега OPC UA old на new (тот же тип, тег из таблицы; object — "
                        "только этот); rename_window — имя окна (new); clone_window — копия окна window под номером "
                        "number (по умолчанию — после последнего) с именем new; clone_object — копия объекта object в "
@@ -203,13 +208,20 @@ TOOLS = [
                 "type": "object", "properties": {
                     "op": {"type": "string", "enum": ["text", "move", "resize", "tag", "rename_window", "clone_window",
                                                       "clone_object", "delete_object", "delete_window", "link",
-                                                      "add_tags", "import_window", "import_objects", "picture_states"]},
+                                                      "add_tags", "import_window", "import_objects", "picture_states", "style", "bind_tag"]},
                     "window": {"type": "string", "description": "Имя окна или номер (у import_* — окно донора)"},
                     "object": {"type": "integer", "description": "index объекта из cmtp_objects"},
                     "objects": {"type": "array", "items": {"type": "integer"}, "description": "import_objects: index объектов донора"},
                     "old": {"type": "string"}, "new": {"type": "string"},
                     "dx": {"type": "integer"}, "dy": {"type": "integer"},
                     "width": {"type": "integer"}, "height": {"type": "integer"},
+                    "fill": {"type": ["string", "null"], "description": "Цвет заливки #RRGGBB; null — без заливки"},
+                    "frame": {"type": "string", "description": "Цвет рамки #RRGGBB"},
+                    "frame_width": {"type": "integer", "minimum": 0, "maximum": 20},
+                    "text_color": {"type": "string", "description": "Цвет подписи #RRGGBB"},
+                    "font_size": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "label": {"type": "integer", "minimum": 0, "description": "Индекс состояния подписи, по умолчанию 0"},
+                    "slot": {"type": "integer", "enum": [1, 2, 3], "description": "Номер существующего OPC UA-адреса"},
                     "number": {"type": "integer", "description": "clone_window / import_window: номер нового окна"},
                     "to": {"type": "string", "description": "clone_object / import_objects: окно, куда положить; link: окно, куда вести"},
                     "from": {"type": "string", "description": r"import_*: файл проекта-донора, например C:\Projects\donor.cmtp"},
@@ -374,7 +386,7 @@ def _call(name, args):
         if name == "cmtp_render":
             import ebprender
             p = _load(args["path"])
-            png = ebprender.render(p, args["window"], args.get("scale") or 1, bool(args.get("marks")))
+            png = ebprender.render(p, args["window"], args.get("scale") or 1, bool(args.get("marks")), args.get("states"))
             out = args["out_file"]
             os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
             with open(out, "wb") as f:
@@ -433,7 +445,7 @@ def _edit(args):
         op, win = e.get("op"), e.get("window")
         try:
             num = p.window(win)["number"] if op in ("text", "move", "resize", "tag", "rename_window", "clone_object",
-                                                    "delete_object", "link", "picture_states") else None
+                                                    "delete_object", "link", "picture_states", "style", "bind_tag") else None
             res = {"op": op, "window": num}
             if op == "text":
                 k = p.edit_text(win, str(e["old"]), str(e["new"]), e.get("object"))
@@ -466,6 +478,15 @@ def _edit(args):
                 ids = ebpedit.picture_states(p, win, int(e["object"]), states)
                 done.append(f"{n}. объект #{e['object']}: заменены картинки, состояний {len(ids)}")
                 res.update(object=int(e["object"]), images=ids)
+            elif op == "style":
+                props = {k: e[k] for k in ("fill", "frame", "frame_width", "text_color", "font_size", "label") if k in e}
+                changed = ebpedit.style(p, win, int(e["object"]), props)
+                done.append(f"{n}. объект #{e['object']}: изменено оформление {changed}")
+                res.update(object=int(e["object"]), style=changed)
+            elif op == "bind_tag":
+                changed = ebpedit.bind_tag(p, win, int(e["object"]), e["slot"], str(e["new"]))
+                done.append(f"{n}. объект #{e['object']}: адрес {changed['slot']} → {changed['tag']}")
+                res.update(object=int(e["object"]), **changed)
             elif op == "tag":
                 k = p.retag(win, str(e["old"]), str(e["new"]), e.get("object"))
                 done.append(f"{n}. тег {e['old']} → {e['new']}: {k} адрес(ов)")
@@ -568,7 +589,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.4.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.5.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})

@@ -317,9 +317,24 @@ def _light(c) -> bool:
     return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.62
 
 
-def render(p, window, scale: float = 1.0, marks: bool = False) -> bytes:
+def render(p, window, scale: float = 1.0, marks: bool = False, states=None) -> bytes:
     """PNG bytes of the window (scale 0.1-2). marks — the index of every object in a corner, to name them."""
     sc = p.scene(window)
+    if states is None:
+        states = {}
+    if not isinstance(states, dict):
+        raise ValueError('states must map object indices to state indices')
+    chosen = {}
+    for key, state in states.items():
+        if not isinstance(key, str) or not key.isascii() or not key.isdigit() or str(int(key)) != key:
+            raise ValueError('state object index must be a canonical nonnegative integer string')
+        index = int(key)
+        if index >= len(sc['objects']) or not isinstance(state, int) or isinstance(state, bool) or state < 0:
+            raise ValueError('invalid object or state index')
+        pics = sc['objects'][index].get('picture') or []
+        if state >= len(pics):
+            raise ValueError(f'object #{index} has no picture state {state}')
+        chosen[index] = state
     W, H = sc['window']['width'], sc['window']['height']
     scale = max(0.1, min(2.0, float(scale or 1)))
     cw, ch = max(1, int(W * scale)), max(1, int(H * scale))
@@ -340,8 +355,13 @@ def render(p, window, scale: float = 1.0, marks: bool = False) -> bytes:
                 cv.fill(l, t, r, b, _hex(o['fill']))
             if kind != 'Text' and o.get('frame') and (o.get('frame_width') or 0) > 0:
                 cv.frame(l, t, r, b, _hex(o['frame']), max(1, int(o['frame_width'] * scale)))
-        pic = (o.get('picture') or [None])[0]
-        lab = next((x for x in o.get('labels') or () if str(x.get('text') or '') != ''), None)
+        state = chosen.get(o['index'], 0)
+        pic = (o.get('picture') or [None])[state]
+        labels = o.get('labels') or []
+        if o['index'] in chosen and len(labels) > 1:
+            lab = labels[state] if state < len(labels) and str(labels[state].get('text') or '') else None
+        else:
+            lab = next((x for x in labels if str(x.get('text') or '') != ''), None)
         if pic:
             key = pic['image'] + (pic['transparent'] or '')
             if key not in pics:
