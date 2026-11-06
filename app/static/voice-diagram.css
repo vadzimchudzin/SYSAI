@@ -222,3 +222,35 @@ a.t[data-vd-seq]:hover { color: var(--clay2); text-decoration: underline; }
 .vd-relabel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
 .vd-relabel-actions form { margin: 0; }
 .vd-relabel-actions p { flex: 1 1 100%; margin: 0; }
+
+/* «Отметка голоса»: a part of the recording marked on the band for a person's voice profile (POST …/voice-marks). */
+.vd-mark-layer { position: absolute; left: 0; right: 0; z-index: 1; pointer-events: none; }
+.vd-mark-layer[hidden] { display: none; }
+.vd-mark-box { position: absolute; top: 0; bottom: 0; border: 1.5px solid var(--text); border-radius: 6px;
+  background: rgba(240,238,230,.12); box-shadow: 0 0 0 1px rgba(18,18,16,.5); }
+.vd-mark-layer.is-short .vd-mark-box { border-style: dashed; border-color: var(--amber); }
+.vd-mark-edge { position: absolute; top: -4px; bottom: -4px; width: 16px; margin-left: -8px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; cursor: ew-resize; pointer-events: auto; touch-action: none; }
+.vd-mark-edge::before { content: ""; position: absolute; left: 6px; top: 28%; bottom: 28%; width: 4px; border-radius: 2px; background: var(--text); }
+.vd-mark-edge:focus-visible { outline: 2px solid var(--clay); outline-offset: 1px; }
+.vd-sample-strip { fill: var(--green); opacity: .9; }
+.vd-mark { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line2); border-left: 3px solid var(--text); border-radius: 10px; background: var(--bg2); }
+.vd-mark[hidden] { display: none; }
+.vd-mark-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.vd-mark-what { display: inline-flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.vd-mark-what b { font-weight: 600; }
+.vd-mark-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+.vd-mark-tools .btn svg.i { width: 12px; height: 12px; fill: currentColor; stroke: none; }
+.vd-mark > p { margin: 8px 0 0; }
+.vd-mark-warn { color: var(--amber); }
+.vd-mark-warn[hidden] { display: none; }
+.vd-mark-fields { display: grid; gap: 8px; margin-top: 10px; }
+.vd-mark-fields .f { max-width: 440px; }
+.vd-mark-profile { margin: -2px 0 0; }
+.vd-mark-profile:empty { display: none; }
+.vd-mark-apply { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0; border: 0; }
+.vd-mark-apply legend { width: 100%; margin-bottom: 4px; padding: 0; color: var(--soft); }
+.vd-mark-apply [hidden] { display: none; }
+.vd-mark-actions { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; margin-top: 12px; }
+.vd-mark .check { display: flex; align-items: flex-start; gap: 8px; font-size: 13.5px; line-height: 1.45; color: var(--soft); }
+.vd-mark .check input { flex: none; margin: 3px 0 0; }

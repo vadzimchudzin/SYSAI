@@ -661,7 +661,8 @@ def gemini_labels(audio_path, segments: list, total: float, settings: dict, peop
 def relabel(audio_path, segments: list, total: float, settings: dict, people: int = 0, progress=None,
             name: str | None = None, meeting_id: int | None = None, allowed=None) -> tuple[list, dict]:
     """The transcript labelled by the chosen way, and what happened: {"method", "wanted", "voices", "error", "seconds",
-    "remembered"}. The voice service's way also recognises the voices remembered at other meetings (voice_memory.py).
+    "remembered", "profiled"}. The voice service's way also recognises the voices of the people's voice profiles
+    (confirmed samples) and the voices remembered at other meetings (voice_memory.known).
 
     Any failure keeps the labels of the parts: speaker labels must never cost the meeting its transcript."""
     from . import voice_memory
@@ -682,10 +683,10 @@ def relabel(audio_path, segments: list, total: float, settings: dict, people: in
             groups = voice_groups(audio_path, segments, total, progress)
             found = {}
             labels = voice_labels(segments, groups, threshold_of(settings), people, total, found=found)
-            try:
-                known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
-            except Exception:  # noqa: BLE001  the remembered voices are a bonus
-                log.warning("recognising remembered voices failed", exc_info=True)
+            try:  # by the voice profiles (confirmed samples) and by the voices remembered at other meetings
+                known = voice_memory.known(found, meeting_id=meeting_id, allowed=allowed)
+            except Exception:  # noqa: BLE001  the known voices are a bonus
+                log.warning("recognising known voices failed", exc_info=True)
         else:
             labels = gemini_labels(audio_path, segments, total, settings, people, progress, details)
     except (DiarizationError, speaker_id.SpeakerIdentityError, llm.LLMError, OSError, ValueError) as exc:
@@ -698,8 +699,11 @@ def relabel(audio_path, segments: list, total: float, settings: dict, people: in
         return segments, info
     result = voice_memory.rename(apply(segments, labels, details), known)
     info.update(voices=len({item["speaker"] for item in result}), seconds=round(time.monotonic() - started, 1))
-    if known:
-        info["remembered"] = len(known)
+    profiled = sum(1 for match in known.values() if not match.get("memory", True))
+    if known and len(known) > profiled:
+        info["remembered"] = len(known) - profiled
+    if profiled:
+        info["profiled"] = profiled
     if details.get("cuts"):
         info["cuts"] = len(details["cuts"])
     if details.get("overlap"):

@@ -26,6 +26,17 @@
   const zoomButtons = [...root.querySelectorAll('[data-vd-zoom]')];
   const chips = [...root.querySelectorAll('[data-vd-speaker]')];
   const fixForm = root.querySelector('.vd-fix');
+  // «Отметка голоса»: a part of the recording marked here goes into a person's voice profile (POST …/voice-marks).
+  const markForm = root.querySelector('[data-vd-mark]');
+  const markInfo = data.mark && typeof data.mark === 'object' ? data.mark : null;
+  const marking = Boolean(markForm && markInfo && data.audio && data.audio.src);
+  const MARK_MIN = marking ? Number(markInfo.min) || 5 : 5;
+  const MARK_MAX = marking ? Number(markInfo.max) || 30 : 30;
+  const savedSamples = marking && Array.isArray(markInfo.samples) ? markInfo.samples : [];  // [start, end, name, id, status]
+  const markField = name => (markForm ? markForm.querySelector(`[data-vd-mark-${name}]`) : null);
+  const markPlay = markField('play');
+  let drag = null;          // drawing a mark with the mouse, or moving one of its edges
+  let swallowUntil = 0;     // the click that ends a drawn mark does not select a replica
   const speakers = data.speakers || [];
   const turns = data.turns;              // [speaker, start, end, first segment, last segment]
   const segments = data.segments || [];  // [transcript index, speaker, start, end], by start time
@@ -38,7 +49,7 @@
   const CALLOUT = 24;   // callout height
   const GAP = 10;       // between callouts and the band
   const HEAD = 18;      // a row above the callouts for the time of the selected replica
-  const state = { zoom: 1, current: -1, focus: -1 };
+  const state = { zoom: 1, current: -1, focus: -1, mark: null };
   const starts = turns.map(turn => turn[1]);
   const turnOfSegment = new Map();
   turns.forEach((turn, index) => {
@@ -91,7 +102,13 @@
   const playheadTime = html('time');
   playhead.append(playheadTime);
   playhead.hidden = true;
-  canvas.append(drawing, playhead, calloutLayer);
+  const markLayer = html('div', { class: 'vd-mark-layer' });
+  const markBox = html('div', { class: 'vd-mark-box', 'aria-hidden': 'true' });
+  const markEdges = ['from', 'to'].map(edge => html('button', { type: 'button', class: `vd-mark-edge is-${edge}`,
+    'data-vd-mark-edge': edge, 'aria-label': edge === 'from' ? 'Начало отметки: ← и → двигают' : 'Конец отметки: ← и → двигают' }));
+  markLayer.append(markBox, ...markEdges);
+  markLayer.hidden = true;
+  canvas.append(drawing, markLayer, playhead, calloutLayer);
   scroller.append(canvas);
   stage.replaceChildren(scroller, tip);
   if (tools) tools.hidden = false;
@@ -260,6 +277,14 @@
       cross.append(svg('rect', { x: left, y: m.top + 1, width: Math.max(3, x(to) - left), height: m.band - 2, fill: 'url(#vd-hatch)' }));
     });
 
+    const kept = svg('g', { class: 'vd-samples' });  // the samples already cut from this meeting into voice profiles
+    savedSamples.forEach(([from, to, name]) => {
+      const left = x(from);
+      const strip = svg('rect', { class: 'vd-sample-strip', x: left, y: m.bottom - 6, width: Math.max(3, x(to) - left), height: 4, rx: 2 });
+      strip.append(svg('title', {}, `Образец голоса в профиле: ${name} · ${clock(from)}–${clock(to)}`));
+      kept.append(strip);
+    });
+
     const axis = svg('g');
     axis.append(svg('line', { class: 'vd-axis-line', x1: 0, y1: m.axis, x2: width, y2: m.axis }));
     const steps = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
@@ -300,13 +325,14 @@
     hoverLine = svg('line', { class: 'vd-hover-line', x1: 0, y1: m.top, x2: 0, y2: m.bottom, visibility: 'hidden' });
     const hit = svg('rect', { class: 'vd-hit', x: 0, y: m.top, width, height: m.band });
 
-    drawing.replaceChildren(defs, band, tints, shapes, cross, axis, stems, cursor, hoverLine, hit);
+    drawing.replaceChildren(defs, band, tints, shapes, cross, kept, axis, stems, cursor, hoverLine, hit);
     calloutLayer.replaceChildren(...buttons);
     buttons.forEach(button => {  // the text was measured before fonts settled: never let a callout leave the canvas
       const left = parseFloat(button.style.left);
       if (left + button.offsetWidth > width) button.style.left = `${Math.max(0, width - button.offsetWidth)}px`;
     });
     layout = { width, perSecond, m };
+    paintMark();
     paintPlayhead();
     if (zoomValue) zoomValue.textContent = `×${state.zoom}`;
     zoomButtons.forEach(button => {
@@ -381,6 +407,8 @@
       nav.append(listen);
     }
     if (rowsOf(index).length) nav.append(html('button', { type: 'button', class: 'btn sm', 'data-vd-open': '' }, 'В расшифровке'));
+    if (marking) nav.append(html('button', { type: 'button', class: 'btn sm', 'data-vd-mark-turn': '',
+      title: 'Отметить эту реплику на волне, прослушать и сохранить голос в профиль человека' }, 'Отметить голос'));
     if (fixForm) nav.append(html('button', { type: 'button', class: 'btn sm ghost', 'data-vd-fix': '' }, 'Исправить говорящего'));
     head.append(who, nav);
     const body = html('div', { class: 'vd-detail-text' });
@@ -498,6 +526,12 @@
       button.classList.toggle('is-playing', on);
       button.setAttribute('aria-label', `${on ? 'Пауза' : 'Прослушать момент'} ${button.dataset.label || ''}`.trim());
     });
+    if (markPlay) {
+      const on = playing && player.quote === 'mark';
+      markPlay.classList.toggle('is-playing', on);
+      const text = markPlay.querySelector('span:last-child');
+      if (text) text.textContent = on ? 'Пауза' : 'Слушать отметку';
+    }
     const listen = detail && detail.querySelector('[data-vd-play-turn]');
     if (listen) {
       const on = playing && player.turn >= 0 && player.turn === state.current;
@@ -779,18 +813,187 @@
     scroller.addEventListener('pointerdown', event => { if (event.target === scroller) looked(); });
   }
 
+  // ---- «Отметка голоса»: a part of the recording for a person's voice profile ------------------------------------
+  const replicasOf = speakers.map((_, index) => segments.filter(item => item[1] === index).length);
+  const precise = seconds => `${clock(seconds)},${Math.floor((Math.max(0, seconds) % 1) * 10)}`;
+  const secondsText = seconds => `${String(Math.round(seconds * 10) / 10).replace('.', ',')} с`;
+  const shared = (a, b, mark) => Math.min(b, mark.to) - Math.max(a, mark.from);
+  const timeAt = clientX => clampTime((clientX - drawing.getBoundingClientRect().left) / layout.perSecond);
+
+  // The mark between a fixed edge and a moving one; never longer than a sample may be.
+  function setMark(fixed, moving) {
+    let from = Math.min(fixed, moving);
+    let to = Math.max(fixed, moving);
+    if (to - from > MARK_MAX) {
+      if (moving > fixed) to = from + MARK_MAX;
+      else from = to - MARK_MAX;
+    }
+    state.mark = { from: clampTime(from), to: clampTime(to) };
+    paintMark();
+    updateMark();
+  }
+  function clearMark() {
+    if (player.playing && player.quote === 'mark') pause();
+    state.mark = null;
+    paintMark();
+    updateMark();
+  }
+  function paintMark() {
+    if (!marking) return;
+    const mark = state.mark;
+    markLayer.hidden = !mark || !layout;
+    if (!mark || !layout) return;
+    const left = mark.from * layout.perSecond;
+    const width = Math.max(2, (mark.to - mark.from) * layout.perSecond);
+    markLayer.style.top = `${layout.m.top}px`;
+    markLayer.style.height = `${layout.m.band}px`;
+    markBox.style.left = `${left}px`;
+    markBox.style.width = `${width}px`;
+    markEdges[0].style.left = `${left}px`;
+    markEdges[1].style.left = `${left + width}px`;
+    markLayer.classList.toggle('is-short', mark.to - mark.from < MARK_MIN);
+  }
+  // What is in the mark by the transcript; the same rules sign the replicas on the server (voice_diagram.inside).
+  function inMark(mark) {
+    const spoken = new Map();
+    let inside = 0;
+    segments.forEach(([, speaker, start, end]) => {
+      if (end > start) {
+        const common = shared(start, end, mark);
+        if (common > 0) spoken.set(speaker, (spoken.get(speaker) || 0) + common);
+        if (common > 0.5 * (end - start)) inside += 1;
+      } else if (start >= mark.from && start < mark.to) inside += 1;
+    });
+    const ranked = [...spoken.entries()].sort((a, b) => b[1] - a[1]);
+    const total = ranked.reduce((sum, item) => sum + item[1], 0);
+    return { ranked, inside, main: ranked.length && ranked[0][1] >= 0.8 * total ? ranked[0][0] : -1 };
+  }
+  function showProfile() {
+    const who = markField('who');
+    const line = markField('profile');
+    if (!who || !line) return;
+    if (!who.value) { line.textContent = ''; return; }
+    const count = Number((markInfo.profiles || {})[who.value] || 0);
+    const need = Number(markInfo.need) || 3;
+    const here = savedSamples.some(item => String(item[3]) === who.value);
+    if (!count) line.textContent = here
+      ? 'Образец с этого совещания уже есть, но признаки голоса ещё не извлечены — проверьте его в карточке сотрудника.'
+      : 'В профиле голоса пока нет образцов: этот будет первым, и голос начнут узнавать со следующего совещания.';
+    else line.textContent = `В профиле голоса записей с разных совещаний: ${count}${count < need ? ` (надёжнее с ${need})` : ''}.`
+      + (here ? ' С этого совещания образец уже есть — новый уточнит голос, но записей не прибавит.' : '');
+  }
+  function updateMark() {
+    if (!marking) return;
+    const mark = state.mark;
+    markForm.hidden = !mark;
+    if (!mark) return;
+    const length = mark.to - mark.from;
+    markField('start').value = mark.from.toFixed(3);
+    markField('end').value = mark.to.toFixed(3);
+    markField('range').textContent = `${precise(mark.from)}–${precise(mark.to)}`;
+    markField('length').textContent = secondsText(length);
+    const { ranked, inside, main } = inMark(mark);
+    markField('inside').textContent = ranked.length
+      ? `По расшифровке в отметке: ${ranked.map(([speaker, seconds]) => `${speakers[speaker].name} — ${secondsText(seconds)}`).join(', ')}.`
+      : 'В отметке нет реплик по расшифровке.';
+    const warnings = [];
+    let blocked = false;
+    if (length < MARK_MIN) {
+      warnings.push(`Отметка короче ${MARK_MIN} с — растяните её за край.`);
+      blocked = true;
+    }
+    const taken = savedSamples.find(([from, to]) => shared(from, to, mark) > 0);
+    if (taken) {
+      warnings.push(`Эта часть уже сохранена образцом голоса (${taken[2]}) — отметьте другое место.`);
+      blocked = true;
+    }
+    if (overlaps.some(([from, to]) => shared(from, to, mark) > 0.3)) {
+      warnings.push('Здесь говорят одновременно (штриховка), а в образце должен быть один голос.');
+    }
+    if (ranked.filter(item => item[1] >= 0.5).length > 1) {
+      warnings.push('По расшифровке здесь говорят несколько человек — проверьте на слух, что голос один.');
+    }
+    const warn = markField('warn');
+    warn.textContent = warnings.join(' ');
+    warn.hidden = !warnings.length;
+    markField('save').disabled = blocked;
+    markField('apply-mark').textContent = `Реплики в отметке (${inside})`;
+    const labelRow = markField('label-row');
+    labelRow.hidden = main < 0;
+    if (main >= 0) markField('apply-label').textContent = `Все реплики «${speakers[main].name}» (${replicasOf[main]})`;
+    else if (labelRow.querySelector('input').checked) markForm.querySelector('input[name="apply"][value="mark"]').checked = true;
+    const who = markField('who');
+    const known = main >= 0 ? speakers[main].employee : null;
+    if (known && !who.value && [...who.options].some(option => option.value === String(known))) who.value = String(known);
+    showProfile();
+    if (player.quote === 'mark') player.stopAt = mark.to;
+  }
+
+  if (marking) {
+    drawing.addEventListener('pointerdown', event => {
+      if (!layout || event.button !== 0 || event.pointerType === 'touch' || !event.target.classList.contains('vd-hit')) return;
+      drag = { id: event.pointerId, x: event.clientX, fixed: timeAt(event.clientX), moved: false };
+    });
+    markEdges.forEach(handle => {
+      handle.addEventListener('pointerdown', event => {
+        if (!state.mark || event.button !== 0) return;
+        event.preventDefault();
+        drag = { id: event.pointerId, moved: true, fixed: handle.dataset.vdMarkEdge === 'from' ? state.mark.to : state.mark.from };
+        try { handle.setPointerCapture(event.pointerId); } catch (error) { /* an old browser */ }
+      });
+      handle.addEventListener('keydown', event => {
+        if (!state.mark || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+        event.preventDefault();
+        event.stopPropagation();  // the diagram's arrows go to the neighbouring replicas
+        const step = (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1);
+        if (handle.dataset.vdMarkEdge === 'from') setMark(state.mark.to, clampTime(state.mark.from + step));
+        else setMark(state.mark.from, clampTime(state.mark.to + step));
+      });
+    });
+    window.addEventListener('pointermove', event => {
+      if (!drag || event.pointerId !== drag.id || !layout) return;
+      if (!drag.moved) {
+        if (Math.abs(event.clientX - drag.x) < 5) return;
+        drag.moved = true;
+        try { drawing.setPointerCapture(drag.id); } catch (error) { /* an old browser */ }
+        hideTip();
+      }
+      setMark(drag.fixed, timeAt(event.clientX));
+    });
+    const drop = event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      if (drag.moved) swallowUntil = performance.now() + 400;
+      drag = null;
+    };
+    window.addEventListener('pointerup', drop);
+    window.addEventListener('pointercancel', drop);
+    markForm.addEventListener('click', event => {
+      if (event.target.closest('[data-vd-mark-play]') && state.mark) {
+        if (player.playing && player.quote === 'mark') { pause(); return; }
+        play({ from: state.mark.from, until: state.mark.to, quote: 'mark' });
+        return;
+      }
+      if (event.target.closest('[data-vd-mark-clear]')) clearMark();
+    });
+    markField('who').addEventListener('change', showProfile);
+    markForm.addEventListener('submit', event => {
+      if (!state.mark || state.mark.to - state.mark.from < MARK_MIN) { event.preventDefault(); return; }
+      markField('save').disabled = true;  // one sample per press: the voice service is asked once
+    });
+  }
+
   // ---- events ---------------------------------------------------------------------------------------------------
   calloutLayer.addEventListener('click', event => {
     const button = event.target.closest('[data-turn]');
     if (button) select(Number(button.dataset.turn), { focusCallout: true });
   });
   drawing.addEventListener('click', event => {
-    if (!event.target.classList.contains('vd-hit') || !layout) return;
+    if (!event.target.classList.contains('vd-hit') || !layout || performance.now() < swallowUntil) return;
     const time = clampTime((event.clientX - drawing.getBoundingClientRect().left) / layout.perSecond);
     select(nearestTurn(time), { at: time });
   });
   drawing.addEventListener('pointermove', event => {
-    if (!event.target.classList.contains('vd-hit') || !layout) { hideTip(); return; }
+    if (!event.target.classList.contains('vd-hit') || !layout || (drag && drag.moved)) { hideTip(); return; }
     const offset = event.clientX - drawing.getBoundingClientRect().left;
     const time = offset / layout.perSecond;
     const index = turnAt(time);
@@ -806,6 +1009,8 @@
     } else {
       tip.append(document.createTextNode(`${clock(time)} · без речи в расшифровке`));
     }
+    const sample = savedSamples.find(([from, to]) => time >= from && time <= to);
+    if (sample) tip.append(document.createTextNode(` · образец голоса: ${sample[2]}`));
     const stageBox = stage.getBoundingClientRect();
     tip.style.left = `${Math.max(90, Math.min(stageBox.width - 90, event.clientX - stageBox.left))}px`;
     tip.style.top = `${layout.m.top}px`;
@@ -865,6 +1070,12 @@
         markTranscript(state.current);
         const row = marked[0];
         if (row) row.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
+        return;
+      }
+      if (event.target.closest('[data-vd-mark-turn]') && marking && state.current >= 0) {
+        const turn = turns[state.current];
+        setMark(turn[1], Math.min(turn[2], turn[1] + MARK_MAX));
+        markForm.scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
         return;
       }
       if (event.target.closest('[data-vd-fix]') && fixForm && state.current >= 0) {

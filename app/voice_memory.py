@@ -333,8 +333,28 @@ def recognise(found: dict, meeting_id: int | None = None, allowed=None, memory: 
     return known
 
 
+def known(found: dict, meeting_id: int | None = None, allowed=None, memory: dict | None = None,
+          own_samples: bool = True) -> dict:
+    """The voices of a whole-record labelling that are known: by the person's voice profile first (the samples a
+    person confirmed, speaker_id.recognise — they need no «Запоминать голоса»), then by the prints remembered at other
+    meetings. One person is one voice. own_samples=False leaves out the samples cut from this very meeting (measuring
+    its labelling as at a new meeting)."""
+    try:
+        out = speaker_id.recognise(found, allowed=allowed, exclude_meeting=None if own_samples else meeting_id)
+    except speaker_id.SpeakerIdentityError as exc:
+        log.warning("recognising the voices by the profiles failed: %s", exc)
+        out = {}
+    people = {match["employee_id"] for match in out.values()}
+    for label, match in recognise(found, meeting_id=meeting_id, allowed=allowed, memory=memory).items():
+        if label not in out and match["employee_id"] not in people:
+            out[label] = match
+            people.add(match["employee_id"])
+    return out
+
+
 def rename(segments: list, known: dict) -> list:
-    """The replicas of the recognised voices get the person (a voice match: «голос совпал»)."""
+    """The replicas of the recognised voices get the person (a voice match: «голос совпал»); speaker_memory marks
+    a voice recognised by the prints of past meetings, not by the person's samples."""
     if not known:
         return segments
     out = []
@@ -343,9 +363,11 @@ def rename(segments: list, known: dict) -> list:
         if match is None:
             out.append(seg)
             continue
-        item = {k: v for k, v in seg.items() if k not in ("speaker_confidence",)}
+        item = {k: v for k, v in seg.items() if k not in ("speaker_confidence", "speaker_memory")}
         item.update(speaker=match["name"], speaker_employee_id=match["employee_id"], speaker_source="voiceprint",
-                    speaker_similarity=match["similarity"], speaker_memory=True)
+                    speaker_similarity=match["similarity"])
+        if match.get("memory", True):
+            item["speaker_memory"] = True
         out.append(item)
     return out
 

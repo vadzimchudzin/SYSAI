@@ -202,7 +202,7 @@ def propose(transcript: list, path, method: str, settings: dict, total: float, e
         groups = diarize.voice_groups(path, work, total, progress)
         found = {}
         labels = diarize.voice_labels(work, groups, diarize.threshold_of(settings), people, total, found=found)
-        known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
+        known = voice_memory.known(found, meeting_id=meeting_id, allowed=allowed)
     elif method == "gemini":
         labels = diarize.gemini_labels(path, work, total, settings, people, progress, details)
     else:
@@ -226,7 +226,8 @@ def propose(transcript: list, path, method: str, settings: dict, total: float, e
                 auto_label = known.get(label)
                 item["speaker_auto"] = ({"speaker": auto_label["name"], "speaker_employee_id": auto_label["employee_id"],
                                          "speaker_source": "voiceprint", "speaker_similarity": auto_label["similarity"],
-                                         "speaker_memory": True} if auto_label else {"speaker": label})
+                                         **({"speaker_memory": True} if auto_label.get("memory", True) else {})}
+                                        if auto_label else {"speaker": label})
         elif seg.get("speaker_source") == "voiceprint" or not label:
             item = dict(seg)
         else:
@@ -258,7 +259,9 @@ def propose(transcript: list, path, method: str, settings: dict, total: float, e
     changed = sum(pairs.values())
     summary = {"method": method, "title": diarize.METHODS.get(method, method), "replicas": len(transcript),
                "changed": changed, "manual": len(manual), "before": voices(transcript), "after": voices(after),
-               "remembered": len(known), "named": len(analysis.get("mapping") or {})}
+               "remembered": sum(1 for match in known.values() if match.get("memory", True)),
+               "profiled": sum(1 for match in known.values() if not match.get("memory", True)),
+               "named": len(analysis.get("mapping") or {})}
     return {"patches": patches(transcript, after),
             "auto": patches(auto, _auto_after(auto, after)) if auto is not None else None,
             "hints": analysis, "summary": summary,

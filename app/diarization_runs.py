@@ -118,10 +118,11 @@ def _measure(truth, base, labels, allowed, details=None, known=None) -> dict:
 
 
 def _remembered(base, groups, threshold, people, total, allowed, memory, meeting_id) -> tuple:
-    """(labels of one threshold, voices recognised by the prints from the other meetings — as at a new meeting)."""
+    """(labels of one threshold, voices recognised by the voice profiles and the prints from the other meetings — as at
+    a new meeting: the samples cut from this meeting are left out)."""
     found = {}
     labels = diarize.voice_labels(base, groups, threshold, people, total, found=found)
-    known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed, memory=memory) if memory else {}
+    known = voice_memory.known(found, meeting_id=meeting_id, allowed=allowed, memory=memory, own_samples=False)
     return labels, known
 
 

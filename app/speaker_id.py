@@ -32,6 +32,11 @@ MAX_SAMPLE_SECONDS = 30.0
 OUTDATED_MODELS = frozenset({"speechbrain-ecapa-voxceleb-onnx-a9cb932"})
 MATCH_FLOOR = 0.6          # the least similarity to a person's samples that may name a voice (ECAPA, cos)
 SAME_PERSON = 0.6          # two samples of one person are consistent from this similarity up
+# A person is named from the first confirmed sample of their voice profile: a 10 s print of one voice is 0.76 ± 0.07
+# alike to the same voice and at most ~0.5 to another (замер «в комнате»), so the floor and the margin keep strangers
+# apart. More samples from other meetings only make it surer (all of the best three must agree).
+IDENTIFY_MIN_SAMPLES = 1
+RECOGNISE_MIN_SECONDS = 6.0  # speech of a voice of the whole record needed to compare it with the profiles
 
 
 class SpeakerIdentityError(RuntimeError):
@@ -249,6 +254,38 @@ def _independent(refs: list) -> list:
     return picked
 
 
+def _recordings(refs: list) -> list:
+    """One reference per independent recording, grouped as _independent does: the average print of the person's
+    samples from it. A second mark at the same meeting refines the voice; it is no new evidence of it."""
+    groups: list[dict] = []
+    for ref in refs:
+        source, meeting = ref.get("source_audio_sha256"), ref.get("source_meeting_id")
+        if not source:
+            continue
+        group = next((g for g in groups if source in g["sources"] or (meeting is not None and meeting in g["meetings"])),
+                     None)
+        if group is None:
+            group = {"sources": set(), "meetings": set(), "refs": []}
+            groups.append(group)
+        group["sources"].add(source)
+        if meeting is not None:
+            group["meetings"].add(meeting)
+        group["refs"].append(ref)
+    out = []
+    for group in groups:
+        first = group["refs"][0]
+        if len(group["refs"]) == 1:
+            out.append(first)
+            continue
+        try:
+            centre = _normalise_embedding([sum(values) for values in zip(*(r["embedding"] for r in group["refs"]))])
+        except SpeakerIdentityError:  # opposite prints cancel out: keep the first one
+            out.append(first)
+            continue
+        out.append({**first, "embedding": centre, "samples": len(group["refs"])})
+    return out
+
+
 def _cosine_similarity(first: list[float], second: list[float]) -> float:
     if not first or len(first) != len(second):
         return -1.0
@@ -333,6 +370,61 @@ def embed_speakers(path: str | pathlib.Path, segments: list[dict], min_seconds: 
     return payload
 
 
+def _thresholds() -> tuple[float, float]:
+    """(least similarity, least lead over the next person) to name a voice by the profiles; never below the floor."""
+    try:
+        threshold = float(config.VOICE_MATCH_THRESHOLD)
+        margin_required = float(config.VOICE_MATCH_MARGIN)
+    except (TypeError, ValueError):
+        threshold, margin_required = 0.55, 0.08
+    threshold = min(0.95, max(MATCH_FLOOR, threshold)) if math.isfinite(threshold) else MATCH_FLOOR
+    margin_required = min(0.5, max(0.15, margin_required)) if math.isfinite(margin_required) else 0.15
+    return threshold, margin_required
+
+
+def match_prints(observed: dict, model: str, profiles: list) -> dict:
+    """{label: (employee id, name, similarity)}: the voices whose print is like one person's voice profile.
+
+    observed: {label: print} made by the voice service of `model`; profiles: enrolled_embeddings(). A voice is named
+    when it is alike at least the threshold to every one of the person's best (up to three) recordings (the average
+    print of their samples from one meeting) and clearly more than to anybody else's; everyone with a sample takes
+    part as a rival. One person is never two voices: when two voices are like the same person, neither is named."""
+    by_employee: dict[int, list[dict]] = {}
+    for profile in profiles or []:
+        if not model or profile.get("model_version") != model:
+            continue
+        try:
+            employee_id = int(profile["employee_id"])
+            embedding = _normalise_embedding(profile.get("embedding"))
+        except (KeyError, TypeError, ValueError, SpeakerIdentityError):
+            continue
+        by_employee.setdefault(employee_id, []).append({**profile, "embedding": embedding})
+    by_employee = {employee_id: _recordings(refs) for employee_id, refs in by_employee.items()}
+    by_employee = {employee_id: refs for employee_id, refs in by_employee.items() if refs}
+    if not by_employee:
+        return {}
+    threshold, margin_required = _thresholds()
+    recognized: dict[str, tuple[int, str, float]] = {}
+    for label, values in (observed or {}).items():
+        try:
+            vector = _normalise_embedding(values)
+        except SpeakerIdentityError:
+            continue
+        scored = []
+        for employee_id, refs in by_employee.items():
+            similarities = sorted((_cosine_similarity(vector, r["embedding"]) for r in refs), reverse=True)
+            score = min(similarities[:READY_INDEPENDENT_SAMPLES])
+            name = str(refs[0].get("employee_name") or f"Сотрудник {employee_id}")
+            scored.append((score, employee_id, name, len(refs)))
+        scored.sort(reverse=True)
+        best = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else -1.0
+        if best[3] >= IDENTIFY_MIN_SAMPLES and best[0] >= threshold and best[0] - runner_up >= margin_required:
+            recognized[str(label)] = (best[1], best[2], best[0])
+    twice = {match[0] for match in recognized.values() if sum(other[0] == match[0] for other in recognized.values()) > 1}
+    return {label: match for label, match in recognized.items() if match[0] not in twice}
+
+
 def identify_embedded_segments(
     path: str | pathlib.Path,
     segments: list[dict],
@@ -352,67 +444,11 @@ def identify_embedded_segments(
     if not payload_segments:
         return segments
     payload = embed_speakers(path, payload_segments)
-    speaker_embeddings = payload["speakers"]
-    by_employee: dict[int, list[dict]] = {}
-    for profile in profiles:
-        try:
-            employee_id = int(profile["employee_id"])
-            embedding = _normalise_embedding(profile.get("embedding"))
-        except (KeyError, TypeError, ValueError, SpeakerIdentityError):
-            continue
-        by_employee.setdefault(employee_id, []).append({**profile, "embedding": embedding})
-
-    try:
-        threshold = float(config.VOICE_MATCH_THRESHOLD)
-        margin_required = float(config.VOICE_MATCH_MARGIN)
-    except (TypeError, ValueError):
-        threshold, margin_required = 0.55, 0.08
-    threshold = min(0.95, max(MATCH_FLOOR, threshold)) if math.isfinite(threshold) else MATCH_FLOOR
-    margin_required = min(0.5, max(0.15, margin_required)) if math.isfinite(margin_required) else 0.15
-    recognized: dict[str, tuple[int, str, float]] = {}
-    for speaker, info in speaker_embeddings.items():
-        if not isinstance(info, dict):
-            continue
-        try:
-            observed = _normalise_embedding(info.get("embedding"))
-        except SpeakerIdentityError:
-            continue
-        scored = []
-        eligible = {}
-        for employee_id, refs in by_employee.items():
-            model = payload.get("model_version")
-            refs = [r for r in refs if model and r.get("model_version") == model]
-            if not refs:
-                continue
-            # One representative per independent recording; all rivals remain in
-            # ambiguity scoring even before they have enough enrollment evidence.
-            refs = _independent(refs)
-            if not refs:
-                continue
-            similarities = sorted((_cosine_similarity(observed, r["embedding"]) for r in refs), reverse=True)
-            score = min(similarities[:READY_INDEPENDENT_SAMPLES])
-            eligible[employee_id] = len(refs) >= READY_INDEPENDENT_SAMPLES
-            name = str(refs[0].get("employee_name") or f"Сотрудник {employee_id}")
-            scored.append((score, employee_id, name))
-        scored.sort(reverse=True)
-        if not scored:
-            continue
-        best = scored[0]
-        runner_up = scored[1][0] if len(scored) > 1 else -1.0
-        if eligible[best[1]] and best[0] >= threshold and best[0] - runner_up >= margin_required:
-            recognized[str(speaker)] = (best[1], best[2], best[0])
-
-    # Recheck after an external request: revocation/expiry must win over a cached profile.
-    live = enrolled_embeddings()
-    live_by_employee = {}
-    for profile in live:
-        if profile.get("model_version") == payload.get("model_version"):
-            live_by_employee.setdefault(profile["employee_id"], []).append(profile)
-    duplicate_ids = {match[0] for match in recognized.values()
-                     if sum(other[0] == match[0] for other in recognized.values()) > 1}
-    recognized = {speaker: match for speaker, match in recognized.items()
-                  if match[0] not in duplicate_ids
-                  and len(_independent(live_by_employee.get(match[0], []))) >= READY_INDEPENDENT_SAMPLES}
+    observed = {str(speaker): info.get("embedding") for speaker, info in payload["speakers"].items() if isinstance(info, dict)}
+    # Recheck after the external request: a revocation or an expiry meanwhile wins over the cached profile.
+    live_ids = {p["sample_id"] for p in enrolled_embeddings()}
+    profiles = [p for p in profiles if p.get("sample_id") in live_ids]
+    recognized = match_prints(observed, str(payload.get("model_version") or ""), profiles)
 
     result = []
     for segment in segments:
@@ -432,6 +468,30 @@ def identify_embedded_segments(
         renamed.pop("speaker_confidence", None)
         result.append(renamed)
     return result
+
+
+def recognise(found: dict, allowed=None, exclude_meeting: int | None = None) -> dict:
+    """{label: {"employee_id", "name", "similarity", "memory": False}}: the voices of a whole-record labelling
+    (diarize.voice_labels gives the average print of every voice in `found`) that are like a person's voice profile —
+    the samples confirmed by a person (a mark on the voice diagram, «Кто говорит на этом фрагменте?»).
+
+    allowed: the meeting's participants (None: anybody); exclude_meeting: the samples of this meeting are not used
+    (measuring a labelling as at a new meeting, diarization_runs)."""
+    centres = (found or {}).get("centres") or {}
+    if not centres or not config.voice_service_enabled():
+        return {}
+    profiles = [p for p in enrolled_embeddings()
+                if (allowed is None or p.get("employee_id") in allowed)
+                and (exclude_meeting is None or p.get("source_meeting_id") != exclude_meeting)]
+    if not profiles:
+        return {}
+    seconds = (found or {}).get("seconds") or {}
+    observed = {label: centre for label, centre in centres.items()
+                if label not in seconds or (_finite(seconds.get(label)) or 0.0) >= RECOGNISE_MIN_SECONDS}
+    matches = match_prints(observed, str((found or {}).get("model") or ""), profiles)
+    return {label: {"employee_id": employee_id, "name": name, "similarity": round(max(-1.0, min(1.0, score)), 3),
+                    "memory": False}
+            for label, (employee_id, name, score) in matches.items()}
 
 
 def extract_confirmed_speaker_sample(
@@ -814,9 +874,10 @@ def embed_pending_sample(session, row):
         path.write_bytes(raw)
         try:
             _accept_embedding(row, embed_voice_sample(path, row.employee_id))
-        except SpeakerIdentityError:
+        except SpeakerIdentityError as exc:
             row.embedding_status = "failed"
             row.encrypted_embedding = b""
+            row.failure = str(exc)[:300]  # not stored: what to tell the person who saved the sample
             return False
     return True
 
@@ -871,7 +932,8 @@ def retry_sample_cleanup(session):
 
 def store_confirmed_meeting_sample(session, *, employee_id, meeting_id, start, end, wav_path,
                                    consent_version=CONFIRMED_CONSENT_VERSION,
-                                   confirmed_by="", access_owner="", source_audio_sha256=""):
+                                   confirmed_by="", access_owner="", source_audio_sha256="",
+                                   source_kind="meeting_confirmed"):
     from .db import EmployeeVoiceSample, Employee, Meeting, now
     from sqlalchemy.exc import IntegrityError
     import datetime as dt
@@ -896,7 +958,7 @@ def store_confirmed_meeting_sample(session, *, employee_id, meeting_id, start, e
         employee_id=employee_id, sample_blob_path="", encrypted_audio=_fernet().encrypt(raw),
         audio_mime="audio/wav", audio_bytes=len(raw), encrypted_embedding=b"", embedding_status="pending",
         embedding_dimensions=0, model_version="", sample_duration=duration, waveform_data=[],
-        source_kind="meeting_confirmed", source_meeting_id=meeting_id, source_start=start, source_end=end,
+        source_kind=source_kind, source_meeting_id=meeting_id, source_start=start, source_end=end,
         content_sha256=digest, source_audio_sha256=source_audio_sha256, quality_metrics=quality,
         confirmed_by=confirmed_by, access_owner=access_owner, consent_version=consent_version,
         consent_at=now(), expires_at=now() + dt.timedelta(days=VOICE_SAMPLE_RETENTION_DAYS),

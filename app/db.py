@@ -272,7 +272,7 @@ class EmployeeVoiceSample(Base):
     model_version = Column(String(120), nullable=False, default="")
     sample_duration = Column(Float, nullable=False, default=0.0)
     waveform_data = Column(JSON, nullable=False, default=list)
-    source_kind = Column(String(32), nullable=False, default="manual")  # manual | meeting_confirmed
+    source_kind = Column(String(32), nullable=False, default="manual")  # manual | meeting_confirmed | meeting_marked
     source_meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True, index=True)
     source_start = Column(Float, nullable=True)
     source_end = Column(Float, nullable=True)

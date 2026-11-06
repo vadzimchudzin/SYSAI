@@ -19,7 +19,8 @@ HISTORY_BYTES = 1_500_000   # and their size: a correction of every replica of a
 SHOWN = 10                  # latest corrections listed on the meeting page
 NEW = "new"                 # a voice that is not in the transcript yet («Спикер N»)
 SAME = "same"               # the second part of a split keeps the speaker
-OPS = {"speaker": "говорящий", "split": "разделение", "merge": "объединение", "assign": "все реплики говорящего"}
+OPS = {"speaker": "говорящий", "split": "разделение", "merge": "объединение", "assign": "все реплики говорящего",
+       "mark": "отметка голоса"}
 
 
 class EditError(ValueError):
@@ -190,6 +191,22 @@ def merge(transcript, seq: int, sig: str, direction: str, neighbour_sig: str, by
     result = list(transcript[:first]) + [merged] + list(transcript[second + 1:])
     summary = f"{mmss(a.get('start'))}: реплики {voice_diagram.label_of(a)} и {voice_diagram.label_of(b)} объединены"
     return result, _entry("merge", summary, first, [[first, 1, [copy.deepcopy(a), copy.deepcopy(b)]]], by)
+
+
+def mark(transcript, indexes, who, start, end, by: str = "") -> tuple[list, dict]:
+    """The replicas of a part marked on the voice diagram (voice_diagram.inside) get one person; a replica the person
+    already has by hand stays as it is."""
+    name, employee_id, guest = who
+    result, patches = list(transcript or []), []
+    for index in indexes:
+        segment = result[index]
+        if not isinstance(segment, dict) or (voice_diagram.label_of(segment) == name
+                                             and segment.get("speaker_source") == "manual"):
+            continue
+        result[index] = voice_diagram.relabel(segment, name, employee_id, guest, by)
+        patches.append([index, 1, [copy.deepcopy(segment)]])
+    summary = f"{mmss(start)}–{mmss(end)}: отметка голоса → {name} ({len(patches)})"
+    return result, _entry("mark", summary, patches[0][0] if patches else 0, patches, by)
 
 
 def assigned(before, after, label: str, name: str, by: str = "") -> dict:

@@ -34,6 +34,7 @@
   </div>
   {% if speaker_msg %}<div class="vd-msg" role="status">{{ speaker_msg }}</div>{% endif %}
   {% if recording_msg %}<div class="vd-msg" role="status">{{ recording_msg }}</div>{% endif %}
+  {% if mark_msg %}<div class="vd-msg" role="status">{{ mark_msg }}</div>{% endif %}
   <div class="vd-msg is-error" data-vd-play-error role="alert" hidden></div>
   <ul class="vd-legend" aria-label="Говорящие">
     {% for sp in d.speakers %}
@@ -52,12 +53,49 @@
     <div class="vd-static-axis small muted"><span>00:00</span><span>{{ mmss(d.duration / 2) }}</span><span>{{ mmss(d.duration) }}</span></div>
   </div>
   <div class="vd-detail" data-vd-detail aria-live="polite" hidden></div>
+  {% if voice_marking %}{% set mk = diagram_client.mark %}
+  <form method="post" action="/meetings/{{ m.id }}/voice-marks" class="vd-mark" data-vd-mark hidden>
+    <input type="hidden" name="start" data-vd-mark-start><input type="hidden" name="end" data-vd-mark-end>
+    <input type="hidden" name="version" value="{{ mk.version }}">
+    <div class="vd-mark-head">
+      <div class="vd-mark-what"><b>Отметка голоса</b> <span class="t" data-vd-mark-range></span>
+        <span class="small muted" data-vd-mark-length></span></div>
+      <div class="vd-mark-tools">
+        <button type="button" class="btn sm vd-play-turn" data-vd-mark-play><span class="vd-ico-play" aria-hidden="true">{{ icon('play') }}</span><span class="vd-ico-pause" aria-hidden="true">{{ icon('pause') }}</span><span>Слушать отметку</span></button>
+        <button type="button" class="btn sm ghost" data-vd-mark-clear>Снять отметку</button>
+      </div>
+    </div>
+    <p class="small muted" data-vd-mark-inside></p>
+    <p class="small vd-mark-warn" data-vd-mark-warn role="alert" hidden></p>
+    <div class="vd-mark-fields">
+      <label class="f">Чей это голос
+        <select name="employee_id" required data-vd-mark-who>
+          <option value="">Выберите сотрудника…</option>
+          {{ employee_options(employees, participant_ids) }}
+        </select></label>
+      <p class="small muted vd-mark-profile" data-vd-mark-profile></p>
+      <fieldset class="vd-mark-apply"><legend class="small">Подписать в расшифровке</legend>
+        <label class="check"><input type="radio" name="apply" value="mark" checked> <span data-vd-mark-apply-mark>Реплики в отметке</span></label>
+        <label class="check" data-vd-mark-label-row hidden><input type="radio" name="apply" value="label"> <span data-vd-mark-apply-label>Все реплики говорящего</span></label>
+        <label class="check"><input type="radio" name="apply" value="none"> Не менять расшифровку</label>
+      </fieldset>
+      <label class="check"><input type="checkbox" name="listened" value="yes" required> Я прослушал отметку: говорит один человек — выбранный сотрудник, без музыки и чужих голосов.</label>
+      <label class="check"><input type="checkbox" name="consent" value="yes" required> Согласие сотрудника получено: образец его голоса хранится зашифрованным в БД до 180 дней и нужен, чтобы узнавать его голос на совещаниях.</label>
+    </div>
+    <div class="vd-mark-actions">
+      <button class="btn primary" data-vd-mark-save>{{ icon('mic') }}Сохранить в профиль голоса</button>
+      <span class="small muted">Образец {{ mk.min|int }}–{{ mk.max|int }} с. С первого образца голос узнаётся на следующих совещаниях; образцы с {{ mk.need }} разных совещаний — надёжнее.</span>
+    </div>
+  </form>
+  {% endif %}
   <p class="small muted vd-hint">
     {%- if d.peaks %}Высота — громкость записи{% if d.synthetic %} (в демо волна условная: у демо нет записи){% endif %}, цвет — говорящий по расшифровке.
+    {%- elif rec.playable %}Волна громкости строится при обработке, а для этой записи её нет, поэтому показаны участки речи по расшифровке; слушать запись можно.
     {%- else %}Волна громкости строится для новых записей при обработке. Аудио этого совещания уже удалено, поэтому показаны участки речи по расшифровке.{% endif %}
     Выноски — начало реплик; при увеличении масштаба их становится больше. Штриховка — говорят одновременно.
     {% if rec.playable %}Нажмите на выноску или волну, чтобы прочитать реплику и слушать с этого места; ← и → — соседние реплики, пробел — пауза.
     Если выделен говорящий, звучат только его реплики.
+    {%- if voice_marking %} Чтобы сохранить голос в профиль человека, протяните мышью по волне (5–30 с) или нажмите «Отметить голос» у реплики; края отметки можно двигать.{% endif %}
     {%- else %}Нажмите на выноску или участок, чтобы прочитать реплику; ← и → — соседние реплики.{% endif %}</p>
   {% if rec.text %}
   <div class="vd-rec small muted" data-vd-rec="{{ rec.state }}">
@@ -115,7 +153,7 @@
   </div>
   {% elif r.state == 'ready' %}
   {% if s.changed %}
-  <p class="small">Способ «{{ s.title }}»: говорящий сменится у <b>{{ s.changed }}</b> из {{ s.replicas }} {{ plural(s.replicas, 'реплики', 'реплик', 'реплик') }} · голосов было {{ s.before }}, станет {{ s.after }}{% if s.remembered %} · узнаны по прошлым совещаниям: {{ s.remembered }}{% endif %}{% if s.named %} · имена из разговора: {{ s.named }}{% endif %}.</p>
+  <p class="small">Способ «{{ s.title }}»: говорящий сменится у <b>{{ s.changed }}</b> из {{ s.replicas }} {{ plural(s.replicas, 'реплики', 'реплик', 'реплик') }} · голосов было {{ s.before }}, станет {{ s.after }}{% if s.profiled %} · узнаны по профилю голоса: {{ s.profiled }}{% endif %}{% if s.remembered %} · узнаны по прошлым совещаниям: {{ s.remembered }}{% endif %}{% if s.named %} · имена из разговора: {{ s.named }}{% endif %}.</p>
   <p class="small muted">{% if s.manual %}Ручные исправления ({{ s.manual }} {{ plural(s.manual, 'реплика', 'реплики', 'реплик') }}) не тронуты. {% endif %}Текст, время реплик, протокол и задачи не меняются. Пока не сохраните, расшифровка остаётся прежней.</p>
   <div class="table-wrap"><table class="ref-table small vd-relabel-pairs">
     <thead><tr><th>Было</th><th>Стало</th><th>Реплик</th></tr></thead>

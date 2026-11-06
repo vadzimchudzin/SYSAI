@@ -18,6 +18,8 @@ SAMPLE_QUOTES = 3
 QUOTE_CHARS = 180
 GUEST = "Гость"
 UNLABELLED = "Без метки"
+MARK_SHARE = 0.5         # a replica belongs to a part marked on the diagram when more than half of it lies inside
+MARK_LABEL = 0.8         # the speaker of a marked part: the one who has this share of its speech by the transcript
 
 STATUS = {
     "voice": ("голос совпал", "green", "Сопоставлено с подтверждённым образцом голоса. Оценка сходства не является вероятностью."),
@@ -200,7 +202,8 @@ def client_payload(diagram: dict) -> dict:
     return {
         "duration": diagram["duration"],
         "speakers": [{"name": p["name"], "n": p["n"], "color": p["color"], "share": p["share"], "seconds": p["seconds"],
-                      "status": p["status"], "statusLabel": p["status_label"], "turns": p["turns"]} for p in diagram["speakers"]],
+                      "status": p["status"], "statusLabel": p["status_label"], "turns": p["turns"],
+                      "employee": p["employee_id"]} for p in diagram["speakers"]],
         "segments": diagram["segments"],
         "turns": diagram["turns"],
         "overlaps": diagram["overlaps"],
@@ -208,6 +211,53 @@ def client_payload(diagram: dict) -> dict:
         "peaksDuration": diagram["peaks_duration"],
         "synthetic": diagram["synthetic"],
     }
+
+
+def _span(segment):
+    start, end = _seconds(segment.get("start")), _seconds(segment.get("end"))
+    return (start, end if end is not None and end > start else None) if start is not None else (None, None)
+
+
+def inside(transcript, start: float, end: float) -> list:
+    """The replicas of a part [start, end] marked on the diagram: more than half of each lies inside (a replica without
+    a length: its start). The same rule shows them in the browser (voice-diagram.js)."""
+    found = []
+    for index, segment in enumerate(transcript or []):
+        if not isinstance(segment, dict):
+            continue
+        a, b = _span(segment)
+        if a is None:
+            continue
+        if b is None:
+            if start <= a < end:
+                found.append(index)
+        elif min(b, end) - max(a, start) > MARK_SHARE * (b - a):
+            found.append(index)
+    return found
+
+
+def speech_in(transcript, start: float, end: float) -> dict:
+    """{speaker: seconds of their replicas inside [start, end]}, by the transcript."""
+    spoken: dict = {}
+    for segment in transcript or []:
+        if not isinstance(segment, dict):
+            continue
+        a, b = _span(segment)
+        if a is None or b is None or min(b, end) <= max(a, start):
+            continue
+        label = label_of(segment)
+        spoken[label] = spoken.get(label, 0.0) + min(b, end) - max(a, start)
+    return spoken
+
+
+def mark_label(transcript, start: float, end: float) -> str | None:
+    """The speaker of a marked part: the one with at least MARK_LABEL of its speech, else None."""
+    spoken = speech_in(transcript, start, end)
+    total = sum(spoken.values())
+    if total <= 0:
+        return None
+    label, seconds = max(spoken.items(), key=lambda item: item[1])
+    return label if seconds >= MARK_LABEL * total else None
 
 
 def guest_name(transcript, wanted: str, replacing: str) -> str:

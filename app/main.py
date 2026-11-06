@@ -527,7 +527,7 @@ async def demo(request: Request):
 @app.get("/meetings/{mid}", response_class=HTMLResponse)
 def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: bool = False, speakers: str = "",
                  changed: str = "", recording: str = "", seg: str = "", ref: str = "", people: str = "",
-                 relabel: str = ""):
+                 relabel: str = "", voice_mark: str = ""):
     guard(request)
     with SessionLocal() as s:
         m = pipeline.load(s, mid)
@@ -550,6 +550,9 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
         if voice_admin:
             voice_clips, voice_debug, voice_ready = _meeting_voice_enrollment_context(s, loaded, manual=voice_enroll)
         kept = audio_archive.view(loaded)
+        voice_marks = (_voice_marks(s, loaded, voice_ready)
+                       if voice_admin and kept.get("playable") and diagram and loaded.transcript
+                       and loaded.status not in ("queued", "transcribing") else None)
         edits = transcript_edit.history(loaded)
         reference_admin = current_user(request)["role"] == "superuser"
         reference = diarization_eval.summary(loaded) if reference_admin else None
@@ -563,6 +566,8 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
     client = voice_diagram.client_payload(diagram) if diagram else None
     if client is not None and kept.get("playable"):
         client["audio"] = {"src": kept["src"]}
+        if voice_marks is not None:
+            client["mark"] = voice_marks
     until = userbot.quiet_until()
     relabel_view = voice_relabel.view(m, settings_store.for_meeting(m.options)) if diagram and may_listen else None
     return page(request, "meeting.html", m=m, r=m.report or {}, employees=employees, artifacts=artifacts,
@@ -578,7 +583,8 @@ def meeting_view(request: Request, mid: int, voice_msg: str = "", voice_enroll: 
                 pct=diarization_eval.pct, label_list=diarization_eval.label_list,
                 attendance=present, participant_ids=present["ids"], alert_hint=hint,
                 people_msg=PARTICIPANT_MESSAGES.get(people, ""), diarization_note=_diarization_note(m),
-                relabel=relabel_view, recognition_note=_recognition_note(m))
+                relabel=relabel_view, recognition_note=_recognition_note(m),
+                voice_marking=client is not None and "mark" in client, mark_msg=voice_mark[:600])
 
 
 def _plural_count(n, one: str, few: str, many: str) -> str:
@@ -3952,6 +3958,140 @@ def meeting_confirm_speaker_clip(request: Request, mid: int, speaker: str = Form
                    "pending": "Аудио сохранено в БД. Сервис признаков не настроен: образец пока не участвует в идентификации.",
                    "failed": "Аудио сохранено в БД, извлечение признаков не удалось. Можно повторить в карточке сотрудника."}
         return _meeting_redirect(mid, message[status])
+
+
+MARK_KIND = "meeting_marked"  # EmployeeVoiceSample.source_kind of a sample marked on the voice diagram
+
+
+def _mark_redirect(mid: int, message: str):
+    return RedirectResponse(f"/meetings/{mid}?voice_mark={quote(message, safe='')}#voice-diagram", 303)
+
+
+def _voice_marks(session, meeting, readiness) -> dict:
+    """What marking voices on the diagram needs: the samples already cut from this meeting (they are drawn on it and
+    are not cut twice), how many independent recordings each person's voice profile has, the sample bounds and the
+    version of the transcript the replicas are signed in."""
+    rows = (session.query(EmployeeVoiceSample, Employee.name)
+            .join(Employee, Employee.id == EmployeeVoiceSample.employee_id)
+            .filter(EmployeeVoiceSample.source_meeting_id == meeting.id)
+            .order_by(EmployeeVoiceSample.source_start).all())
+    samples = [[round(float(row.source_start), 2), round(float(row.source_end), 2), name, row.employee_id,
+                row.embedding_status] for row, name in rows
+               if speaker_id._not_expired(row) and row.source_start is not None and row.source_end is not None]
+    return {"samples": samples,
+            "profiles": {str(p["employee_id"]): p["independent_samples"] for p in readiness.get("people", [])},
+            "need": speaker_id.READY_INDEPENDENT_SAMPLES, "min": speaker_id.MIN_SAMPLE_SECONDS,
+            "max": speaker_id.MAX_SAMPLE_SECONDS, "version": transcript_edit.fingerprint(meeting.transcript)}
+
+
+def _sign_mark(meeting, start: float, end: float, apply: str, who, by: str, version: str):
+    """The replicas of a marked part — or every replica of its speaker — get the person; None when the transcript
+    changed after the page was opened (nothing is signed then)."""
+    transcript = meeting.transcript or []
+    if version != transcript_edit.fingerprint(transcript):
+        return None
+    name, employee_id, guest = who
+    label = voice_diagram.mark_label(transcript, start, end) if apply == "label" else None
+    if label is not None:
+        after, count = voice_diagram.assign(transcript, label, name, employee_id, guest, by=by)
+        entry = transcript_edit.assigned(transcript, after, label, name, by)
+    else:
+        after, entry = transcript_edit.mark(transcript, voice_diagram.inside(transcript, start, end), who, start, end, by)
+        count = len(entry["patches"])
+    if count:
+        transcript_edit.record(meeting, after, entry)
+        _named_present(meeting, who, by)
+    return count
+
+
+@app.post("/meetings/{mid}/voice-marks")
+async def meeting_voice_mark(request: Request, mid: int):
+    """«Сохранить в профиль голоса»: a part of the recording marked on the voice diagram, listened to and confirmed as
+    one person's voice, becomes a sample of that person's voice profile (encrypted in the DB, with the employee's
+    consent), and the replicas in it — or every replica of its speaker — are signed with the person at once. The
+    profiles name the voices at the next meetings (speaker_id.identify_embedded_segments, speaker_id.recognise)."""
+    _voice_write_guard(request)
+    form = await request.form()
+    start, end = speaker_id._finite(form.get("start")), speaker_id._finite(form.get("end"))
+    choice = str(form.get("employee_id") or "").strip()
+    apply = str(form.get("apply") or "mark")
+    apply = apply if apply in ("mark", "label", "none") else "mark"
+    user = current_user(request)
+    by = user["username"]
+    with SessionLocal() as session:
+        meeting = _voice_meeting(session, request, mid)
+        _speaker_meeting(session, mid)
+        if start is None or end is None or start < 0 or not (
+                speaker_id.MIN_SAMPLE_SECONDS <= end - start <= speaker_id.MAX_SAMPLE_SECONDS):
+            return _mark_redirect(mid, "Отметка должна быть от 5 до 30 секунд.")
+        start, end = round(start, 3), round(end, 3)
+        total = max([float(meeting.duration_sec or 0)] + [b for _, _, b, _ in diarize._rows(meeting.transcript, 0.0)])
+        if total and end > total + 0.5:
+            return _mark_redirect(mid, "Отметка выходит за конец записи.")
+        if form.get("listened") != "yes" or form.get("consent") not in ("yes", "1", "on", "true"):
+            return _mark_redirect(mid, "Прослушайте отметку, подтвердите, что говорит один человек, и отметьте согласие сотрудника.")
+        employee = (session.get(Employee, int(choice))
+                    if choice.isascii() and choice.isdigit() and len(choice) < 10 else None)
+        if employee is None or not employee.active:
+            return _mark_redirect(mid, "Выберите сотрудника из справочника.")
+        taken = speaker_id.overlapping_confirmed_sample(session, mid, start, end)
+        if taken is not None:
+            return _mark_redirect(mid, f"Эта часть записи уже сохранена образцом голоса ({taken.employee.name}). "
+                                       "Отметьте другое место.")
+        reference = _voice_audio(meeting)
+        if not reference:
+            return _mark_redirect(mid, VOICE_NO_AUDIO)
+        with tempfile.TemporaryDirectory(prefix="sysai_voice_mark_") as tmp:
+            source = _voice_audio_file(reference, pathlib.Path(tmp))
+            if source is None or not source.is_file():
+                return _mark_redirect(mid, "Не удалось скачать запись из хранилища записей (R2). Попробуйте ещё раз.")
+            # Lock the employee before the voice service is asked, so a simultaneous revoke wins serially.
+            employee = session.query(Employee).filter_by(id=employee.id, active=True).with_for_update().one_or_none()
+            if employee is None:
+                return _mark_redirect(mid, "Активный сотрудник не найден.")
+            owners = _meeting_audio_owner(session, meeting)
+            source_hash = hashlib.sha256()
+            with source.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    source_hash.update(block)
+            target = pathlib.Path(tmp) / "mark.wav"
+            extracted = speaker_id.extract_interval(source, target, start, end)
+            if extracted is None:
+                return _mark_redirect(mid, "Не удалось вырезать отметку из записи целиком — сдвиньте её от конца записи.")
+            actual_start, length = extracted
+            try:
+                row = speaker_id.store_confirmed_meeting_sample(
+                    session, employee_id=employee.id, meeting_id=mid, start=actual_start, end=actual_start + length,
+                    wav_path=target, confirmed_by=str(user["id"]), access_owner=owners[0].owner if owners else "",
+                    source_audio_sha256=source_hash.hexdigest(), source_kind=MARK_KIND)
+            except speaker_id.SpeakerIdentityError as exc:
+                session.rollback()
+                return _mark_redirect(mid, str(exc)[:300])
+            status, failure = row.embedding_status, getattr(row, "failure", "")
+        who = (employee.name, employee.id, False)
+        signed = _sign_mark(meeting, start, end, apply, who, by, str(form.get("version") or "")) if apply != "none" else 0
+        session.commit()
+        session.refresh(employee)
+        count = speaker_id.independent_sample_count(employee.voice_samples)
+        name = employee.name
+    if signed:
+        voice_memory.remember_soon(mid, by=by)  # a confirmed voice, for the next meetings (with consent)
+    need = speaker_id.READY_INDEPENDENT_SAMPLES
+    text = f"Образец {length:.0f} с сохранён в профиль голоса: {name}."
+    if status == "ready":
+        text += " Голос будет узнаваться на следующих совещаниях"
+        text += (f" — записей с разных совещаний в профиле: {count}, надёжнее с {need}." if count < need else ".")
+    elif status == "pending":
+        text += (" Сервис голосов не подключён: по образцу начнут узнавать, когда подключите «Свой сервис голосов» "
+                 "(Настройки → Разметка голосов) и нажмёте «Повторить извлечение признаков» в карточке сотрудника.")
+    else:
+        text += (f" Признаки голоса извлечь не удалось{': ' + failure if failure else ''}."
+                 " Повторите в карточке сотрудника.")
+    if signed:
+        text += f" Подписано реплик: {signed}."
+    elif signed is None:
+        text += " Расшифровку изменили после открытия страницы — реплики не подписаны, обновите страницу."
+    return _mark_redirect(mid, text)
 
 
 def _voice_sample(session, request, eid, sid):
