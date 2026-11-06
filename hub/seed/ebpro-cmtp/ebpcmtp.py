@@ -191,12 +191,18 @@ class Project:
     def _library(self):
         cache = getattr(self, '_lib_cache', None)
         if cache is None or cache[0] is not self.payload:
-            lib, end = picture_library(self.payload)
-            ws = self.windows()
-            stop = ws[0]['offset'] if ws and ws[0]['offset'] > end else len(self.payload)
-            cache = (self.payload, lib, picture_groups(self.payload, lib, end, stop) if lib else {})
+            lib, start, end, n = _library_scan(self.payload)
+            sec = picture_section(self.payload, end) if lib else None
+            groups = {g['key']: g['states'] for g in (sec or {}).get('groups', ())
+                      if g['states'] and all(f in lib for f, _ in g['states'])}
+            cache = (self.payload, lib, groups, sec, (start, end, n))
             self._lib_cache = cache
         return cache[1], cache[2]
+
+    def picture_section(self):
+        """The picture objects (see picture_section()) and the library span (start, end, entries)."""
+        self._library()
+        return self._lib_cache[3], self._lib_cache[4]
 
     def pictures(self) -> dict:
         """The picture library: {GUID hex: {offset, length, format}}."""
@@ -273,6 +279,19 @@ class Project:
                     return w
         raise ValueError(f'no window {ref!r} in the project')
 
+    def links(self, window=None) -> list:
+        """Function keys that open windows: [{window, object, action (window/popup/back/close), target}]."""
+        out = []
+        for w in ([self.window(window)] if window is not None else self.windows()):
+            for o in w['objects']:
+                fa = fk_action(self.payload, o)
+                if fa and fa[1] in (0, 1, 2, 3):
+                    act = FK_ACTIONS[fa[1]]
+                    out.append({'window': w['number'], 'object': o['index'], 'action': act,
+                                'target': fa[2] if fa[1] in (0, 2) else None,
+                                'labels': [lab['text'] for lab in o['labels']][:2]})
+        return out
+
     def opcua_tags(self) -> list:
         """The OPC UA client tag table: [{name, type, node}]."""
         return parse_opcua_tags(self.payload)
@@ -327,7 +346,7 @@ class Project:
         edits = [(o['_bbox_at'], o['_bbox_at'] + 16, struct.pack('<IIII', *nb))]
         for at, x, y in o['_label_pos']:
             if l - 5 <= x <= r + 5 and t - 5 <= y <= b + 5:
-                edits.append((at, at + 8, struct.pack('<II', x + dx, y + dy)))
+                edits.append((at, at + 8, struct.pack('<ii', x + dx, y + dy)))
         self._splice(edits)
         return nb
 
@@ -365,6 +384,8 @@ class Project:
         w = self.window(src)
         if w['declared'] != len(w['objects']):
             raise ValueError(f'window {w["name"]!r}: not every object is recognised, copying it is not safe')
+        if not w.get('_end_sure'):
+            raise ValueError(f'window {w["name"]!r}: where its record ends is not known, copying it is not safe')
         used = {x['number']: x for x in ws}
         number = max(used) + 1 if number is None else int(number)
         if number in used:
@@ -372,6 +393,9 @@ class Project:
         if not 3 <= number <= 1999:
             raise ValueError('window numbers go from 3 to 1999')
         prev = max((x for x in ws if x['number'] < number), key=lambda x: x['number'])
+        if not prev.get('_end_sure'):
+            raise ValueError(f'window {prev["number"]}: where its record ends is not known, placing window '
+                             f'{number} after it is not safe; take another number')
         nxt = min((x for x in ws if x['number'] > number), key=lambda x: x['number'], default=None)
         at = prev['_rec_end'] + 4 * (number - prev['number'] - 1)
         if nxt is not None:
@@ -402,6 +426,10 @@ class Project:
         for x in (w, d):
             if x['declared'] != len(x['objects']):
                 raise ValueError(f'window {x["name"]!r}: not every object is recognised, inserting is not safe')
+        if o is w['objects'][-1] and not w.get('_end_sure'):
+            raise ValueError(f'window {w["name"]!r}: where its record ends is not known, copying its last object '
+                             f'is not safe')
+        ins, pos = insert_point(d)
         info = _map_info(pay, ws)
         s, e = o['offset'], o['offset'] + o['length']
         rec = bytearray(_clone_bytes(pay, s, e, info))
@@ -416,14 +444,14 @@ class Project:
             struct.pack_into('<IIII', rec, o['_bbox_at'] - s - cut, *nb)
             for at, x, y in o['_label_pos']:
                 if l - 5 <= x <= r + 5 and t - 5 <= y <= b + 5:
-                    struct.pack_into('<II', rec, at - s - cut, x + dx, y + dy)
+                    struct.pack_into('<ii', rec, at - s - cut, x + dx, y + dy)
         cnt = d['_first'] - 4
-        self._insert(info, [(d['_rec_end'], 0, bytes(rec), 1)],
+        self._insert(info, [(ins, 0, bytes(rec), 1)],
                      [(cnt, cnt + 4, struct.pack('<I', d['declared'] + 1))])
-        return len(d['objects'])
+        return pos
 
     def _insert(self, info, inserts, extra=()) -> None:
-        """Splice records in ([(offset, bytes replaced, data, map entries)]) and
+        """Splice records in or out ([(offset, bytes replaced, data, map entries — negative for removed ones)]) and
         renumber the classes defined after them; checked after the fact."""
         old = self.payload
         edits = _renumber_edits(old, info, [(at, k) for at, _, _, k in inserts])
@@ -533,20 +561,79 @@ def opc_tag_name(address: str):
     return m.group('name') if m else None
 
 
+# OPC UA client tag table: u32 count (some 70 bytes before the first entry, after the server address), then the
+# entries one after another: u16be 3 'TAG', u16be length + 'name (ns:2;s:id)(id)', u8 length + description,
+# u8 length + type (BOOL, INT, UINT, UDINT...), u32 0, u32 500, 7 x 00, 01, u16be namespace, u16be length +
+# identifier, u32 0. The last one is EasyBuilder's own «UaStatus Code» (ns 10).
+_TAG = b'\x00\x03TAG'
+_FULL = re.compile(rb'^(.+?) \((ns[:=]\d+;.+?)\)(?:\((.*)\))?$', re.S)
+
+
+def _tag_entry(pay: bytes, i: int):
+    """The tag table entry at i as a dict (start, end, name, type, node, ns, id), None if it is not one."""
+    p = i + 5
+    if pay[i:p] != _TAG or p + 2 > len(pay):
+        return None
+    n = int.from_bytes(pay[p:p + 2], 'big')
+    full = pay[p + 2:p + 2 + n]
+    p += 2 + n
+    if p + 1 > len(pay):
+        return None
+    p += 1 + pay[p]                                   # description
+    if p + 1 > len(pay):
+        return None
+    tl = pay[p]
+    typ = pay[p + 1:p + 1 + tl]
+    p += 1 + tl + 16
+    if not 0 < tl < 40 or p + 4 > len(pay) or pay[p - 1] != 1:
+        return None
+    mid = bytes(pay[p - 16:p])
+    ns = int.from_bytes(pay[p:p + 2], 'big')
+    il = int.from_bytes(pay[p + 2:p + 4], 'big')
+    ident = pay[p + 4:p + 4 + il]
+    p += 4 + il + 4
+    m = _FULL.match(full)
+    if not m or p > len(pay):
+        return None
+    try:
+        return {'start': i, 'end': p, 'name': m.group(1).decode('utf-8'), 'type': typ.decode('ascii'),
+                'node': m.group(2).decode('utf-8'), 'ns': ns, 'id': ident.decode('utf-8'), 'mid': mid}
+    except UnicodeDecodeError:
+        return None
+
+
+def opcua_table(pay: bytes):
+    """{'count_at', 'count', 'entries': [...], 'end'} of the OPC UA tag table, None if there is none or it does
+    not hold together (count, entries one after another)."""
+    i = pay.find(_TAG)
+    if i == -1:
+        return None
+    entries = []
+    while True:
+        e = _tag_entry(pay, i)
+        if e is None:
+            break
+        entries.append(e)
+        i = e['end']
+    if not entries:
+        return None
+    first = entries[0]['start']
+    for back in range(4, 400):
+        if first - back >= 0 and struct.unpack_from('<I', pay, first - back)[0] == len(entries):
+            return {'count_at': first - back, 'count': len(entries), 'entries': entries, 'end': entries[-1]['end']}
+    return None
+
+
 def parse_opcua_tags(pay: bytes) -> list:
-    out, i = [], pay.find(b'\x00\x03TAG')
+    tab = opcua_table(pay)
+    if tab is not None:
+        return [{'name': e['name'], 'type': e['type'], 'node': e['node']} for e in tab['entries']]
+    out, i = [], pay.find(_TAG)     # not one table: every entry that reads
     while i != -1:
-        p = i + 5
-        n = int.from_bytes(pay[p:p + 2], 'big')
-        full = pay[p + 2:p + 2 + n]
-        q = p + 2 + n
-        m = int.from_bytes(pay[q:q + 2], 'big')
-        typ = pay[q + 2:q + 2 + m]
-        mm = re.match(rb'^(.+?) \((ns[:=]\d+;.+?)\)\((.*)\)$', full)
-        if mm and 0 < m < 40:
-            out.append({'name': mm.group(1).decode('utf-8', 'replace'), 'type': typ.decode('ascii', 'replace'),
-                        'node': mm.group(2).decode('utf-8', 'replace')})
-        i = pay.find(b'\x00\x03TAG', i + 5)
+        e = _tag_entry(pay, i)
+        if e:
+            out.append({'name': e['name'], 'type': e['type'], 'node': e['node']})
+        i = pay.find(_TAG, i + 5)
     return out
 
 
@@ -604,12 +691,13 @@ def _part_head(pay: bytes, p: int):
         return None, p
     name, p = r
     p += 12
-    devices = []
+    devices, devs = [], []
     for _ in range(3):
         r = _cstr_at(pay, p)
         if r is None:
             return None, p
         devices.append(r[0])
+        devs.append((p, r[1], r[0]))
         p = r[1]
     atypes = pay[p + 20:p + 23]
     p += 23
@@ -620,7 +708,7 @@ def _part_head(pay: bytes, p: int):
             return None, p
         addrs.append((p, r[1], r[0]))
         p = r[1]
-    return {'name': name, 'devices': devices, 'atypes': atypes, 'addrs': addrs}, p
+    return {'name': name, 'devices': devices, 'devs': devs, 'atypes': atypes, 'addrs': addrs}, p
 
 
 def _find_bbox(pay: bytes, p: int, end: int):
@@ -649,7 +737,7 @@ def _address(slot, device, atype, address):
 def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
     obj = {'index': index, 'kind': None, 'type': typ, 'bbox': None, 'labels': [], 'texts': [], 'addresses': [],
            'offset': o, 'length': end - o, '_bbox_at': None, '_texts': [], '_addr': [], '_label_pos': [],
-           '_lab': []}
+           '_lab': [], '_cls': cls, '_hl': hl, '_dev': []}
     if cls == 'D':
         obj['kind'] = DRAW_KINDS.get(typ, f'draw_{typ}')
         at = o + hl + 31
@@ -660,6 +748,7 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
         obj['kind'] = PART_KINDS.get(typ, f'part_{typ:02x}')
         head, body = _part_head(pay, o + hl)
         if head:
+            obj['_dev'] = head['devs']
             for k, (s, e, a) in enumerate(head['addrs']):
                 obj['_addr'].append((s, e, a))
                 if a not in ('', '0'):
@@ -677,8 +766,8 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
         nxt = strs[i + 1] if i + 1 < len(strs) else None
         if nxt and nxt[0] == e and _FONT.match(nxt[2]) and nxt[1] + 9 <= end:
             size = pay[nxt[1]]
-            x, y = struct.unpack_from('<II', pay, nxt[1] + 1)
-            if 1 <= size and x <= 8000 and y <= 8000:
+            x, y = struct.unpack_from('<ii', pay, nxt[1] + 1)     # a label may stand left of / above the window
+            if 1 <= size and -8000 <= x <= 8000 and -8000 <= y <= 8000:
                 obj['_texts'].append((s, e, t))
                 obj['_label_pos'].append((nxt[1] + 1, x, y))
                 obj['_lab'].append((t, nxt[2], size))
@@ -747,21 +836,23 @@ def _object_tails(wins) -> dict:
 
 
 def _record_end(pay, w, limit, tails, last):
-    """(record end, empty slots between it and limit) for window w."""
+    """(record end, empty slots between it and limit, whether the end is known) for window w."""
     o = w['objects'][-1] if w['objects'] else None
+    # no zeros right before the limit: no empty slot there, the record ends at the limit
+    plain = not last and limit >= 4 and pay[limit - 4:limit] != bytes(4)
     if not o or not o['_label_pos'] or w['declared'] != len(w['objects']):
-        return limit, 0
+        return limit, 0, plain
     base = max(p[0] for p in o['_label_pos']) + 8
     meas = limit - base
     cands = sorted(tails.get((o['kind'], o['type']), ()))
     if last:
         ge = [t for t in cands if t >= meas and not any(pay[limit:base + t])]
         if ge:
-            return base + ge[0], 0
+            return base + ge[0], 0, True
     ok = [t for t in cands if t <= meas and (meas - t) % 4 == 0 and not any(pay[base + t:limit])]
     if not ok:
-        return limit, 0
-    return base + ok[-1], (meas - ok[-1]) // 4
+        return limit, 0, plain
+    return base + ok[-1], (meas - ok[-1]) // 4, True
 
 
 def _number_windows(pay, wins) -> None:
@@ -770,18 +861,44 @@ def _number_windows(pay, wins) -> None:
         last = i + 1 == len(wins)
         flag = not last and pay[wins[i + 1]['offset'] - 4:wins[i + 1]['offset']] == _SLOT
         limit = w['_end'] if last else wins[i + 1]['offset'] - (4 if flag else 0)
-        end, gap = _record_end(pay, w, limit, tails, last)
-        w['number'], w['_rec_end'] = n, end
+        end, gap, sure = _record_end(pay, w, limit, tails, last)
+        w['number'], w['_rec_end'], w['_end_sure'] = n, end, sure and (flag or last)
         if w['objects']:    # the last object ends with the record, not at the next window
             lo = w['objects'][-1]
             lo['length'] = max(0, end - lo['offset'])
         n += 1 + (gap if flag else 0)
 
 
+def insert_point(w: dict):
+    """(offset, index) where new objects go into window w: after its last object; when where its record ends is
+    not known — right before the last object (its start is known; the last object stays on top)."""
+    if w.get('_end_sure'):
+        return w['_rec_end'], len(w['objects'])
+    if len(w['objects']) < 2:
+        raise ValueError(f'window {w["name"]!r}: where its record ends is not known, inserting is not safe')
+    return w['objects'][-1]['offset'], len(w['objects']) - 1
+
+
 def public(d: dict) -> dict:
     """A window / object dict without the private editor fields and offsets."""
     return {k: v for k, v in d.items()
             if not k.startswith('_') and k not in ('offset', 'length', 'objects', 'position')}
+
+
+# A FunctionKey (EasyBuilder 6.08.02 and later) keeps what it does right after one of its strings: u8 action,
+# 0x0d, u16 value, 08 00. Action 0 — change the full-screen window to window <value>, 2 — open the pop-up window
+# <value>, 3 — close this pop-up, 1 — back to the previous window, 8 — a key of a keypad (value — the character).
+FK_ACTIONS = {0: 'window', 1: 'back', 2: 'popup', 3: 'close', 8: 'key'}
+
+
+def fk_action(pay: bytes, o: dict):
+    """(offset of the action byte, action, value) of a FunctionKey object; None — not found or not one."""
+    if o.get('kind') != 'FunctionKey':
+        return None
+    end = o['offset'] + o['length']
+    hits = [(e, pay[e], struct.unpack_from('<H', pay, e + 2)[0]) for _, e, _ in cstrings(pay, o['offset'], end)
+            if e + 6 <= end and pay[e + 1] == 0x0d and pay[e + 4:e + 6] == b'\x08\x00' and pay[e] <= 0x30]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _text_em(s: str) -> float:
@@ -824,7 +941,8 @@ def _plain_ref(pay: bytes, k: int) -> bool:
 
 
 def _image_spans(pay: bytes) -> list:
-    spans = []
+    lib, _, _, _ = _library_scan(pay)
+    spans = [(o, o + n) for o, n in lib.values()]      # library files of any format (BMP pixels too)
     for sig in (b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff'):
         i = pay.find(sig)
         while i != -1:
@@ -843,12 +961,12 @@ def _image_spans(pay: bytes) -> list:
 # A widget names its picture object (or an EasyBuilder shape, not kept in the project) 15 bytes after the
 # x of its last label; labels: text, font, size (pt), u32 x, u32 y, colour (R G B 0), alignment.
 _PIC_START = re.compile(rb'\xff[\x00-\xff]{20}(?:\x89PNG|BM|\xff\xd8\xff|GIF8)')
-_PIC_GROUP = re.compile(rb'([\x00-\xff]{16})\x01\x04\x01\x00\x00\x00([\x00-\xff]{4})')
 _PIC_STATE = b'\x02\x04\x01\x00'
+_PIC_CLASS = b'\x01\x00\x01\x00'
 
 
-def picture_library(pay: bytes):
-    """({GUID: (offset, length)}, end) of the project's picture library ({}, 0 — none found)."""
+def _library_scan(pay: bytes):
+    """({GUID: (offset, length)}, start of the first entry, end, entries) of the picture library."""
     for m in _PIC_START.finditer(pay):
         s = m.start()
         n = struct.unpack_from('<I', pay, s - 4)[0] if s >= 4 else 0
@@ -864,29 +982,81 @@ def picture_library(pay: bytes):
             out[bytes(pay[at + 1:at + 17])] = (at + 21, ln)
             at += 21 + ln
         else:
-            return out, at
-    return {}, 0
+            return out, s, at, n
+    return {}, 0, 0, 0
 
 
-def picture_groups(pay: bytes, lib: dict, start: int, stop: int) -> dict:
-    """{GUID of a picture object: [(GUID of the file, transparent colour '#rrggbb' or None) per state]}."""
+def picture_library(pay: bytes):
+    """({GUID: (offset, length)}, end) of the project's picture library ({}, 0 — none found)."""
+    out, _, end, _ = _library_scan(pay)
+    return out, end
+
+
+# The picture objects follow the library: 6 bytes (04 00 00 00 00 00), u32 count, then the objects. The first one
+# starts with its class (01 00 01 00, u16 length, «class PicGroup<class BitmapPicture>»), every one with 01 04 (the
+# later ones 01 04 01 00), u16 length + name, u32 count of states, per state 02 04 01 00 01 00 (the very first
+# state: its class 01 00 01 00 u16 «class BitmapPicture», then 02 04 01 00), the GUID of its file, u32
+# «transparent colour on», u32 0, the colour (R G B 0); after the states the GUID the widgets name it by.
+def picture_section(pay: bytes, end: int):
+    """{'at', 'count_at', 'count', 'groups': [{start, end, name, states [(file GUID, transparent)], key}], 'end',
+    'complete'} of the picture objects at `end` (the library end), None if they are not there."""
+    if end <= 0 or end + 10 > len(pay):
+        return None
+    cnt = struct.unpack_from('<I', pay, end + 6)[0]
+    if cnt > 100000 or pay[end + 1:end + 6] != bytes(5):
+        return None
+    q = end + 10
+    sec = {'at': end, 'count_at': end + 6, 'count': cnt, 'groups': [], 'end': q, 'complete': cnt == 0}
+    if cnt == 0:
+        return sec
+    if pay[q:q + 4] != _PIC_CLASS:
+        return None
+    q += 6 + struct.unpack_from('<H', pay, q + 4)[0]
+    for i in range(cnt):
+        s = q
+        if pay[q:q + 2] != b'\x01\x04' or (i and pay[q + 2:q + 4] != b'\x01\x00'):
+            return sec
+        q += 4 if i else 2
+        n = struct.unpack_from('<H', pay, q)[0]
+        raw = bytes(pay[q + 2:q + 2 + n])
+        q += 2 + n
+        ns = struct.unpack_from('<I', pay, q)[0]
+        q += 4
+        if ns > 1000:
+            return sec
+        states, at = [], []
+        for _ in range(ns):
+            if pay[q:q + 4] == _PIC_CLASS:
+                q += 6 + struct.unpack_from('<H', pay, q + 4)[0]
+                if pay[q:q + 4] != _PIC_STATE:
+                    return sec
+                q += 4
+            elif pay[q:q + 6] == _PIC_STATE + b'\x01\x00':
+                q += 6
+            else:
+                return sec
+            if q + 44 > len(pay):
+                return sec
+            on = struct.unpack_from('<I', pay, q + 16)[0]
+            states.append((bytes(pay[q:q + 16]), _rgb(pay, q + 24) if on else None))
+            at.append(q)
+            q += 28
+        sec['groups'].append({'start': s, 'end': q + 16, 'name': raw.decode('utf-8', 'replace'), 'name_raw': raw,
+                              'states': states, 'state_at': at, 'key': bytes(pay[q:q + 16])})
+        q += 16
+        sec['end'] = q
+    sec['complete'] = True
+    return sec
+
+
+def picture_groups(pay: bytes, lib: dict, start: int, stop: int = None) -> dict:
+    """{GUID of a picture object: [(GUID of the file, transparent colour '#rrggbb' or None) per state]} — the
+    picture objects whose files are all in the library."""
+    sec = picture_section(pay, start)
     out = {}
-    for m in _PIC_GROUP.finditer(pay, start, stop):
-        at, n, states = m.end(), struct.unpack('<I', m.group(2))[0], []
-        for _ in range(n if n <= 256 else 0):
-            if pay[at:at + 4] != _PIC_STATE:
-                break
-            at += 4
-            if pay[at:at + 16] not in lib and pay[at:at + 2] == b'\x01\x00':
-                at += 2
-            g = bytes(pay[at:at + 16])
-            if g not in lib:
-                break
-            on = struct.unpack_from('<I', pay, at + 16)[0]
-            states.append((g, _rgb(pay, at + 24) if on else None))
-            at += 28
-        if n and len(states) == n:
-            out[bytes(m.group(1))] = states
+    for g in (sec or {}).get('groups', ()):
+        if g['states'] and all(f in lib for f, _ in g['states']):
+            out[g['key']] = g['states']
     return out
 
 
@@ -983,14 +1153,8 @@ def _look(pay: bytes, o: dict, w: dict, groups: dict) -> dict:
 # classes of the settings after the windows (CTagObject, CDataLog, CMail*...) -- the 16-bit values
 # of their number range among plain data (exactly the 1464 references EasyBuilder 6.10 rewrote when
 # copying a window). The computed number of the first settings class must be the most used value.
-def _map_info(pay: bytes, wins: list) -> dict:
-    if not wins:
-        raise ValueError('no windows in the project')
-    defs, wend = class_defs(pay), wins[-1]['_rec_end']
-    tail = [d for d in defs if d[0] >= wend]
-    if not tail:
-        raise ValueError('the settings after the windows were not found')
-    heads = _heads(pay)
+def _nested_classes(pay: bytes, wins: list, defs: list, wend: int) -> list:
+    """Classes defined between the windows (CCharDouble, CTrendLimit...): [{name, def, tag, refs}]."""
     imgs = _image_spans(pay)
     istarts = [s for s, _ in imgs]
 
@@ -1024,39 +1188,75 @@ def _map_info(pay: bytes, wins: list) -> dict:
                 refs.append(k)
             k = pay.find(tb, k + 1)
         nested.append({'name': name, 'def': d, 'tag': 0x8000 | idx, 'refs': refs})
+    return nested
+
+
+def _class_tags(pay: bytes) -> tuple:
+    """(CPartObject reference, CDrawObject reference) as 2 bytes each (None — not used)."""
+    heads = _heads(pay)
+    return (next((pay[h[0]:h[0] + 2] for h in heads if h[1] == 'P' and h[3] == 3), None),
+            next((pay[h[0]:h[0] + 2] for h in heads if h[1] == 'D' and h[3] == 2), None))
+
+
+def _map_info(pay: bytes, wins: list) -> dict:
+    if not wins:
+        raise ValueError('no windows in the project')
+    defs, wend = class_defs(pay), wins[-1]['_rec_end']
+    tail = [d for d in defs if d[0] >= wend]
+    if not tail:
+        raise ValueError('the settings after the windows were not found')
+    nested = _nested_classes(pay, wins, defs, wend)
     first = 0x8000 | (1 + sum(1 for x in defs if x[0] < tail[0][0]) + sum(w['declared'] for w in wins)
                       + sum(1 + len(c['refs']) for c in nested))
 
-    def most_used(start, span, lo, hi):
+    def most_used(start, span, lo, hi, prefer=None):
         c = collections.Counter()
         for k in range(start, min(len(pay) - 1, start + span)):
             if pay[k + 1] & 0x80:
                 v = pay[k] | pay[k + 1] << 8
                 if lo <= v < hi and _plain_ref(pay, k):
                     c[v] += 1
-        return c.most_common(1)[0][0] if c else None
+        if not c:
+            return None
+        # a reference LL HH after a zero byte also reads as HH00 one byte earlier, as often as the real one
+        best = max(c.values())
+        tops = [v for v, n in c.items() if n == best]
+        return prefer if prefer in tops else min(tops, key=lambda v: (v & 0xff == 0, v))
 
-    lo = most_used(tail[0][0], 1 << 16, first, 0xffff)
+    lo = most_used(tail[0][0], 1 << 16, first, 0xffff, first)
     if lo != first:
         raise ValueError(f'class numbering does not add up (expected {first:#x}, found {lo and hex(lo)})')
     hi = most_used(tail[-1][0], 1 << 20, lo, lo + 0x1000) or lo
-    trefs = [k for k in range(tail[0][0], len(pay) - 1)
-             if pay[k + 1] & 0x80 and lo <= (pay[k] | pay[k + 1] << 8) <= hi and _plain_ref(pay, k)]
-    return {'defs': defs, 'nested': nested, 'tail_refs': trefs, 'range': (lo, hi),
-            'ptag': next((pay[h[0]:h[0] + 2] for h in heads if h[1] == 'P' and h[3] == 3), None),
-            'dtag': next((pay[h[0]:h[0] + 2] for h in heads if h[1] == 'D' and h[3] == 2), None),
+
+    def ref(k):
+        return pay[k + 1] & 0x80 and lo <= (pay[k] | pay[k + 1] << 8) <= hi
+
+    # a class reference of the settings stands after 00 / FF / 01-03 or another reference and before a small
+    # number (a length, 00) or another reference; the OPC UA tag table (big-endian lengths) holds none
+    tab = opcua_table(pay)
+    skip = (tab['entries'][0]['start'], tab['end']) if tab else (0, 0)
+    trefs = [k for k in range(tail[0][0], len(pay) - 2)
+             if ref(k) and not skip[0] <= k < skip[1] and _plain_ref(pay, k)
+             and (pay[k - 1] in (0, 1, 2, 3, 0xff) or ref(k - 2)) and (pay[k + 2] <= 0x40 or ref(k + 2))]
+    ptag, dtag = _class_tags(pay)
+    return {'defs': defs, 'nested': nested, 'tail_refs': trefs, 'range': (lo, hi), 'ptag': ptag, 'dtag': dtag,
             'first_defs': max(pay.find(_PART_DEF), pay.find(_DRAW_DEF)),
             'counts': (len(trefs), tuple(len(c['refs']) for c in nested))}
 
 
-def _clone_bytes(pay: bytes, s: int, e: int, info: dict) -> bytes:
-    """Bytes of a window / object record to insert again (its class definitions -> references)."""
+def _check_range(pay: bytes, s: int, e: int, info: dict, what: str = 'copying') -> None:
+    """Refuse records holding sub-objects or class definitions other than the widget / shape ones."""
     for c in info['nested']:
         if s <= c['def'] < e or any(s <= k < e for k in c['refs']):
-            raise ValueError(f'it holds sub-objects ({c["name"]}); copying those is not supported yet')
+            raise ValueError(f'it holds sub-objects ({c["name"]}); {what} those is not supported yet')
     for d, name, _ in info['defs']:
         if s <= d < e and name not in ('CPartObject', 'CDrawObject'):
-            raise ValueError(f'it defines class {name}; copying it is not supported')
+            raise ValueError(f'it defines class {name}; {what} it is not supported')
+
+
+def _clone_bytes(pay: bytes, s: int, e: int, info: dict) -> bytes:
+    """Bytes of a window / object record to insert again (its class definitions -> references)."""
+    _check_range(pay, s, e, info)
     rec = pay[s:e]
     for cdef, tag in ((_PART_DEF, info['ptag']), (_DRAW_DEF, info['dtag'])):
         if cdef in rec:
@@ -1077,4 +1277,6 @@ def _renumber_edits(pay: bytes, info: dict, inserts) -> list:
     add = sum(k for _, k in inserts)
     if info['range'][1] + add > 0xffff:
         raise ValueError('too many objects for 16-bit class references')
+    if info['range'][0] + add <= 0x8000:
+        raise ValueError('class references would leave their range')
     return edits + [(k, k + 2, struct.pack('<H', (pay[k] | pay[k + 1] << 8) + add)) for k in info['tail_refs']]

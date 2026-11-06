@@ -53,13 +53,23 @@ const TOOLS = [
 const WHO = { type: 'string', description: 'Кто работает на холсте: «Агент» — вы сами; помощник (подагент) — своё имя, '
   + 'например «Помощник 1». У каждого свой курсор и цвет' };
 const WINDOW = { type: ['string', 'integer'], description: 'Окно проекта: номер или имя, например 23 или «Нория 3»' };
+const NAMES = { type: 'object', additionalProperties: { type: 'string' } };
 const EDIT = { type: 'object', properties: {
-  op: { type: 'string', enum: ['text', 'move', 'tag', 'rename_window', 'clone_window', 'clone_object'] },
-  window: { ...WINDOW, description: 'Окно: номер или имя (по умолчанию — окно на холсте)' },
+  op: { type: 'string', enum: ['text', 'move', 'resize', 'tag', 'rename_window', 'clone_window', 'clone_object',
+    'delete_object', 'delete_window', 'link', 'add_tags', 'import_window', 'import_objects'] },
+  window: { ...WINDOW, description: 'Окно: номер или имя (по умолчанию — окно на холсте; у import_* — окно донора)' },
   object: { type: 'integer', description: 'index объекта (canvas_look)' },
+  objects: { type: 'array', items: { type: 'integer' }, description: 'import_objects: index объектов донора' },
   old: { type: 'string' }, new: { type: 'string' }, dx: { type: 'integer' }, dy: { type: 'integer' },
-  number: { type: 'integer', description: 'clone_window: номер нового окна' },
-  to: { type: 'string', description: 'clone_object: окно, куда положить копию' } },
+  width: { type: 'integer' }, height: { type: 'integer' },
+  number: { type: 'integer', description: 'clone_window / import_window: номер нового окна' },
+  to: { type: 'string', description: 'clone_object / import_objects: окно, куда положить (по умолчанию — на холсте); '
+    + 'link: окно, куда ведёт кнопка' },
+  from: { type: 'string', description: 'import_*: файл проекта-донора (та же версия EasyBuilder)' },
+  tags: { type: 'array', description: 'add_tags: [{name, type, node}]', items: { type: 'object', properties: {
+    name: { type: 'string' }, type: { type: 'string' }, node: { type: 'string' } }, required: ['name', 'type'],
+  additionalProperties: false } },
+  map_tags: NAMES, map_windows: NAMES, map_devices: NAMES },
 required: ['op'], additionalProperties: false };
 TOOLS.push(
   {
@@ -104,9 +114,12 @@ TOOLS.push(
     title: 'Править на холсте',
     description: 'Править проект, открытый на холсте, — прямо в его файле: каждая правка сразу видна человеку, ваш курсор '
       + 'идёт к объекту, человек может отменить («Отменить», Ctrl+Z). Правки — как у cmtp_edit: text (old → new, '
-      + 'object — только в нём), move (object, dx, dy), tag (old → new), rename_window (new), clone_window (new, number), '
-      + 'clone_object (object, dx, dy, to); window по умолчанию — окно на холсте. Правки идут по порядку; не прошла одна '
-      + '— файл не меняется. Нужна запись в папку проекта (SYSAI → Доступы).',
+      + 'object — только в нём), move (object, dx, dy), resize (object, width, height), tag (old → new), rename_window '
+      + '(new), clone_window (new, number), clone_object (object, dx, dy, to), delete_object (object; удаляйте с '
+      + 'большего index), delete_window, link (object → окно to), add_tags (tags), import_window (from, window донора, '
+      + 'new, number), import_objects (from, window донора, objects, to, dx, dy; map_tags, map_windows, map_devices); '
+      + 'window по умолчанию — окно на холсте. Правки идут по порядку; не прошла одна — файл не меняется. Нужна запись '
+      + 'в папку проекта и в папку донора (SYSAI → Доступы).',
     inputSchema: { type: 'object', properties: { who: WHO, edits: { type: 'array', minItems: 1, maxItems: 50, items: EDIT } },
       required: ['edits'], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

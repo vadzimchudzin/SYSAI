@@ -18,8 +18,10 @@ const config = require('./config');
 
 const TOOL = 'ebpro-cmtp';
 const EXT = /\.(cmtp|emtp)$/i;
-const OPS = ['text', 'move', 'tag', 'rename_window', 'clone_window', 'clone_object'];
-const WINDOW_OPS = new Set(['rename_window', 'clone_window']);
+const OPS = ['text', 'move', 'resize', 'tag', 'rename_window', 'clone_window', 'clone_object', 'delete_object',
+  'delete_window', 'link', 'add_tags', 'import_window', 'import_objects'];
+const WINDOW_OPS = new Set(['rename_window', 'clone_window', 'delete_window', 'import_window']);
+const DONOR_OPS = new Set(['import_window', 'import_objects']);
 const PERSON = 'Человек';
 const AGENT = 'Агент';
 const COLORS = ['#f0a63a', '#4cc3ff', '#b78cff', '#5fd38d', '#ff7a9c', '#e8d45a', '#7ee0d2', '#ff9a5c'];
@@ -196,15 +198,38 @@ function normalize(edits, current) {
   if (edits.length > MAX_EDITS) throw new Error(`за раз — не больше ${MAX_EDITS} правок`);
   return edits.map((e, n) => {
     if (!e || typeof e !== 'object' || !OPS.includes(e.op)) throw new Error(`правка ${n + 1}: op — одно из ${OPS.join(', ')}`);
+    const donor = DONOR_OPS.has(e.op);
+    if (donor && (!e.from || e.window === undefined || e.window === null || e.window === '')) {
+      throw new Error(`правка ${n + 1}: ${e.op} — нужен проект-донор (from) и его окно (window)`);
+    }
     const win = e.window ?? current;
-    if (win === undefined || win === null || win === '') throw new Error(`правка ${n + 1}: какое окно (window)?`);
-    const out = { op: e.op, window: String(win) };
-    for (const k of ['object', 'dx', 'dy', 'number']) {
+    if (e.op !== 'add_tags' && (win === undefined || win === null || win === '')) throw new Error(`правка ${n + 1}: какое окно (window)?`);
+    const out = { op: e.op };
+    if (e.op !== 'add_tags') out.window = String(win);
+    for (const k of ['object', 'dx', 'dy', 'number', 'width', 'height']) {
       const v = int(e[k]);
       if (Number.isNaN(v)) throw new Error(`правка ${n + 1}: ${k} — целое число`);
       if (v !== null) out[k] = v;
     }
-    for (const k of ['old', 'new', 'to']) if (e[k] !== undefined && e[k] !== null) out[k] = String(e[k]);
+    for (const k of ['old', 'new', 'to', 'from']) if (e[k] !== undefined && e[k] !== null) out[k] = String(e[k]);
+    if (e.op === 'import_objects' && e.to === undefined) out.to = String(current);
+    if (Array.isArray(e.objects)) {
+      out.objects = e.objects.map((v) => int(v));
+      if (out.objects.some((v) => !Number.isInteger(v))) throw new Error(`правка ${n + 1}: objects — номера объектов`);
+    }
+    if (e.op === 'add_tags') {
+      if (!Array.isArray(e.tags) || !e.tags.length) throw new Error(`правка ${n + 1}: add_tags — список tags [{name, type}]`);
+      out.tags = e.tags.map((t) => {
+        const tag = { name: String((t && t.name) || ''), type: String((t && t.type) || '') };
+        if (t && t.node) tag.node = String(t.node);
+        return tag;
+      });
+    }
+    for (const k of ['map_tags', 'map_windows', 'map_devices']) {
+      if (e[k] && typeof e[k] === 'object' && !Array.isArray(e[k])) {
+        out[k] = Object.fromEntries(Object.entries(e[k]).map(([a, b]) => [String(a), String(b)]));
+      }
+    }
     return out;
   });
 }
@@ -217,6 +242,13 @@ function describe(edits) {
     if (e.op === 'tag') return `тег${obj} ${clip(e.old, 40)} → ${clip(e.new, 40)}`;
     if (e.op === 'rename_window') return `имя окна ${e.window} → «${clip(e.new, 40)}»`;
     if (e.op === 'clone_window') return `копия окна ${e.window}${e.new ? ` «${clip(e.new, 40)}»` : ''}`;
+    if (e.op === 'resize') return `размер${obj} → ${e.width ?? '…'}×${e.height ?? '…'}`;
+    if (e.op === 'delete_object') return `удаление${obj}`;
+    if (e.op === 'delete_window') return `удаление окна ${e.window}`;
+    if (e.op === 'link') return `кнопка${obj} → окно ${e.to}`;
+    if (e.op === 'add_tags') return `теги: ${(e.tags || []).slice(0, 3).map((t) => t.name).join(', ')}${(e.tags || []).length > 3 ? '…' : ''}`;
+    if (e.op === 'import_window') return `окно донора «${clip(e.window, 40)}»${e.new ? ` → «${clip(e.new, 40)}»` : ''}`;
+    if (e.op === 'import_objects') return `объекты донора ${(e.objects || [e.object]).map((i) => `#${i}`).join(', ')} → окно ${e.to}`;
     return `копия${obj}${e.to ? ` в окно ${e.to}` : ''}`;
   };
   const moves = edits.filter((e) => e.op === 'move');
@@ -404,7 +436,8 @@ class Canvas extends EventEmitter {
       if (!this.file || !this.scene) throw new Error('на холсте нет проекта — откройте его (canvas_open)');
       const list = normalize(edits, this.window);
       const what = describe(list);
-      const before = list.filter((e) => Number.isInteger(e.object) && this._same(e.window)).map((e) => e.object);
+      const before = list.filter((e) => Number.isInteger(e.object) && !DONOR_OPS.has(e.op) && this._same(e.window))
+        .map((e) => e.object);
       if (name !== PERSON) this._point(name, before, what);
       this.busy = `${name}: ${what}`;
       this._emit();
@@ -422,12 +455,18 @@ class Canvas extends EventEmitter {
       while (this.undos.length > this.undoMax) await fsp.unlink(this.undos.shift().file).catch(() => {});
       const results = (res.data && Array.isArray(res.data.results)) ? res.data.results : [];
       if (list.some((e) => WINDOW_OPS.has(e.op))) this.windows = await this._list(this.file);
-      const target = [...results].reverse().find((r) => r.op === 'clone_window' || r.op === 'clone_object');
-      const shown = results.some((r) => r.window === this.window);
-      if (target && Number.isInteger(target.window) && target.window !== this.window && (target.op === 'clone_window' || !shown)) {
+      const NEW = ['clone_window', 'clone_object', 'import_window', 'import_objects'];
+      const target = [...results].reverse().find((r) => NEW.includes(r.op));
+      const shown = results.some((r) => r.window === this.window && r.op !== 'delete_window');
+      const whole = target && (target.op === 'clone_window' || target.op === 'import_window');
+      if (target && Number.isInteger(target.window) && target.window !== this.window && (whole || !shown)) {
         this.window = target.window;
       } else if (!shown && results.length && Number.isInteger(results[results.length - 1].window)) {
         this.window = results[results.length - 1].window; // правили другое окно — показываем его
+      }
+      if (this.windows.length && !this.windows.some((w) => w.number === this.window)) { // окно удалили — соседнее
+        const rest = this.windows.map((w) => w.number);
+        this.window = rest.find((x) => x > this.window) ?? rest.filter((x) => x < this.window).pop() ?? rest[0];
       }
       this.busy = '';
       await this._scene();

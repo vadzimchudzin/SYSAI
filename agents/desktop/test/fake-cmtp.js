@@ -61,6 +61,13 @@ function edit(p, args) {
       shift(copy, e.dx || 0, e.dy || 0);
       to.objects.push(copy);
       results.push({ op: e.op, window: to.number, object: to.objects.length - 1 });
+    } else if (e.op === 'delete_object') {
+      if (!o || e.object === 0) return text(`правка ${n} (${e.op}): нет объекта #${e.object}; файл не записан`, true);
+      w.objects.splice(e.object, 1);
+      results.push({ op: e.op, window: w.number, object: e.object });
+    } else if (e.op === 'delete_window') {
+      p.windows = p.windows.filter((x) => x !== w);
+      results.push({ op: e.op, window: w.number, links: [] });
     } else {
       return text(`правка ${n}: нет такого op: ${e.op}`, true);
     }

@@ -4,12 +4,15 @@
 построчным JSON-RPC 2.0 (как ждёт обёртка SYSAI). Доступы (папки на чтение/запись)
 проверяет сам SYSAI по подписанным правилам до вызова — здесь только работа с файлами.
 """
+import base64
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ebpcmtp import Project, public  # noqa: E402
+import ebpedit  # noqa: E402
 
 PROTOCOL = "2025-06-18"
 PATH = {"type": "string", "description": r"Полный путь к файлу проекта, например C:\Projects\topol.emtp"}
@@ -129,39 +132,104 @@ TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
     {
-        "name": "cmtp_edit",
-        "title": "Править окна",
-        "description": "Правки готовых окон по списку и сборка нового файла проекта (исходник не меняется). "
-                       "Виды правок (op): text — заменить текст в окне на любой длины (old → new, object — только "
-                       "в этом объекте; рамка «Текста» расширяется под длинный текст); move — сдвинуть объект "
-                       "(object, dx, dy в пикселях); tag — перепривязать "
-                       "объекты окна с тега OPC UA old на тег new (тот же тип, тег должен быть в таблице проекта; "
-                       "object — только этот объект); rename_window — новое имя окна (new); clone_window — копия "
-                       "окна window под номером number (по умолчанию — следующий после последнего) с именем new; "
-                       "clone_object — копия объекта object в конец того же окна или окна to, со сдвигом dx, dy "
-                       "(копию потом правят text/tag/move: её index — следующий после последнего). Правки идут по "
-                       "порядку; если одна не прошла — файл не пишется.",
+        "name": "cmtp_links",
+        "title": "Переходы между окнами",
+        "description": "Функциональные клавиши, что открывают окна: в каком окне и какой объект, что делает "
+                       "(window — сменить окно, popup — всплывающее окно, back — назад, close — закрыть всплывающее), "
+                       "куда ведёт (target — номер окна). Нужна, чтобы понять меню проекта и перепривязать кнопки. "
+                       "window — только кнопки этого окна.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
-            "out_file": {"type": "string", "description": r"Куда записать новый проект, например C:\Projects\topol_v2.cmtp"},
+                        "window": {"type": "string", "description": "Имя окна или номер"}},
+                        "required": ["path"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "cmtp_check",
+        "title": "Проверить проект",
+        "description": "Что пойдёт не так на панели: объект за краем окна (outside), подпись шире объекта (text_fit), "
+                       "кнопка ведёт в несуществующее окно (link_missing), адрес с тегом не из таблицы OPC UA "
+                       "(tag_missing), нет файла картинки (picture_missing), в окно не ведёт ни одна кнопка "
+                       "(unreachable, справка), одинаковые имена окон (duplicate_name), не все объекты распознаны "
+                       "(not_parsed). Уровни: error, warning, info. Проверяют после сборки и перед сдачей. "
+                       "window — только это окно.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+                        "window": {"type": "string", "description": "Имя окна или номер"}},
+                        "required": ["path"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "cmtp_render",
+        "title": "Картинка окна",
+        "description": "Нарисовать окно проекта в PNG так, как его покажет панель (фон, фигуры, картинки первого "
+                       "состояния, подписи шрифтами системы; фигуры библиотеки EasyBuilder — простыми кнопками, "
+                       "полями и лампами) — посмотреть результат без EasyBuilder. out_file — куда записать .png; "
+                       "scale — масштаб 0.1–2 (для окон 1920×1080 хватит 0.5); marks — номера объектов (index) в "
+                       "углу каждого, чтобы называть их в правках; show — вернуть картинку и в ответе.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+                        "window": {"type": "string", "description": "Имя окна или номер"},
+                        "out_file": {"type": "string", "description": r"Куда записать PNG, например C:\SYSAI\shots\w23.png"},
+                        "scale": {"type": "number", "minimum": 0.1, "maximum": 2},
+                        "marks": {"type": "boolean"}, "show": {"type": "boolean"}},
+                        "required": ["path", "window", "out_file"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "cmtp_edit",
+        "title": "Править проект",
+        "description": "Правки проекта по списку и сборка файла (out_file; тот же путь, что path, — правка на месте, "
+                       "с блокировкой от одновременной записи). Правки идут по порядку; если одна не прошла — файл "
+                       "не пишется. Виды (op): text — заменить текст в окне на любой длины (old → new, object — "
+                       "только в этом объекте; рамка «Текста» расширяется); move — сдвинуть объект (object, dx, dy); "
+                       "resize — новый размер объекта (object, width, height в пикселях; угол на месте); tag — "
+                       "перепривязать объекты окна с тега OPC UA old на new (тот же тип, тег из таблицы; object — "
+                       "только этот); rename_window — имя окна (new); clone_window — копия окна window под номером "
+                       "number (по умолчанию — после последнего) с именем new; clone_object — копия объекта object в "
+                       "конец того же окна или окна to со сдвигом dx, dy; delete_object — удалить объект object "
+                       "(следующие сдвигаются на один index); delete_window — удалить окно (номер освобождается; в "
+                       "ответе — кнопки, что ещё ведут в него); link — кнопку object окна window направить в окно to "
+                       "(кнопка уже должна открывать окно или всплывающее окно); add_tags — добавить теги OPC UA в "
+                       "таблицу (tags: [{name, type, node}], node по умолчанию ns таблицы;s=name; типы — те, что в "
+                       "проекте уже есть); import_window — взять окно window из проекта-донора from (та же версия "
+                       "EasyBuilder) под номером number с именем new; import_objects — взять объекты objects окна "
+                       "window донора from в окно to со сдвигом dx, dy. При взятии из донора: картинки переносятся "
+                       "в библиотеку (одинаковые не дублируются), теги, которых нет в проекте, — из таблицы донора, "
+                       "map_tags {тег донора: тег проекта} — перепривязать, map_windows {окно донора: окно проекта} "
+                       "— куда вести кнопки, map_devices {устройство донора: устройство проекта}; кнопки на окна, "
+                       "взятые в этом же списке, ведут на их новые номера сами.",
+        "inputSchema": {"type": "object", "properties": {"path": PATH,
+            "out_file": {"type": "string", "description": r"Куда записать проект, например C:\Projects\topol_v2.cmtp"},
             "edits": {"type": "array", "minItems": 1, "description": "Правки по порядку", "items": {
                 "type": "object", "properties": {
-                    "op": {"type": "string", "enum": ["text", "move", "tag", "rename_window", "clone_window",
-                                                      "clone_object"]},
-                    "window": {"type": "string", "description": "Имя окна или номер"},
+                    "op": {"type": "string", "enum": ["text", "move", "resize", "tag", "rename_window", "clone_window",
+                                                      "clone_object", "delete_object", "delete_window", "link",
+                                                      "add_tags", "import_window", "import_objects"]},
+                    "window": {"type": "string", "description": "Имя окна или номер (у import_* — окно донора)"},
                     "object": {"type": "integer", "description": "index объекта из cmtp_objects"},
+                    "objects": {"type": "array", "items": {"type": "integer"}, "description": "import_objects: index объектов донора"},
                     "old": {"type": "string"}, "new": {"type": "string"},
                     "dx": {"type": "integer"}, "dy": {"type": "integer"},
-                    "number": {"type": "integer", "description": "clone_window: номер нового окна"},
-                    "to": {"type": "string", "description": "clone_object: окно, куда положить копию"}},
-                "required": ["op", "window"], "additionalProperties": False}}},
+                    "width": {"type": "integer"}, "height": {"type": "integer"},
+                    "number": {"type": "integer", "description": "clone_window / import_window: номер нового окна"},
+                    "to": {"type": "string", "description": "clone_object / import_objects: окно, куда положить; link: окно, куда вести"},
+                    "from": {"type": "string", "description": r"import_*: файл проекта-донора, например C:\Projects\donor.cmtp"},
+                    "tags": {"type": "array", "description": "add_tags: [{name, type, node}]", "items": {
+                        "type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string"},
+                                                         "node": {"type": "string"}},
+                        "required": ["name", "type"], "additionalProperties": False}},
+                    "map_tags": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "map_windows": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "map_devices": {"type": "object", "additionalProperties": {"type": "string"}}},
+                "required": ["op"], "additionalProperties": False}}},
             "required": ["path", "out_file", "edits"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
 ]
 
-INSTRUCTIONS = ("Инструменты для проектов EasyBuilder Pro (.cmtp/.emtp). Разобрать пример: cmtp_info → cmtp_windows → "
-                "cmtp_objects (окно) → cmtp_tags; картинки — cmtp_extract_images. Собрать по образцу: cmtp_edit "
-                "(тексты любой длины, сдвиг, перепривязка тегов, имя окна) в новый файл. Доступы к папкам даёт SYSAI.")
+INSTRUCTIONS = ("Инструменты для проектов EasyBuilder Pro (.cmtp/.emtp). Разобрать: cmtp_info → cmtp_windows → "
+                "cmtp_objects (окно) → cmtp_links (меню) → cmtp_tags. Посмотреть окно без EasyBuilder: cmtp_render "
+                "(PNG, marks — номера объектов). Собрать: cmtp_edit — тексты, сдвиг, размер, теги, копии и удаление "
+                "окон и объектов, кнопки на окна, новые теги, окна и объекты из проекта-донора. После сборки — "
+                "cmtp_check. Доступы к папкам даёт SYSAI.")
 
 
 _CACHE = {}   # path -> (mtime_ns, size, Project): reading tools on an unchanged file do not decrypt it again
@@ -177,6 +245,41 @@ def _load(path):
     _CACHE.clear()
     _CACHE[key] = (st.st_mtime_ns, st.st_size, p)
     return p
+
+
+class _Lock:
+    """<file>.sysai-lock while a project is written: the canvas, the agent and its helpers do not overwrite each
+    other's edits. A lock older than two minutes is a leftover and is taken over."""
+
+    def __init__(self, path, wait=20.0):
+        self.path, self.wait, self.fd = f"{os.path.abspath(path)}.sysai-lock", wait, None
+
+    def __enter__(self):
+        end = time.monotonic() + self.wait
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, f"{os.getpid()} {time.time():.0f}".encode())
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.stat(self.path).st_mtime > 120:
+                        os.remove(self.path)
+                        continue
+                except OSError:
+                    continue
+                if time.monotonic() > end:
+                    raise ValueError("проект сейчас пишет другой агент или холст — повторите через минуту") from None
+                time.sleep(0.2)
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+        return False
 
 
 def _text(s, is_error=False):
@@ -248,47 +351,37 @@ def _call(name, args):
         if name == "cmtp_scene":
             p = _load(args["path"])
             return _text(json.dumps(p.scene(args["window"], args.get("images_dir") or None), ensure_ascii=False))
+        if name == "cmtp_links":
+            p = _load(args["path"])
+            rows = p.links(args.get("window") or None)
+            names = {w["number"]: w["name"] for w in p.windows()}
+            for r in rows:
+                r["window_name"] = names.get(r["window"])
+                if r["target"] is not None:
+                    r["target_name"] = names.get(r["target"])
+            return _text(json.dumps({"count": len(rows), "links": rows}, ensure_ascii=False))
+        if name == "cmtp_check":
+            p = _load(args["path"])
+            rows = ebpedit.check(p, args.get("window") or None)
+            levels = {k: sum(1 for r in rows if r["level"] == k) for k in ("error", "warning", "info")}
+            return _text(json.dumps({"summary": levels, "issues": rows[:3000]}, ensure_ascii=False))
+        if name == "cmtp_render":
+            import ebprender
+            p = _load(args["path"])
+            png = ebprender.render(p, args["window"], args.get("scale") or 1, bool(args.get("marks")))
+            out = args["out_file"]
+            os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+            with open(out, "wb") as f:
+                f.write(png)
+            w = p.window(args["window"])
+            res = _text(f"Окно {w['number']} «{w['name']}» {w['width']}×{w['height']} → {out} ({len(png)} байт)")
+            if args.get("show") and len(png) <= 3_000_000:
+                res["content"].append({"type": "image", "data": base64.b64encode(png).decode(), "mimeType": "image/png"})
+            return res
         if name == "cmtp_edit":
-            p = Project.load(args["path"])
-            done, results = [], []
-            for n, e in enumerate(args.get("edits") or [], 1):
-                op, win = e.get("op"), e.get("window")
-                try:
-                    num = p.window(win)["number"] if op != "clone_window" else None
-                    res = {"op": op, "window": num}
-                    if op == "text":
-                        k = p.edit_text(win, str(e["old"]), str(e["new"]), e.get("object"))
-                        done.append(f"{n}. текст {e['old']!r} → {e['new']!r}: {k} шт.")
-                        res.update(object=e.get("object"), count=k)
-                    elif op == "move":
-                        bb = p.move_object(win, int(e["object"]), int(e.get("dx") or 0), int(e.get("dy") or 0))
-                        done.append(f"{n}. объект #{e['object']} сдвинут, рамка {bb}")
-                        res.update(object=int(e["object"]), bbox=bb)
-                    elif op == "tag":
-                        k = p.retag(win, str(e["old"]), str(e["new"]), e.get("object"))
-                        done.append(f"{n}. тег {e['old']} → {e['new']}: {k} адрес(ов)")
-                        res.update(object=e.get("object"), count=k)
-                    elif op == "rename_window":
-                        p.rename_window(win, str(e["new"]))
-                        done.append(f"{n}. окно {win!r} → {e['new']!r}")
-                    elif op == "clone_window":
-                        num = p.clone_window(win, e.get("new"), e.get("number"))
-                        done.append(f"{n}. окно {win!r} скопировано → {num} : {p.window(num)['name']}")
-                        res.update(window=num)
-                    elif op == "clone_object":
-                        k = p.clone_object(win, int(e["object"]), e.get("to"), int(e.get("dx") or 0), int(e.get("dy") or 0))
-                        done.append(f"{n}. объект #{e['object']} скопирован → #{k} в окне {e.get('to') or win!r}")
-                        res.update(window=p.window(e["to"])["number"] if e.get("to") else num, object=k)
-                    else:
-                        return _text(f"правка {n}: нет такого op: {op!r}", True)
-                    results.append(res)
-                except KeyError as exc:
-                    return _text(f"правка {n} ({op}): не хватает поля {exc}; файл не записан", True)
-                except ValueError as exc:
-                    return _text(f"правка {n} ({op}): {exc}; файл не записан", True)
-            p.save(args["out_file"])
-            return dict(_text("\n".join(done + [f"Записано → {args['out_file']}"])),
-                        structuredContent={"results": results, "out_file": args["out_file"]})
+            out = args["out_file"]
+            with _Lock(out):
+                return _edit(args)
         return _text(f"нет такого инструмента: {name}", True)
     except FileNotFoundError as exc:
         return _text(f"файл не найден: {exc}", True)
@@ -296,6 +389,142 @@ def _call(name, args):
         return _text(f"не выходит: {exc}", True)
     except OSError as exc:
         return _text(f"ошибка файла: {exc}", True)
+
+
+def _edit(args):
+    p = Project.load(args["path"])
+    done, results, notes, pending = [], [], [], []
+    donors, linked = {}, {}
+
+    def removed(wn, i):         # object i of window wn is gone: the keys waiting for their window follow
+        for x in list(pending):
+            if x["window"] == wn and (i is None or x["object"] == i):
+                pending.remove(x)
+            elif x["window"] == wn and x["object"] > i:
+                x["object"] -= 1
+
+    def inserted(wn, at, k):    # k objects went in at index `at` (before the last one)
+        for x in pending:
+            if x["window"] == wn and x["object"] >= at:
+                x["object"] += k
+
+    def settle(path):           # keys waiting for a donor window that is here now lead to it
+        for x in list(pending):
+            if x["path"] == path and x["donor_target"] in linked[path]:
+                to = linked[path][x["donor_target"]]
+                ebpedit.link(p, x["window"], x["object"], to)
+                done.append(f"{x['n']}. кнопка #{x['object']} окна {x['window']} → окно {to} (взято из донора)")
+                pending.remove(x)
+
+    def donor(e):
+        path = os.path.abspath(str(e["from"]))
+        if path not in donors:
+            donors[path] = ebpedit.open_donor(path, p)
+            linked[path] = {}
+        return path, donors[path]
+
+    for n, e in enumerate(args.get("edits") or [], 1):
+        op, win = e.get("op"), e.get("window")
+        try:
+            num = p.window(win)["number"] if op in ("text", "move", "resize", "tag", "rename_window", "clone_object",
+                                                    "delete_object", "link") else None
+            res = {"op": op, "window": num}
+            if op == "text":
+                k = p.edit_text(win, str(e["old"]), str(e["new"]), e.get("object"))
+                done.append(f"{n}. текст {e['old']!r} → {e['new']!r}: {k} шт.")
+                res.update(object=e.get("object"), count=k)
+            elif op == "move":
+                bb = p.move_object(win, int(e["object"]), int(e.get("dx") or 0), int(e.get("dy") or 0))
+                done.append(f"{n}. объект #{e['object']} сдвинут, рамка {bb}")
+                res.update(object=int(e["object"]), bbox=bb)
+            elif op == "resize":
+                bb = ebpedit.resize(p, win, int(e["object"]), e.get("width"), e.get("height"))
+                done.append(f"{n}. объект #{e['object']}: новый размер, рамка {bb}")
+                res.update(object=int(e["object"]), bbox=bb)
+            elif op == "tag":
+                k = p.retag(win, str(e["old"]), str(e["new"]), e.get("object"))
+                done.append(f"{n}. тег {e['old']} → {e['new']}: {k} адрес(ов)")
+                res.update(object=e.get("object"), count=k)
+            elif op == "rename_window":
+                p.rename_window(win, str(e["new"]))
+                done.append(f"{n}. окно {win!r} → {e['new']!r}")
+            elif op == "clone_window":
+                num = p.clone_window(win, e.get("new"), e.get("number"))
+                done.append(f"{n}. окно {win!r} скопировано → {num} : {p.window(num)['name']}")
+                res.update(window=num)
+            elif op == "clone_object":
+                tn = p.window(e["to"])["number"] if e.get("to") else num
+                before = len(p.window(tn)["objects"])
+                k = p.clone_object(win, int(e["object"]), e.get("to"), int(e.get("dx") or 0), int(e.get("dy") or 0))
+                if k < before:
+                    inserted(tn, k, 1)
+                done.append(f"{n}. объект #{e['object']} скопирован → #{k} в окне {e.get('to') or win!r}")
+                res.update(window=p.window(e["to"])["number"] if e.get("to") else num, object=k)
+            elif op == "delete_object":
+                ebpedit.delete_object(p, win, int(e["object"]))
+                removed(num, int(e["object"]))
+                done.append(f"{n}. объект #{e['object']} окна {win!r} удалён")
+                res.update(object=int(e["object"]))
+            elif op == "delete_window":
+                w = p.window(win)
+                left = ebpedit.delete_window(p, win)
+                removed(w["number"], None)
+                for m in linked.values():
+                    for k in [k for k, v in m.items() if v == w["number"]]:
+                        del m[k]
+                res.update(window=w["number"], links=left)
+                done.append(f"{n}. окно {w['number']} «{w['name']}» удалено" + (
+                    f"; в него ещё ведут кнопки: " + ", ".join(f"окно {x['window']} #{x['object']}" for x in left)
+                    if left else ""))
+            elif op == "link":
+                t = ebpedit.link(p, win, int(e["object"]), e["to"])
+                pending[:] = [x for x in pending if (x["window"], x["object"]) != (num, int(e["object"]))]
+                done.append(f"{n}. кнопка #{e['object']} окна {win!r} ведёт в окно {t}")
+                res.update(object=int(e["object"]), target=t)
+            elif op == "add_tags":
+                added = ebpedit.add_tags(p, e["tags"])
+                done.append(f"{n}. тегов добавлено: {len(added)}" + (f" ({', '.join(added[:10])}"
+                            + ("…" if len(added) > 10 else "") + ")" if added else ""))
+                res.update(added=added)
+            elif op == "import_window":
+                path, d = donor(e)
+                r = ebpedit.import_window(p, d, win, e.get("number"), e.get("new"), e.get("map_tags"),
+                                          e.get("map_windows"), e.get("map_devices"), linked[path])
+                num = r["number"]
+                done.append(f"{n}. окно донора {win!r} → {num} : {p.window(num)['name']}")
+                res.update(window=num)
+                notes += [f"{n}. {x}" for x in r["notes"] if "the key leads to donor window" not in x]
+                pending += [dict(ln, n=n, path=path, window=num) for ln in r["pending"]]
+                settle(path)
+            elif op == "import_objects":
+                path, d = donor(e)
+                objs = e.get("objects") if e.get("objects") is not None else [e["object"]]
+                before = len(p.window(e["to"])["objects"])
+                r = ebpedit.import_objects(p, d, win, objs, e["to"], e.get("dx") or 0, e.get("dy") or 0,
+                                           e.get("map_tags"), e.get("map_windows"), e.get("map_devices"), linked[path])
+                tw = p.window(e["to"])["number"]
+                if r["first"] < before:
+                    inserted(tw, r["first"], r["count"])
+                done.append(f"{n}. объекты донора {objs} → окно {tw}, #{r['first']}…#{r['first'] + r['count'] - 1}")
+                res.update(window=tw, object=r["first"], count=r["count"])
+                notes += [f"{n}. {x}" for x in r["notes"] if "the key leads to donor window" not in x]
+                pending += [dict(ln, n=n, path=path, window=tw) for ln in r["pending"]]
+            else:
+                return _text(f"правка {n}: нет такого op: {op!r}", True)
+            results.append(res)
+        except KeyError as exc:
+            return _text(f"правка {n} ({op}): не хватает поля {exc}; файл не записан", True)
+        except ValueError as exc:
+            return _text(f"правка {n} ({op}): {exc}; файл не записан", True)
+    for ln in pending:          # keys into donor windows not taken: the number stays, say what it is here
+        dn = ln["donor_target"]
+        here = next((w["name"] for w in p.windows() if w["number"] == dn), None)
+        notes.append(f"{ln['n']}. кнопка #{ln['object']} окна {ln['window']} ведёт в окно донора {dn} "
+                     f"«{ln['donor_name']}», его не брали: номер оставлен"
+                     + (f" (здесь это «{here}»)" if here else " (здесь такого окна нет)"))
+    p.save(args["out_file"])
+    text = "\n".join(done + (["Заметки:"] + notes if notes else []) + [f"Записано → {args['out_file']}"])
+    return dict(_text(text), structuredContent={"results": results, "notes": notes, "out_file": args["out_file"]})
 
 
 def _out(msg):
@@ -314,7 +543,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.3.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.4.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})

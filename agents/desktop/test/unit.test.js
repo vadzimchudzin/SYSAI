@@ -536,6 +536,31 @@ test('canvas: copies — of an object (selected next), of a window (shown); edit
   }
 });
 
+test('canvas: deleting — objects from the end, the shown window (the next one is shown), undo brings it back', async () => {
+  const { file, cv, read } = canvasHome();
+  try {
+    await cv.open(file);
+    const del = await cv.edit('Человек', [{ op: 'delete_object', object: 4 }, { op: 'delete_object', object: 2 }]);
+    assert.deepEqual(del.objects, [4, 2]);
+    assert.deepEqual(read().windows[1].objects.map((o) => o.kind), ['Window', 'Rect', 'ToggleSwitch']);
+    await cv.edit('Агент', [{ op: 'delete_window' }]);
+    assert.equal(cv.state().window, 23, 'the window after the deleted one is shown');
+    assert.deepEqual(cv.state().windows.map((w) => w.number), [3, 23]);
+    await cv.undo();
+    assert.deepEqual(cv.state().windows.map((w) => w.number), [3, 10, 23]);
+  } finally {
+    cv.stop();
+  }
+  assert.throws(() => canvasLib.normalize([{ op: 'import_window', window: 'Нория 3' }], 10), /донор/);
+  assert.deepEqual(canvasLib.normalize([{ op: 'import_objects', from: 'C:\\d.cmtp', window: 'Меню', objects: ['5', 6],
+    map_tags: { 'GVL.A': 'GVL.B' } }], 10),
+  [{ op: 'import_objects', window: 'Меню', from: 'C:\\d.cmtp', to: '10', objects: [5, 6], map_tags: { 'GVL.A': 'GVL.B' } }]);
+  assert.deepEqual(canvasLib.normalize([{ op: 'add_tags', tags: [{ name: 'GVL.C', type: 'BOOL' }] }], 10),
+    [{ op: 'add_tags', tags: [{ name: 'GVL.C', type: 'BOOL' }] }]);
+  assert.equal(canvasLib.describe([{ op: 'delete_object', object: 4 }, { op: 'resize', object: 2, width: 90, height: 30 },
+    { op: 'link', object: 3, to: '23' }]), 'удаление #4; размер #2 → 90×30; кнопка #3 → окно 23');
+});
+
 test('canvas: what the agent sees — the person\'s pointer and selection, the last edits, the cursors', async () => {
   const { file, cv } = canvasHome();
   try {

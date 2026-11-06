@@ -2,8 +2,8 @@
 // вместе. Объекты — блоки по рамкам (bbox) в пикселях панели, в масштабе: фон окна, фигуры (заливка, рамка), тексты
 // (шрифт, размер в пунктах, цвет, выравнивание), картинки первого состояния — как их описал cmtp_scene; фигуры из
 // библиотеки EasyBuilder, которых нет в проекте, — их обычным видом. Мышью: выделить (Shift/Ctrl — ещё; рамкой по
-// пустому месту), перетащить, двойной щелчок — текст; стрелки — сдвиг (Shift — на 10), Ctrl+D — копия, Ctrl+Z —
-// отменить. Курсоры агента и помощников — стрелки с именем и тем, что они делают.
+// пустому месту), перетащить, двойной щелчок — текст; стрелки — сдвиг (Shift — на 10), Ctrl+D — копия, Delete —
+// удалить, Ctrl+Z — отменить. Курсоры агента и помощников — стрелки с именем и тем, что они делают.
 import { h, icon, basename } from './dom.js';
 import { openMenu, toast } from './ui.js';
 
@@ -467,6 +467,18 @@ export class CanvasView {
     }
   }
 
+  // Удалить выделенные — с конца списка, чтобы номера оставшихся не сдвигались под ногами; Ctrl+Z вернёт.
+  async remove() {
+    const ids = [...this.sel].filter((i) => i > 0).sort((a, b) => b - a);
+    if (!ids.length) return;
+    const out = await this.apply(ids.map((i) => ({ op: 'delete_object', object: i })));
+    if (out) {
+      this.sel.clear();
+      this.markSel();
+      toast(ids.length > 1 ? `Удалено объектов: ${ids.length} — Ctrl+Z вернёт` : `Удалён #${ids[0]} — Ctrl+Z вернёт`, 'info');
+    }
+  }
+
   nudgeBy(dx, dy) {
     const ids = [...this.sel];
     if (!ids.length) return;
@@ -519,7 +531,10 @@ export class CanvasView {
       e.preventDefault();
       this.editText([...this.sel][0]);
     } else if (k === 'Delete' || k === 'Backspace') {
-      if (this.sel.size) toast('Удалять объекты холст пока не умеет — удалите их в EasyBuilder', 'info');
+      if (this.sel.size) {
+        e.preventDefault();
+        this.remove();
+      }
     } else if (!ctrl && (k === '+' || k === '=')) {
       this.step(1);
     } else if (!ctrl && k === '-') {
@@ -627,11 +642,13 @@ export class CanvasView {
       { header: tip(o) },
       label0(o) ? { label: 'Изменить текст', sub: 'двойной щелчок, Enter', value: 'text', icon: 'pencil' } : null,
       { label: this.sel.size > 1 ? `Копии рядом (${this.sel.size})` : 'Копия рядом', sub: 'Ctrl+D', value: 'copy', icon: 'copy' },
+      { label: this.sel.size > 1 ? `Удалить (${this.sel.size})` : 'Удалить', sub: 'Delete', value: 'delete', icon: 'trash' },
       this.hooks.mention ? { label: 'Спросить агента об этом', sub: 'вставить в сообщение', value: 'ask', icon: 'chat' } : null,
     ].filter(Boolean);
     openMenu(anchor, items, { onPick: (v) => {
       if (v === 'text') this.editText(i);
       else if (v === 'copy') this.duplicate();
+      else if (v === 'delete') this.remove();
       else if (v === 'ask') this.mention();
     } });
     setTimeout(() => anchor.remove(), 0);
