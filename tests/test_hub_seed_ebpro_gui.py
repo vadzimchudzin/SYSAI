@@ -244,7 +244,7 @@ def test_gui_stdio_server_lists_tools_and_says_windows_only():
     assert replies[2]["result"]["isError"] and "Windows" in replies[2]["result"]["content"][0]["text"]
 
 
-@pytest.mark.parametrize("name", ["ebpro-project", "ebpro-donor", "ebpro-team", "ebpro-easybuilder"])
+@pytest.mark.parametrize("name", ["ebpro-project", "ebpro-donor", "ebpro-team", "ebpro-easybuilder", "ebpro-mnemoscheme"])
 def test_ebpro_skills_pass_the_hub_check(name):
     root = GUI.parent / name
     files = {str(p.relative_to(root)).replace(os.sep, "/"): p.read_bytes() for p in root.rglob("*") if p.is_file()}

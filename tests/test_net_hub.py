@@ -354,3 +354,54 @@ def test_the_lists_of_a_tool_are_read_in_every_yaml_form():
                                  "tools: [read_tags, 'check_addresses']\nrequires:\n  - python\n  - TIA Portal\n---\n# ПЛК\n")
     spec = hub.tool_spec(meta)
     assert spec["tools"] == ["read_tags", "check_addresses"] and spec["requires"] == ["python", "TIA Portal"]
+
+
+def test_bundled_easybuilder_packages_download_without_publishing(client, net_agent):
+    from app.net import hub_bundles
+
+    before = client.get('/agents/api/hub/manifest', headers=net_agent['headers']).json()
+    page = client.get('/hub')
+    assert page.status_code == 200
+    for name, version, doc in [('ebpro-cmtp', '1.4.1', 'TOOL.md'),
+                               ('ebpro-mnemoscheme', '1.0.0', 'SKILL.md'),
+                               ('ebpro-gui', '1.0.0', 'TOOL.md')]:
+        assert f'/hub/bundled/{name}.zip' in page.text
+        result = client.get(f'/hub/bundled/{name}.zip')
+        assert result.status_code == 200
+        assert result.headers['x-sha256'] == hashlib.sha256(result.content).hexdigest()
+        files = hub.read_zip(result.content)
+        meta, report = hub.check(files)
+        assert doc in files and meta['name'] == name and meta['version'] == version
+        assert not report['errors']
+        assert not any('__pycache__' in name or name.endswith('.pyc') for name in files)
+        assert result.content == hub_bundles.package(name)['blob']
+    assert client.get('/hub/bundled/not-a-bundle.zip').status_code == 404
+    after = client.get('/agents/api/hub/manifest', headers=net_agent['headers']).json()
+    assert {k: v for k, v in after.items() if k != "generated_at"} == {k: v for k, v in before.items() if k != "generated_at"}
+
+
+def test_bundled_skill_can_be_uploaded_and_published_like_any_other(client, net_agent):
+    blob = client.get('/hub/bundled/ebpro-mnemoscheme.zip').content
+    r = client.post('/hub/upload', files={'file': ('skill.zip', blob, 'application/zip')}, follow_redirects=False)
+    assert 'v=1.0.0' in r.headers['location']
+    manifest = client.get('/agents/api/hub/manifest', headers=net_agent['headers']).json()
+    assert not any(x['name'] == 'ebpro-mnemoscheme' for x in manifest['skills'])
+    client.post('/hub/ebpro-mnemoscheme/1.0.0/publish')
+    manifest = client.get('/agents/api/hub/manifest', headers=net_agent['headers']).json()
+    assert any(x['name'] == 'ebpro-mnemoscheme' and x['version'] == '1.0.0' for x in manifest['skills'])
+
+
+def test_bundled_mcp_upload_keeps_existing_published_version(client, net_agent):
+    from app.net import hub_bundles
+    files = hub.read_zip(client.get('/hub/bundled/ebpro-cmtp.zip').content)
+    files['TOOL.md'] = files['TOOL.md'].replace(b'version: 1.4.1', b'version: 1.0.0')
+    assert 'v=1.0.0' in _upload(client, files).headers['location']
+    client.post('/hub/ebpro-cmtp/1.0.0/publish')
+    before = hub.blob_of('ebpro-cmtp', '1.0.0')
+    r = client.post('/hub/upload', files={'file': ('tool.zip', hub_bundles.package('ebpro-cmtp')['blob'], 'application/zip')},
+                    follow_redirects=False)
+    assert 'v=1.4.1' in r.headers['location']
+    assert hub.blob_of('ebpro-cmtp', '1.0.0') == before
+    card = hub.card('ebpro-cmtp')
+    assert card['current'] == '1.0.0'
+    assert next(v for v in card['versions'] if v['version'] == '1.4.1')['status'] == 'draft'

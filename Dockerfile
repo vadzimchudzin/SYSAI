@@ -5,6 +5,7 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app app
+COPY hub/seed hub/seed
 COPY samples samples
 COPY agents/sync agents/sync
 COPY agents/installer agents/installer

@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from .. import config, settings_store, storage
 from ..db import Department, Employee, SessionLocal, User
-from . import access, agents, desktop, enabled, files, gateway, hub, installer, journal, mcp, soul, spend, trace
+from . import access, agents, desktop, enabled, files, gateway, hub, hub_bundles, installer, journal, mcp, soul, spend, trace
 from .models import NetAgent, NetAgentToken, NetSkill
 
 router = APIRouter()
@@ -432,7 +432,7 @@ def _hub_page(request: Request, me: dict, panel: str = "", selected: str = "", *
     ctx.setdefault("changes", [])
     return _page(request, "net/hub.html", groups=groups, queue=queue, summary=summary, chips=HUB_CHIPS, panel=panel,
                  panel_open=panel in ("item", "upload"), selected=selected, platform_ru=hub.PLATFORM_RU,
-                 boss=me["role"] == "superuser", me=me, **ctx, **_choices())
+                 boss=me["role"] == "superuser", me=me, bundles=hub_bundles.listing(), **ctx, **_choices())
 
 
 @router.get("/hub", response_class=HTMLResponse)
@@ -481,6 +481,20 @@ def hub_new(request: Request, skill_md: str = Form(...), changelog: str = Form("
     except hub.HubError as exc:
         return _back("/hub/new" + ("" if kind == "skill" else f"?kind={kind}"), error=str(exc))
     return _back(f"/hub/{name}?v={version}", msg=f"Создана версия {version}")
+
+
+@router.get("/hub/bundled/{name}.zip")
+def hub_bundled_download(request: Request, name: str):
+    _person(request)
+    try:
+        item = hub_bundles.package(name)
+    except (OSError, hub.HubError) as exc:
+        raise HTTPException(404, "Пакет недоступен") from exc
+    if item is None:
+        raise HTTPException(404, "Нет такого пакета")
+    return Response(item["blob"], media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-{item["version"]}.zip"',
+                             "X-SHA256": item["sha256"], "Cache-Control": "no-store"})
 
 
 @router.get("/hub/{name}/{version}.zip")

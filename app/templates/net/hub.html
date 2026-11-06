@@ -27,6 +27,14 @@
 {% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
 <div class="card note nx-hint">Всё, чем работают агенты сети, — в одном месте. <b>Навык</b> (SKILL.md) — как делать работу; <b>MCP-сервер</b> и <b>программа</b> (TOOL.md) — чем её делать на ПК. «Всегда с собой» синхронизатор держит у каждого агента, кому это разрешено; «по запросу» агент находит сам и берёт под задачу. Что агент придумал сам, приходит сюда на проверку.</div>
 
+{% if bundles %}
+<details class="card note">
+  <summary><b>EasyBuilder Pro — готовые пакеты</b></summary>
+  <p>Скачайте ZIP и загрузите его в Hub. Это отдельные версии: они не изменяют опубликованные до проверки и публикации владельцем.</p>
+  <ul>{% for bundle in bundles %}<li>{{ bundle.title }} · {{ bundle.version }} — <a href="/hub/bundled/{{ bundle.name }}.zip">Скачать ZIP</a></li>{% endfor %}</ul>
+</details>
+{% endif %}
+
 <div class="nx-layout{{ ' panel-open' if panel_open }}" data-nx-root>
   <section class="card nx-list-card" aria-label="Навыки и инструменты">
     <div class="nx-toolbar">
