@@ -2,7 +2,8 @@
 // «Агент SYSAI» — the main process. One window; Hermes behind it as ACP over stdio (`hermes -p <profile> acp`);
 // the page asks for everything through preload.js, and the agent shows files here through the bridge (127.0.0.1)
 // of lib/uimcp.js, the MCP server this window gives every session (run by this electron.exe as plain Node,
-// ELECTRON_RUN_AS_NODE=1). Started by the synchronizer's launcher
+// ELECTRON_RUN_AS_NODE=1); on «Холст» (lib/canvas.js) the person and the agent edit a window of an EasyBuilder Pro
+// project together. Started by the synchronizer's launcher
 // (`sysai-agentw desktop` → `electron.exe <this folder>`); `--sysai-shortcuts` only writes the shortcuts and leaves.
 const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, screen, session, shell } = require('electron');
 const fs = require('node:fs');
@@ -13,6 +14,7 @@ const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 const { AcpClient } = require('./lib/acp');
+const { Canvas, PERSON } = require('./lib/canvas');
 const config = require('./lib/config');
 const files = require('./lib/files');
 const storage = require('./lib/storage');
@@ -41,6 +43,7 @@ let win = null;
 let uiReady = false;
 let quitting = false;
 let bridge = null;
+let canvas = null;
 let acp = null;
 let generation = 0;
 let restarts = [];
@@ -116,6 +119,7 @@ if (INSTALL) {
   app.on('before-quit', () => {
     quitting = true;
     if (bridge) bridge.stop();
+    if (canvas) canvas.stop();
     if (acp) acp.stop();
   });
   app.whenReady().then(start).catch((err) => {
@@ -140,6 +144,7 @@ async function start() {
   nativeTheme.themeSource = 'dark';
   Menu.setApplicationMenu(null);
   guard(session.defaultSession);
+  startCanvas();
   ipc();
   createWindow();
   cleanPaste();
@@ -424,6 +429,72 @@ async function acpRequest(method, params) {
   }
 }
 
+// ------------------------------------------------------------------------------------------------- the canvas
+// «Холст»: окно проекта EasyBuilder Pro, которое человек и агент правят вместе (lib/canvas.js); агент — через мост
+// ниже, по подписанным доступам: смотреть — нужно чтение папки проекта, править — запись.
+function startCanvas() {
+  canvas = new Canvas({ home: HOME, cache: path.join(DESK, 'cache', 'canvas'), log });
+  canvas.on('state', (s) => send('canvas:state', s));
+  canvas.on('cursors', (c) => send('canvas:cursors', c));
+  canvas.on('edited', (e) => send('canvas:edited', e));
+  canvas.on('notice', (n) => send('ui:notice', n));
+}
+
+function agentRead(p) {
+  if (!p) throw new Error('на холсте нет проекта — откройте его (canvas_open)');
+  agentTarget({ path: p }, 'show');
+}
+
+function agentWrite(p) {
+  agentRead(p);
+  const got = rules.load(HOME);
+  if (!got.rules) throw new Error(`SYSAI: ${got.error}`);
+  const why = !rules.pathAllowed(got.rules, p, true) ? `папка ${p.slice(0, 160)} агенту не разрешена на запись (SYSAI → Доступы → Папки)`
+    : rules.guardedPath(p, HOME, config.load(HOME).profileDir) ? rules.SETTINGS_NOTE : '';
+  if (why) {
+    log(`агенту отказано (правка на холсте): ${why}`);
+    throw new Error(`SYSAI: ${why}`);
+  }
+}
+
+function showCanvas() {
+  sendOrQueue('canvas:focus', {});
+  if (win && win.isMinimized()) win.flashFrame(true);
+}
+
+// EasyBuilder Pro: программа, которой открывается .cmtp на этом компьютере; если такой нет — та, что человек указал
+// (desktop/easybuilder.json), или из обычных мест установки.
+function ebCandidates() {
+  const pf = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, 'C:\\Program Files (x86)', 'C:\\Program Files'].filter(Boolean);
+  const out = ['C:\\EBpro\\EasyBuilderPro.exe'];
+  for (const d of pf) out.push(path.join(d, 'EBpro', 'EasyBuilderPro.exe'), path.join(d, 'Weintek', 'EasyBuilder Pro', 'EasyBuilderPro.exe'));
+  return out;
+}
+
+async function openInEasyBuilder(file) {
+  if (!file) throw new Error('на холсте нет проекта');
+  const keep = path.join(DESK, 'easybuilder.json');
+  const saved = (config.readJson(keep) || {}).exe;
+  const start = (exe) => {
+    const child = spawn(exe, [file], { cwd: path.dirname(exe), detached: true, stdio: 'ignore', windowsHide: false });
+    child.on('error', (err) => log('EasyBuilder:', err.message));
+    child.unref();
+    log(`проект открыт в EasyBuilder: ${exe} ${file}`);
+    return { exe };
+  };
+  if (saved && fs.existsSync(saved)) return start(saved);
+  const err = await shell.openPath(file);
+  if (!err) return { exe: '' };
+  log('EasyBuilder через ассоциацию файла:', err);
+  const found = ebCandidates().find((p) => fs.existsSync(p));
+  if (found) return start(found);
+  const res = await dialog.showOpenDialog(win, { title: 'Где EasyBuilder Pro? Укажите EasyBuilderPro.exe', properties: ['openFile'],
+    filters: [{ name: 'Программа', extensions: ['exe'] }] });
+  if (res.canceled || !res.filePaths.length) throw new Error('EasyBuilder Pro не найден на этом компьютере');
+  config.writeJson(keep, { exe: res.filePaths[0] });
+  return start(res.filePaths[0]);
+}
+
 // ------------------------------------------------------------------------------------------------- the bridge
 // What the agent asks of the window (lib/uimcp.js): checked by the signed rules as the synchronizer checks them —
 // showing needs reading, opening also stays out of SYSAI's places, a program needs «Команды на ПК».
@@ -471,6 +542,35 @@ async function startBridge() {
         const { p } = agentTarget(body, 'reveal');
         shell.showItemInFolder(p);
         return { shown: true, path: p };
+      },
+      canvas_open: async (body) => {
+        const { p, dir } = agentTarget(body, 'show');
+        if (dir) throw new Error('на холсте открывается файл проекта .cmtp/.emtp, а не папка');
+        const out = await canvas.open(p, body.window);
+        showCanvas();
+        log(`агент открыл на холсте ${p}, окно ${out.window.number}`);
+        return out;
+      },
+      canvas_look: async () => {
+        if (canvas.file) agentRead(canvas.file);
+        return canvas.look();
+      },
+      canvas_window: async (body) => {
+        agentRead(canvas.file);
+        const out = await canvas.show(body.window);
+        showCanvas();
+        return out;
+      },
+      canvas_cursor: async (body) => {
+        agentRead(canvas.file);
+        return { cursor: canvas.cursor(body.who, body) };
+      },
+      canvas_edit: async (body) => {
+        agentWrite(canvas.file);
+        if (canvas.who(body.who) === PERSON) throw new Error('правки от имени человека агент не делает — назовитесь «Агент» или своим именем');
+        const out = await canvas.edit(body.who, body.edits);
+        showCanvas();
+        return out;
       },
       notice: async (body) => {
         sendOrQueue('ui:notice', { text: String(body.text || '').slice(0, 600), kind: body.kind === 'err' ? 'err' : 'info' });
@@ -617,6 +717,22 @@ function ipc() {
       win.setTitleBarOverlay({ color, symbolColor: SYMBOLS, height: TOP });
     } catch { /* not where there is no overlay */ }
     return true;
+  });
+  handle('canvas:state', () => canvas.state());
+  handle('canvas:open', (p, w) => canvas.open(need(p), w));
+  handle('canvas:pick', async () => {
+    const res = await dialog.showOpenDialog(win, { title: 'Проект EasyBuilder Pro', properties: ['openFile'],
+      filters: [{ name: 'EasyBuilder Pro', extensions: ['cmtp', 'emtp'] }] });
+    return res.canceled || !res.filePaths.length ? '' : res.filePaths[0];
+  });
+  handle('canvas:window', (w) => canvas.show(w));
+  handle('canvas:edit', (edits) => canvas.edit(PERSON, edits));
+  handle('canvas:undo', () => canvas.undo());
+  handle('canvas:reload', () => canvas.reload());
+  handle('canvas:close', () => canvas.close());
+  handle('canvas:eb', () => openInEasyBuilder(canvas.file));
+  ipcMain.on('canvas:pointer', (event, p) => {
+    if (win && event.sender === win.webContents && p && typeof p === 'object') canvas.pointer(p);
   });
   ipcMain.on('ui:ready', (event) => {
     if (!win || event.sender !== win.webContents) return;

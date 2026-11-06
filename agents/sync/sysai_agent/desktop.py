@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -220,7 +221,8 @@ def _launcher(sysai: str) -> str:
 
 
 def fields(home, state: dict | None = None) -> dict:
-    """What the window takes from the synchronizer: the agent, the profile, the programs, the person."""
+    """What the window takes from the synchronizer: the agent, the profile, the programs (its own Python too: the
+    window runs the hub tools of «Холст» with it), the person."""
     from . import core
     cfg = fsutil.read_json(Path(home) / "agent.json", {}) or {}
     state = state if state is not None else (fsutil.read_json(Path(home) / "state.json", {}) or {})
@@ -228,7 +230,7 @@ def fields(home, state: dict | None = None) -> dict:
     return {"agent": cfg.get("agent", ""), "server": cfg.get("server", ""),
             "profile": cfg.get("profile") or cfg.get("agent", ""),
             "profile_dir": str(paths.hermes_profile_dir(cfg)) if cfg.get("agent") else "",
-            "hermes": shutil.which("hermes") or "", "sysai_agent": sysai, "launcher": _launcher(sysai),
+            "hermes": shutil.which("hermes") or "", "sysai_agent": sysai, "launcher": _launcher(sysai), "python": sys.executable,
             "person": str(state.get("person") or ""), "synchronizer": __version__}
 
 
