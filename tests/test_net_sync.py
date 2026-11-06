@@ -297,6 +297,8 @@ def test_the_mcp_guard_checks_the_signed_rules_itself(client, pc):
         _rpc(9, "tools/call", {"name": "read_doc", "arguments": {"url": "https://evil.example/x"}}),
         _rpc(10, "tools/call", {"name": "read_doc", "arguments": {"url": "https://www.se.com/ru/doc"}}),
         _rpc(11, "tools/call", {"name": "read_doc", "arguments": {"command": "del /s C:\\"}}),
+        _rpc(12, "tools/call", {"name": "write_report", "arguments": {"edits": [{"states": [{"image_file": "D:\\ОПО\\Проекты\\ok.png"}]}]}}),
+        _rpc(13, "tools/call", {"name": "write_report", "arguments": {"edits": [{"states": [{"image_file": "C:\\Windows\\secret.png"}]}]}}),
     ]
     out = io.BytesIO()
     code = mcpwrap.serve("doc-kit", pc["home"], stdin=io.BytesIO(("\n".join(calls) + "\n").encode("utf-8")), stdout=out)
@@ -304,11 +306,12 @@ def test_the_mcp_guard_checks_the_signed_rules_itself(client, pc):
     answers = {m["id"]: m for m in (json.loads(line) for line in out.getvalue().decode("utf-8").splitlines() if line.strip())}
     assert [t["name"] for t in answers[1]["result"]["tools"]] == ["read_doc", "write_report"]
     ok = {i for i, m in answers.items() if "result" in m}
-    assert ok == {1, 2, 7, 10}, answers
+    assert ok == {1, 2, 7, 10, 12}, answers
     assert "delete_all" in answers[3]["error"]["message"] and "не разрешён" in answers[3]["error"]["message"]
     assert "C:\\Windows" in answers[4]["error"]["message"] and "secret" in answers[5]["error"]["message"]
     assert "на запись" in answers[6]["error"]["message"] and "Архив" in answers[8]["error"]["message"]
     assert "evil.example" in answers[9]["error"]["message"] and "команды агенту запрещены" in answers[11]["error"]["message"]
+    assert "C:\\Windows" in answers[13]["error"]["message"]
     # the server is not allowed any more: the guard does not start it at all
     access.set_agent_access(pc["agent_id"], overrides={"mcp": {"sysai": ["*"]}})
     core.sync_once(pc["home"], transport=pc["send"])

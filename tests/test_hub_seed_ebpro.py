@@ -318,6 +318,76 @@ def test_scene_pictures_and_colours(tmp_path):
     assert p.scene("Экран")["images"] == {}                # nothing written without images_dir
 
 
+def test_check_warns_about_compact_opaque_widget():
+    import ebpedit
+    p = ebpcmtp.Project.load(_look_project())
+    w = p.window("Экран")
+    compact = b"\x01\x80" + ebpcmtp._OPAQUE_PART_4A + bytes(200)
+    count_at = w["_first"] - 4
+    insert_at = w["objects"][3]["offset"]
+    p._splice([(count_at, count_at + 4, struct.pack("<I", w["declared"] + 1)),
+               (insert_at, insert_at, compact)])
+    w = p.window("Экран")
+    assert len(w["objects"]) == w["declared"]
+    assert w["objects"][3]["kind"] == "part_4a"
+    assert any(x["code"] == "opaque_object" and x["object"] == 3 for x in ebpedit.check(p, "Экран"))
+
+
+def test_clone_multistate_keeps_each_picture_and_independent_geometry():
+    p = ebpcmtp.Project.load(_look_project())
+    lamp = p.window("Экран")["objects"][3]
+    assert lamp["kind"] == "BitLamp"
+    # Use the same two-state picture-group layout with a MultiState widget type.
+    at = lamp["offset"] + 2
+    p.payload = p.payload[:at] + b"\x18" + p.payload[at + 1:]
+    before = p.scene("Экран")["objects"][3]
+    index = p.clone_object("Экран", 3, to="Клавиатура", dx=-390, dy=-90)
+    copy = p.scene("Клавиатура")["objects"][index]
+    assert copy["kind"] == "MultiState?" and copy["bbox"] == [10, 10, 70, 70]
+    assert copy["picture"] == before["picture"] and len(copy["picture"]) == 2
+    assert p.scene("Экран")["objects"][3]["bbox"] == [400, 100, 460, 160]
+    assert ebpcmtp.Project.load(p.dump()).scene("Клавиатура")["objects"][index]["picture"] == before["picture"]
+
+
+def test_picture_states_are_independent_and_checked(tmp_path):
+    import ebpedit
+    import server
+    p = ebpcmtp.Project.load(_look_project())
+    clone = p.clone_object("Экран", 3, to="Клавиатура", dx=-390, dy=-90)
+    old_copy = p.scene("Клавиатура")["objects"][clone]["picture"]
+    before = p.payload
+    with pytest.raises(ValueError, match="count cannot be changed"):
+        ebpedit.picture_states(p, "Экран", 3, [{"png": _png()}])
+    assert p.payload == before
+    with pytest.raises(ValueError):
+        ebpedit.picture_states(p, "Экран", 3, [{"png": b"not png"}, {"image": IMG2.hex()}])
+    assert p.payload == before
+    corrupt = bytearray(_png())
+    corrupt[-5] ^= 1
+    with pytest.raises(ValueError, match="checksum"):
+        ebpedit.picture_states(p, "Экран", 3, [{"png": bytes(corrupt)}, {"image": IMG2.hex()}])
+    assert p.payload == before
+    green = _png((0, 255, 0, 255))
+    green_file = tmp_path / "green.png"
+    green_file.write_bytes(green)
+    src, dst = tmp_path / "project.cmtp", tmp_path / "out.cmtp"
+    src.write_bytes(p.dump())
+    result = server._call("cmtp_edit", {"path": str(src), "out_file": str(dst), "edits": [
+        {"op": "picture_states", "window": "Экран", "object": 3, "states": [
+            {"image_file": str(green_file)}, {"image": IMG2.hex(), "transparent": "#00D2FF"}]}]})
+    assert not result.get("isError"), result
+    q = ebpcmtp.Project.load(dst.read_bytes())
+    changed = q.scene("Экран")["objects"][3]["picture"]
+    assert q.picture(changed[0]["image"])[0] == green
+    assert changed[1]["image"] == IMG2.hex() and changed[1]["transparent"] == "#00d2ff"
+    assert q.scene("Клавиатура")["objects"][clone]["picture"] == old_copy
+    assert src.read_bytes() == p.dump()
+    result = server._call("cmtp_edit", {"path": str(src), "out_file": str(dst), "edits": [
+        {"op": "picture_states", "window": "Экран", "object": 3, "states": [
+            {"image_file": "relative.png"}, {"image": IMG2.hex()}]}]})
+    assert result.get("isError")
+
+
 def test_mcp_server_over_stdio(tmp_path):
     src = tmp_path / "topol.emtp"
     src.write_bytes(_project())
@@ -574,6 +644,34 @@ def test_resize_keeps_the_corner_and_moves_centred_labels():
             ebpedit.resize(q, "Экран", 4, w, h)
     with pytest.raises(ValueError):
         ebpedit.resize(q, "Экран", 0, 100, 100)     # the window frame
+
+
+def test_compact_opaque_widget_is_a_boundary_but_cannot_be_copied():
+    compact = b"\x01\x80" + ebpcmtp._OPAQUE_PART_4A + bytes(200)
+    normal = _part(0x15, (10, 10, 100, 50), first=True)
+    blob = normal + compact + _part(0x15, (10, 80, 100, 120))
+    heads = ebpcmtp._heads(blob)
+    assert [h[2] for h in heads] == [0x15, 0x4a, 0x15]
+    assert heads[1][0] == len(normal)
+    info = {"ptag": b"\x01\x80", "nested": [], "defs": []}
+    with pytest.raises(ValueError, match="opaque part_4a"):
+        ebpcmtp._check_range(blob, len(normal), len(normal) + len(compact), info)
+    ebpcmtp._check_range(blob, 0, len(normal), info)
+    # Partial lookalikes inside other data must not create a boundary.
+    assert len(ebpcmtp._heads(normal + b"\x01\x80\x4a\x01\x00\x06" + bytes(20))) == 1
+
+
+@pytest.mark.parametrize("left", [48, 568])
+def test_rectangle_detection_when_bottom_is_multiple_of_256(left):
+    import ebpedit
+    p = _ui_project()
+    p.move_object("Главное", 1, left - 100, 715)
+    ebpedit.resize(p, "Главное", 1, 225, 34)
+    obj = p.window("Главное")["objects"][1]
+    assert obj["bbox"] == [left, 735, left + 224, 768]
+    assert (obj["labels"][0]["x"], obj["labels"][0]["y"]) == (left, 735)
+    p.move_object("Главное", 1, 2, 3)
+    assert p.window("Главное")["objects"][1]["bbox"] == [left + 2, 738, left + 226, 771]
 
 
 def test_check_finds_what_the_panel_would_show_wrong():

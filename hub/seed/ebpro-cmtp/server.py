@@ -193,7 +193,8 @@ TOOLS = [
                        "EasyBuilder) под номером number с именем new; import_objects — взять объекты objects окна "
                        "window донора from в окно to со сдвигом dx, dy. При взятии из донора: картинки переносятся "
                        "в библиотеку (одинаковые не дублируются), теги, которых нет в проекте, — из таблицы донора, "
-                       "map_tags {тег донора: тег проекта} — перепривязать, map_windows {окно донора: окно проекта} "
+                       "picture_states — заменить картинки отдельного объекта по состояниям PNG-файлами или GUID библиотеки "
+                       "(число состояний не меняется). map_tags {тег донора: тег проекта} — перепривязать, map_windows {окно донора: окно проекта} "
                        "— куда вести кнопки, map_devices {устройство донора: устройство проекта}; кнопки на окна, "
                        "взятые в этом же списке, ведут на их новые номера сами.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
@@ -202,7 +203,7 @@ TOOLS = [
                 "type": "object", "properties": {
                     "op": {"type": "string", "enum": ["text", "move", "resize", "tag", "rename_window", "clone_window",
                                                       "clone_object", "delete_object", "delete_window", "link",
-                                                      "add_tags", "import_window", "import_objects"]},
+                                                      "add_tags", "import_window", "import_objects", "picture_states"]},
                     "window": {"type": "string", "description": "Имя окна или номер (у import_* — окно донора)"},
                     "object": {"type": "integer", "description": "index объекта из cmtp_objects"},
                     "objects": {"type": "array", "items": {"type": "integer"}, "description": "import_objects: index объектов донора"},
@@ -216,6 +217,11 @@ TOOLS = [
                         "type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string"},
                                                          "node": {"type": "string"}},
                         "required": ["name", "type"], "additionalProperties": False}},
+                    "states": {"type": "array", "minItems": 1, "maxItems": 100, "items": {
+                        "type": "object", "properties": {"image_file": {"type": "string", "description": "Полный путь к PNG"},
+                                                            "image": {"type": "string", "description": "GUID картинки проекта"},
+                                                            "transparent": {"type": ["string", "null"]}},
+                        "additionalProperties": False}},
                     "map_tags": {"type": "object", "additionalProperties": {"type": "string"}},
                     "map_windows": {"type": "object", "additionalProperties": {"type": "string"}},
                     "map_devices": {"type": "object", "additionalProperties": {"type": "string"}}},
@@ -427,7 +433,7 @@ def _edit(args):
         op, win = e.get("op"), e.get("window")
         try:
             num = p.window(win)["number"] if op in ("text", "move", "resize", "tag", "rename_window", "clone_object",
-                                                    "delete_object", "link") else None
+                                                    "delete_object", "link", "picture_states") else None
             res = {"op": op, "window": num}
             if op == "text":
                 k = p.edit_text(win, str(e["old"]), str(e["new"]), e.get("object"))
@@ -441,6 +447,25 @@ def _edit(args):
                 bb = ebpedit.resize(p, win, int(e["object"]), e.get("width"), e.get("height"))
                 done.append(f"{n}. объект #{e['object']}: новый размер, рамка {bb}")
                 res.update(object=int(e["object"]), bbox=bb)
+            elif op == "picture_states":
+                if not isinstance(e["states"], list) or not 1 <= len(e["states"]) <= 100:
+                    raise ValueError("нужно от 1 до 100 состояний")
+                states, total = [], 0
+                for state in e["states"]:
+                    state = dict(state)
+                    if "image_file" in state:
+                        path = state.pop("image_file")
+                        if not os.path.isabs(path):
+                            raise ValueError("image_file: нужен полный путь к PNG")
+                        with open(path, "rb") as f:
+                            state["png"] = f.read(8 * 1024 * 1024 + 1)
+                        total += len(state["png"])
+                        if total > 32 * 1024 * 1024:
+                            raise ValueError("суммарный размер PNG больше 32 МБ")
+                    states.append(state)
+                ids = ebpedit.picture_states(p, win, int(e["object"]), states)
+                done.append(f"{n}. объект #{e['object']}: заменены картинки, состояний {len(ids)}")
+                res.update(object=int(e["object"]), images=ids)
             elif op == "tag":
                 k = p.retag(win, str(e["old"]), str(e["new"]), e.get("object"))
                 done.append(f"{n}. тег {e['old']} → {e['new']}: {k} адрес(ов)")

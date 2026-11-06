@@ -495,6 +495,8 @@ PART_KINDS = {0x2d: 'Window', 0x15: 'Text', 0x16: 'Picture', 0x17: 'BitLamp', 0x
               0x29: 'Trend?', 0x40: 'OptionList?', 0x50: 'QRCode'}
 DRAW_KINDS = {2: 'Line', 4: 'Rect'}
 _PART_DEF = b'\xff\xff\x01\x00\x0b\x00CPartObject'
+# Compact widget header observed in a real 6.10 project. Contents remain opaque.
+_OPAQUE_PART_4A = b'\x4a\x01\x00\x06\x00\x04\x00\x00\x00\x00\x00\x10'
 _DRAW_DEF = b'\xff\xff\x01\x00\x0b\x00CDrawObject'
 _CLASS_DEF = re.compile(rb'\xff\xff\x01\x00[\x03-\x40]\x00C[A-Za-z]')
 _DRAW_SIG = rb'([\x00-\x40])[\x00-\xff]\x00\x00\x00\x01'
@@ -644,7 +646,11 @@ def _heads(pay: bytes) -> list:
         return []
     base = 1 + 2 * len(_CLASS_DEF.findall(pay, 0, fp))       # map index of CPartObject
     ptag = struct.pack('<H', 0x8000 | base)
-    prefs = [m.start() for m in re.finditer(re.escape(ptag) + rb'.\xff\xfe\xff', pay, re.S)]
+    # Some panel objects (type 0x4a) use a compact header, not the usual
+    # wide CString. Keep them as opaque records; this signature is intentionally
+    # narrow so arbitrary class-reference bytes inside data are not mistaken for objects.
+    psig = rb'(?:[\x00-\xff]\xff\xfe\xff|' + re.escape(_OPAQUE_PART_4A) + rb')'
+    prefs = [m.start() for m in re.finditer(re.escape(ptag) + psig, pay)]
     heads = [(fp, 'P', pay[fp + len(_PART_DEF)], len(_PART_DEF) + 1)] + [(k, 'P', pay[k + 2], 3) for k in prefs]
     fd = pay.find(_DRAW_DEF)
     if fd != -1:
@@ -711,18 +717,39 @@ def _part_head(pay: bytes, p: int):
     return {'name': name, 'devices': devices, 'devs': devs, 'atypes': atypes, 'addrs': addrs}, p
 
 
-def _find_bbox(pay: bytes, p: int, end: int):
+def _find_bbox(pay: bytes, p: int, end: int, label_positions=()):
     fallback = (None, None)
-    for k in range(max(p, 4), min(end, p + 2500) - 24):
-        if pay[k + 16] != 0 or pay[k - 4:k] != b'\x00\x00\x00\x00':
-            continue
+    def candidate(k):
+        if k < max(p, 4) or k + 24 >= end or pay[k + 16] != 0 or pay[k - 4:k] != bytes(4):
+            return None
         l, t, r, b = struct.unpack_from('<IIII', pay, k)
-        if l <= r <= 4000 and t <= b <= 4000 and r - l >= 3 and b - t >= 3:
-            col = pay[k + 17:k + 24]
-            if any(col[:3]) or any(col[4:7]):
-                return k, [l, t, r, b]
-            if fallback[0] is None:
-                fallback = (k, [l, t, r, b])
+        if not (l <= r <= 4000 and t <= b <= 4000 and r - l >= 3 and b - t >= 3):
+            return None
+        col = pay[k + 17:k + 24]
+        return [l, t, r, b], bool(any(col[:3]) or any(col[4:7]))
+
+    def contains(bb, x, y):
+        return bb[0] <= x <= bb[2] and bb[1] <= y <= bb[3]
+
+    for k in range(max(p, 4), min(end, p + 2500) - 24):
+        found = candidate(k)
+        if found is None:
+            continue
+        bb, colored = found
+        # A zero immediately before the rectangle can itself look like its left
+        # edge, particularly when the real bottom coordinate is a multiple of
+        # 256. If the following four-byte-aligned rectangle contains a label
+        # or starts at a label, while the first does not, it is the real frame.
+        nxt = candidate(k + 4)
+        if (nxt and label_positions and (
+                (not any(contains(bb, x, y) for x, y in label_positions) and
+                 any(contains(nxt[0], x, y) for x, y in label_positions)) or
+                (tuple(nxt[0][:2]) in label_positions and tuple(bb[:2]) not in label_positions))):
+            return k + 4, nxt[0]
+        if colored:
+            return k, bb
+        if fallback[0] is None:
+            fallback = (k, bb)
     return fallback
 
 
@@ -753,8 +780,6 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
                 obj['_addr'].append((s, e, a))
                 if a not in ('', '0'):
                     obj['addresses'].append(_address(k + 1, head['devices'][k], head['atypes'][k], a))
-        at, bb = _find_bbox(pay, body, end)
-        obj['bbox'], obj['_bbox_at'] = bb, at
     a = bisect.bisect_left(starts, body)
     strs = []
     while a < len(cs) and cs[a][0] < end:
@@ -782,6 +807,9 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
             obj['_texts'].append((s, e, t))
             obj['texts'].append(t)
         i += 1
+    if cls != 'D':
+        at, bb = _find_bbox(pay, body, end, [(x, y) for _, x, y in obj['_label_pos']])
+        obj['bbox'], obj['_bbox_at'] = bb, at
     return obj
 
 
@@ -1246,6 +1274,8 @@ def _map_info(pay: bytes, wins: list) -> dict:
 
 def _check_range(pay: bytes, s: int, e: int, info: dict, what: str = 'copying') -> None:
     """Refuse records holding sub-objects or class definitions other than the widget / shape ones."""
+    if info.get('ptag') and pay.find(info['ptag'] + _OPAQUE_PART_4A, s, e) != -1:
+        raise ValueError(f'it contains an opaque part_4a; {what} it is not supported')
     for c in info['nested']:
         if s <= c['def'] < e or any(s <= k < e for k in c['refs']):
             raise ValueError(f'it holds sub-objects ({c["name"]}); {what} those is not supported yet')

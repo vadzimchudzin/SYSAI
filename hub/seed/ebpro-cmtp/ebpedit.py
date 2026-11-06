@@ -367,6 +367,8 @@ class Graft:
         dx, dy = shift
         for j, o in enumerate(objs):
             slot = slots[j] if slots else o['index']
+            if o['kind'] == 'part_4a':
+                raise ValueError('opaque part_4a cannot be taken until its contents are understood')
             if not self.dinfo.get('sure') and o['kind'] in _NESTED_KINDS:
                 raise ValueError(f'object #{o["index"]} ({o["kind"]}) may hold sub-objects and the class numbering of '
                                  f'the donor does not check out; build this one in EasyBuilder')
@@ -554,6 +556,124 @@ def import_objects(p: Project, donor, src, objects, to, dx=0, dy=0, tags=None, w
     return {'first': first, 'count': len(objs), 'notes': g.notes, 'pending': g.pending}
 
 
+# -- image states -------------------------------------------------------------------------------------------------
+def picture_states(p: Project, window, index: int, states: list) -> list:
+    """Replace one object's picture group without modifying other objects sharing it.
+
+    Each state is {'image': existing file GUID hex OR 'png': bytes, 'transparent': '#rrggbb' or None}.
+    Number of states must remain unchanged: object state programming is not modified.
+    """
+    w, (obj,) = p._objects(window, index)
+    _whole(w, 'changing pictures in it')
+    if obj['kind'] not in ('Picture', 'BitLamp', 'MultiState?', 'WordLamp?', 'ToggleSwitch', 'FunctionKey'):
+        raise ValueError('this object type is not supported for picture replacement')
+    if not isinstance(states, list) or not states or len(states) > 100:
+        raise ValueError('pictures need 1 to 100 states')
+    pay = p.payload
+    lib, groups = p._library()
+    sec, span = p.picture_section()
+    if not sec or not sec['complete'] or not sec['count']:
+        raise ValueError('the picture library is not completely understood')
+    s, e = obj['offset'], obj['offset'] + obj['length']
+    hits = []
+    for key in groups:
+        at = pay.find(key, s, e)
+        while at >= 0:
+            hits.append((at, key))
+            at = pay.find(key, at + 16, e)
+    if len(hits) != 1:
+        raise ValueError('the object does not have one unambiguous picture group')
+    at, oldkey = hits[0]
+    if len(states) != len(groups[oldkey]):
+        raise ValueError(f'the object has {len(groups[oldkey])} picture states; the count cannot be changed here')
+    known_hash = {hashlib.sha256(pay[o:o+n]).digest(): key for key, (o, n) in lib.items()}
+    new_files, new_states = [], []
+    for st in states:
+        if not isinstance(st, dict) or ('image' in st) == ('png' in st):
+            raise ValueError('each state needs one existing image GUID or PNG')
+        col = st.get('transparent')
+        if col is not None and (not isinstance(col, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', col)):
+            raise ValueError('transparent must be a colour #RRGGBB or null')
+        if 'image' in st:
+            try:
+                key = bytes.fromhex(st['image'])
+            except (TypeError, ValueError):
+                raise ValueError('bad image GUID') from None
+            if key not in lib:
+                raise ValueError('image GUID is not in the project library')
+        else:
+            data = st['png']
+            _validate_png(data)
+            digest = hashlib.sha256(data).digest()
+            key = known_hash.get(digest)
+            if key is None:
+                key = uuid.uuid4().bytes
+                known_hash[digest] = key
+                new_files.append((key, data))
+        new_states.append((key, col.lower() if col else None))
+    name = b'SYSAI picture states'
+    group_key = uuid.uuid4().bytes
+    rec = b'\x01\x04\x01\x00' + struct.pack('<H', len(name)) + name + struct.pack('<I', len(new_states))
+    for key, col in new_states:
+        rgb = bytes.fromhex(col[1:]) if col else b'\xff\xff\xff'
+        rec += b'\x02\x04\x01\x00\x01\x00' + key + struct.pack('<II', bool(col), 0) + rgb + b'\x00'
+    rec += group_key
+    start, end, n = span
+    edits = [(at, at + 16, group_key), (sec['end'], sec['end'], rec),
+             (sec['count_at'], sec['count_at'] + 4, struct.pack('<I', sec['count'] + 1))]
+    if new_files:
+        edits += [(end, end, b''.join(b'\xff' + key + struct.pack('<I', len(data)) + data for key, data in new_files)),
+                  (start - 4, start, struct.pack('<I', n + len(new_files)))]
+    before = _numbers(p)
+    addresses = list(obj['addresses'])
+    def run():
+        p._splice(edits)
+        _map_info(p.payload, p.windows())
+        if _numbers(p) != before or p.window(window)['objects'][index]['addresses'] != addresses:
+            raise ValueError('window or addresses changed unexpectedly')
+        _, after = p._library()
+        if after.get(group_key) != new_states:
+            raise ValueError('picture states do not read back')
+        return [k.hex() for k, _ in new_states]
+    return _guarded(p, run)
+
+
+def _validate_png(data: bytes) -> None:
+    """Check a bounded PNG's chunk boundaries, CRCs and image header without decoding pixels."""
+    import zlib
+    if not isinstance(data, bytes) or len(data) > 8 * 1024 * 1024 or not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise ValueError('image must be a PNG of at most 8 MB')
+    pos, ihdr, idat, end = 8, False, False, False
+    while pos + 12 <= len(data):
+        n = struct.unpack_from('>I', data, pos)[0]
+        if n > len(data) - pos - 12:
+            break
+        typ = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + n]
+        crc = struct.unpack_from('>I', data, pos + 8 + n)[0]
+        if zlib.crc32(typ + body) & 0xffffffff != crc:
+            raise ValueError('PNG checksum failed')
+        if not ihdr:
+            if typ != b'IHDR' or n != 13:
+                raise ValueError('PNG header is missing')
+            width, height = struct.unpack_from('>II', body)
+            depth, color, compression, filt, interlace = body[8:13]
+            depths = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
+            if not (1 <= width <= 4096 and 1 <= height <= 4096):
+                raise ValueError('PNG dimensions must be 1–4096 pixels')
+            if color not in depths or depth not in depths[color] or compression or filt or interlace not in (0, 1):
+                raise ValueError('PNG header is invalid')
+            ihdr = True
+        if typ == b'IDAT':
+            idat = True
+        pos += n + 12
+        if typ == b'IEND':
+            end = n == 0
+            break
+    if not (ihdr and idat and end and pos == len(data)):
+        raise ValueError('PNG is incomplete')
+
+
 # -- checking --------------------------------------------------------------------------------------------------------
 def check(p: Project, window=None) -> list:
     """What would go wrong on the panel: [{level (error/warning/info), window, object, code, text}]. Codes:
@@ -587,6 +707,8 @@ def check(p: Project, window=None) -> list:
                 'windows opened from the PLC)')
         user = w['number'] >= SYSTEM_WINDOWS
         for o in w['objects']:
+            if o['kind'] == 'part_4a':
+                add('warning', w, o['index'], 'opaque_object', 'part_4a is only recognised as a record boundary; its contents are not decoded')
             if o['kind'] == 'Window' or not o['bbox']:
                 continue
             l, t, r, b = o['bbox']
