@@ -104,7 +104,8 @@ try {
     # 7. окно агента «Агент SYSAI»: Electron и приложение, проверенные по подписи SYSAI, ярлыки на рабочем столе и в «Пуске»
     Say 'ставлю окно агента «Агент SYSAI» (в первый раз скачивается около 160 МБ)...'
     & sysai-agent desktop --install-only
-    if ($LASTEXITCODE -ne 0) { Warn 'окно агента не установилось (см. выше): синхронизатор попробует сам, или выполните sysai-agent desktop' }
+    $DesktopOK = ($LASTEXITCODE -eq 0)
+    if (-not $DesktopOK) { Warn 'окно агента не установилось (см. выше): синхронизатор попробует сам, или выполните sysai-agent desktop' }
 
     # 8. синхронизация в фоне: при входе в Windows и каждые 5 минут
     $runner = Get-Command 'sysai-agentw' -ErrorAction SilentlyContinue
@@ -117,7 +118,8 @@ try {
 
     Write-Host ''
     Say "готово: агент $Agent на этом компьютере."
-    Write-Host '  Окно агента:           ярлык «Агент SYSAI» на рабочем столе (или sysai-agent desktop)'
+    if ($DesktopOK) { Write-Host '  Окно агента:           ярлык «Агент SYSAI» на рабочем столе (или sysai-agent desktop)' }
+    else { Warn 'окно и ярлык ещё не установлены; проверьте сообщения выше и запустите sysai-agent desktop' }
     Write-Host "  Агент в терминале:     hermes -p $Agent"
     Write-Host '  Что на компьютере:     sysai-agent status'
     Write-Host "  Доступы, расходы, трасса - на странице агента в SYSAI: $Server/agents"

@@ -620,3 +620,20 @@ def test_the_synchronizer_updates_itself_only_to_the_wheel_sysai_signed(pc, monk
     assert run() == [1] and len(started) == 1  # once: the helper is at work
     monkeypatch.setattr(paths, "WINDOWS", False)  # elsewhere the synchronizer is updated by whoever installed it
     assert core.self_update(home, None, {"version": "9.9.9"}, {}) is False
+
+
+def test_windows_installer_is_downloadable_from_agent_page(client, net_agent):
+    for path in ('/agents', f"/agents/{net_agent['id']}"):
+        page = client.get(path)
+        assert page.status_code == 200
+        if path == '/agents':
+            assert '/agents/download/install.ps1' in page.text
+    page = client.post(f"/agents/{net_agent['id']}/connect").text
+    assert '/agents/download/install.ps1' in page
+    r = client.get('/agents/download/install.ps1')
+    assert r.status_code == 200 and 'SYSAI-install.ps1' in r.headers['content-disposition']
+    assert r.content.startswith(b'\xef\xbb\xbf')  # Windows PowerShell 5.1 decodes Cyrillic correctly
+    script = r.content.decode('utf-8-sig')
+    assert "$Server = 'http://testserver'" in script and '__SYSAI_' not in script
+    assert 'sysai-agent desktop --install-only' in script and "Read-Host 'Код подключения" in script
+    assert 'окно и ярлык ещё не установлены' in script

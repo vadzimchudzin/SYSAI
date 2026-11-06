@@ -11,8 +11,9 @@
 <section class="card" id="connect-code"><h2>Подключение компьютера</h2>
   <p>Код действует {{ ttl }} минут и только один раз. Установщик меняет его на токен агента; в SYSAI хранится только хэш токена, на ПК — защищённое хранилище Windows.</p>
   <p><span class="net-code">{{ code }}</span></p>
-  <p>На ПК сотрудника откройте PowerShell (обычный, не от администратора) и вставьте одну строку:</p>
+  <p>На ПК сотрудника откройте PowerShell (обычный, не от администратора) и вставьте одну строку. Установится клиент «Агент SYSAI» с ярлыком:</p>
   <pre class="net-pre">$env:SYSAI_CODE='{{ code }}'; irm {{ server }}/agents/api/install.ps1 | iex</pre>
+  <p><a href="/agents/download/install.ps1">Скачать скрипт установщика Windows</a> — при отдельном запуске скрипт попросит код выше.</p>
   <p class="small muted">Установщик ставит uv, синхронизатор SYSAI и Hermes (чего нет), создаёт профиль Hermes «{{ a.name }}», применяет доступы, характер и навыки из SYSAI_Hub и включает синхронизацию при входе в Windows. Повторный запуск (с новым кодом) ничего не ломает: обновляет то же самое.</p>
   <dl class="net-kv"><dt>Сервер</dt><dd>{{ server }}</dd>
     <dt>Синхронизатор уже стоит</dt><dd><code>sysai-agent connect --server {{ server }} --code {{ code }}</code>, затем <code>sysai-agent sync</code></dd></dl>

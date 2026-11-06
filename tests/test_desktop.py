@@ -469,3 +469,14 @@ def test_the_window_checks_as_the_synchronizer_does():
     js = json.loads(r.stdout)
     differ = [(c, _python(c), j) for c, j in zip(cases, js) if _python(c) != j]
     assert not differ, differ[:5]
+
+
+def test_render_docker_contains_all_desktop_sources():
+    docker = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+    assert 'COPY agents/desktop agents/desktop' in docker
+    assert 'COPY agents/sync agents/sync' in docker
+    assert 'COPY agents/installer agents/installer' in docker
+    name, blob, _ = desktop.build()
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        assert name != 'sysai-desktop-0.0.0.zip'
+        assert {'package.json', 'main.js', 'renderer/index.html', 'lib/canvas.js'} <= set(z.namelist())

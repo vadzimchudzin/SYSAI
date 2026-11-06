@@ -762,6 +762,16 @@ def files_raw(request: Request, path: str, v: int = 0, inline: str = ""):
 
 
 # ============================================================================= API of agents
+@router.get("/agents/download/install.ps1")
+def download_agent_installer(request: Request):
+    """A Windows PowerShell installer tied to this server; the user enters a one-use code on the PC."""
+    _person(request)
+    data = installer.script(_server(request)).encode("utf-8-sig")
+    return Response(data, media_type="application/octet-stream",
+                    headers={"Content-Disposition": 'attachment; filename="SYSAI-install.ps1"',
+                             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
 @router.get("/agents/api/public-key")
 def api_public_key():
     if not enabled():

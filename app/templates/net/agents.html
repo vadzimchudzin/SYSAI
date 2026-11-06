@@ -3,9 +3,10 @@
 {% block body %}
 <div class="page-h"><div><h1>{{ 'Агенты' if boss else 'Мой агент' }}</h1>
   <p>У каждого сотрудника свой агент на его ПК: своя память, свои доступы. Доступы — только здесь, в настройках SYSAI: агент ничего не спрашивает в Telegram, что не разрешено — запрещено.</p></div>
-  <div class="actions"><a class="btn" href="/agents/spend">Расходы</a>{% if boss %}<a class="btn" href="/agents/access">Доступы</a><a class="btn" href="/hub">SYSAI_Hub</a>{% endif %}</div></div>
+  <div class="actions"><a class="btn" href="/agents/download/install.ps1">Скачать установщик Windows</a><a class="btn" href="/agents/spend">Расходы</a>{% if boss %}<a class="btn" href="/agents/access">Доступы</a><a class="btn" href="/hub">SYSAI_Hub</a>{% endif %}</div></div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
+<div class="card note">Установщик Windows — скрипт PowerShell, не готовый EXE. Для подключения откройте карточку агента и получите одноразовый код. Удобнее всего запустить указанную там строку в PowerShell: она установит клиент и ярлык «Агент SYSAI». Нужен доступ к серверу и интернет для зависимостей.</div>
 <section class="card"><h2>{{ 'Все агенты' if boss else 'Мои агенты' }} ({{ agents|length }})</h2>
   {% if not agents %}<p class="muted">Агентов пока нет. Создайте агента и подключите компьютер одноразовым кодом.</p>{% else %}
   <div class="table-wrap"><table class="list">

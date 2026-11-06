@@ -9,6 +9,7 @@ COPY hub/seed hub/seed
 COPY samples samples
 COPY agents/sync agents/sync
 COPY agents/installer agents/installer
+COPY agents/desktop agents/desktop
 ENV DATA_DIR=/srv/data PYTHONUNBUFFERED=1
 EXPOSE 8000
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
