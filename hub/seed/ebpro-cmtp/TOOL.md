@@ -2,7 +2,7 @@
 name: ebpro-cmtp
 kind: mcp
 description: Читает, рисует и собирает проекты Weintek EasyBuilder Pro (.cmtp/.emtp) без EasyBuilder — окна, объекты, теги OPC UA, меню (какая кнопка какое окно открывает), картинки; PNG окна как на панели; проверка (за краем, не влезает текст, кнопка в никуда, тега нет); правки в новый файл — тексты, сдвиг, размер, теги, копии и удаление окон и объектов, кнопки на окна, новые теги, окна и объекты из проекта-донора. Основа навыков ebpro-project, ebpro-donor, ebpro-team и холста окна «Агент SYSAI».
-version: 1.4.1
+version: 1.4.2
 run: python server.py
 platform: any
 tools: cmtp_info, cmtp_labels, cmtp_extract_images, cmtp_unpack, cmtp_pack, cmtp_relabel, cmtp_windows, cmtp_objects, cmtp_tags, cmtp_scene, cmtp_links, cmtp_check, cmtp_render, cmtp_edit

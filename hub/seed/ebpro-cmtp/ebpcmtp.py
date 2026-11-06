@@ -486,7 +486,7 @@ def unwrap(data) -> Project:
 #          3 extra), type-specific data with the frame (4 x u32 l, t, r, b after
 #          4 zero bytes, then 00 + colours) and labels (cstring text, cstring
 #          font, u8 size, u32 x, u32 y).
-# Shape:   tag, u8 shape (2 line, 4 rect), ..., frame 4 x u32 at +31 after the tag.
+# Shape:   tag, u8 shape (2 line, 4 rect), ..., frame 4 x signed i32 at +31 after the tag.
 # OPC UA tag table: 00 03 'TAG', u16be len + 'name (ns:2;s:id)(id)', u16be len + type.
 
 PART_KINDS = {0x2d: 'Window', 0x15: 'Text', 0x16: 'Picture', 0x17: 'BitLamp', 0x18: 'MultiState?',
@@ -769,7 +769,7 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
         obj['kind'] = DRAW_KINDS.get(typ, f'draw_{typ}')
         at = o + hl + 31
         if at + 16 <= end:
-            obj['bbox'], obj['_bbox_at'] = list(struct.unpack_from('<IIII', pay, at)), at
+            obj['bbox'], obj['_bbox_at'] = list(struct.unpack_from('<iiii', pay, at)), at
         body = min(end, at + 16)
     else:
         obj['kind'] = PART_KINDS.get(typ, f'part_{typ:02x}')

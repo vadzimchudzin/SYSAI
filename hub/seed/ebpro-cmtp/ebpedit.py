@@ -199,7 +199,7 @@ def resize(p: Project, window, index: int, width=None, height=None) -> list:
         raise ValueError('width and height go from 3 to 4000 pixels')
     nb = [l, t, l + nw - 1, t + nh - 1]
     dw, dh = nw - (r - l + 1), nh - (b - t + 1)
-    edits = [(o['_bbox_at'], o['_bbox_at'] + 16, struct.pack('<IIII', *nb))]
+    edits = [(o['_bbox_at'], o['_bbox_at'] + 16, struct.pack('<iiii', *nb))]
     end = o['offset'] + o['length']
     for at, x, y in o['_label_pos']:
         if not (l - 5 <= x <= r + 5 and t - 5 <= y <= b + 5) or (x, y) == (l, t):

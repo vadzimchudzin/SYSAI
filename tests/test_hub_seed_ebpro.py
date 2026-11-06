@@ -798,6 +798,22 @@ def test_render_draws_the_window():
     assert (w, h) == (2, 2) and rgba[3] == 0 and bytes(rgba[8:12]) == b"\xff\xff\xff\xff"
 
 
+def test_negative_draw_coordinates_render_and_resize():
+    from PIL import Image
+    p = ebpcmtp.Project.load(_look_project())
+    rect = p.window("Экран")["objects"][1]
+    payload = bytearray(p.payload)
+    struct.pack_into("<iiii", payload, rect["_bbox_at"], -1, -1, 300, 60)
+    p.payload = bytes(payload)
+    assert p.scene("Экран")["objects"][1]["bbox"] == [-1, -1, 300, 60]
+    image = Image.open(io.BytesIO(ebprender.render(p, "Экран"))).convert("RGB")
+    assert image.getpixel((250, 40)) == (0, 84, 128)
+    assert ebpedit.resize(p, "Экран", 1, width=302) == [-1, -1, 300, 60]
+    q = ebpcmtp.Project.load(p.dump())
+    assert q.scene("Экран")["objects"][1]["bbox"] == [-1, -1, 300, 60]
+    assert q.move_object("Экран", 1, 1, 1) == [0, 0, 301, 61]
+
+
 def test_fonts_render_glyphs():
     import ttf
     chain = ttf.find("Arial") or ttf.find("Droid Sans Fallback")
