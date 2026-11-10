@@ -14,7 +14,7 @@ import pytest
 from app.net import hub
 
 SEED = Path(__file__).resolve().parent.parent / "hub" / "seed" / "plc-kit"
-sys.path.insert(0, str(SEED))
+sys.path.append(str(SEED))          # at the end: other seed tools have a `server` module of their own
 import plcbuild  # noqa: E402
 import plcme  # noqa: E402
 import plcst  # noqa: E402
