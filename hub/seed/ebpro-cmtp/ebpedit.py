@@ -471,8 +471,8 @@ class Graft:
         dx, dy = shift
         for j, o in enumerate(objs):
             slot = slots[j] if slots else o['index']
-            if o['kind'] == 'part_4a':
-                raise ValueError('opaque part_4a cannot be taken until its contents are understood')
+            if o.get('_compact'):
+                raise ValueError(f'opaque {o["kind"]} cannot be taken until its contents are understood')
             if not self.dinfo.get('sure') and o['kind'] in _NESTED_KINDS:
                 raise ValueError(f'object #{o["index"]} ({o["kind"]}) may hold sub-objects and the class numbering of '
                                  f'the donor does not check out; build this one in EasyBuilder')
@@ -811,8 +811,9 @@ def check(p: Project, window=None) -> list:
                 'windows opened from the PLC)')
         user = w['number'] >= SYSTEM_WINDOWS
         for o in w['objects']:
-            if o['kind'] == 'part_4a':
-                add('warning', w, o['index'], 'opaque_object', 'part_4a is only recognised as a record boundary; its contents are not decoded')
+            if o.get('_compact'):
+                add('warning', w, o['index'], 'opaque_object',
+                    f'{o["kind"]} is only recognised as a record boundary; its contents are not decoded')
             if o['kind'] == 'Window' or not o['bbox']:
                 continue
             l, t, r, b = o['bbox']

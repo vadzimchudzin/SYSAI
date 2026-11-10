@@ -514,7 +514,7 @@ def test_mcp_server_over_stdio(tmp_path):
 
     try:
         assert rpc(1, "initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"] == {
-            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.5.0"}
+            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.5.2"}
         assert [t["name"] for t in rpc(2, "tools/list")["result"]["tools"]] == TOOLS
         err, text = call(3, "cmtp_info", path=str(src))
         info = json.loads(text)
@@ -769,6 +769,79 @@ def test_compact_opaque_widget_is_a_boundary_but_cannot_be_copied():
     ebpcmtp._check_range(blob, 0, len(normal), info)
     # Partial lookalikes inside other data must not create a boundary.
     assert len(ebpcmtp._heads(normal + b"\x01\x80\x4a\x01\x00\x06" + bytes(20))) == 1
+
+
+def _compact(ident, flag=0, last=0x10, tail=bytes(40), six=True):
+    """A compact widget as the trend and EasyAccess windows of a real 6.10 project hold them (id, flag, last byte vary;
+    the event-log widget 0x48 of 6.10.02.421 has no 00 06)."""
+    return (b"\x01\x80" + struct.pack("<H", ident) + (b"\x00\x06" if six else b"") + b"\x00\x04\x00" + bytes([flag])
+            + b"\x00\x00\x00" + bytes([last]) + b"\x09\x00Local HMI\x00" + tail)
+
+
+def test_compact_widgets_with_any_id_are_boundaries():
+    """In real projects compact widgets (ids 0x15d, 0x33d, 0x253, 0x847, 0x148) were missed: the window declares them, the
+    parser knew only id 0x14a, and read 7 of 10, 22 of 24 and 0 of 1 objects."""
+    normal = _part(0x15, (10, 10, 100, 50), first=True)
+    parts = [_compact(0x15D), _compact(0x33D, last=0), _compact(0x253), _compact(0x847, flag=1, last=0),
+             _compact(0x148, six=False)]
+    blob = normal + b"".join(parts) + _part(0x15, (10, 80, 100, 120))
+    heads = ebpcmtp._heads(blob)
+    assert [h[2] for h in heads] == [0x15, 0x5D, 0x3D, 0x53, 0x47, 0x48, 0x15]
+    assert heads[1][0] == len(normal) and heads[2][0] == len(normal) + len(parts[0])
+    info = {"ptag": b"\x01\x80", "nested": [], "defs": []}
+    with pytest.raises(ValueError, match="opaque part_5d"):
+        ebpcmtp._check_range(blob, len(normal), len(normal) + len(parts[0]), info)
+    # a wrong constant part (00 07 instead of 00 06) is not a widget
+    assert len(ebpcmtp._heads(normal + b"\x01\x80\x5d\x01\x00\x07\x00\x04\x00\x00\x00\x00\x00\x10" + bytes(30))) == 1
+
+
+def test_a_window_counts_compact_widgets_and_check_warns():
+    import ebpedit
+    p = ebpcmtp.Project.load(_look_project())
+    w = p.window("Экран")
+    count_at, insert_at = w["_first"] - 4, w["objects"][3]["offset"]
+    p._splice([(count_at, count_at + 4, struct.pack("<I", w["declared"] + 2)),
+               (insert_at, insert_at, _compact(0x15D) + _compact(0x33D, flag=1, last=0))])
+    w = p.window("Экран")
+    assert len(w["objects"]) == w["declared"]
+    assert [o["kind"] for o in w["objects"][3:5]] == ["part_5d", "part_3d"]
+    assert all(o.get("_compact") and o["addresses"] == [] for o in w["objects"][3:5])
+    issues = {(x["code"], x["object"]) for x in ebpedit.check(p, "Экран")}
+    assert {("opaque_object", 3), ("opaque_object", 4)} <= issues
+
+
+def test_the_widget_that_defines_the_class_can_be_compact_too():
+    """In 6.10.02.300 the event-log widget 0x48 is the first widget of the file and carries the class definition; in a
+    project saved by 6.10.02.421 it is a reference (the class is defined in window 0). Both forms count and stay opaque."""
+    body = b"\x48\x01\x00\x04\x00\x00\x00\x00\x00\x10\x09\x00Local HMI\x00" + bytes(40)
+    window = _window("Экран", 600, 400, "Слой 1", [PART_DEF + body, _part(0x15, (10, 10, 100, 50))])
+    p = ebpcmtp.Project(378, "6.10.02.300", True, window + bytes(300))
+    w = p.window("Экран")
+    first, second = w["objects"]
+    assert w["declared"] == 2 and (first["kind"], first.get("_compact"), second["kind"]) == ("part_48", True, "Text")
+    info = {"ptag": b"\x01\x80", "nested": [], "defs": []}
+    with pytest.raises(ValueError, match="opaque part_48"):
+        ebpcmtp._check_range(p.payload, first["offset"], first["offset"] + first["length"], info)
+
+
+def test_device_names_are_stored_second_first_third():
+    """A button's OPC UA tag is its 1st address, its device is the 2nd stored name (762 of 763 widgets of two real projects);
+    the address types and strings follow the slot order."""
+    window = _window("Экран", 600, 400, "Слой 1", [
+        _part(0x2D, (0, 0, 599, 399), first=True),
+        _part(0x19, (10, 10, 100, 50), devices=("Local HMI", "OPC UA Client", "Local HMI"), atypes=b"\xc1\x08\x00",
+              addrs=(_opc("GVL.BTN"), "0", "0")),
+        _part(0x1B, (10, 60, 100, 90), devices=("OPC UA Client", "OPC UA Client", "Local HMI"), atypes=b"\xc1\xc1\x00",
+              addrs=(_opc("GVL.A"), _opc("GVL.B"), "0")),
+        _part(0x1E, (10, 100, 100, 130), devices=("Local HMI", "Local HMI", "Local HMI"), atypes=b"\x08\x00\x00",
+              addrs=("LW-9002", "0", "0")),
+    ])
+    p = ebpcmtp.Project(378, "6.10.02.300", True, window + bytes(300))
+    btn, tog, num = p.window("Экран")["objects"][1:4]
+    assert [(a["slot"], a["device"], a["atype"], a["tag"]) for a in btn["addresses"]] == [(1, "OPC UA Client", "c1", "GVL.BTN")]
+    assert [(a["slot"], a["device"], a["tag"]) for a in tog["addresses"]] == [(1, "OPC UA Client", "GVL.A"), (2, "OPC UA Client", "GVL.B")]
+    assert [(a["slot"], a["device"], a["address"]) for a in num["addresses"]] == [(1, "Local HMI", "LW-9002")]
+    assert [d[2] for d in btn["_dev"]] == ["Local HMI", "OPC UA Client", "Local HMI"]    # stored order is kept for editing
 
 
 @pytest.mark.parametrize("left", [48, 568])
