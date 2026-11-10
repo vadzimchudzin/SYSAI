@@ -495,8 +495,14 @@ PART_KINDS = {0x2d: 'Window', 0x15: 'Text', 0x16: 'Picture', 0x17: 'BitLamp', 0x
               0x29: 'Trend?', 0x40: 'OptionList?', 0x50: 'QRCode'}
 DRAW_KINDS = {2: 'Line', 4: 'Rect'}
 _PART_DEF = b'\xff\xff\x01\x00\x0b\x00CPartObject'
-# Compact widget header observed in a real 6.10 project. Contents remain opaque.
+# Compact widget header observed in real 6.10 projects. Contents remain opaque.
 _OPAQUE_PART_4A = b'\x4a\x01\x00\x06\x00\x04\x00\x00\x00\x00\x00\x10'
+# The same head with any id: u16 (its low byte is what the record keeps as «type», it is an id, not a widget type),
+# 00 06 00 04 00, a flag (00 / 01), 00 00 00, 00 or 10. An ASCII string with a u16 length follows («Local HMI»).
+# These widgets stand next to a trend (3 of them in the trend window) and in the EasyAccess windows; the window
+# declares them in its object count, so a parser that skips them reads fewer objects than declared.
+_COMPACT_HEAD = rb'[\x00-\xff]{2}\x00\x06\x00\x04\x00[\x00\x01]\x00\x00\x00[\x00\x10]'
+_COMPACT_RE = re.compile(_COMPACT_HEAD)
 _DRAW_DEF = b'\xff\xff\x01\x00\x0b\x00CDrawObject'
 _CLASS_DEF = re.compile(rb'\xff\xff\x01\x00[\x03-\x40]\x00C[A-Za-z]')
 _DRAW_SIG = rb'([\x00-\x40])[\x00-\xff]\x00\x00\x00\x01'
@@ -646,10 +652,10 @@ def _heads(pay: bytes) -> list:
         return []
     base = 1 + 2 * len(_CLASS_DEF.findall(pay, 0, fp))       # map index of CPartObject
     ptag = struct.pack('<H', 0x8000 | base)
-    # Some panel objects (type 0x4a) use a compact header, not the usual
-    # wide CString. Keep them as opaque records; this signature is intentionally
-    # narrow so arbitrary class-reference bytes inside data are not mistaken for objects.
-    psig = rb'(?:[\x00-\xff]\xff\xfe\xff|' + re.escape(_OPAQUE_PART_4A) + rb')'
+    # Some panel objects use a compact header, not the usual wide CString (see _COMPACT_HEAD). Keep them as
+    # opaque records; the signature is intentionally narrow so arbitrary class-reference bytes inside data are
+    # not mistaken for objects (checked: every window of two real projects reads exactly its declared count).
+    psig = rb'(?:[\x00-\xff]\xff\xfe\xff|' + _COMPACT_HEAD + rb')'
     prefs = [m.start() for m in re.finditer(re.escape(ptag) + psig, pay)]
     heads = [(fp, 'P', pay[fp + len(_PART_DEF)], len(_PART_DEF) + 1)] + [(k, 'P', pay[k + 2], 3) for k in prefs]
     fd = pay.find(_DRAW_DEF)
@@ -771,15 +777,24 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
         if at + 16 <= end:
             obj['bbox'], obj['_bbox_at'] = list(struct.unpack_from('<iiii', pay, at)), at
         body = min(end, at + 16)
+    elif hl == 3 and _COMPACT_RE.match(pay, o + 2):
+        # a compact widget: no name / device / address block, its contents are not decoded; `typ` is only the low
+        # byte of an id, so it never names a known widget kind
+        obj['kind'], obj['_compact'] = f'part_{typ:02x}', True
+        body = o + hl
     else:
         obj['kind'] = PART_KINDS.get(typ, f'part_{typ:02x}')
         head, body = _part_head(pay, o + hl)
         if head:
             obj['_dev'] = head['devs']
+            # The three device names are stored in the order (2nd address, 1st address, 3rd address): checked on 762
+            # of 763 widgets of two real projects (the OPC UA tag of a button sits in the 1st address, its device is
+            # the 2nd name). The address types and the address strings themselves follow the slot order.
+            slot_devices = (head['devices'][1], head['devices'][0], head['devices'][2])
             for k, (s, e, a) in enumerate(head['addrs']):
                 obj['_addr'].append((s, e, a))
                 if a not in ('', '0'):
-                    obj['addresses'].append(_address(k + 1, head['devices'][k], head['atypes'][k], a))
+                    obj['addresses'].append(_address(k + 1, slot_devices[k], head['atypes'][k], a))
     a = bisect.bisect_left(starts, body)
     strs = []
     while a < len(cs) and cs[a][0] < end:
@@ -1274,8 +1289,10 @@ def _map_info(pay: bytes, wins: list) -> dict:
 
 def _check_range(pay: bytes, s: int, e: int, info: dict, what: str = 'copying') -> None:
     """Refuse records holding sub-objects or class definitions other than the widget / shape ones."""
-    if info.get('ptag') and pay.find(info['ptag'] + _OPAQUE_PART_4A, s, e) != -1:
-        raise ValueError(f'it contains an opaque part_4a; {what} it is not supported')
+    if info.get('ptag'):
+        hit = re.compile(re.escape(info['ptag']) + _COMPACT_HEAD).search(pay, s, e)
+        if hit:
+            raise ValueError(f'it contains an opaque part_{pay[hit.start() + 2]:02x}; {what} it is not supported')
     for c in info['nested']:
         if s <= c['def'] < e or any(s <= k < e for k in c['refs']):
             raise ValueError(f'it holds sub-objects ({c["name"]}); {what} those is not supported yet')
