@@ -263,6 +263,7 @@ function describe(edits) {
 }
 
 function center(bbox) {
+  if (!Array.isArray(bbox)) return [NaN, NaN];
   return [Math.round((bbox[0] + bbox[2]) / 2), Math.round((bbox[1] + bbox[3]) / 2)];
 }
 
@@ -551,7 +552,7 @@ class Canvas extends EventEmitter {
 
   _point(name, objects, say) {
     const s = this.scene;
-    const o = s && objects.map((i) => s.objects[i]).find(Boolean);
+    const o = s && objects.map((i) => s.objects[i]).find((x) => x && Array.isArray(x.bbox));
     const prev = this.cursors.get(name);
     if (o) this._set(name, ...center(o.bbox), say);
     else if (s) this._set(name, prev ? prev.x : Math.round(s.window.width / 2), prev ? prev.y : 24, say);

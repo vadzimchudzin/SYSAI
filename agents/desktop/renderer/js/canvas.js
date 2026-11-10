@@ -251,7 +251,7 @@ export class CanvasView {
     const W = scene.window.width;
     const H = scene.window.height;
     Object.assign(this.screen.style, { width: `${W}px`, height: `${H}px`, background: scene.window.background || '#000' });
-    const els = scene.objects.filter((o) => o.kind !== 'Window').map((o) => objectEl(o, scene.images));
+    const els = scene.objects.filter((o) => o.kind !== 'Window' && Array.isArray(o.bbox)).map((o) => objectEl(o, scene.images));
     this.screen.replaceChildren(...els);
     this.els = new Map(els.map((el) => [Number(el.dataset.i), el]));
     this.drag = null;
@@ -379,7 +379,7 @@ export class CanvasView {
       Object.assign(b.el.style, { left: `${l * this.z}px`, top: `${t * this.z}px`, width: `${(r - l) * this.z}px`, height: `${(bt - t) * this.z}px` });
       this.sel = new Set(b.base);
       for (const o of this.s.scene.objects) {
-        if (o.kind === 'Window') continue;
+        if (o.kind === 'Window' || !Array.isArray(o.bbox)) continue;
         const [ol, ot, or, ob] = o.bbox;
         if (ol <= r && or >= l && ot <= bt && ob >= t) this.sel.add(o.index);
       }
