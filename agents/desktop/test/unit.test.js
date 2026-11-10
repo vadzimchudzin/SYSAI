@@ -13,7 +13,7 @@ const { AcpClient, commandLine } = require('../lib/acp');
 const { Bridge } = require('../lib/bridge');
 const config = require('../lib/config');
 const files = require('../lib/files');
-const { Projects, prompts: projectPrompts, groupOf, cleanName } = require('../lib/projects');
+const { Projects, prompts: projectPrompts, pipeline: projectPipeline, groupOf, cleanName, STAGES } = require('../lib/projects');
 const rules = require('../lib/rules');
 const storage = require('../lib/storage');
 
@@ -705,7 +705,7 @@ test('projects: a folder per project — create, drop materials in, what is insi
   assert.deepEqual(await pj.list(), { root, projects: [] }); // the folder appears with the first project
   const made = await pj.create('  ЕФБШ-621   Достоево ');
   assert.equal(made.name, 'ЕФБШ-621 Достоево');
-  assert.deepEqual(fs.readdirSync(made.path).sort(), ['hmi', 'materials', 'plc', 'project.md']);
+  assert.deepEqual(fs.readdirSync(made.path).sort(), ['docs', 'hmi', 'materials', 'plc', 'project.md']);
   assert.match(fs.readFileSync(made.memory, 'utf8'), /^# ЕФБШ-621 Достоево\n/);
   await assert.rejects(pj.create('ЕФБШ-621 Достоево'), /уже есть/);
   for (const bad of ['', 'a/b', '..', 'con', 'x'.repeat(81), 'a:b']) await assert.rejects(pj.create(bad));
@@ -739,4 +739,27 @@ test('projects: a folder per project — create, drop materials in, what is insi
   assert.ok(pr.build.includes(made.path) && pr.build.includes('plc_hmi_tags') && pr.build.includes('«ОПО»') && pr.build.endsWith('Стиль: '));
   assert.deepEqual(['a.EXPORT', 'b.emtp', 'c.dwg', 'd.xlsx', 'e.png', 'f.bin'].map(groupOf), ['plc', 'hmi', 'scheme', 'doc', 'image', 'other']);
   assert.equal(cleanName(' Линия  1. '), 'Линия 1');
+
+  // the stages: nothing started → the agent marks them in pipeline.json → the window shows them and what to do next
+  assert.deepEqual(info.pipeline.stages.map((s) => [s.stage, s.state]), STAGES.map(([k]) => [k, 'todo']));
+  assert.equal(info.pipeline.next, 'materials');
+  assert.ok(!info.pipeline.started && pr.create.includes('Начни с материалов') && pr.create.includes('plc_link') && pr.create.includes('me_create'));
+  fs.writeFileSync(path.join(made.path, 'pipeline.json'), JSON.stringify({ stages: {
+    materials: { state: 'done', note: '12 механизмов' }, decisions: { state: 'done' }, plc: { state: 'work', note: 'пишу классы' },
+    build: { state: 'нет такого' }, junk: { state: 'done' } },
+  facts: { controller: 'TM241CE40R', panel: 'cMT3072X', link: 'opcua', resolution: [1024, 600], password: 'x' } }));
+  fs.mkdirSync(path.join(made.path, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(made.path, 'docs', 'Руководство.docx'), 'x');
+  const going = await pj.info(made.name);
+  assert.deepEqual(going.pipeline.stages.map((s) => s.state), ['done', 'done', 'work', 'todo', 'todo', 'todo']);
+  assert.deepEqual(going.pipeline.facts, { controller: 'TM241CE40R', panel: 'cMT3072X', resolution: '1024×600', link: 'opcua', link_title: 'OPC UA' });
+  assert.equal(going.pipeline.next, 'plc');
+  assert.deepEqual(going.docs.map((f) => f.rel), ['docs/Руководство.docx']);
+  assert.deepEqual(going.other, []); // pipeline.json is the window's own, not a file of the project
+  const pr2 = projectPrompts(going);
+  assert.ok(pr2.create.includes('продолжай с этапа «Программа ПЛК»') && pr2.docs.includes('project-docs') && pr2.docs.includes('doc_outline'));
+  assert.ok(pr2.stage('plc').includes('Сейчас о нём записано: пишу классы') && pr2.stage('nope') === '');
+  assert.deepEqual((await pj.list()).projects[0].stages, ['done', 'done', 'work', 'todo', 'todo', 'todo']);
+  fs.writeFileSync(path.join(made.path, 'pipeline.json'), '{broken');
+  assert.equal(projectPipeline(made.path).started, false);
 });

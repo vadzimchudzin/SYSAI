@@ -15,7 +15,7 @@ STAGES = [
     ('plc', 'Программа ПЛК', 'Файлы ST в plc/, проверка plc_check без ошибок'),
     ('build', 'Компиляция', 'Проект Machine Expert собран и скомпилирован без ошибок'),
     ('hmi', 'Экраны', 'Проект панели в hmi/, теги привязаны, cmtp_check без ошибок'),
-    ('docs', 'Документация', 'Руководство пользователя и паспорт в docs/'),
+    ('docs', 'Документы', 'Руководство пользователя и паспорт в docs/'),
 ]
 STATES = ('todo', 'work', 'done', 'problem')
 FACTS = ('controller', 'panel', 'resolution', 'link', 'style', 'machine_expert', 'project_file', 'hmi_file', 'doc_file')

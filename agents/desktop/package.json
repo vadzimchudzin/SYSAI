@@ -1,7 +1,7 @@
 {
   "name": "sysai-desktop",
   "productName": "Агент SYSAI",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Окно агента SYSAI на компьютере сотрудника: разговор с Hermes, файлы, Хранилище SYSAI",
   "main": "main.js",
   "private": true,

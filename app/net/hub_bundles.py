@@ -13,7 +13,11 @@ BUNDLES = {
     "ebpro-mnemoscheme": "EasyBuilder Pro — умение сборки мнемосхем",
     "ebpro-gui": "EasyBuilder Pro — работа в программе (Windows)",
     "plc-kit": "ПЛК Machine Expert (ST) — инструмент MCP",
-    "plc-project": "Проект под ключ: ПЛК и экраны — умение",
+    "machine-expert": "Machine Expert: проект .project, компиляция, контроллер (Windows) — инструмент MCP",
+    "pic-index": "Библиотека картинок оборудования: индекс и поиск — инструмент MCP",
+    "doc-kit": "Документация в Word по образцу — инструмент MCP",
+    "plc-project": "Проект под ключ с нуля: ПЛК, Machine Expert, экраны — умение",
+    "project-docs": "Документация проекта: руководство и паспорт — умение",
 }
 
 

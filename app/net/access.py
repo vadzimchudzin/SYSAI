@@ -40,7 +40,7 @@ LEVELS = ("none", "read", "write")
 LEVEL_RU = {"none": "нет", "read": "чтение", "write": "чтение и запись"}
 INTERNET = ("off", "list", "all")
 INTERNET_RU = {"off": "выключен", "list": "только список сайтов", "all": "весь"}
-MCP_SERVERS = ("sysai", "plc-kit", "machine-expert", "cad")
+MCP_SERVERS = ("sysai", "plc-kit", "machine-expert", "pic-index", "doc-kit", "cad")
 SYSAI_TOOLS = ("whoami", "departments", "people", "hub_search", "hub_get", "hub_take", "hub_drop", "hub_propose",
                "files_list", "files_find", "files_read", "files_write", "notify_me", "log_event")
 # Sections of the shared storage (files.py): «Общее» and one per department; «свой отдел» is the agent's department.
@@ -78,7 +78,7 @@ _ENGINEER = {
     "commands": {"run": True, "deny": ["git push --force*", "Remove-Item * -Recurse*", "del /s *"]},
     "folders": {"read": [WHOLE_PC], "write": [WHOLE_PC], "deny": []},
     "programs": ["EcoStruxure Machine Expert", "ODA File Converter", "Excel", "Acrobat Reader"],
-    "mcp": {"sysai": ["*"], "plc-kit": ["*"], "machine-expert": ["*"], "cad": ["*"]},
+    "mcp": {"sysai": ["*"], "plc-kit": ["*"], "machine-expert": ["*"], "pic-index": ["*"], "doc-kit": ["*"], "cad": ["*"]},
     "data": {"projects": "own", "to_base": "read", "tags": "write", "questions": True, "people": True},
     "internet": {"mode": "all", "sites": []},
     "models": {"tiers": ["cheap", "mid", "strong", "vision", "auto"], "main": "auto", "workers": "cheap",

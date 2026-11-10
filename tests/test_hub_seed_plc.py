@@ -156,7 +156,23 @@ def test_the_tool_and_the_skill_pass_the_hub_check():
     meta, report = hub.check(files)
     assert report == {"errors": [], "warnings": []} and meta["name"] == "plc-project" and hub.doc_of(files) == "SKILL.md"
     body = files["SKILL.md"].decode("utf-8")
-    assert all(x in body for x in ("plc-kit", "ebpro-cmtp", "plc_check", "plc_hmi_tags", "hub_propose"))
+    assert all(x in body for x in ("plc-kit", "ebpro-cmtp", "plc_check", "plc_hmi_tags", "hub_propose", "plc_link",
+                                   "plc_stage_update", "me_create", "me_update", "pics_find", "project-docs"))
+    root = SEED.parent / "project-docs"
+    files = {str(p.relative_to(root)).replace(os.sep, "/"): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    meta, report = hub.check(files)
+    assert report == {"errors": [], "warnings": []} and meta["name"] == "project-docs"
+    assert all(x in files["SKILL.md"].decode("utf-8") for x in ("doc_outline", "doc_export", "doc_check", "cmtp_render"))
+
+
+def test_stages_are_the_same_in_the_tool_and_in_the_window():
+    """plc_stage_update writes pipeline.json, the window «Агент SYSAI» reads it: one list of stages for both."""
+    js = (SEED.parents[2] / "agents" / "desktop" / "lib" / "projects.js").read_text(encoding="utf-8")
+    block = js[js.index("const STAGES = ["):js.index("];", js.index("const STAGES = ["))]
+    import re
+    assert re.findall(r"\['(\w+)', '([^']+)'", block) == [(k, title) for k, title, _ in plcstage.STAGES]
+    assert re.search(r"const STATES = \[([^\]]+)\]", js).group(1).replace("'", "").split(", ") == list(plcstage.STATES)
+    assert re.search(r"const FACTS = \[([^\]]+)\]", js).group(1).replace("'", "").split(", ") == list(plcstage.FACTS)
 
 
 def test_declarations_addresses_and_modbus():

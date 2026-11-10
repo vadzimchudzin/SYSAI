@@ -43,7 +43,7 @@ version: 1.0.0
 """
 
 TOOL = """---
-name: doc-kit
+name: report-kit
 kind: mcp
 description: Читает документы ТО и пишет отчёты в папку проекта.
 version: 1.0.0
@@ -275,16 +275,16 @@ def _rpc(id_, method, params=None):
 
 
 def test_the_mcp_guard_checks_the_signed_rules_itself(client, pc):
-    _publish(client, {"TOOL.md": TOOL, "server.py": SERVER}, "doc-kit")
+    _publish(client, {"TOOL.md": TOOL, "server.py": SERVER}, "report-kit")
     access.set_agent_access(pc["agent_id"], overrides={
-        "mcp": {"sysai": ["*"], "doc-kit": ["read_doc", "write_report"]},
+        "mcp": {"sysai": ["*"], "report-kit": ["read_doc", "write_report"]},
         "folders": {"read": ["D:\\ОПО\\ТО"], "write": ["D:\\ОПО\\Проекты"], "deny": ["D:\\ОПО\\Проекты\\Архив"]},
         "internet": {"mode": "list", "sites": ["se.com"]}, "commands": {"run": False}})
     report = core.sync_once(pc["home"], transport=pc["send"])
-    assert report["hub"]["changed"] == ["doc-kit 1.0.0"], report
+    assert report["hub"]["changed"] == ["report-kit 1.0.0"], report
     cfg = yaml.safe_load((pc["profile"] / "config.yaml").read_text(encoding="utf-8"))
-    assert cfg["mcp_servers"]["doc-kit"]["args"] == ["mcp", "doc-kit"]
-    assert cfg["mcp_servers"]["doc-kit"]["env"]["SYSAI_TOOL_DIR"] == str(pc["home"]) + "/tools/doc-kit"
+    assert cfg["mcp_servers"]["report-kit"]["args"] == ["mcp", "report-kit"]
+    assert cfg["mcp_servers"]["report-kit"]["env"]["SYSAI_TOOL_DIR"] == str(pc["home"]) + "/tools/report-kit"
     calls = [
         _rpc(1, "tools/list"),
         _rpc(2, "tools/call", {"name": "read_doc", "arguments": {"path": "D:\\ОПО\\ТО\\24-017\\ТЗ.pdf"}}),
@@ -301,7 +301,7 @@ def test_the_mcp_guard_checks_the_signed_rules_itself(client, pc):
         _rpc(13, "tools/call", {"name": "write_report", "arguments": {"edits": [{"states": [{"image_file": "C:\\Windows\\secret.png"}]}]}}),
     ]
     out = io.BytesIO()
-    code = mcpwrap.serve("doc-kit", pc["home"], stdin=io.BytesIO(("\n".join(calls) + "\n").encode("utf-8")), stdout=out)
+    code = mcpwrap.serve("report-kit", pc["home"], stdin=io.BytesIO(("\n".join(calls) + "\n").encode("utf-8")), stdout=out)
     assert code == 0
     answers = {m["id"]: m for m in (json.loads(line) for line in out.getvalue().decode("utf-8").splitlines() if line.strip())}
     assert [t["name"] for t in answers[1]["result"]["tools"]] == ["read_doc", "write_report"]
@@ -315,7 +315,7 @@ def test_the_mcp_guard_checks_the_signed_rules_itself(client, pc):
     # the server is not allowed any more: the guard does not start it at all
     access.set_agent_access(pc["agent_id"], overrides={"mcp": {"sysai": ["*"]}})
     core.sync_once(pc["home"], transport=pc["send"])
-    assert mcpwrap.serve("doc-kit", pc["home"], stdin=io.BytesIO(b""), stdout=io.BytesIO()) == 2
+    assert mcpwrap.serve("report-kit", pc["home"], stdin=io.BytesIO(b""), stdout=io.BytesIO()) == 2
 
 
 def test_the_rules_on_the_computer_are_the_servers(pc):
