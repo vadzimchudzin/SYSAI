@@ -355,7 +355,7 @@ def render(p, window, scale: float = 1.0, marks: bool = False, states=None) -> b
                 cv.fill(l, t, r, b, _hex(o['fill']))
             if kind != 'Text' and o.get('frame') and (o.get('frame_width') or 0) > 0:
                 cv.frame(l, t, r, b, _hex(o['frame']), max(1, int(o['frame_width'] * scale)))
-        state = chosen.get(o['index'], 0)
+        state = chosen.get(o['index'], o.get('state') or 0)
         pic = (o.get('picture') or [None])[state]
         labels = o.get('labels') or []
         if o['index'] in chosen and len(labels) > 1:

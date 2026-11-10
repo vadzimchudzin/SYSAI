@@ -230,7 +230,8 @@ class Project:
         """How the window looks on the panel: size and background colour; per object (in drawing order) its
         frame, the colours of a shape (fill — None when not filled, frame, frame width), its labels state by
         state (text, font, size in points, x, y, colour, alignment), the pictures of its states (library
-        files, transparent colour) or `shape` — an EasyBuilder library shape the project does not keep.
+        files, transparent colour; `state` — the one a Picture shows, when not the first) or `shape` — an EasyBuilder
+        library shape the project does not keep.
         images_dir: the window's pictures are written there (<GUID>[-<colour>].<ext>), `images` maps them."""
         w = self.window(window)
         _, groups = self._library()
@@ -1214,6 +1215,12 @@ def _look(pay: bytes, o: dict, w: dict, groups: dict) -> dict:
         g = next((bytes(pay[k:k + 16]) for k in range(o['offset'], end - 15) if bytes(pay[k:k + 16]) in groups), g)
     if g in groups:
         d['picture'] = [{'image': i.hex(), 'transparent': t} for i, t in groups[g]]
+        # A Picture shows one fixed state of its picture object: u16 ten bytes after the addresses (the keypad
+        # backgrounds are seven states of one object; the state it names has exactly the size of the frame).
+        if o['kind'] == 'Picture' and o.get('_body') and o['_body'] + 12 <= end:
+            shown = struct.unpack_from('<H', pay, o['_body'] + 10)[0]
+            if 0 < shown < len(groups[g]):
+                d['state'] = shown
     elif len(g) == 16 and any(g) and g[6] >> 4 == 5 and g[8] >> 6 == 2:
         d['shape'] = g.hex()      # a shape of EasyBuilder's own library: drawn by EasyBuilder, not kept here
     elif (o['_cls'] != 'D' and o['kind'] not in ('Window', 'Text') and not o.get('_compact') and o.get('_body')

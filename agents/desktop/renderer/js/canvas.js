@@ -78,7 +78,7 @@ function objectEl(o, images) {
   const hh = Math.max(1, b - t + 1);
   const el = h('div', { class: `cv-obj k-${css(o.kind)}`, dataset: { i: o.index }, title: tip(o) });
   Object.assign(el.style, { left: `${l}px`, top: `${t}px`, width: `${w}px`, height: `${hh}px` });
-  const pic = (o.picture || [])[0];
+  const pic = (o.picture || [])[Number(o.state) || 0] || (o.picture || [])[0]; // «Картинка» показывает своё состояние
   const url = pic && images ? images[pic.key] : '';
   let look = false;
   if (o.kind === 'Line') {
