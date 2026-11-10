@@ -640,6 +640,9 @@ SYSAI (сервер)
 
 ### Этап 17. Экраны — после тегов и кода
 
+Сценарий «Новый проект» и экраны EasyBuilder с нуля — [NEW_PROJECT.md](NEW_PROJECT.md), формат проектов и что в нём
+проверено — [EASYBUILDER_FORMAT.md](EASYBUILDER_FORMAT.md).
+
 **ОПО-17.1 · Целевая панель или SCADA** · S · ОПО — Vijeo Designer, Operator Terminal Expert, веб-визуализация
 Machine Expert или SCADA.
 
