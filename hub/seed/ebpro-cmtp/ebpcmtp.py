@@ -498,10 +498,11 @@ _PART_DEF = b'\xff\xff\x01\x00\x0b\x00CPartObject'
 # Compact widget header observed in real 6.10 projects. Contents remain opaque.
 _OPAQUE_PART_4A = b'\x4a\x01\x00\x06\x00\x04\x00\x00\x00\x00\x00\x10'
 # The same head with any id: u16 (its low byte is what the record keeps as «type», it is an id, not a widget type),
-# 00 06 00 04 00, a flag (00 / 01), 00 00 00, 00 or 10. An ASCII string with a u16 length follows («Local HMI»).
-# These widgets stand next to a trend (3 of them in the trend window) and in the EasyAccess windows; the window
-# declares them in its object count, so a parser that skips them reads fewer objects than declared.
-_COMPACT_HEAD = rb'[\x00-\xff]{2}\x00\x06\x00\x04\x00[\x00\x01]\x00\x00\x00[\x00\x10]'
+# 00 06 (absent in the event-log widget 0x48 of 6.10.02.421), 00 04 00, a flag (00 / 01), 00 00 00, 00 or 10. An ASCII
+# string with a u16 length follows («Local HMI»).
+# These widgets stand next to a trend (3 of them in the trend window), in the EasyAccess windows and in window 1; the
+# window declares them in its object count, so a parser that skips them reads fewer objects than declared.
+_COMPACT_HEAD = rb'[\x00-\xff]{2}(?:\x00\x06)?\x00\x04\x00[\x00\x01]\x00\x00\x00[\x00\x10]'
 _COMPACT_RE = re.compile(_COMPACT_HEAD)
 _DRAW_DEF = b'\xff\xff\x01\x00\x0b\x00CDrawObject'
 _CLASS_DEF = re.compile(rb'\xff\xff\x01\x00[\x03-\x40]\x00C[A-Za-z]')
@@ -777,9 +778,10 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
         if at + 16 <= end:
             obj['bbox'], obj['_bbox_at'] = list(struct.unpack_from('<iiii', pay, at)), at
         body = min(end, at + 16)
-    elif hl == 3 and _COMPACT_RE.match(pay, o + 2):
+    elif _COMPACT_RE.match(pay, o + hl - 1):    # the type byte (the first byte of the id) closes every head
         # a compact widget: no name / device / address block, its contents are not decoded; `typ` is only the low
-        # byte of an id, so it never names a known widget kind
+        # byte of an id, so it never names a known widget kind (the first widget of a file may carry the class
+        # definition and is compact too: the event-log widget 0x48)
         obj['kind'], obj['_compact'] = f'part_{typ:02x}', True
         body = o + hl
     else:
@@ -1290,9 +1292,10 @@ def _map_info(pay: bytes, wins: list) -> dict:
 def _check_range(pay: bytes, s: int, e: int, info: dict, what: str = 'copying') -> None:
     """Refuse records holding sub-objects or class definitions other than the widget / shape ones."""
     if info.get('ptag'):
-        hit = re.compile(re.escape(info['ptag']) + _COMPACT_HEAD).search(pay, s, e)
-        if hit:
-            raise ValueError(f'it contains an opaque part_{pay[hit.start() + 2]:02x}; {what} it is not supported')
+        for lead in (info['ptag'], _PART_DEF):      # a reference to the class, or the record that defines it
+            hit = re.compile(re.escape(lead) + _COMPACT_HEAD).search(pay, s, e)
+            if hit:
+                raise ValueError(f'it contains an opaque part_{pay[hit.start() + len(lead)]:02x}; {what} it is not supported')
     for c in info['nested']:
         if s <= c['def'] < e or any(s <= k < e for k in c['refs']):
             raise ValueError(f'it holds sub-objects ({c["name"]}); {what} those is not supported yet')
