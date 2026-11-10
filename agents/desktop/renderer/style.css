@@ -390,6 +390,7 @@ body.resizing { cursor: col-resize; } body.resizing iframe { pointer-events: non
 .cv-shape.button.dark { background: linear-gradient(#5d6e80, #2e3a47); box-shadow: inset 0 0 0 1px #1c242c, inset 0 1px 0 rgba(255,255,255,.18); }
 .cv-shape.field { background: #fff; box-shadow: inset 0 0 0 1px #707070, inset 1px 1px 0 1px rgba(0,0,0,.12); }
 .cv-shape.lamp { border-radius: 50%; background: radial-gradient(circle at 35% 30%, #f4f4f4, #9a9a9a 70%); box-shadow: inset 0 0 0 1px #555; }
+.cv-shape.plate { border-radius: 3px; background: linear-gradient(#f6f6f6, #dedede); box-shadow: inset 0 0 0 1px #8a8a8a; }
 .cv-shape.missing { background: repeating-linear-gradient(45deg, rgba(255,255,255,.2) 0 4px, transparent 4px 8px); box-shadow: inset 0 0 0 1px rgba(255,255,255,.45); }
 .cv-band { position: absolute; border: 1px solid #4cc3ff; background: rgba(76,195,255,.12); }
 .cv-cur { position: absolute; left: 0; top: 0; z-index: 3; transition: transform .6s cubic-bezier(.2,.7,.2,1), opacity .4s; will-change: transform; }

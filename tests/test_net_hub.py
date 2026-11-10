@@ -362,7 +362,7 @@ def test_bundled_easybuilder_packages_download_without_publishing(client, net_ag
     before = client.get('/agents/api/hub/manifest', headers=net_agent['headers']).json()
     page = client.get('/hub')
     assert page.status_code == 200
-    for name, version, doc in [('ebpro-cmtp', '1.5.2', 'TOOL.md'),
+    for name, version, doc in [('ebpro-cmtp', '1.5.3', 'TOOL.md'),
                                ('ebpro-mnemoscheme', '1.0.0', 'SKILL.md'),
                                ('ebpro-gui', '1.0.0', 'TOOL.md')]:
         assert f'/hub/bundled/{name}.zip' in page.text
@@ -394,14 +394,14 @@ def test_bundled_skill_can_be_uploaded_and_published_like_any_other(client, net_
 def test_bundled_mcp_upload_keeps_existing_published_version(client, net_agent):
     from app.net import hub_bundles
     files = hub.read_zip(client.get('/hub/bundled/ebpro-cmtp.zip').content)
-    files['TOOL.md'] = files['TOOL.md'].replace(b'version: 1.5.2', b'version: 1.0.0')
+    files['TOOL.md'] = files['TOOL.md'].replace(b'version: 1.5.3', b'version: 1.0.0')
     assert 'v=1.0.0' in _upload(client, files).headers['location']
     client.post('/hub/ebpro-cmtp/1.0.0/publish')
     before = hub.blob_of('ebpro-cmtp', '1.0.0')
     r = client.post('/hub/upload', files={'file': ('tool.zip', hub_bundles.package('ebpro-cmtp')['blob'], 'application/zip')},
                     follow_redirects=False)
-    assert 'v=1.5.2' in r.headers['location']
+    assert 'v=1.5.3' in r.headers['location']
     assert hub.blob_of('ebpro-cmtp', '1.0.0') == before
     card = hub.card('ebpro-cmtp')
     assert card['current'] == '1.0.0'
-    assert next(v for v in card['versions'] if v['version'] == '1.5.2')['status'] == 'draft'
+    assert next(v for v in card['versions'] if v['version'] == '1.5.3')['status'] == 'draft'

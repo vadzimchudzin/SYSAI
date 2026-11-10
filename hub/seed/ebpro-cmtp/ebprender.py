@@ -371,12 +371,21 @@ def render(p, window, scale: float = 1.0, marks: bool = False, states=None) -> b
             else:   # a picture this renderer does not decode (JPEG...): a light box
                 cv.fill(l, t, r, b, (128, 128, 128), 0.35)
                 cv.frame(l, t, r, b, (200, 200, 200), 1)
+        elif not o.get('shape') and kind != 'Line' and kind not in ('Rect', 'Text') and not kind.startswith('draw_') \
+                and (o.get('fill') or o.get('frame')):     # a widget without a picture / shape: a plain box
+            if o.get('fill'):
+                cv.fill(l, t, r, b, _hex(o['fill']))
+            if o.get('frame'):
+                cv.frame(l, t, r, b, _hex(o['frame']), max(1, int((o.get('frame_width') or 1) * scale)))
         elif o.get('shape'):
             if kind in FIELD:
                 cv.fill(l, t, r, b, (255, 255, 255))
                 cv.frame(l, t, r, b, (112, 112, 112), 1)
-            elif kind in LAMP:
+            elif kind in LAMP and not lab and 0.6 < (r - l + 1) / max(1, b - t + 1) < 1.6:
                 cv.ellipse(l, t, r, b, (190, 190, 190), (85, 85, 85))
+            elif kind in LAMP:      # a lamp with a text or a long one: a plate, not a round lamp
+                cv.gradient(l, t, r, b, (246, 246, 246), (222, 222, 222))
+                cv.frame(l, t, r, b, (138, 138, 138), 1)
             elif lab and _light(lab.get('color')):
                 cv.gradient(l, t, r, b, (93, 110, 128), (46, 58, 71))
                 cv.frame(l, t, r, b, (28, 36, 44), 1)

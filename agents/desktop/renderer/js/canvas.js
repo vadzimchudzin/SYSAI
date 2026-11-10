@@ -89,13 +89,21 @@ function objectEl(o, images) {
     if (o.kind !== 'Text' && o.frame && Number(o.frame_width) > 0) el.style.boxShadow = `inset 0 0 0 ${Number(o.frame_width)}px ${o.frame}`;
     if (/^(Circle|Ellipse)$/.test(o.kind)) el.style.borderRadius = '50%';
     look = Boolean(o.fill || (o.kind !== 'Text' && o.frame));
+  } else if (!url && !o.shape && (o.fill || o.frame)) { // виджет без картинки и фигуры: простая рамка с заливкой
+    if (o.fill) el.style.background = o.fill;
+    if (o.frame) el.style.boxShadow = `inset 0 0 0 ${Math.max(1, Number(o.frame_width) || 1)}px ${o.frame}`;
+    look = true;
   }
   if (url) {
     el.append(h('img', { class: 'cv-pic', src: url, alt: '', draggable: 'false' }));
     look = true;
   } else if (o.shape) {
     const lab = label0(o);
-    const kind = FIELD.has(o.kind) ? 'field' : LAMP.has(o.kind) ? 'lamp' : `button${lab && light(lab.color) ? ' dark' : ''}`;
+    // Фигура из библиотеки EasyBuilder (в проекте её нет): поле, круглая лампа — только если рамка почти квадратная и
+    // без подписи, иначе плашка / кнопка.
+    const round = LAMP.has(o.kind) && !lab && w / hh > 0.6 && w / hh < 1.6;
+    const kind = FIELD.has(o.kind) ? 'field' : round ? 'lamp' : LAMP.has(o.kind) ? 'plate'
+      : `button${lab && light(lab.color) ? ' dark' : ''}`;
     el.append(h('div', { class: `cv-shape ${kind}` }));
     look = true;
   } else if (pic) {

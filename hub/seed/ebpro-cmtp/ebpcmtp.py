@@ -760,6 +760,22 @@ def _find_bbox(pay: bytes, p: int, end: int, label_positions=()):
     return fallback
 
 
+def _label_bbox(pay: bytes, body: int, end: int, first_text: int):
+    """The frame of a widget, found from its first label: (offset, [l, t, r, b]) or (None, None).
+
+    A widget writes, right before its labels: the frame of its group (zeros when it is in no group), u32 the group
+    number, its own frame (4 x i32), one byte, 44 bytes of colours and `01 00 00` -- so its own frame starts 63 bytes
+    before the text of the first label. Checked on three real projects: that frame holds the label of every widget
+    that has one, while the search by pattern took the group frame (or nothing) for the grouped ones."""
+    k = first_text - 63
+    if k < body or k + 16 > end:
+        return None, None
+    l, t, r, b = struct.unpack_from('<iiii', pay, k)
+    if not (-8000 <= l <= r <= 8000 and -8000 <= t <= b <= 8000 and r - l >= 1 and b - t >= 1):
+        return None, None
+    return k, [l, t, r, b]
+
+
 def _address(slot, device, atype, address):
     a = {'slot': slot, 'device': device, 'atype': f'{atype:02x}' if atype is not None else None, 'address': address}
     m = _OPC.match(address)
@@ -797,12 +813,14 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
                 obj['_addr'].append((s, e, a))
                 if a not in ('', '0'):
                     obj['addresses'].append(_address(k + 1, slot_devices[k], head['atypes'][k], a))
+    obj['_body'] = body if cls != 'D' and not obj.get('_compact') else None
     a = bisect.bisect_left(starts, body)
     strs = []
     while a < len(cs) and cs[a][0] < end:
         strs.append(cs[a])
         a += 1
     i = 0
+    first_label = None
     while i < len(strs):
         s, e, t = strs[i]
         nxt = strs[i + 1] if i + 1 < len(strs) else None
@@ -810,6 +828,8 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
             size = pay[nxt[1]]
             x, y = struct.unpack_from('<ii', pay, nxt[1] + 1)     # a label may stand left of / above the window
             if 1 <= size and -8000 <= x <= 8000 and -8000 <= y <= 8000:
+                if first_label is None:
+                    first_label = s
                 obj['_texts'].append((s, e, t))
                 obj['_label_pos'].append((nxt[1] + 1, x, y))
                 obj['_lab'].append((t, nxt[2], size))
@@ -825,7 +845,15 @@ def _parse_object(pay, cs, starts, o, end, cls, typ, hl, index) -> dict:
             obj['texts'].append(t)
         i += 1
     if cls != 'D':
-        at, bb = _find_bbox(pay, body, end, [(x, y) for _, x, y in obj['_label_pos']])
+        at, bb = _label_bbox(pay, body, end, first_label) if first_label is not None else (None, None)
+        lx, ly = obj['_label_pos'][0][1:] if obj['_label_pos'] else (None, None)
+
+        def holds(r):
+            return r is not None and lx is not None and r[0] - 2 <= lx <= r[2] + 2 and r[1] - 2 <= ly <= r[3] + 2
+        if not holds(bb):     # another layout (old revisions, widgets without labels): the search by pattern
+            at2, bb2 = _find_bbox(pay, body, end, [(x, y) for _, x, y in obj['_label_pos']])
+            if bb is None or holds(bb2):
+                at, bb = at2, bb2
         obj['bbox'], obj['_bbox_at'] = bb, at
     return obj
 
@@ -1188,6 +1216,15 @@ def _look(pay: bytes, o: dict, w: dict, groups: dict) -> dict:
         d['picture'] = [{'image': i.hex(), 'transparent': t} for i, t in groups[g]]
     elif len(g) == 16 and any(g) and g[6] >> 4 == 5 and g[8] >> 6 == 2:
         d['shape'] = g.hex()      # a shape of EasyBuilder's own library: drawn by EasyBuilder, not kept here
+    elif (o['_cls'] != 'D' and o['kind'] not in ('Window', 'Text') and not o.get('_compact') and o.get('_body')
+          and a is not None and a + 45 <= end and o['_body'] + 7 <= end and pay[o['_body'] + 6] == 1):
+        # A widget with neither a picture nor a library shape is a plain box: inner colour, frame colour (the first
+        # two of the colours after its frame). Drawn when the widget shows itself (the 7th byte after its addresses)
+        # and the colours are not both the untouched default -- seen on the buttons, lamps and numeric fields of
+        # real projects; the frame width is not decoded (2 px).
+        inner, edge = _rgb(pay, a + 1), _rgb(pay, a + 5)
+        if (inner, edge) != ('#f0f0f0', '#f0f0f0'):
+            d['fill'], d['frame'], d['frame_width'] = inner, edge, 2
     return d
 
 
