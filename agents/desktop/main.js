@@ -18,7 +18,7 @@ const { Canvas, PERSON } = require('./lib/canvas');
 const config = require('./lib/config');
 const files = require('./lib/files');
 const storage = require('./lib/storage');
-const { Projects, prompts: projectPrompts } = require('./lib/projects');
+const { Projects, prompts: projectPrompts, STAGES: projectStages } = require('./lib/projects');
 const shortcuts = require('./lib/shortcuts');
 const { Bridge } = require('./lib/bridge');
 const rules = require('./lib/rules');
@@ -693,7 +693,8 @@ function ipc() {
   handle('projects:create', (name) => projects.create(String(name || '')));
   handle('projects:info', async (name) => {
     const info = await projects.info(String(name || ''));
-    return { ...info, prompts: projectPrompts(info) };
+    const { stage, ...pr } = projectPrompts(info);
+    return { ...info, prompts: { ...pr, stages: Object.fromEntries(projectStages.map(([key]) => [key, stage(key)])) } };
   });
   handle('projects:add', (name, paths) => projects.add(String(name || ''), Array.isArray(paths) ? paths.map(need) : []));
   handle('clipboard:text', (text) => {

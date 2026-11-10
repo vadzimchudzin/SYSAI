@@ -11,18 +11,24 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plcbuild  # noqa: E402
+import plclink  # noqa: E402
 import plcme  # noqa: E402
+import plcproj  # noqa: E402
+import plcstage  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PATH = {"type": "string", "description": r"Проект ПЛК: файл .export или PLCopen .xml из Machine Expert, либо папка с "
                                          r"файлами .st (plc_export_st), например C:\Projects\line\plc"}
 INSTRUCTIONS = (
     "Программа ПЛК (Machine Expert / CODESYS, ST). Читать: plc_info → plc_pous → plc_pou; переменные и адреса — "
     "plc_variables, plc_addresses; теги для панели по Modbus — plc_hmi_tags; как проект построен — plc_style. "
     "Создавать: написать папку файлов .st (plc_export_st показывает пример на готовом проекте), проверить plc_check, "
-    "собрать plc_build в PLCopen XML — инженер импортирует его в Machine Expert и компилирует. Файл .project закрыт: "
-    "просите .export («Проект → Экспорт…»). Графические языки (LD/FBD/CFC) читаются только как объявления."
+    "собрать plc_build в PLCopen XML. До программы — plc_link: по моделям контроллера и панели из ТЗ решает связь "
+    "(OPC UA или Modbus) и что из этого следует для переменных; plc_hmi_tags даёт теги панели под выбранную связь. "
+    "Ход проекта «под ключ» отмечают plc_stage_update (его показывает окно «Агент SYSAI»). Проект Machine Expert "
+    "(.project), компиляцию и связь с контроллером делает инструмент machine-expert; у файла .project plc_info "
+    "показывает только вид контейнера и дерево объектов. Графические языки (LD/FBD/CFC) читаются как объявления."
 )
 
 
@@ -60,11 +66,13 @@ TOOLS = [
         "Занятые диапазоны по областям (%M, %I, %Q), первое свободное слово и бит, как контроллер считает биты (по байтам "
         "или по словам) и пересечения: один адрес у двух переменных, слово %MW поверх битов %MX того же регистра.",
         {"path": PATH}),
-    _ro("plc_hmi_tags", "Теги для панели (Modbus)",
-        "Переменные, до которых панель дотянется по Modbus (адреса %M): имя, тип, комментарий, регистр, бит и адрес в "
-        "записи Weintek (4x — регистр с единицы, 4x_Bit — регистр и две цифры бита). out_file — записать CSV для "
-        "импорта и сверки; filter — подстрока имени или комментария.",
+    _ro("plc_hmi_tags", "Теги для панели",
+        "Переменные, которые увидит панель. Modbus (адреса %M): имя, тип, комментарий, регистр, бит и адрес в записи "
+        "Weintek (4x — регистр с единицы, 4x_Bit — регистр и две цифры бита). OPC UA (link: opcua или так сказано в "
+        "project.json): переменные простых типов из опубликованных списков — имя «GVL.Имя», тип и node; поле "
+        "add_tags готово для cmtp_edit (ebpro-cmtp). out_file — записать CSV; filter — подстрока имени или комментария.",
         {"path": PATH, "filter": {"type": "string"},
+         "link": {"type": "string", "enum": ["modbus", "opcua"], "description": "Связь; по умолчанию — из project.json, иначе Modbus"},
          "out_file": {"type": "string", "description": r"Куда записать CSV (в разрешённой на запись папке)"}}),
     _ro("plc_check", "Проверка",
         "Что видно по тексту до компиляции: незакрытые IF/CASE/FOR, скобки, присваивание без «;», имена, которых нет ни в "
@@ -75,6 +83,27 @@ TOOLS = [
         "экземпляры, правила имён, группы переменных, диапазоны адресов. По этому пишут следующий проект в том же стиле. "
         "out_file — записать страницу Markdown.",
         {"path": PATH, "out_file": {"type": "string", "description": r"Куда записать .md (в разрешённой на запись папке)"}}),
+    _ro("plc_link", "Связь панели и контроллера",
+        "По моделям контроллера и панели решить, как панель говорит с ПЛК: OPC UA (оба умеют — переменные по именам, "
+        "без адресов) или Modbus TCP / RTU (адреса %M). Модели можно назвать (controller, panel) или дать текст ТЗ "
+        "(text) — инструмент найдёт в нём модели и слова о связи; wish — что просит заказчик. В ответе: link, почему, "
+        "разрешение панели, что записать в project.json, что делать дальше и что спросить у инженера (ask), если "
+        "решить нельзя. Вызывают до написания программы.",
+        {"controller": {"type": "string", "description": "Модель контроллера, например TM241CE40R"},
+         "panel": {"type": "string", "description": "Модель панели, например cMT3072X или MT8071iE"},
+         "wish": {"type": "string", "description": "Связь, названная заказчиком: OPC UA, Modbus TCP, Modbus RTU"},
+         "text": {"type": "string", "description": "Текст ТЗ или спецификации: модели и связь будут найдены в нём"}}, ()),
+    _rw("plc_stage_update", "Отметить этап проекта",
+        "Ход проекта «под ключ» в pipeline.json папки проекта — его показывает окно «Агент SYSAI» полосой этапов: "
+        "materials, decisions, plc, build, hmi, docs. state: work (начал), done (готов), problem (нужен инженер — в "
+        "note что именно), todo. facts — решения и итоги: controller, panel, resolution, link, style, machine_expert, "
+        "project_file, hmi_file, doc_file. Без stage — только прочитать ход и записать facts.",
+        {"project_dir": {"type": "string", "description": r"Папка проекта, например C:\Users\me\Documents\SYSAI Проекты\Линия 1"},
+         "stage": {"type": "string", "enum": [k for k, _, _ in plcstage.STAGES]},
+         "state": {"type": "string", "enum": list(plcstage.STATES)},
+         "note": {"type": "string", "description": "Одна-две фразы: что сделано или что мешает"},
+         "facts": {"type": "object", "description": "Например {\"controller\": \"TM241CE40R\", \"link\": \"opcua\"}"}},
+        ("project_dir",)),
     _rw("plc_export_st", "Проект в папку ST",
         "Разложить проект в папку: по файлу .st на каждый POU, список переменных и тип + project.json (контроллер, задачи). "
         "В таком виде проект читают, правят и пишут с нуля; plc_build собирает папку обратно.",
@@ -106,8 +135,8 @@ def _open(path):
     path = str(path)
     if os.path.isdir(path):
         return plcbuild.load_dir(path)
-    if path.lower().endswith('.project'):
-        return plcme.Project.load(path)          # says what to export instead
+    if path.lower().endswith(('.project', '.projectarchive')):
+        return plcme.Project.load(path)          # says what the file is and how to open it
     st = os.stat(path)
     key = os.path.abspath(path)
     got = _CACHE.get(key)
@@ -146,9 +175,21 @@ def _call(name, args):
             text = (f"Записано → {out}: POU {len(p.pous) - len(skipped)}, списков переменных {len(p.gvls)}, типов "
                     f"{len(p.types)}, задач {len(p.tasks)}. Ошибок {len(errors)}, предупреждений {len(warn)}. "
                     "Импорт: Machine Expert → выделить Application → «Проект → Импорт PLCopenXML…»; задачу проверьте "
-                    "в «Конфигурации задач». Компиляцию и загрузку делает инженер.")
+                    "в «Конфигурации задач». Проект .project, компиляцию и ошибки компилятора даёт инструмент "
+                    "machine-expert (me_create по папке ST, me_build).")
             return _text(text, data={"written": True, "out_file": out, "errors": errors[:200], "warnings": warn[:200],
                                      "skipped": skipped})
+        if name == "plc_link":
+            d = plclink.decide(args.get("controller") or "", args.get("panel") or "", args.get("wish") or "", args.get("text") or "")
+            head = (f"Связь: {d['link_ru']}" + ("" if d["sure"] else " (уточнить)") if d["link"] else "Связь решить нельзя")
+            lines = [head] + [f"— {w}" for w in d["why"]] + [f"Спросить: {a}" for a in d["ask"]] + d["next"]
+            return _text("\n".join(lines), data=d)
+        if name == "plc_stage_update":
+            return _text(_json(plcstage.update(args["project_dir"], args.get("stage") or "", args.get("state") or "",
+                                               args.get("note"), args.get("facts"))))
+        if name == "plc_info" and str(args["path"]).lower().endswith((".project", ".projectarchive")):
+            d = plcproj.probe(str(args["path"]))
+            return _text(d["note"] + "\n" + _json({k: d[k] for k in d if k != "note"}), data=d)
         p = _open(args["path"])
         if name == "plc_info":
             return _text(_json(p.info()))
@@ -186,20 +227,32 @@ def _call(name, args):
                                 "conflicts": a["conflicts"][:500], "addressed": len(a["variables"])}))
         if name == "plc_hmi_tags":
             flt = (args.get("filter") or "").lower()
-            rows = [t for t in p.hmi_tags() if not flt or flt in t["name"].lower() or flt in t["comment"].lower() or flt in t["group"].lower()]
+            link = "opcua" if (args.get("link") or p.link.get("kind") or "") == "opcua" else "modbus"
+            rows = [t for t in p.hmi_tags(link) if not flt or flt in t["name"].lower() or flt in t["comment"].lower() or flt in t["group"].lower()]
             note = ""
             if args.get("out_file"):
                 buf = io.StringIO()
                 w = csv.writer(buf, delimiter=";", lineterminator="\n")
-                w.writerow(["name", "type", "kind", "address", "register", "bit", "weintek_type", "weintek_address", "group", "comment"])
-                for t in rows:
-                    w.writerow([t["name"], t["type"], t["kind"], t["address"], t["register"], "" if t["bit"] is None else t["bit"],
-                                t["weintek"]["type"], t["weintek"]["address"], t["group"], t["comment"]])
+                if link == "opcua":
+                    w.writerow(["name", "type", "kind", "node", "group", "comment"])
+                    for t in rows:
+                        w.writerow([t["name"], t["type"], t["kind"], t["node"], t["group"], t["comment"]])
+                else:
+                    w.writerow(["name", "type", "kind", "address", "register", "bit", "weintek_type", "weintek_address", "group", "comment"])
+                    for t in rows:
+                        w.writerow([t["name"], t["type"], t["kind"], t["address"], t["register"], "" if t["bit"] is None else t["bit"],
+                                    t["weintek"]["type"], t["weintek"]["address"], t["group"], t["comment"]])
                 os.makedirs(os.path.dirname(os.path.abspath(args["out_file"])), exist_ok=True)
                 with open(args["out_file"], "w", encoding="utf-8-sig", newline="") as f:
                     f.write(buf.getvalue())
                 note = f" CSV → {args['out_file']}"
-            return _text(_json({"count": len(rows), "note": "регистры Modbus с нуля; у Weintek с единицы." + note,
+            if link == "opcua":
+                return _text(_json({"count": len(rows), "link": "opcua",
+                                    "note": "теги OPC UA: имя «Список.Переменная», node — s:имя (ns возьмёт таблица панели); "
+                                            "add_tags — готовая правка для cmtp_edit." + note,
+                                    "add_tags": [{"name": t["name"], "type": t["type"]} for t in rows[:3000]],
+                                    "tags": rows[:3000]}))
+            return _text(_json({"count": len(rows), "link": "modbus", "note": "регистры Modbus с нуля; у Weintek с единицы." + note,
                                 "tags": rows[:3000]}))
         if name == "plc_check":
             issues = p.check()
@@ -217,7 +270,7 @@ def _call(name, args):
             files = plcbuild.write_dir(p, args["out_dir"])
             return _text(f"Записано файлов: {len(files)} → {args['out_dir']}", data={"files": files})
         return _text(f"нет инструмента {name}", True)
-    except plcme.PlcError as exc:
+    except (plcme.PlcError, plcproj.ProjectFileError, plcstage.StageError) as exc:
         return _text(str(exc), True)
     except KeyError as exc:
         return _text(f"не хватает поля {exc}", True)

@@ -1,18 +1,32 @@
 'use strict';
 // «Проекты» of the window: one folder per project on this computer. A project holds everything the engineer gives
 // (materials/: the terms of reference, drawings, documentation, finished projects of the PLC and of the panel) and
-// everything the agent makes (plc/: the PLC program as ST files and the PLCopen XML, hmi/: the panel project and its
-// pictures, project.md: the memory of the project, style.md: the style it is made in). Files are copied in, never
-// moved; nothing is deleted from here -- the person does that in the folder.
+// everything the agent makes (plc/: the PLC program as ST files, the PLCopen XML and the Machine Expert project, hmi/:
+// the panel project and its pictures, docs/: the manual and the passport, project.md: the memory of the project,
+// style.md: the style it is made in, pipeline.json: where the work is — the agent marks the stages with the tool
+// plc_stage_update of plc-kit, the window shows them). Files are copied in, never moved; nothing is deleted from
+// here -- the person does that in the folder.
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
-const PARTS = ['materials', 'plc', 'hmi'];
+const PARTS = ['materials', 'plc', 'hmi', 'docs'];
+// The stages of a project «с нуля под ключ», in order — the same as hub/seed/plc-kit/plcstage.py (a test compares).
+const STAGES = [
+  ['materials', 'Материалы', 'ТЗ и схемы прочитаны, механизмы и сигналы выписаны'],
+  ['decisions', 'Решения', 'Контроллер, панель, связь, стиль'],
+  ['plc', 'Программа ПЛК', 'Программа на ST написана и проверена'],
+  ['build', 'Компиляция', 'Проект Machine Expert компилируется без ошибок'],
+  ['hmi', 'Экраны', 'Экраны панели собраны, теги привязаны'],
+  ['docs', 'Документы', 'Руководство пользователя и паспорт'],
+];
+const STATES = ['todo', 'work', 'done', 'problem'];
+const FACTS = ['controller', 'panel', 'resolution', 'link', 'style', 'machine_expert', 'project_file', 'hmi_file', 'doc_file'];
+const LINKS = { opcua: 'OPC UA', modbus_tcp: 'Modbus TCP', modbus_rtu: 'Modbus RTU' };
 const MAX_COPY = 2 * 1024 * 1024 * 1024; // one file
 const MAX_FILES = 3000;
 const GROUPS = {
-  plc: 'export project xml st gpc projectarchive smbp',
+  plc: 'export project xml st gpc projectarchive smbp library',
   hmi: 'cmtp emtp cxob exob mtp fsprj',
   scheme: 'pdf dwg dxf',
   doc: 'docx doc xlsx xls xlsm csv txt md rtf odt',
@@ -47,6 +61,29 @@ function template(name) {
     + '## Оборудование и сигналы\n\n_Перечень механизмов и их сигналов по схемам — с каналами модулей._\n\n'
     + '## Решения\n\n_Контроллер, панель, связь (Modbus / OPC UA), стиль._\n\n'
     + '## Сделано и проверено\n\n_Что готово, чем проверено, что должен проверить инженер._\n';
+}
+
+// pipeline.json of a project as the window shows it: every stage with its title, state and note; the facts the
+// agent wrote down (controller, panel, link…); the stage to do next. A missing or broken file — nothing started.
+function pipeline(dir) {
+  let data = {};
+  try {
+    data = JSON.parse(fs.readFileSync(path.join(dir, 'pipeline.json'), 'utf8').replace(/^\uFEFF/, ''));
+  } catch { /* not started */ }
+  const src = data && typeof data.stages === 'object' && data.stages ? data.stages : {};
+  const stages = STAGES.map(([stage, title, goal]) => {
+    const s = src[stage] && typeof src[stage] === 'object' ? src[stage] : {};
+    return { stage, title, goal, state: STATES.includes(s.state) ? s.state : 'todo', note: String(s.note || '').slice(0, 500),
+      updated: String(s.updated || '') };
+  });
+  const facts = {};
+  const f = data && typeof data.facts === 'object' && data.facts ? data.facts : {};
+  for (const k of FACTS) if (f[k] !== undefined && f[k] !== null && f[k] !== '') facts[k] = f[k];
+  if (typeof facts.link === 'string') facts.link_title = LINKS[facts.link] || facts.link;
+  if (Array.isArray(facts.resolution)) facts.resolution = facts.resolution.join('×');
+  const next = stages.find((s) => s.state !== 'done');
+  return { stages, facts, next: next ? next.stage : '', done: stages.filter((s) => s.state === 'done').length,
+    started: stages.some((s) => s.state !== 'todo') };
 }
 
 class Projects {
@@ -100,7 +137,8 @@ class Projects {
         materials: files.filter((f) => f.rel.startsWith('materials/')).length,
         updated: Math.max(st ? st.mtimeMs : 0, ...files.map((f) => f.mtime)),
         style: fs.existsSync(path.join(dir, 'style.md')),
-        plc: files.some((f) => f.rel.startsWith('plc/')), hmi: files.some((f) => f.rel.startsWith('hmi/')) });
+        plc: files.some((f) => f.rel.startsWith('plc/')), hmi: files.some((f) => f.rel.startsWith('hmi/')),
+        docs: files.some((f) => f.rel.startsWith('docs/')), stages: pipeline(dir).stages.map((s) => s.state) });
     }
     out.sort((a, b) => b.updated - a.updated);
     return { root: this.root, projects: out };
@@ -122,9 +160,10 @@ class Projects {
     await this._walk(dir, '', files);
     const part = (p) => files.filter((f) => f.rel.startsWith(`${p}/`));
     return { name: path.basename(dir), path: dir, materials: part('materials'), plc: part('plc'), hmi: part('hmi'),
+      docs: part('docs'), pipeline: pipeline(dir),
       memory: fs.existsSync(path.join(dir, 'project.md')) ? path.join(dir, 'project.md') : '',
       style: fs.existsSync(path.join(dir, 'style.md')) ? path.join(dir, 'style.md') : '',
-      other: files.filter((f) => !/^(materials|plc|hmi)\//.test(f.rel) && !/^(project|style)\.md$/.test(f.rel)),
+      other: files.filter((f) => !/^(materials|plc|hmi|docs)\//.test(f.rel) && !/^(project\.md|style\.md|pipeline\.json)$/.test(f.rel)),
       truncated: files.length >= MAX_FILES };
   }
 
@@ -165,19 +204,39 @@ class Projects {
   }
 }
 
-// What the person sends to the agent with the two buttons of a project. The work itself is the agent's (the
-// skill plc-project with the tools plc-kit and ebpro-cmtp); the folder must be open to it for writing in SYSAI.
+// What the person sends to the agent with the buttons of a project. The work itself is the agent's (the skills
+// plc-project and project-docs with the tools plc-kit, machine-expert, ebpro-cmtp, pic-index, doc-kit); the folder
+// must be open to it for writing in SYSAI.
 function prompts(info) {
   const where = `Папка проекта: ${info.path}`;
+  const pl = info.pipeline || pipeline(info.path);
+  const next = pl.stages.find((s) => s.stage === pl.next);
+  const resume = pl.started && next
+    ? `Работа уже начата: продолжай с этапа «${next.title}» (ход — в pipeline.json, решения — в project.md).`
+    : 'Начни с материалов.';
   return {
     analyze: `Проанализируй проект «${info.name}» по навыку plc-project. ${where}\n`
       + 'В materials лежит готовый проект: программа ПЛК и экраны панели. Разбери, как он устроен (plc_style, plc_check, '
       + 'экраны — ebpro-cmtp), запиши стиль в style.md, что сделано неудачно — отдельным разделом, и предложи стиль в Хаб.',
+    create: `Создай проект «${info.name}» полностью, с нуля, по навыку plc-project. ${where}\n`
+      + 'В materials — всё, что есть: ТЗ, схемы, чертежи. Иди по этапам и отмечай каждый (plc_stage_update): материалы → '
+      + 'решения (контроллер, панель и связь OPC UA или Modbus — plc_link по ТЗ) → программа ПЛК на ST → компиляция в '
+      + 'Machine Expert (me_create, исправляй ошибки до нуля) → экраны панели (картинки — pic-index, теги — plc_hmi_tags) → '
+      + `в конце предложи мне документацию. Чего нет в материалах — спроси, не додумывай. ${resume}\nСтиль: `,
     build: `Собери проект «${info.name}» по навыку plc-project. ${where}\n`
       + 'По материалам в materials: выпиши в project.md все механизмы и сигналы (ничего не пропусти), напиши программу '
       + 'ПЛК на ST в plc, проверь (plc_check) и собери plc.xml, затем собери экраны панели в hmi с адресами из '
       + 'plc_hmi_tags; картинки — из Хранилища SYSAI, раздел «ОПО». Стиль: ',
+    docs: `Создай техническую документацию проекта «${info.name}» по навыку project-docs. ${where}\n`
+      + 'Руководство пользователя (оператора) и технический паспорт — по материалам, программе в plc и экранам в hmi; '
+      + 'снимки экранов — cmtp_render. Если в materials есть пример руководства (.docx) — сделай по нему (doc_outline, '
+      + 'style_from); если нет — спроси меня, по какому образцу. Результат — в docs, этап docs отметь (plc_stage_update).',
+    stage: (stage) => {
+      const s = pl.stages.find((x) => x.stage === stage);
+      return s ? `Проект «${info.name}», навык plc-project. ${where}\nЗаймись этапом «${s.title}» (${s.goal.toLowerCase()})`
+        + `${s.note ? `. Сейчас о нём записано: ${s.note}` : ''}. Предыдущие этапы и решения — в pipeline.json и project.md.` : '';
+    },
   };
 }
 
-module.exports = { Projects, ProjectsError, prompts, groupOf, cleanName, PARTS };
+module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, PARTS, STAGES };

@@ -1,11 +1,11 @@
 ---
 name: plc-kit
 kind: mcp
-description: Читает, проверяет и собирает программу ПЛК Schneider Machine Expert / CODESYS на языке ST без Machine Expert — программы, блоки, переменные, адреса Modbus, теги для панели, стиль проекта, PLCopen XML для импорта.
-version: 1.0.0
+description: Читает, проверяет и собирает программу ПЛК Schneider Machine Expert / CODESYS на языке ST без Machine Expert — программы, блоки, переменные, адреса Modbus, теги для панели (Modbus и OPC UA), стиль проекта, PLCopen XML; решает связь панели и контроллера по моделям из ТЗ и ведёт этапы проекта «под ключ».
+version: 1.1.0
 run: python server.py
 platform: any
-tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_check, plc_style, plc_export_st, plc_build
+tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_check, plc_style, plc_link, plc_stage_update, plc_export_st, plc_build
 requires: python>=3.11
 ---
 # ПЛК: Machine Expert / CODESYS, язык ST
@@ -20,8 +20,12 @@ requires: python>=3.11
 адреса читаются; проект на ST проходит круг «экспорт → папка ST → PLCopen XML → чтение» без единого отличия в тексте;
 PLCopen XML проходит проверку по схеме TC6 2.01.
 
-**Не проверено в Machine Expert:** импорт собранного XML. До проверки давай файл инженеру как черновик и проси
-импортировать в пустой проект. Компиляцию и загрузку в контроллер делает только инженер.
+**Файл `.project`** этот инструмент не читает как программу: `plc_info` говорит, в каком он виде (открытый архив
+или закрытый контейнер), и показывает дерево объектов открытого — имена программ, блоков, списков, задач. Достать
+из него программу, создать `.project` из папки ST, скомпилировать и получить ошибки компилятора — инструмент
+**machine-expert** (`me_export`, `me_create`, `me_update`). Как устроен файл — `docs/opo/MACHINE_EXPERT.md`.
+
+**Не проверено в Machine Expert:** импорт собранного XML. Без machine-expert давай файл инженеру как черновик.
 
 ## Когда применять
 
@@ -29,7 +33,9 @@ PLCopen XML проходит проверку по схеме TC6 2.01.
 - Найти ошибки до Machine Expert: незакрытые блоки, необъявленные имена, пересечения адресов.
 - Снять стиль готового проекта, чтобы следующий делать так же (`plc_style`).
 - Написать программу с нуля по документации: файлы `.st` → `plc_check` → `plc_build` → XML инженеру.
-- Дать панели адреса: `plc_hmi_tags` — таблица для привязки объектов экранов (ebpro-cmtp).
+- Дать панели теги: `plc_hmi_tags` — адреса Modbus или имена OPC UA для привязки объектов экранов (ebpro-cmtp).
+- Перед программой решить связь панели и контроллера: `plc_link` по моделям из ТЗ.
+- Вести проект «под ключ» по этапам: `plc_stage_update` (окно «Агент SYSAI» показывает их полосой).
 
 ## Как запускать
 
@@ -49,7 +55,9 @@ PLCopen XML проходит проверку по схеме TC6 2.01.
 | `plc_pous`, `plc_pou` | список программ и блоков; объявление и код одного POU, списка переменных или типа |
 | `plc_variables` | таблица переменных: имя, тип, адрес, комментарий, группа, регистр и бит Modbus |
 | `plc_addresses` | занятые диапазоны, первое свободное место, пересечения адресов |
-| `plc_hmi_tags` | переменные, доступные панели по Modbus, с адресом в записи Weintek; CSV |
+| `plc_hmi_tags` | переменные панели: Modbus — с адресом в записи Weintek; OPC UA — имена `GVL.Имя` и готовый `add_tags`; CSV |
+| `plc_link` | связь по моделям контроллера и панели или по тексту ТЗ: OPC UA / Modbus TCP / RTU, разрешение панели, что спросить |
+| `plc_stage_update` | этапы проекта в `pipeline.json`: materials, decisions, plc, build, hmi, docs; решения (`facts`) |
 | `plc_check` | ошибки, видные по тексту до компиляции |
 | `plc_style` | как проект построен — для следующего проекта в том же стиле |
 | `plc_export_st` | проект → папка файлов `.st` |
@@ -70,10 +78,32 @@ PLCopen XML проходит проверку по схеме TC6 2.01.
 `plc_addresses` называет пересечения: один адрес у двух переменных (предупреждение — так делают нарочно для кнопки и
 её выхода) и слово поверх битов того же регистра (ошибка).
 
+## Связь панели и контроллера
+
+`plc_link` `{controller, panel}` или `{text: «текст ТЗ»}` (модели и слова о связи будут найдены в тексте), `wish` —
+связь, названная заказчиком.
+
+- Оба устройства умеют OPC UA (TM241CE…, TM251, TM262 и Weintek cMT) → **OPC UA**: переменные по именам, адреса не
+  нужны. В `project.json`: `"link": {"kind": "opcua", "lists": ["GVL"]}`; в начале списка — строка
+  `{attribute 'symbol' := 'readwrite'}` (без неё `plc_check` предупредит). `plc_hmi_tags` даёт теги `GVL.Имя` простых
+  типов; экземпляры блоков и структуры в теги не идут.
+- Панель без OPC UA (Weintek iE / iP / XE / eMT) или так просит ТЗ → **Modbus TCP**: `"link": {"kind": "modbus_tcp"}`,
+  адреса `%M`. Нет Ethernet у одного из устройств → **Modbus RTU**.
+- Модель не из таблицы инструмента или ТЗ противоречит возможностям — `link` пустой, в `ask` вопросы инженеру.
+  Разрешение панели — из таблицы серий; сверить при создании проекта панели в EasyBuilder Pro.
+
+## Этапы проекта
+
+`plc_stage_update` `{project_dir, stage, state, note, facts}` пишет `pipeline.json` в папке проекта: этап `work` /
+`done` / `problem` / `todo` и короткая заметка; `facts` — решения (`controller`, `panel`, `resolution`, `link`,
+`style`) и итоги (`machine_expert`, `project_file`, `hmi_file`, `doc_file`). Этап не закрывается раньше предыдущих
+(экраны и документы — можно без компиляции: её может сделать инженер). Только `project_dir` — прочитать ход.
+
 ## Папка ST — как пишут проект с нуля
 
 ```
-project.json      {"name": "Line1", "controller": "TM241CE40R",
+project.json      {"name": "Line1", "controller": "TM241CE40R", "panel": "cMT3072X",
+                   "link": {"kind": "opcua", "lists": ["GVL"]},
                    "tasks": [{"name": "MAST", "interval": "20ms", "priority": 15, "pous": ["BIND", "Main"]}]}
 GVL.st            VAR_GLOBAL … END_VAR                      — список глобальных переменных, их может быть несколько
 In_Out.st         VAR_GLOBAL … END_VAR                      — входы и выходы модулей
@@ -91,7 +121,7 @@ Motor.st          TYPE Motor : STRUCT … END_STRUCT END_TYPE — тип дан�
 
 ## Ограничения
 
-- `.project` не читается: формат закрыт. Нужен `.export` или PLCopen XML.
+- `.project`: только вид контейнера и дерево объектов; программа — через machine-expert (`me_export`), `.export` или PLCopen XML.
 - Графические языки (LD, FBD, CFC): читаются объявления и имена, которые встречаются в схеме; код не читается и в
   XML не попадает.
 - `plc_check` — не компилятор: типы выражений, вызовы библиотек и конфигурацию модулей проверяет Machine Expert.
@@ -100,7 +130,8 @@ Motor.st          TYPE Motor : STRUCT … END_STRUCT END_TYPE — тип дан�
 
 ## Ошибки
 
-- «файл .project — закрытый формат…» — нужен `.export` или PLCopen XML из Machine Expert.
+- «Файл .project в открытом виде…» / «…сохранён в закрытом виде…» — программу из него достаёт machine-expert (`me_export`) или экспорт из Machine Expert.
+- «этап нельзя закрыть раньше предыдущих» — сначала закрой названные этапы (или отметь `problem`).
 - «не экспорт Machine Expert и не PLCopen XML» — это другой XML; проверь, что файл сохранён командой экспорта.
 - «нет POU …» — такого имени нет: список в `plc_pous`.
 - «файл ST должен начинаться с PROGRAM, FUNCTION_BLOCK, FUNCTION, TYPE или VAR_GLOBAL» — в папке лежит `.st` без

@@ -16,11 +16,14 @@ from app.net import hub
 SEED = Path(__file__).resolve().parent.parent / "hub" / "seed" / "plc-kit"
 sys.path.append(str(SEED))          # at the end: other seed tools have a `server` module of their own
 import plcbuild  # noqa: E402
+import plclink  # noqa: E402
 import plcme  # noqa: E402
+import plcproj  # noqa: E402
 import plcst  # noqa: E402
+import plcstage  # noqa: E402
 
 TOOLS = ["plc_info", "plc_pous", "plc_pou", "plc_variables", "plc_addresses", "plc_hmi_tags", "plc_check", "plc_style",
-         "plc_export_st", "plc_build"]
+         "plc_link", "plc_stage_update", "plc_export_st", "plc_build"]
 
 GVL = """VAR_GLOBAL
 	PUSK AT %MX0.0:BOOL; //ПУСК
@@ -153,7 +156,23 @@ def test_the_tool_and_the_skill_pass_the_hub_check():
     meta, report = hub.check(files)
     assert report == {"errors": [], "warnings": []} and meta["name"] == "plc-project" and hub.doc_of(files) == "SKILL.md"
     body = files["SKILL.md"].decode("utf-8")
-    assert all(x in body for x in ("plc-kit", "ebpro-cmtp", "plc_check", "plc_hmi_tags", "hub_propose"))
+    assert all(x in body for x in ("plc-kit", "ebpro-cmtp", "plc_check", "plc_hmi_tags", "hub_propose", "plc_link",
+                                   "plc_stage_update", "me_create", "me_update", "pics_find", "project-docs"))
+    root = SEED.parent / "project-docs"
+    files = {str(p.relative_to(root)).replace(os.sep, "/"): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    meta, report = hub.check(files)
+    assert report == {"errors": [], "warnings": []} and meta["name"] == "project-docs"
+    assert all(x in files["SKILL.md"].decode("utf-8") for x in ("doc_outline", "doc_export", "doc_check", "cmtp_render"))
+
+
+def test_stages_are_the_same_in_the_tool_and_in_the_window():
+    """plc_stage_update writes pipeline.json, the window «Агент SYSAI» reads it: one list of stages for both."""
+    js = (SEED.parents[2] / "agents" / "desktop" / "lib" / "projects.js").read_text(encoding="utf-8")
+    block = js[js.index("const STAGES = ["):js.index("];", js.index("const STAGES = ["))]
+    import re
+    assert re.findall(r"\['(\w+)', '([^']+)'", block) == [(k, title) for k, title, _ in plcstage.STAGES]
+    assert re.search(r"const STATES = \[([^\]]+)\]", js).group(1).replace("'", "").split(", ") == list(plcstage.STATES)
+    assert re.search(r"const FACTS = \[([^\]]+)\]", js).group(1).replace("'", "").split(", ") == list(plcstage.FACTS)
 
 
 def test_declarations_addresses_and_modbus():
@@ -197,7 +216,7 @@ def test_reads_a_machine_expert_export(tmp_path):
     assert p.pou("main")["body"] == MAIN_BODY and p.pou("Noria_class")["declaration"] == FB_DECL
     drawn = p.pou("Instances")
     assert drawn["language"] == "graphic" and drawn["uses"] == ["Noria_6", "noria2_button"] and drawn["body"] == ""
-    with pytest.raises(plcme.PlcError, match="закрытый формат"):
+    with pytest.raises(plcme.PlcError, match="файл не читается"):
         plcme.Project.load(str(tmp_path / "x.project"))
     (tmp_path / "bad.export").write_text("<html/>", encoding="utf-8")
     with pytest.raises(plcme.PlcError, match="не экспорт"):
@@ -305,7 +324,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.0.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.1.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3
@@ -322,7 +341,7 @@ def test_server_reads_checks_and_builds(tmp_path):
     assert r[9]["structuredContent"]["written"] and "Импорт PLCopenXML" in r[9]["content"][0]["text"]
     assert plcme.Project.load(str(out / "plc.xml")).pou("Main")["body"] == MAIN_BODY
     assert json.loads(r[10]["content"][0]["text"])["source"] == "st-folder"
-    assert r[11]["isError"] and "закрытый формат" in r[11]["content"][0]["text"]
+    assert r[11]["isError"] and "файл не читается" in r[11]["content"][0]["text"]
     assert r[12]["isError"] and "нет POU «Nope»" in r[12]["content"][0]["text"]
     # a broken project is not written unless forced
     (out / "st" / "Main.st").write_text(MAIN_DECL + "\n\nIF PUSK THEN\n\tnoria2_status := 1;\n", encoding="utf-8")
@@ -330,3 +349,133 @@ def test_server_reads_checks_and_builds(tmp_path):
                      ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "bad.xml"), "force": True})])
     assert again[2]["result"]["isError"] and "IF не закрыт" in again[2]["result"]["content"][0]["text"] and not (out / "nope.xml").exists()
     assert again[3]["result"]["structuredContent"]["written"] and (out / "bad.xml").exists()
+
+
+# ------------------------------------------------------------------------------------- .project, the link, the stages
+def _varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _project_file(path, objects):
+    """A `.project` in the open container, as Machine Expert / CODESYS writes it: a ZIP of <guid>.meta / <guid>.object
+    and the shared string table. objects: [(guid, parent, name, type guid)]."""
+    import zipfile
+    strings, index = [], {}
+
+    def s(text):
+        if text not in index:
+            index[text] = len(strings)
+            strings.append(text)
+        return index[text]
+    head = bytes.fromhex("02200928") + bytes(12)
+    metas = {}
+    for guid, parent, name, typ in objects:
+        body = b"\x0f" + _varint(20) + _varint(s(guid)) + _varint(s(parent)) + _varint(s(name)) + b"\x00\x00\x00" \
+            + _varint(s(typ)) + b"\x00"
+        metas[guid] = head + len(body).to_bytes(4, "little") + body + bytes(8)
+    table = _varint(len(strings)) + b"".join(_varint(i) + _varint(len(t.encode())) + t.encode() for i, t in enumerate(strings))
+    with zipfile.ZipFile(path, "w") as z:
+        for guid, blob in metas.items():
+            z.writestr(f"{guid}.meta", blob)
+            z.writestr(f"{guid}.object", head + b"\x02\x00\x00\x00\x0f\x15")
+        z.writestr(plcproj.STRINGS, table)
+    return str(path)
+
+
+def test_project_file_is_probed_not_guessed(tmp_path):
+    null = plcproj.NULL
+    kinds = {v: k for k, v in plcproj.TYPES.items()}
+    dev, app = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+    path = _project_file(tmp_path / "line.project", [
+        (dev, null, "MyController", kinds["device"]), (app, dev, "Application", kinds["application"]),
+        ("33333333-3333-3333-3333-333333333333", app, "Main", kinds["pou"]),
+        ("44444444-4444-4444-4444-444444444444", app, "GVL", kinds["gvl"]),
+        ("55555555-5555-5555-5555-555555555555", app, "MAST", kinds["task"]),
+    ])
+    d = plcproj.probe(path)
+    assert d["container"] == "zip" and d["counts"] == {"device": 1, "application": 1, "pou": 1, "gvl": 1, "task": 1}
+    assert {"kind": "pou", "name": "Main", "path": "MyController/Application"} in d["objects"]
+    closed = tmp_path / "closed.project"
+    closed.write_bytes(plcproj.MAGIC_CLOSED + bytes(range(256)) * 4)
+    assert plcproj.probe(str(closed))["container"] == "encrypted" and "me_export" in plcproj.probe(str(closed))["note"]
+    (tmp_path / "junk.project").write_bytes(b"not a project at all")
+    with pytest.raises(plcproj.ProjectFileError, match="не файл проекта"):
+        plcproj.probe(str(tmp_path / "junk.project"))
+    replies = _server([("plc_info", {"path": path}), ("plc_pous", {"path": path}), ("plc_info", {"path": str(closed)})])
+    r = [x["result"] for x in replies[2:]]
+    assert r[0]["structuredContent"]["container"] == "zip" and "дерево объектов" in r[0]["content"][0]["text"]
+    assert r[1]["isError"] and "machine-expert" in r[1]["content"][0]["text"]
+    assert r[2]["structuredContent"]["container"] == "encrypted"
+
+
+def test_link_is_decided_from_the_models():
+    d = plclink.decide("TM241CE40R", "cMT3072X")
+    assert (d["link"], d["sure"], d["panel"]["resolution"], d["panel"]["file"]) == ("opcua", True, [1024, 600], ".cmtp")
+    assert d["project_json"] == {"link": {"kind": "opcua", "lists": ["GVL"]}}
+    d = plclink.decide("TM241CE24T", "MT8071iE")
+    assert (d["link"], d["sure"], d["panel"]["resolution"], d["panel"]["file"]) == ("modbus_tcp", True, [800, 480], ".emtp")
+    assert plclink.decide("TM241C24R", "cMT3072X")["link"] == "modbus_rtu"          # no Ethernet on the controller
+    d = plclink.decide("TM241CE40R", "MT8071iE", wish="OPC UA")
+    assert d["link"] == "" and "панель MT8071iE" in d["ask"][0]
+    assert plclink.decide("TM241CE40R", "cMT3072X", wish="modbus tcp")["link"] == "modbus_tcp"
+    d = plclink.decide(text="Шкаф управления на базе ПЛК TM251MESE, панель оператора Weintek cMT3102X, обмен по OPC UA.")
+    assert (d["link"], d["controller"]["model"], d["panel"]["model"]) == ("opcua", "TM251MESE", "cMT3102X")
+    d = plclink.decide(text="Контроллер Овен ПЛК210, панель ИП320")
+    assert d["link"] == "" and len(d["ask"]) == 2
+    d = plclink.decide("TM221CE24R", "MT8071iE")
+    assert any("Machine Expert Basic" in a for a in d["ask"])
+
+
+def test_opcua_tags_checks_and_stages(tmp_path):
+    src = tmp_path / "plc"
+    src.mkdir()
+    (src / "GVL.st").write_text("{attribute 'symbol' := 'readwrite'}\nVAR_GLOBAL\n\t//Нория 1\n\tStart_1: BOOL; //пуск\n"
+                                "\tSpeed_1: REAL;\n\tHours_1: UDINT;\n\tNoria_1: Noria;\nEND_VAR\n", encoding="utf-8")
+    (src / "Internal.st").write_text("VAR_GLOBAL\n\ttick: INT;\nEND_VAR\n", encoding="utf-8")
+    (src / "Noria.st").write_text("FUNCTION_BLOCK Noria\nVAR_INPUT\n\trun: BOOL;\nEND_VAR\n\n;\n", encoding="utf-8")
+    (src / "Main.st").write_text("PROGRAM Main\nVAR\nEND_VAR\n\nNoria_1(run := Start_1);\ntick := tick + 1;\n", encoding="utf-8")
+    meta = {"name": "Line", "controller": "TM241CE40R", "panel": "cMT3072X", "link": {"kind": "opcua", "lists": ["GVL"]},
+            "tasks": [{"name": "MAST", "interval": "20ms", "pous": ["Main"]}]}
+    (src / "project.json").write_text(json.dumps(meta), encoding="utf-8")
+    p = plcbuild.load_dir(str(src))
+    assert p.link == {"kind": "opcua", "lists": ["GVL"]} and p.info()["link"]["kind"] == "opcua"
+    assert [(t["name"], t["type"], t["kind"], t["node"]) for t in p.hmi_tags()] == [
+        ("GVL.Start_1", "BOOL", "bit", "s:GVL.Start_1"), ("GVL.Speed_1", "REAL", "real", "s:GVL.Speed_1"),
+        ("GVL.Hours_1", "UDINT", "dword", "s:GVL.Hours_1")]
+    assert [i for i in p.check() if i["level"] != "info"] == []
+    (src / "GVL.st").write_text("VAR_GLOBAL\n\tStart_1: BOOL;\n\tNoria_1: Noria;\nEND_VAR\n", encoding="utf-8")
+    meta["link"]["lists"] = ["GVL", "Nope"]
+    (src / "project.json").write_text(json.dumps(meta), encoding="utf-8")
+    texts = [i["text"] for i in plcbuild.load_dir(str(src)).check()]
+    assert any("список Nope" in t for t in texts) and any("attribute 'symbol'" in t for t in texts)
+    # the stages of the project
+    proj = tmp_path
+    with pytest.raises(plcstage.StageError, match="не готовы materials, decisions"):
+        plcstage.update(str(proj), "plc", "done")
+    plcstage.update(str(proj), "materials", "done", "12 механизмов, 96 сигналов")
+    v = plcstage.update(str(proj), "decisions", "done", facts={"controller": "TM241CE40R", "link": "opcua"})
+    assert v["next"] == "plc" and v["facts"] == {"controller": "TM241CE40R", "link": "opcua"}
+    plcstage.update(str(proj), "plc", "done")
+    v = plcstage.update(str(proj), "hmi", "done")            # screens may be closed before the engineer compiles
+    assert [r["state"] for r in v["stages"]] == ["done", "done", "done", "todo", "done", "todo"] and v["next"] == "build"
+    with pytest.raises(plcstage.StageError, match="нет такого поля"):
+        plcstage.update(str(proj), facts={"password": "x"})
+    replies = _server([("plc_hmi_tags", {"path": str(src), "out_file": str(tmp_path / "tags.csv")}),
+                       ("plc_link", {"controller": "TM241CE40R", "panel": "cMT3072X"}),
+                       ("plc_stage_update", {"project_dir": str(proj), "stage": "build", "state": "problem", "note": "нет Machine Expert"}),
+                       ("plc_stage_update", {"project_dir": str(tmp_path / "none"), "stage": "plc", "state": "work"})])
+    r = [x["result"] for x in replies[2:]]
+    tags = json.loads(r[0]["content"][0]["text"])
+    assert tags["link"] == "opcua" and tags["add_tags"] == [{"name": "GVL.Start_1", "type": "BOOL"}]
+    assert (tmp_path / "tags.csv").read_text(encoding="utf-8-sig").splitlines() == ["name;type;kind;node;group;comment",
+                                                                                    "GVL.Start_1;BOOL;bit;s:GVL.Start_1;;"]
+    assert r[1]["structuredContent"]["link"] == "opcua" and r[1]["content"][0]["text"].startswith("Связь: OPC UA")
+    assert json.loads(r[2]["content"][0]["text"])["stages"][3]["note"] == "нет Machine Expert"
+    assert json.loads((proj / "pipeline.json").read_text(encoding="utf-8"))["stages"]["build"]["state"] == "problem"
+    assert r[3]["isError"] and "нет папки проекта" in r[3]["content"][0]["text"]

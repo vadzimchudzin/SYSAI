@@ -27,7 +27,7 @@
 
     <label class="f">{{ sections.programs }} (по строке) <textarea name="programs">{{ r.programs|join('\n') }}</textarea></label>
     <label class="f">{{ sections.mcp }} («сервер: инструмент, инструмент» или «сервер: *») <textarea name="mcp" spellcheck="false">{% for srv, tools in r.mcp.items() %}{{ srv }}: {{ tools|join(', ') }}
-{% endfor %}</textarea><small class="muted">sysai: {{ sysai_tools|join(', ') }} · plc-kit, machine-expert, cad · MCP-серверы из хаба — по их имени</small></label>
+{% endfor %}</textarea><small class="muted">sysai: {{ sysai_tools|join(', ') }} · plc-kit, machine-expert, pic-index, doc-kit, cad · MCP-серверы из хаба — по их имени</small></label>
 
     <h3 class="wide">{{ sections.data }}</h3>
     <label class="f">Проекты <select name="data_projects">{% for s in scopes %}<option value="{{ s }}" {{ 'selected' if r.data.projects == s }}>{{ scope_ru[s] }}</option>{% endfor %}</select></label>
