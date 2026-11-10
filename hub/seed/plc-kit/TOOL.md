@@ -2,10 +2,10 @@
 name: plc-kit
 kind: mcp
 description: Читает, проверяет и собирает программу ПЛК Schneider Machine Expert / CODESYS на языке ST без Machine Expert — программы, блоки, переменные, адреса Modbus, теги для панели, стиль проекта, PLCopen XML для импорта.
-version: 1.0.0
+version: 1.1.0
 run: python server.py
 platform: any
-tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_check, plc_style, plc_export_st, plc_build
+tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_check, plc_style, plc_link, plc_stage_update, plc_export_st, plc_build
 requires: python>=3.11
 ---
 # ПЛК: Machine Expert / CODESYS, язык ST

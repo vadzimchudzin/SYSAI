@@ -66,13 +66,17 @@ class Project:
         self.name, self.source = name, source
         self.pous, self.gvls, self.types, self.tasks, self.devices = [], [], [], [], []
         self.path, self._vars, self.word_bits = '', None, False
+        self.link = {}      # how the panel talks to the controller: {'kind': opcua | modbus_tcp | modbus_rtu, 'lists'}
 
     # ------------------------------------------------------------------------------------------------ reading
     @classmethod
     def load(cls, path: str) -> 'Project':
-        if str(path).lower().endswith('.project'):
-            raise PlcError('файл .project — закрытый формат Machine Expert, его не прочитать. В Machine Expert: '
-                           '«Проект → Экспорт…» (получится .export) или «Экспорт PLCopenXML…» (.xml) — и дайте этот файл')
+        if str(path).lower().endswith(('.project', '.projectarchive')):
+            import plcproj
+            try:
+                raise PlcError(plcproj.probe(str(path))['note'])
+            except plcproj.ProjectFileError as exc:
+                raise PlcError(str(exc)) from None
         try:
             root = ET.parse(path).getroot()
         except ET.ParseError as exc:
@@ -269,7 +273,7 @@ class Project:
                 'gvls': [g['name'] for g in self.gvls], 'types': [t['name'] for t in self.types],
                 'tasks': self.tasks, 'variables': len(vs), 'addressed': sum(1 for v in vs if v['address']),
                 'modbus': sum(1 for v in vs if v['modbus']), 'bit_numbering': 'word' if self.word_bits else 'byte',
-                'devices': [d['name'] for d in self.devices][:60]}
+                'devices': [d['name'] for d in self.devices][:60], 'link': self.link or None}
 
     # ------------------------------------------------------------------------------------------------ addresses
     def addresses(self) -> dict:
@@ -320,10 +324,34 @@ class Project:
         return {'variables': rows, 'conflicts': conflicts, 'ranges': ranges, 'free': free,
                 'bit_numbering': 'word' if self.word_bits else 'byte'}
 
-    def hmi_tags(self) -> list:
-        """The variables a panel can reach by Modbus (those at `%M`), ready for the HMI: [{'name', 'type', 'comment',
-        'group', 'address', 'register', 'bit', 'weintek': {'type': '4x' | '4x_Bit', 'address'}, 'kind': bit | word |
-        dword | real}]. Weintek counts registers from 1; a bit is written as register and two digits of the bit."""
+    def opcua_lists(self) -> list:
+        """The global lists the panel sees over OPC UA: those named in project.json, else every list."""
+        want = [str(n).lower() for n in (self.link.get('lists') or [])]
+        return [g for g in self.gvls if not want or g['name'].lower() in want]
+
+    def hmi_tags(self, link: str = '') -> list:
+        """The variables a panel can reach, ready for the HMI.
+
+        Modbus (the default): those at `%M` -- [{'name', 'type', 'comment', 'group', 'address', 'register', 'bit',
+        'weintek': {'type': '4x' | '4x_Bit', 'address'}, 'kind': bit | word | dword | real}]. Weintek counts
+        registers from 1; a bit is written as register and two digits of the bit.
+
+        OPC UA (`link` or project.json says so): the variables of the published lists that have a plain type --
+        [{'name': 'GVL.Start', 'type', 'comment', 'group', 'node': 's:GVL.Start', 'kind'}]; instances of function
+        blocks and structures are left out (a panel binds to plain values)."""
+        if (link or self.link.get('kind') or '') == 'opcua':
+            out = []
+            for g in self.opcua_lists():
+                for v in plcst.parse_declaration(g['declaration'])['vars']:
+                    base = plcst.base_type(v['type']).upper()
+                    if base not in plcst.ELEMENTARY or v['type'].strip().upper().startswith('ARRAY'):
+                        continue
+                    kind = ('bit' if base == 'BOOL' else 'real' if base in ('REAL', 'LREAL') else 'string' if 'STRING' in base
+                            else 'dword' if plcst.BITS.get(base, 16) >= 32 else 'word')
+                    name = f"{g['name']}.{v['name']}"
+                    out.append({'name': name, 'scope': g['name'], 'type': base, 'comment': v['comment'] or '',
+                                'group': v['group'] or '', 'node': f's:{name}', 'kind': kind})
+            return out
         out = []
         for v in self.addresses()['variables']:
             m = v['modbus']
@@ -403,6 +431,22 @@ class Project:
                     add('error', f"задача {t['name']}", f'вызывает {name}, такой программы нет')
         if self.pous and not self.tasks and self.source != 'plcopen':
             add('warning', 'проект', 'нет ни одной задачи: программы никто не вызывает')
+        kind = self.link.get('kind') or ''
+        if kind == 'opcua':
+            have = {g['name'].lower() for g in self.gvls}
+            for n in self.link.get('lists') or []:
+                if str(n).lower() not in have:
+                    add('error', 'связь', f'project.json: список {n} для OPC UA не найден среди списков переменных')
+            for g in self.opcua_lists():
+                if not re.search(r"\{\s*attribute\s+'symbol'", g['declaration'], re.I):
+                    add('warning', g['name'], "связь OPC UA: перед VAR_GLOBAL нет строки {attribute 'symbol' := 'readwrite'} — "
+                                              'панель не увидит переменные этого списка')
+            if not self.hmi_tags():
+                add('warning', 'связь', 'связь OPC UA: в опубликованных списках нет ни одной переменной простого типа')
+        elif kind in ('modbus_tcp', 'modbus_rtu') and self.gvls and not self.hmi_tags():
+            add('warning', 'связь', 'связь Modbus: ни у одной переменной нет адреса %M — панели нечего читать')
+        elif kind and kind not in ('modbus_tcp', 'modbus_rtu'):
+            add('error', 'связь', f'project.json: link.kind «{kind}» — нужно opcua, modbus_tcp или modbus_rtu')
         return issues
 
     # ------------------------------------------------------------------------------------------------ the style

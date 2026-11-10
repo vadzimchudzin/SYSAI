@@ -2,7 +2,8 @@
 
 The folder is what the agent writes and the engineer reads:
 
-    project.json          {"name", "controller", "tasks": [{"name", "interval", "priority", "pous": [...]}]}
+    project.json          {"name", "controller", "panel", "link": {"kind": "opcua" | "modbus_tcp" | "modbus_rtu",
+                           "lists": ["GVL"]}, "tasks": [{"name", "interval", "priority", "pous": [...]}]}
     GVL.st                VAR_GLOBAL ... END_VAR                          (a global variable list; any number of them)
     Noria_class.st        FUNCTION_BLOCK Noria_class VAR_INPUT ... END_VAR <body>
     Main.st               PROGRAM Main VAR ... END_VAR <body>
@@ -74,6 +75,12 @@ def load_dir(src_dir: str) -> plcme.Project:
             raise plcme.PlcError('project.json: нужен объект {"name", "tasks": [...]}')
     p = plcme.Project(name=str(meta.get('name') or os.path.basename(os.path.normpath(src_dir))), source='st-folder')
     p.controller = str(meta.get('controller') or '')
+    link = meta.get('link')
+    if isinstance(link, str):
+        link = {'kind': link}
+    if isinstance(link, dict) and link.get('kind'):
+        p.link = {'kind': str(link['kind']).strip().lower(), 'lists': [str(n) for n in link.get('lists') or []]}
+    p.panel = str(meta.get('panel') or '')
     files = sorted(f for f in os.listdir(src_dir) if f.lower().endswith('.st'))
     if not files:
         raise plcme.PlcError(f'в папке {src_dir} нет файлов .st')
@@ -131,6 +138,7 @@ def write_dir(p: plcme.Project, out_dir: str) -> list:
             put(f"{x['name']}.st", x['declaration'].rstrip('\n') + '\n\n// Графический язык (LD / FBD / CFC): кода текстом нет.\n'
                 '// Имена, которые встречаются в схеме:\n' + uses)
     meta = {'name': p.name, 'controller': getattr(p, 'controller', ''), 'source': p.source,
+            **({'panel': p.panel} if getattr(p, 'panel', '') else {}), **({'link': p.link} if p.link else {}),
             'tasks': [{'name': t['name'], 'interval': t['interval'], 'priority': t['priority'], 'pous': t['pous']} for t in p.tasks]}
     put('project.json', json.dumps(meta, ensure_ascii=False, indent=2))
     return written
