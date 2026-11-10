@@ -18,6 +18,7 @@ const { Canvas, PERSON } = require('./lib/canvas');
 const config = require('./lib/config');
 const files = require('./lib/files');
 const storage = require('./lib/storage');
+const { Projects, prompts: projectPrompts } = require('./lib/projects');
 const shortcuts = require('./lib/shortcuts');
 const { Bridge } = require('./lib/bridge');
 const rules = require('./lib/rules');
@@ -686,6 +687,15 @@ function ipc() {
     const res = await dialog.showOpenDialog(win, { title: String((opts && opts.title) || 'Выберите файлы'), properties: ['openFile', 'multiSelections'] });
     return res.canceled ? [] : res.filePaths;
   });
+  // «Проекты»: folders of projects in the person's documents
+  const projects = new Projects(path.join(app.getPath('documents'), 'SYSAI Проекты'));
+  handle('projects:list', () => projects.list());
+  handle('projects:create', (name) => projects.create(String(name || '')));
+  handle('projects:info', async (name) => {
+    const info = await projects.info(String(name || ''));
+    return { ...info, prompts: projectPrompts(info) };
+  });
+  handle('projects:add', (name, paths) => projects.add(String(name || ''), Array.isArray(paths) ? paths.map(need) : []));
   handle('clipboard:text', (text) => {
     clipboard.writeText(String(text));
     return true;

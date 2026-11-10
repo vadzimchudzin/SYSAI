@@ -54,6 +54,12 @@ contextBridge.exposeInMainWorld('sysai', {
     fetch: (item) => call('storage:fetch', item),
     upload: (paths, folder) => call('storage:upload', paths, folder),
   },
+  projects: {
+    list: () => call('projects:list'),
+    create: (name) => call('projects:create', name),
+    info: (name) => call('projects:info', name),
+    add: (name, paths) => call('projects:add', name, paths),
+  },
   canvas: {
     state: () => call('canvas:state'),
     open: (path, window) => call('canvas:open', path, window),

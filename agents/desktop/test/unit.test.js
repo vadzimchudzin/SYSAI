@@ -13,6 +13,7 @@ const { AcpClient, commandLine } = require('../lib/acp');
 const { Bridge } = require('../lib/bridge');
 const config = require('../lib/config');
 const files = require('../lib/files');
+const { Projects, prompts: projectPrompts, groupOf, cleanName } = require('../lib/projects');
 const rules = require('../lib/rules');
 const storage = require('../lib/storage');
 
@@ -695,4 +696,47 @@ test('the MCP server of the window: the canvas tools go to the window and say wh
     bridge.stop();
     await server.close();
   }
+});
+
+// ------------------------------------------------------------------------------------------------ projects
+test('projects: a folder per project — create, drop materials in, what is inside, the requests for the agent', async () => {
+  const root = path.join(tmp(), 'SYSAI Проекты');
+  const pj = new Projects(root);
+  assert.deepEqual(await pj.list(), { root, projects: [] }); // the folder appears with the first project
+  const made = await pj.create('  ЕФБШ-621   Достоево ');
+  assert.equal(made.name, 'ЕФБШ-621 Достоево');
+  assert.deepEqual(fs.readdirSync(made.path).sort(), ['hmi', 'materials', 'plc', 'project.md']);
+  assert.match(fs.readFileSync(made.memory, 'utf8'), /^# ЕФБШ-621 Достоево\n/);
+  await assert.rejects(pj.create('ЕФБШ-621 Достоево'), /уже есть/);
+  for (const bad of ['', 'a/b', '..', 'con', 'x'.repeat(81), 'a:b']) await assert.rejects(pj.create(bad));
+  await assert.rejects(pj.info('Нет такого'), /нет проекта/);
+
+  const src = tmp();
+  fs.writeFileSync(path.join(src, 'Dostoevo.export'), '<ExportFile/>');
+  fs.writeFileSync(path.join(src, 'Э3 схема.pdf'), 'pdf');
+  fs.mkdirSync(path.join(src, 'HMI'));
+  fs.writeFileSync(path.join(src, 'HMI', 'line.cmtp'), 'x');
+  fs.writeFileSync(path.join(src, 'HMI', '~$lock.docx'), 'x');
+  const done = await pj.add(made.name, [path.join(src, 'Dostoevo.export'), path.join(src, 'Э3 схема.pdf'), path.join(src, 'HMI'),
+    path.join(src, 'Dostoevo.export'), path.join(src, 'нет.txt'), made.path]);
+  assert.deepEqual(done.map((d) => d.error || path.basename(d.to)),
+    ['Dostoevo.export', 'Э3 схема.pdf', 'HMI', 'Dostoevo (2).export', 'нет такого файла', 'это папка самого проекта']);
+  assert.equal(fs.readFileSync(path.join(src, 'Dostoevo.export'), 'utf8'), '<ExportFile/>'); // copied, not moved
+
+  fs.mkdirSync(path.join(made.path, 'plc'), { recursive: true });
+  fs.writeFileSync(path.join(made.path, 'plc', 'Main.st'), 'PROGRAM Main');
+  fs.writeFileSync(path.join(made.path, 'style.md'), '# стиль');
+  const info = await pj.info(made.name);
+  assert.deepEqual(info.materials.map((f) => [f.rel, f.group]).sort(), [['materials/Dostoevo (2).export', 'plc'],
+    ['materials/Dostoevo.export', 'plc'], ['materials/HMI/line.cmtp', 'hmi'], ['materials/Э3 схема.pdf', 'scheme']]);
+  assert.deepEqual(info.plc.map((f) => f.rel), ['plc/Main.st']);
+  assert.equal(info.style, path.join(made.path, 'style.md'));
+  const listed = await pj.list();
+  assert.deepEqual(listed.projects.map((p) => [p.name, p.materials, p.style, p.plc, p.hmi]), [['ЕФБШ-621 Достоево', 4, true, true, false]]);
+
+  const pr = projectPrompts(info);
+  assert.ok(pr.analyze.includes(made.path) && pr.analyze.includes('plc-project') && pr.analyze.includes('style.md'));
+  assert.ok(pr.build.includes(made.path) && pr.build.includes('plc_hmi_tags') && pr.build.includes('«ОПО»') && pr.build.endsWith('Стиль: '));
+  assert.deepEqual(['a.EXPORT', 'b.emtp', 'c.dwg', 'd.xlsx', 'e.png', 'f.bin'].map(groupOf), ['plc', 'hmi', 'scheme', 'doc', 'image', 'other']);
+  assert.equal(cleanName(' Линия  1. '), 'Линия 1');
 });

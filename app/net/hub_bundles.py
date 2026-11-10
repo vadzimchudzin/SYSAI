@@ -1,4 +1,4 @@
-"""Downloadable EasyBuilder starter packages shipped with the server.
+"""Downloadable starter packages (EasyBuilder Pro, PLC) shipped with the server.
 
 These are separate from the Hub database: downloading never publishes or changes a version.
 """
@@ -12,6 +12,8 @@ BUNDLES = {
     "ebpro-cmtp": "EasyBuilder Pro — инструмент MCP",
     "ebpro-mnemoscheme": "EasyBuilder Pro — умение сборки мнемосхем",
     "ebpro-gui": "EasyBuilder Pro — работа в программе (Windows)",
+    "plc-kit": "ПЛК Machine Expert (ST) — инструмент MCP",
+    "plc-project": "Проект под ключ: ПЛК и экраны — умение",
 }
 
 

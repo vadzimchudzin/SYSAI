@@ -364,7 +364,8 @@ def test_bundled_easybuilder_packages_download_without_publishing(client, net_ag
     assert page.status_code == 200
     for name, version, doc in [('ebpro-cmtp', '1.5.3', 'TOOL.md'),
                                ('ebpro-mnemoscheme', '1.0.0', 'SKILL.md'),
-                               ('ebpro-gui', '1.0.0', 'TOOL.md')]:
+                               ('ebpro-gui', '1.0.0', 'TOOL.md'), ('plc-kit', '1.0.0', 'TOOL.md'),
+                               ('plc-project', '1.0.0', 'SKILL.md')]:
         assert f'/hub/bundled/{name}.zip' in page.text
         result = client.get(f'/hub/bundled/{name}.zip')
         assert result.status_code == 200

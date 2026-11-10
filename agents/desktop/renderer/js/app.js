@@ -5,6 +5,7 @@ import { h, icon, clear, when, group, basename, debounce } from './dom.js';
 import { Conversation } from './chat.js';
 import { Preview } from './preview.js';
 import { Explorer, StorageView } from './explorer.js';
+import { ProjectsView } from './projects.js';
 import { CanvasView, isProject } from './canvas.js';
 import { Composer } from './composer.js';
 import { openMenu, toast } from './ui.js';
@@ -381,10 +382,12 @@ class Pane {
       attach: (p) => composer.attach(p),
     });
     this.canvas = new CanvasView({ focus: () => this.show('canvas'), mention: (t) => composer.fill(t) });
-    this.sections = { preview: this.preview, canvas: this.canvas, files: this.explorer, storage: this.storage };
+    this.projects = new ProjectsView({ open: (p) => openPath(p), ask: (t) => composer.fill(t) });
+    this.sections = { preview: this.preview, canvas: this.canvas, files: this.explorer, storage: this.storage,
+      projects: this.projects };
     this.tabs = {};
     for (const [key, label, ico] of [['preview', 'Просмотр', 'eye'], ['canvas', 'Холст', 'canvas'], ['files', 'Файлы', 'monitor'],
-      ['storage', 'Хранилище', 'cloud']]) {
+      ['storage', 'Хранилище', 'cloud'], ['projects', 'Проекты', 'folder']]) {
       this.tabs[key] = h('button', { class: 'tab', onclick: () => this.show(key) }, icon(ico, 'sm'), h('span', { text: label }));
     }
     this.maxBtn = h('button', { class: 'icon-btn sm', title: 'Развернуть', onclick: () => this.setMax(!this.max) }, icon('max', 'sm'));
@@ -403,6 +406,7 @@ class Pane {
     if (tab === 'files') this.explorer.start();
     if (tab === 'storage') this.storage.start();
     if (tab === 'canvas') this.canvas.start();
+    if (tab === 'projects') this.projects.start();
     if (!this.opened) {
       this.opened = true;
       this.el.hidden = false;
@@ -470,6 +474,8 @@ function drawSidebar() {
   $('nav-files').onclick = () => pane.toggle('files');
   $('nav-storage').replaceChildren(icon('cloud'), h('span', { text: 'Хранилище SYSAI' }));
   $('nav-storage').onclick = () => pane.toggle('storage');
+  $('nav-projects').replaceChildren(icon('folder'), h('span', { text: 'Проекты' }));
+  $('nav-projects').onclick = () => pane.toggle('projects');
   $('search-field').prepend(icon('search', 'sm'));
   $('search').addEventListener('input', debounce(drawSessions, 120));
   const more = h('button', { class: 'icon-btn', title: 'Ещё' }, icon('dots'));
