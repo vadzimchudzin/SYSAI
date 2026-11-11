@@ -8,7 +8,10 @@ Transcription works in parts of 45–90 seconds and every part names its voices 
   different people), the same voice in different minutes becomes one person.
 - «gemini» — the audio model hears the recording in parts of half an hour together with the recognised replicas and
   gives every replica its speaker; the parts overlap, so their labels are joined.
-- «chunks» — the labels of the parts as they are: the way it worked before and the fallback of the other two.
+- «sound» — the recording itself is heard on this server (voice_local.py): a segmentation network marks who speaks
+  in every 17 ms, a voice print network and clustering make one person of one voice over the whole meeting. It does
+  not depend on the labels of the parts at all, sees a change of voice inside a phrase and needs no outside service.
+- «chunks» — the labels of the parts as they are: the way it worked at first and the fallback of the other three.
 
 Which way is best is measured on references (diarization_eval.py, «Точность разметки голосов»).
 """
@@ -26,21 +29,24 @@ import shutil
 import tempfile
 import time
 
-from . import audio, config, llm, speaker_id
+from . import audio, config, llm, speaker_id, vad
 
 log = logging.getLogger("sysai.diarize")
 
 METHODS = {
+    "sound": "По звуку всей записи, на сервере",
     "chunks": "По кускам записи (как раньше)",
     "voice": "Свой сервис голосов",
     "gemini": "Gemini слушает всю запись",
 }
 HINTS = {
+    "sound": "Нейросеть слушает саму запись и отмечает, кто говорит в каждую долю секунды, — метки кусков не нужны. "
+             "Слышит смену голоса внутри фразы и перебивания. Работает на этом сервере, без сторонних сервисов.",
     "chunks": "Каждый кусок 45–90 с размечается отдельно, куски сшиваются по общим словам.",
     "voice": "Отпечаток голоса каждой метки в каждой минуте, затем все отпечатки встречи собираются по сходству.",
     "gemini": "Модель слушает запись по полчаса вместе с репликами и называет говорящего каждой реплики.",
 }
-DEFAULT_METHOD = "chunks"
+DEFAULT_METHOD = "sound"
 DEFAULT_THRESHOLD = 0.5
 THRESHOLDS = tuple(round(0.3 + 0.05 * k, 2) for k in range(11))  # 0.30 … 0.80, tried on references
 VOICE_WINDOW = 60.0          # seconds of the recording per voice print of a label
@@ -83,9 +89,25 @@ def unavailable(name: str) -> str:
         return "Сервис голосов не подключён: задайте SYSAI_VOICE_SERVICE_URL и SYSAI_VOICE_SERVICE_TOKEN на сервере."
     if name == "gemini" and not config.llm_enabled():
         return "Нужен ключ OpenRouter."
+    if name == "sound":
+        from . import voice_local
+        if not voice_local.available():
+            return "На сервере нет моделей разметки голосов (app/models) или пакета onnxruntime."
     if name not in METHODS:
         return "Неизвестный способ разметки."
     return ""
+
+
+def local_prints(settings: dict | None = None) -> bool:
+    """True when voice prints are made on this server (voice_local.py), not by the voice service: the way «sound» is
+    chosen, or the service is not connected. Prints of the two are never compared with each other."""
+    from . import voice_local
+    if not voice_local.available():
+        return False
+    if settings is None:
+        from . import settings_store
+        settings = settings_store.all_settings()
+    return method_of(settings) == "sound" or not config.voice_service_enabled()
 
 
 # ------------------------------------------------------------------------------------------------ the transcript
@@ -451,6 +473,205 @@ def voice_labels(segments: list, groups: list, threshold: float, people: int = 0
     return labels
 
 
+# ------------------------------------------------------------------------------------- the sound of the recording
+CUT_MIN_WORDS = 4            # a replica is cut between two voices only when it has this many words…
+CUT_MIN_SECONDS = 2.0        # …lasts this long…
+CUT_OTHER_SECONDS = 1.0      # …and the second voice speaks in it at least this long
+CUT_RUN_WORDS = 3            # a voice inside a replica is believed from this many words in a row…
+CUT_OWN_SHARE = 0.7          # …when it speaks over this share of their time…
+CUT_REST_SHARE = 0.2         # …and the voice next to it over no more than this share
+OVERLAP_SHARE = 0.5          # two people at once over this share of a replica: cross-talk
+
+
+class _Timeline:
+    """Who speaks when: the turns [[start, end, person]] of the whole recording, looked up by time."""
+
+    BIN = 20.0
+
+    def __init__(self, turns: list):
+        self.turns = sorted((float(a), float(b), who) for a, b, who in turns if b > a)
+        self.bins = {}
+        for turn in self.turns:
+            for number in range(int(turn[0] // self.BIN), int(turn[1] // self.BIN) + 1):
+                self.bins.setdefault(number, []).append(turn)
+
+    def _near(self, start: float, end: float):
+        seen = set()
+        for number in range(int(start // self.BIN), int(end // self.BIN) + 1):
+            for turn in self.bins.get(number, ()):
+                if turn not in seen:
+                    seen.add(turn)
+                    yield turn
+
+    def during(self, start: float, end: float) -> dict:
+        """{person: seconds of speech} between two moments."""
+        out = {}
+        for a, b, who in self._near(start, end):
+            shared = min(b, end) - max(a, start)
+            if shared > 0:
+                out[who] = out.get(who, 0.0) + shared
+        return out
+
+    def fit(self, who, start: float, end: float) -> float:
+        """How well a person's speech matches a stretch of time, 0…1: a short reply said over a long phrase of
+        another person belongs to the one who speaks just then, not to the one who speaks through it."""
+        shared, first, last = 0.0, start, end
+        for a, b, person in self._near(start, end):
+            if person == who and min(b, end) > max(a, start):
+                shared += min(b, end) - max(a, start)
+                first, last = min(first, a), max(last, b)
+        return shared / (last - first) if last > first else 0.0
+
+    def at(self, moment: float) -> set:
+        return {who for a, b, who in self._near(moment, moment) if a <= moment < b}
+
+    def nearest(self, start: float, end: float):
+        """The person heard closest to a stretch of time, and how far away."""
+        best = (math.inf, None)
+        for a, b, who in self._near(start - 3 * self.BIN, end + 3 * self.BIN):
+            gap = max(0.0, a - end, start - b)
+            if gap < best[0]:
+                best = (gap, who)
+        return best[1], best[0]
+
+
+def _voice_runs(item: dict, start: float, end: float, line: _Timeline, main, spoken: dict) -> list:
+    """[(character, person)] of the stretches of one voice inside a replica, by its words (their time is their
+    share of the syllables); a stretch shorter than CUT_RUN_WORDS words is not believed."""
+    text = str(item.get("text") or "")
+    words = _words_of(text)
+    if len(words) < CUT_MIN_WORDS or end - start < CUT_MIN_SECONDS:
+        return []
+    if sorted(spoken.values(), reverse=True)[1:2] < [CUT_OTHER_SECONDS]:
+        return []
+    whose, current = [], None
+    for k, (at, _) in enumerate(words):
+        until = words[k + 1][0] if k + 1 < len(words) else len(text)
+        middle = (moment(text, start, end, at) + moment(text, start, end, until)) / 2
+        active = line.at(middle)
+        if current not in active and active:
+            current = main if main in active else max(active, key=lambda who: spoken.get(who, 0.0))
+        whose.append(current)
+    first = next((who for who in whose if who is not None), main)
+    whose = [who if who is not None else first for who in whose]
+    runs = []   # [person, first word, words]
+    for k, who in enumerate(whose):
+        if runs and runs[-1][0] == who:
+            runs[-1][2] += 1
+        else:
+            runs.append([who, k, 1])
+    def sure(k) -> bool:
+        """The voice of a stretch really speaks through it, and its neighbour's voice is silent meanwhile."""
+        who, first_word, count = runs[k]
+        if count < CUT_RUN_WORDS:
+            return False
+        last = first_word + count
+        a = moment(text, start, end, words[first_word][0])
+        b = moment(text, start, end, words[last][0]) if last < len(words) else end
+        if b - a < CUT_OTHER_SECONDS:
+            return False
+        during = line.during(a, b)
+        other = runs[k - 1][0] if k else runs[1][0]
+        return during.get(who, 0.0) >= CUT_OWN_SHARE * (b - a) and during.get(other, 0.0) <= CUT_REST_SHARE * (b - a)
+
+    changed = True
+    while changed and len(runs) > 1:   # a word or two of another voice inside a phrase is a guess of the timing
+        changed = False
+        for k in sorted(range(len(runs)), key=lambda k: runs[k][2]):
+            if not sure(k):
+                target = k - 1 if k else 1
+                runs[target][2] += runs[k][2]
+                if target > k:
+                    runs[target][1] = runs[k][1]
+                del runs[k]
+                changed = True
+                break
+        merged = []
+        for run in runs:
+            if merged and merged[-1][0] == run[0]:
+                merged[-1][2] += run[2]
+            else:
+                merged.append(run)
+        runs = merged
+    return [(words[first_word][0], who) for who, first_word, _ in runs]
+
+
+def turn_labels(segments: list, heard: dict, total: float = 0.0, details: dict | None = None,
+                found: dict | None = None, cut: bool = True) -> list:
+    """New label of every replica from the turns the sound engine heard (voice_local.diarize): the person who speaks
+    longest over the replica. A replica shared by two people is cut where the voice changes, and one said over
+    another person's speech is marked as cross-talk — both through `details`, as for the audio model. `found`
+    receives the voice print of every new label, to recognise the voices remembered at other meetings."""
+    line = _Timeline(heard.get("turns") or [])
+    if not line.turns:
+        raise DiarizationError("В записи не слышно речи — размечать голоса не по чему.")
+    rows = [row for row in _rows(segments, total) if segments[row[0]].get("speaker_source") != "voiceprint"]
+    labels = [None] * len(segments)
+    cuts, overlap = {}, set()
+    for index, start, end, _ in rows:
+        end = max(end, start + 0.2)
+        spoken = line.during(start, end)
+        if not spoken:
+            spoken = line.during(start - 0.5, end + 0.5)
+        if not spoken:
+            who, _ = line.nearest(start, end)
+            if who is None:
+                continue
+            spoken = {who: 0.0}
+        main = max(spoken, key=lambda who: spoken[who] * (0.5 + 0.5 * line.fit(who, start, end)))
+        runs = _voice_runs(segments[index], start, end, line, main, spoken) if cut else []
+        if len(runs) > 1:
+            main = runs[0][1]
+            cuts[index] = [(at, who) for at, who in runs[1:]][:3]
+        labels[index] = main
+        if sum(spoken.values()) - (end - start) >= OVERLAP_SHARE * (end - start):
+            overlap.add(index)
+    order = {}
+    for index, *_ in _rows(segments, total):  # «Спикер N» by the first time each voice is heard
+        for who in [labels[index]] + [who for _, who in cuts.get(index, [])]:
+            if who is not None and who not in order:
+                order[who] = f"Спикер {len(order) + 1}"
+    if details is not None:
+        details["cuts"] = {index: [(at, order[who]) for at, who in cut_] for index, cut_ in cuts.items()}
+        details["overlap"] = overlap
+    if found is not None:
+        centres, seconds = heard.get("centres") or [], heard.get("seconds") or []
+        found.update(centres={order[who]: centres[who] for who in order if isinstance(who, int) and who < len(centres)},
+                     seconds={order[who]: seconds[who] for who in order if isinstance(who, int) and who < len(seconds)},
+                     model=str(heard.get("model") or ""))
+    return [order.get(who) if who is not None else None for who in labels]
+
+
+def sound_labels(audio_path, segments: list, total: float, people: int = 0, progress=None,
+                 details: dict | None = None, found: dict | None = None, cut: bool = True) -> list:
+    """New label of every replica from the sound of the whole recording, heard on this server."""
+    from . import voice_local
+    try:
+        heard = voice_local.diarize(audio_path, people=people, progress=progress, total=total)
+    except voice_local.LocalVoiceError as exc:
+        raise DiarizationError(str(exc)) from exc
+    return turn_labels(segments, heard, total, details, found, cut)
+
+
+def local_groups(audio_path, segments: list, total: float) -> list:
+    """One voice print per label, made on this server: [{"window": 0, "label", "embedding", "seconds", "model"}] —
+    what voice_groups gives through the voice service, for remembering confirmed voices (voice_memory.py)."""
+    from . import voice_local
+    intervals = {}
+    for index, start, end, label in _rows(segments, total):
+        a, b = _speech(segments[index], start, end)
+        if label and b - a >= 1.0:
+            intervals.setdefault(label, []).append((a, b))
+    if not intervals:
+        raise DiarizationError("В расшифровке нет реплик длиннее секунды — сравнивать голоса не по чему.")
+    try:
+        prints = voice_local.embed_labels(audio_path, intervals)
+    except (voice_local.LocalVoiceError, vad.VADError) as exc:
+        raise DiarizationError(str(exc)) from exc
+    return [{"window": 0, "label": label, "embedding": vector, "seconds": seconds, "model": voice_local.MODEL_VERSION}
+            for label, (vector, seconds) in sorted(prints.items())]
+
+
 # ------------------------------------------------------------------------------------------- the audio model
 GEMINI_PROMPT = """Ты слушаешь запись совещания, фрагмент {begin}–{end}. Ниже — уже распознанные реплики этого фрагмента: номер, время начала от начала фрагмента и текст.
 Определи по голосу и ходу разговора, кто говорит каждую реплику. Один человек — одна метка во всём фрагменте: «Спикер 1», «Спикер 2»… Нумеруй по порядку первого появления.
@@ -618,6 +839,13 @@ def relabel(audio_path, segments: list, total: float, settings: dict, people: in
             groups = voice_groups(audio_path, segments, total, progress)
             found = {}
             labels = voice_labels(segments, groups, threshold_of(settings), people, total, found=found)
+            try:
+                known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
+            except Exception:  # noqa: BLE001  the remembered voices are a bonus
+                log.warning("recognising remembered voices failed", exc_info=True)
+        elif name == "sound":
+            found = {}
+            labels = sound_labels(audio_path, segments, total, people, progress, details, found)
             try:
                 known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
             except Exception:  # noqa: BLE001  the remembered voices are a bonus

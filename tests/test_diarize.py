@@ -184,7 +184,7 @@ def test_relabel_gives_new_labels_and_leaves_named_voices(monkeypatch, tmp_path)
 
 
 def test_settings_of_the_way_are_checked():
-    assert diarize.method_of({"diarization_method": "pyannote"}) == "chunks"
+    assert diarize.method_of({"diarization_method": "pyannote"}) == diarize.DEFAULT_METHOD == "sound"
     assert diarize.method_of({"diarization_method": "gemini"}) == "gemini"
     assert diarize.threshold_of({"diarization_voice_threshold": "abc"}) == 0.5
     assert diarize.threshold_of({"diarization_voice_threshold": 3}) == 0.95

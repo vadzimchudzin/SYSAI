@@ -1,5 +1,7 @@
 # SYSAI Speaker Identity Service
 
+> Since November 2026 SYSAI labels speakers on its own server (`app/voice_local.py`, see `docs/SPEAKERS.md`) and this service is optional: it is needed only for the «Свой сервис голосов» way and for enrolled voice samples.
+
 A separate Vercel Python API that computes voice embeddings for SYSAI. It does not own employee records, meeting transcripts, or speaker-to-employee mappings; those remain in SYSAI's main database on Render.
 
 ## API

@@ -124,6 +124,8 @@ tpl.env.filters["action_line"] = action_line
 
 def startup():
     init_db()
+    if settings_store.adopt_sound_engine():
+        log.info("speaker labelling moved from the part labels to the sound engine (voice_local.py)")
     accounts.ensure_superuser()
     if accounts.insecure_reason():
         log.error("SIGN-IN IS CLOSED: %s is still the public default from the README. Set a real value in the service "

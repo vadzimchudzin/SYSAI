@@ -42,8 +42,14 @@ _pending: set = set()
 _lock = threading.Lock()
 
 
+def engine() -> bool:
+    """True when voice prints can be made: on this server (voice_local.py) or by the voice service."""
+    from . import voice_local
+    return config.voice_service_enabled() or voice_local.available()
+
+
 def enabled() -> bool:
-    return settings_store.get("voice_memory") is True and config.voice_service_enabled()
+    return settings_store.get("voice_memory") is True and engine()
 
 
 def threshold() -> float:
@@ -164,7 +170,8 @@ def remember(meeting_id: int, path=None, by: str = "") -> dict:
                 segments.append({"speaker": f"employee-{eid}", "start": seg.get("start"), "end": seg.get("end"),
                                  "text": seg.get("text")})
         segments.sort(key=lambda seg: _number(seg.get("start")))
-        groups = diarize.voice_groups(path, segments, total)
+        groups = (diarize.local_groups(path, segments, total) if diarize.local_prints()
+                  else diarize.voice_groups(path, segments, total))
     finally:
         if temporary:
             pathlib.Path(path).unlink(missing_ok=True)
@@ -386,7 +393,7 @@ def card(session, employee) -> dict:
     titles = dict(session.query(Meeting.id, Meeting.title).filter(
         Meeting.id.in_([row.meeting_id for row in rows if row.meeting_id is not None])).all()) if rows else {}
     meetings = {row.meeting_id for row in rows if row.meeting_id is not None}
-    on, service = settings_store.get("voice_memory") is True, config.voice_service_enabled()
+    on, service = settings_store.get("voice_memory") is True, engine()
     consent = employee.voice_memory_consent_at
     if not consent:
         state, label = "none", "нет согласия"

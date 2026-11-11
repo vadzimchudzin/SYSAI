@@ -29,7 +29,7 @@ from .db import Employee, Meeting, SessionLocal
 
 log = logging.getLogger("sysai.voice_relabel")
 
-WAYS = ("voice", "gemini")
+WAYS = ("sound", "voice", "gemini")
 FIELDS = ("speaker", "speaker_source", "speaker_employee_id", "speaker_similarity", "speaker_confidence",
           "speaker_memory", "speaker_guest", "speaker_assigned_by", "speaker_auto", "overlap")
 STALE = dt.timedelta(minutes=45)     # a run that long was lost with a restart of the server
@@ -96,7 +96,7 @@ def unavailable(meeting, settings=None) -> str:
     if not has_recording(meeting):
         return "Записи этого совещания нет ни на сервере, ни в хранилище — переразметить не по чему."
     if not way(settings if settings is not None else settings_store.for_meeting(meeting.options)):
-        return "Нужен свой сервис голосов или ключ OpenRouter (Gemini слушает запись)."
+        return "Нужны модели разметки голосов на сервере, свой сервис голосов или ключ OpenRouter (Gemini слушает запись)."
     return ""
 
 
@@ -200,6 +200,10 @@ def propose(transcript: list, path, method: str, settings: dict, total: float, e
         groups = diarize.voice_groups(path, work, total, progress)
         found = {}
         labels = diarize.voice_labels(work, groups, diarize.threshold_of(settings), people, total, found=found)
+        known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
+    elif method == "sound":
+        found = {}  # replicas are not cut here: a relabelling changes only who speaks
+        labels = diarize.sound_labels(path, work, total, people, progress, details, found, cut=False)
         known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
     elif method == "gemini":
         labels = diarize.gemini_labels(path, work, total, settings, people, progress, details)
