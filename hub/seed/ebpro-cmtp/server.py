@@ -11,6 +11,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ebpcmtp  # noqa: E402
 from ebpcmtp import Project, public  # noqa: E402
 import ebpedit  # noqa: E402
 
@@ -211,7 +212,7 @@ TOOLS = [
                                                       "add_tags", "import_window", "import_objects", "picture_states", "style", "bind_tag"]},
                     "window": {"type": "string", "description": "Имя окна или номер (у import_* — окно донора)"},
                     "object": {"type": "integer", "description": "index объекта из cmtp_objects"},
-                    "objects": {"type": "array", "items": {"type": "integer"}, "description": "import_objects: index объектов донора"},
+                    "objects": {"type": "array", "items": {"type": "integer"}, "description": "import_objects: index объектов донора; clone_object: несколько объектов разом — все index как до этой правки, в ответе index копий"},
                     "old": {"type": "string"}, "new": {"type": "string"},
                     "dx": {"type": "integer"}, "dy": {"type": "integer"},
                     "width": {"type": "integer"}, "height": {"type": "integer"},
@@ -224,6 +225,7 @@ TOOLS = [
                     "slot": {"type": "integer", "enum": [1, 2, 3], "description": "Номер существующего OPC UA-адреса"},
                     "number": {"type": "integer", "description": "clone_window / import_window: номер нового окна"},
                     "to": {"type": "string", "description": "clone_object / import_objects: окно, куда положить; link: окно, куда вести"},
+                    "layer": {"type": "string", "description": "clone_object / import_objects: слой окна (имя или номер с 0), в конец которого встаёт копия; по умолчанию у clone_object — слой с тем же именем, что у оригинала, иначе последний"},
                     "from": {"type": "string", "description": r"import_*: файл проекта-донора, например C:\Projects\donor.cmtp"},
                     "tags": {"type": "array", "description": "add_tags: [{name, type, node}]", "items": {
                         "type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string"},
@@ -234,7 +236,11 @@ TOOLS = [
                                                             "image": {"type": "string", "description": "GUID картинки проекта"},
                                                             "transparent": {"type": ["string", "null"]}},
                         "additionalProperties": False}},
-                    "map_tags": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "map_tags": {"type": "object", "additionalProperties": {"type": "string"},
+                                 "description": "import_*: {тег донора: тег проекта}; clone_window / clone_object: {тег оригинала: тег копии} — теги копии перепривязываются сразу (теги должны быть в таблице: add_tags раньше в этом же списке)"},
+                    "map_texts": {"type": "object", "additionalProperties": {"type": "string"},
+                                  "description": "clone_window: {текст оригинала: текст копии} — заголовок и подписи копии"},
+                    "link_to": {"type": "string", "description": "clone_object: окно, которое открывают скопированные кнопки перехода"},
                     "map_windows": {"type": "object", "additionalProperties": {"type": "string"}},
                     "map_devices": {"type": "object", "additionalProperties": {"type": "string"}}},
                 "required": ["op"], "additionalProperties": False}}},
@@ -496,16 +502,64 @@ def _edit(args):
                 done.append(f"{n}. окно {win!r} → {e['new']!r}")
             elif op == "clone_window":
                 num = p.clone_window(win, e.get("new"), e.get("number"))
-                done.append(f"{n}. окно {win!r} скопировано → {num} : {p.window(num)['name']}")
+                tail = ""
+                if e.get("map_tags"):       # the copy at once on its own tags and texts: «one more mechanism»
+                    used = {a["tag"] for o in p.window(num)["objects"] for a in o["addresses"] if a.get("tag")}
+                    k = sum(p.retag(num, old, str(new)) for old, new in e["map_tags"].items() if old in used)
+                    left = sorted(used - set(e["map_tags"]))
+                    tail += f"; адресов перепривязано: {k}"
+                    if left:
+                        tail += f"; остались теги оригинала: {', '.join(left[:8])}{'…' if len(left) > 8 else ''}"
+                    res.update(retagged=k, tags_left=left)
+                if e.get("map_texts"):
+                    have = {t for o in p.window(num)["objects"] for _, _, t in o["_texts"]}
+                    k = sum(p.edit_text(num, old, str(new)) for old, new in e["map_texts"].items() if old in have)
+                    tail += f"; текстов заменено: {k}"
+                done.append(f"{n}. окно {win!r} скопировано → {num} : {p.window(num)['name']}{tail}")
                 res.update(window=num)
             elif op == "clone_object":
                 tn = p.window(e["to"])["number"] if e.get("to") else num
-                before = len(p.window(tn)["objects"])
-                k = p.clone_object(win, int(e["object"]), e.get("to"), int(e.get("dx") or 0), int(e.get("dy") or 0))
-                if k < before:
-                    inserted(tn, k, 1)
-                done.append(f"{n}. объект #{e['object']} скопирован → #{k} в окне {e.get('to') or win!r}")
-                res.update(window=p.window(e["to"])["number"] if e.get("to") else num, object=k)
+                same = tn == num
+                # objects: several at once, every index as it is BEFORE this edit (the copies shift the rest)
+                src = [int(i) for i in e["objects"]] if e.get("objects") else [int(e["object"])]
+                todo, copies = list(src), []
+                while todo:
+                    i = todo.pop(0)
+                    before = len(p.window(tn)["objects"])
+                    k = p.clone_object(win, i, e.get("to"), int(e.get("dx") or 0), int(e.get("dy") or 0),
+                                       e.get("layer"))
+                    if k < before:
+                        inserted(tn, k, 1)
+                    copies = [c + 1 if c >= k else c for c in copies] + [k]
+                    if same:
+                        todo = [j + 1 if j >= k else j for j in todo]
+                # the copies at once: map_tags {tag of the original: tag of the copy}, link_to — the window the
+                # copied keys open (the keys that open a window), so one edit makes «one more mechanism»
+                extra = []
+                if e.get("map_tags") or e.get("link_to") is not None:
+                    retagged = linked_keys = 0
+                    for c in copies:
+                        o = p.window(tn)["objects"][c]
+                        for old in sorted({a["tag"] for a in o["addresses"] if a.get("tag")} & set(e.get("map_tags") or {})):
+                            retagged += p.retag(tn, old, str(e["map_tags"][old]), c)
+                        if e.get("link_to") is not None:
+                            o = p.window(tn)["objects"][c]
+                            fa = ebpcmtp.fk_action(p.payload, o)
+                            if fa and fa[1] in (0, 2):
+                                ebpedit.link(p, tn, c, e["link_to"])
+                                linked_keys += 1
+                    if e.get("map_tags"):
+                        extra.append(f"адресов перепривязано: {retagged}")
+                    if e.get("link_to") is not None:
+                        extra.append(f"кнопок на окно {e['link_to']}: {linked_keys}")
+                    res.update(retagged=retagged, linked=linked_keys)
+                tail = ("; " + ", ".join(extra)) if extra else ""
+                if len(src) == 1:
+                    done.append(f"{n}. объект #{src[0]} скопирован → #{copies[0]} в окне {e.get('to') or win!r}{tail}")
+                    res.update(window=tn, object=copies[0])
+                else:
+                    done.append(f"{n}. объекты {src} скопированы → {copies} в окне {e.get('to') or win!r}{tail}")
+                    res.update(window=tn, object=copies[0], objects=copies)
             elif op == "delete_object":
                 ebpedit.delete_object(p, win, int(e["object"]))
                 removed(num, int(e["object"]))
@@ -547,7 +601,8 @@ def _edit(args):
                 objs = e.get("objects") if e.get("objects") is not None else [e["object"]]
                 before = len(p.window(e["to"])["objects"])
                 r = ebpedit.import_objects(p, d, win, objs, e["to"], e.get("dx") or 0, e.get("dy") or 0,
-                                           e.get("map_tags"), e.get("map_windows"), e.get("map_devices"), linked[path])
+                                           e.get("map_tags"), e.get("map_windows"), e.get("map_devices"), linked[path],
+                                           e.get("layer"))
                 tw = p.window(e["to"])["number"]
                 if r["first"] < before:
                     inserted(tw, r["first"], r["count"])
@@ -589,7 +644,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.5.3"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.6.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})

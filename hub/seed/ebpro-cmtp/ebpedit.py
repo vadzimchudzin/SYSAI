@@ -9,7 +9,7 @@ import uuid
 
 from ebpcmtp import (FK_ACTIONS, Project, _ALIGN, _DRAW_DEF, _PART_DEF, _SLOT, _TAG, _check_range, _cstr_at,
                      _map_info, _nested_classes, _text_em, _attrs_at, class_defs, cstring, fk_action, opc_tag_name,
-                     insert_point, opcua_table)
+                     count_edit, insert_point, layer_of, m241_node_id, map_slots, opcua_table)
 
 SYSTEM_WINDOWS = 10         # windows 0-9 belong to EasyBuilder (common window, keypads' base, messages...)
 
@@ -54,10 +54,10 @@ def delete_object(p: Project, window, index: int) -> None:
     info = _map_info(pay, ws)
     _check_range(pay, s, e, info, 'deleting')
     before = _numbers(p)
-    cnt = w['_first'] - 4
+    cnt = count_edit(w, -1, layer_of(w, o['index']))
 
     def run():
-        p._insert(info, [(s, e - s, b'', -1)], [(cnt, cnt + 4, struct.pack('<I', w['declared'] - 1))])
+        p._insert(info, [(s, e - s, b'', -1)], [cnt])
         if _numbers(p) != before:
             raise ValueError('window numbers moved after the delete; the project is left unchanged')
     _guarded(p, run)
@@ -83,7 +83,7 @@ def delete_window(p: Project, window) -> list:
     left = [ln for ln in p.links() if ln['target'] == w['number'] and ln['window'] != w['number']]
 
     def run():
-        p._insert(info, [(s, e - s, bytes(4), -w['declared'])])
+        p._insert(info, [(s, e - s, bytes(4), -map_slots(w))])
         if _numbers(p) != before:
             raise ValueError('window numbers moved after the delete; the project is left unchanged')
     _guarded(p, run)
@@ -117,16 +117,17 @@ def _target_number(p: Project, ref) -> int:
 
 
 # -- OPC UA tags ------------------------------------------------------------------------------------------------------
-_NODE = re.compile(r'^ns[:=](\d+);s[:=](.+)$')
+_NODE = re.compile(r'^ns[:=](\d+);([si])[:=](.+)$')
 
 
-def _tag_bytes(name: str, typ: str, ns: int, ident: str, mid: bytes) -> bytes:
-    full = f'{name} (ns:{ns};s:{ident})({ident})'.encode('utf-8')
+def _tag_bytes(name: str, typ: str, ns: int, ident: str, mid: bytes, style: str = 'a', kind: str = 's') -> bytes:
+    full = f'{name} (ns:{ns};{kind}:{ident})({ident})'.encode('utf-8')
     idb, tb = ident.encode('utf-8'), typ.encode('ascii')
     if len(full) > 0xffff or len(idb) > 0xffff:
         raise ValueError(f'tag name too long: {name!r}')
-    return (_TAG + len(full).to_bytes(2, 'big') + full + b'\x00' + bytes([len(tb)]) + tb + mid
-            + ns.to_bytes(2, 'big') + len(idb).to_bytes(2, 'big') + idb + bytes(4))
+    mid = mid[:-1] + (b'\x00' if kind == 'i' else b'\x01')
+    return ((_TAG if style == 'a' else _TAG[1:]) + len(full).to_bytes(2, 'big') + full + b'\x00' + bytes([len(tb)])
+            + tb + mid + ns.to_bytes(2, 'big') + len(idb).to_bytes(2, 'big') + idb + (bytes(4) if style == 'a' else b''))
 
 
 def _tag_insert(pay: bytes, tab: dict, entries: list) -> list:
@@ -150,17 +151,20 @@ def add_tags(p: Project, tags: list) -> list:
     have = {e['name']: e for e in tab['entries']}
     types = sorted({e['type'] for e in user})
     ns0 = user[0]['ns']
+    numeric = sum(1 for e in user if e.get('numeric')) * 2 > len(user)
     raw, added = [], []
     for t in tags:
         if not isinstance(t, dict) or not str(t.get('name') or '').strip():
             raise ValueError('every tag needs a name and a type')
         name, typ = str(t['name']).strip(), str(t.get('type') or '').strip().upper()
-        node = str(t.get('node') or f'ns:{ns0};s:{name}').strip()
+        # a project whose tags carry numbers (the Schneider M241 / M251 server) gets the number of the new tag
+        # worked out from its name; with string identifiers the name is the identifier
+        node = str(t.get('node') or (f'ns:{ns0};i:{m241_node_id(name)}' if numeric else f'ns:{ns0};s:{name}')).strip()
         m = _NODE.match(node)
-        if not m:
-            raise ValueError(f'tag {name}: node must look like ns:2;s:GVL.X, not {node!r}')
-        ns, ident = int(m.group(1)), m.group(2)
-        node = f'ns:{ns};s:{ident}'
+        if not m or (m.group(2) == 'i' and not m.group(3).isdigit()):
+            raise ValueError(f'tag {name}: node must look like ns:2;s:GVL.X or ns:2;i:123, not {node!r}')
+        ns, kind, ident = int(m.group(1)), m.group(2), m.group(3)
+        node = f'ns:{ns};{kind}:{ident}'
         if name in have:
             if have[name]['type'] != typ or have[name]['node'] != node:
                 raise ValueError(f'tag {name} is already in the table as {have[name]["type"]} {have[name]["node"]}')
@@ -168,7 +172,7 @@ def add_tags(p: Project, tags: list) -> list:
         if typ not in types:
             raise ValueError(f'tag {name}: type {typ or "?"} is not used in this project yet (there are: '
                              f'{", ".join(types)}); add one such tag in EasyBuilder first')
-        raw.append(_tag_bytes(name, typ, ns, ident, user[0]['mid']))
+        raw.append(_tag_bytes(name, typ, ns, ident, user[0]['mid'], tab['style'], kind))
         have[name] = {'type': typ, 'node': node}
         added.append(name)
     if not raw:
@@ -610,7 +614,7 @@ def import_window(p: Project, donor, src, number=None, name=None, tags=None, win
     before = _numbers(p)
 
     def run():
-        p._insert(info, [(at, 4, data, dw['declared'])], g.extra())
+        p._insert(info, [(at, 4, data, map_slots(dw))], g.extra())
         nums = _numbers(p)
         if nums.get(guid.hex()) != number or any(nums.get(k) != v for k, v in before.items()):
             raise ValueError(f'window number {number} cannot be placed reliably; take {prev["number"] + 1}')
@@ -620,8 +624,9 @@ def import_window(p: Project, donor, src, number=None, name=None, tags=None, win
 
 
 def import_objects(p: Project, donor, src, objects, to, dx=0, dy=0, tags=None, windows=None, devices=None,
-                   linked=None) -> dict:
-    """Take objects (indexes) of donor window `src` to the end of the project's window `to`, shifted by dx, dy.
+                   linked=None, layer=None) -> dict:
+    """Take objects (indexes) of donor window `src` to the end of the project's window `to` (of its layer `layer`,
+    name or number; the last one by default), shifted by dx, dy.
     Returns {first: index of the first copy, count, notes, pending}."""
     d = open_donor(donor, p)
     dw = d.window(src)
@@ -642,17 +647,16 @@ def import_objects(p: Project, donor, src, objects, to, dx=0, dy=0, tags=None, w
     pay, ws = p.payload, p.windows()
     tw = p.window(to)
     _whole(tw, 'inserting into it')
-    at, first = insert_point(tw)
+    at, first, lay = insert_point(tw, layer)
     info = _map_info(pay, ws)
     g = Graft(p, d, info, tags, windows, devices, linked)
     rec = b''.join(g.graft(o['offset'], o['offset'] + o['length'], [o], (int(dx or 0), int(dy or 0)),
                            where=f'window {tw["number"]}', slots=[first + j]) for j, o in enumerate(objs))
-    cnt = tw['_first'] - 4
+    cnt = count_edit(tw, len(objs), lay)
     before = _numbers(p)
 
     def run():
-        p._insert(info, [(at, 0, rec, len(objs))],
-                  [(cnt, cnt + 4, struct.pack('<I', tw['declared'] + len(objs)))] + g.extra())
+        p._insert(info, [(at, 0, rec, len(objs))], [cnt] + g.extra())
         if _numbers(p) != before:
             raise ValueError('window numbers moved after the insert; the project is left unchanged')
         g.verify()
@@ -786,6 +790,17 @@ def check(p: Project, window=None) -> list:
     window), duplicate_name, not_parsed (objects not recognised)."""
     pay, ws = p.payload, p.windows()
     out = []
+    # how wide a font really is: EasyBuilder itself fits the frame of a Text object to its text, so the frames of
+    # the project's own texts give the width of each font (a narrow one, like GOST Type, is not flagged for nothing)
+    seen = {}
+    for w in ws:
+        for o in w['objects']:
+            if o['kind'] == 'Text' and o['bbox'] and len(o['_lab']) == 1 and o['_lab'][0][0].strip():
+                text, font, size = o['_lab'][0]
+                em = max(_text_em(line) for line in text.splitlines() or [text]) * size
+                if em > 0 and len(text) >= 4:
+                    seen.setdefault(font, []).append((o['bbox'][2] - o['bbox'][0] + 1) / em)
+    factor = {f: sorted(v)[len(v) // 2] for f, v in seen.items() if len(v) >= 5}
 
     def add(level, w, o, code, text):
         out.append({'level': level, 'window': w['number'] if w else None, 'object': o, 'code': code, 'text': text})
@@ -817,14 +832,14 @@ def check(p: Project, window=None) -> list:
             if o['kind'] == 'Window' or not o['bbox']:
                 continue
             l, t, r, b = o['bbox']
-            if user and (r >= w['width'] + 1 or b >= w['height'] + 1):
+            if user and (r >= w['width'] + 4 or b >= w['height'] + 4):      # a frame drawn 1–3 px over the edge is usual
                 add('warning', w, o['index'], 'outside', f'{o["kind"]} {o["bbox"]} goes beyond the window '
                     f'{w["width"]}×{w["height"]} — not seen on the panel' + (' at all' if l >= w['width'] or
                                                                               t >= w['height'] else ' in full'))
             for (at, x, y), (text, font, size) in zip(o['_label_pos'], o['_lab']) if user else ():
                 if not text:
                     continue
-                width = max(_text_em(line) for line in text.splitlines() or [text]) * size * 1.35
+                width = max(_text_em(line) for line in text.splitlines() or [text]) * size * factor.get(font, 1.35)
                 if width > (r - l + 1) * 1.12 + 6:
                     add('warning', w, o['index'], 'text_fit', f'«{text[:40]}» needs about {round(width)} px, '
                         f'the object is {r - l + 1} px wide')

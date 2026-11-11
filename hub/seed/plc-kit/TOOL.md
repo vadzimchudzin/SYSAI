@@ -2,10 +2,10 @@
 name: plc-kit
 kind: mcp
 description: Читает, проверяет и собирает программу ПЛК Schneider Machine Expert / CODESYS на языке ST без Machine Expert — программы, блоки, переменные, адреса Modbus, теги для панели (Modbus и OPC UA), стиль проекта, PLCopen XML; решает связь панели и контроллера по моделям из ТЗ и ведёт этапы проекта «под ключ».
-version: 1.1.0
+version: 1.2.0
 run: python server.py
 platform: any
-tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_check, plc_style, plc_link, plc_stage_update, plc_export_st, plc_build
+tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_tag_check, plc_check, plc_style, plc_link, plc_stage_update, plc_export_st, plc_build
 requires: python>=3.11
 ---
 # ПЛК: Machine Expert / CODESYS, язык ST
@@ -56,6 +56,7 @@ PLCopen XML проходит проверку по схеме TC6 2.01.
 | `plc_variables` | таблица переменных: имя, тип, адрес, комментарий, группа, регистр и бит Modbus |
 | `plc_addresses` | занятые диапазоны, первое свободное место, пересечения адресов |
 | `plc_hmi_tags` | переменные панели: Modbus — с адресом в записи Weintek; OPC UA — имена `GVL.Имя` и готовый `add_tags`; CSV |
+| `plc_tag_check` | теги панели против программы: каких переменных нет, у каких другой тип или не тот номер узла |
 | `plc_link` | связь по моделям контроллера и панели или по тексту ТЗ: OPC UA / Modbus TCP / RTU, разрешение панели, что спросить |
 | `plc_stage_update` | этапы проекта в `pipeline.json`: materials, decisions, plc, build, hmi, docs; решения (`facts`) |
 | `plc_check` | ошибки, видные по тексту до компиляции |
@@ -87,6 +88,14 @@ PLCopen XML проходит проверку по схеме TC6 2.01.
   нужны. В `project.json`: `"link": {"kind": "opcua", "lists": ["GVL"]}`; в начале списка — строка
   `{attribute 'symbol' := 'readwrite'}` (без неё `plc_check` предупредит). `plc_hmi_tags` даёт теги `GVL.Имя` простых
   типов; экземпляры блоков и структуры в теги не идут.
+- Контроллеры **M241 / M251** называют переменные на своём сервере OPC UA номерами: `ns=2;i=N`, где N — CRC-32
+  имени «Список.Переменная» без последней инверсии (сверено на 582 тегах настоящего проекта панели). `plc_hmi_tags`
+  даёт этот номер в поле `node_m241`; `cmtp_edit` `add_tags` (ebpro-cmtp) считает его сам, когда в таблице панели
+  теги с номерами. Типы для панели — в `add_tags`: WORD → UINT, DWORD → UDINT, BYTE → USINT.
+- **Сверка экранов с программой:** `plc_tag_check` `{path, tags}` — `tags` из `cmtp_tags` (или имена, взятые из
+  `cmtp_objects`): `missing` — тег есть на экране, а переменной в программе нет (на панели объект работать не
+  будет); `type` — тип другой; `node` — номер узла не тот, что у этого имени; `not_plain` — это блок или структура.
+  На готовом проекте заказчика сверка нашла 3 таких тега из 475.
 - Панель без OPC UA (Weintek iE / iP / XE / eMT) или так просит ТЗ → **Modbus TCP**: `"link": {"kind": "modbus_tcp"}`,
   адреса `%M`. Нет Ethernet у одного из устройств → **Modbus RTU**.
 - Модель не из таблицы инструмента или ТЗ противоречит возможностям — `link` пустой, в `ask` вопросы инженеру.

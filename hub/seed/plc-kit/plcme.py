@@ -12,6 +12,7 @@ project (how it is built: classes of mechanisms, their instances, names, ranges 
 import collections
 import os
 import re
+import zlib
 import xml.etree.ElementTree as ET
 
 import plcst
@@ -329,6 +330,44 @@ class Project:
         want = [str(n).lower() for n in (self.link.get('lists') or [])]
         return [g for g in self.gvls if not want or g['name'].lower() in want]
 
+    def numeric_nodes(self) -> bool:
+        """The OPC UA server of a Schneider M241 / M251 names variables by numbers (ns=2;i=N), not by strings."""
+        return bool(re.search(r'T?M2[45]1', str(getattr(self, 'controller', '') or ''), re.I))
+
+    def tag_check(self, tags: list) -> dict:
+        """Panel tags against the program: [{name, type?, node?}] or names. Returns {'ok', 'missing' (no such
+        variable), 'type' (another type in the program), 'node' (the number of the node is not the one the
+        controller gives this name), 'unused' (variables of the program no tag points to — count only)}."""
+        have = {t['name'].lower(): t for t in self.hmi_tags('opcua')}
+        every = {f"{g['name']}.{v['name']}".lower(): v for g in self.gvls
+                 for v in plcst.parse_declaration(g['declaration'])['vars']}
+        out = {'ok': 0, 'missing': [], 'type': [], 'node': [], 'not_plain': []}
+        seen = set()
+        for t in tags:
+            t = {'name': t} if isinstance(t, str) else t
+            name = str(t.get('name') or '').strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            if key not in have:
+                if key in every:
+                    out['not_plain'].append({'name': name, 'type': every[key]['type']})
+                else:
+                    out['missing'].append(name)
+                continue
+            v, bad = have[key], False
+            if t.get('type') and panel_type(str(t['type'])) != panel_type(v['type']):
+                out['type'].append({'name': name, 'panel': str(t['type']).upper(), 'plc': v['type']})
+                bad = True
+            m = re.match(r'ns[:=]\d+;i[:=](\d+)$', str(t.get('node') or ''))
+            if m and int(m.group(1)) != m241_node_id(v['name']):
+                out['node'].append({'name': name, 'panel': int(m.group(1)), 'plc': m241_node_id(v['name'])})
+                bad = True
+            out['ok'] += not bad
+        out['unused'] = len(set(have) - seen)
+        return out
+
     def hmi_tags(self, link: str = '') -> list:
         """The variables a panel can reach, ready for the HMI.
 
@@ -349,8 +388,9 @@ class Project:
                     kind = ('bit' if base == 'BOOL' else 'real' if base in ('REAL', 'LREAL') else 'string' if 'STRING' in base
                             else 'dword' if plcst.BITS.get(base, 16) >= 32 else 'word')
                     name = f"{g['name']}.{v['name']}"
-                    out.append({'name': name, 'scope': g['name'], 'type': base, 'comment': v['comment'] or '',
-                                'group': v['group'] or '', 'node': f's:{name}', 'kind': kind})
+                    out.append({'name': name, 'scope': g['name'], 'type': base, 'panel_type': panel_type(base),
+                                'comment': v['comment'] or '', 'group': v['group'] or '', 'node': f's:{name}',
+                                'node_m241': f'ns:2;i:{m241_node_id(name)}', 'kind': kind})
             return out
         out = []
         for v in self.addresses()['variables']:
@@ -512,6 +552,21 @@ class Project:
             'addresses': {k: v for k, v in self.addresses().items() if k in ('ranges', 'free', 'bit_numbering')},
             'address_conflicts': len(self.addresses()['conflicts']),
         }
+
+
+_PANEL_TYPES = {'BYTE': 'USINT', 'WORD': 'UINT', 'DWORD': 'UDINT', 'LWORD': 'ULINT'}
+
+
+def panel_type(plc_type: str) -> str:
+    """The type a panel shows for a variable over OPC UA: bit strings come as unsigned numbers (WORD — UINT)."""
+    t = str(plc_type or '').strip().upper()
+    return _PANEL_TYPES.get(t, t)
+
+
+def m241_node_id(name: str) -> int:
+    """The number the OPC UA server of a Schneider M241 / M251 gives a variable (ns=2;i=N): CRC-32 of
+    «List.Variable» without the final inversion. Checked on the 582 tags of a real panel project."""
+    return zlib.crc32(name.encode('ascii', 'replace')) ^ 0xFFFFFFFF
 
 
 def _role(pou: dict, inst_called: int) -> str:

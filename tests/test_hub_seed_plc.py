@@ -22,7 +22,7 @@ import plcproj  # noqa: E402
 import plcst  # noqa: E402
 import plcstage  # noqa: E402
 
-TOOLS = ["plc_info", "plc_pous", "plc_pou", "plc_variables", "plc_addresses", "plc_hmi_tags", "plc_check", "plc_style",
+TOOLS = ["plc_info", "plc_pous", "plc_pou", "plc_variables", "plc_addresses", "plc_hmi_tags", "plc_tag_check", "plc_check", "plc_style",
          "plc_link", "plc_stage_update", "plc_export_st", "plc_build"]
 
 GVL = """VAR_GLOBAL
@@ -324,7 +324,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.1.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.2.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3
@@ -449,6 +449,17 @@ def test_opcua_tags_checks_and_stages(tmp_path):
         ("GVL.Start_1", "BOOL", "bit", "s:GVL.Start_1"), ("GVL.Speed_1", "REAL", "real", "s:GVL.Speed_1"),
         ("GVL.Hours_1", "UDINT", "dword", "s:GVL.Hours_1")]
     assert [i for i in p.check() if i["level"] != "info"] == []
+    # the number the M241 / M251 server gives a variable, and the panel's tags against the program
+    assert plcme.m241_node_id("VariableList.HMI_Err_DP_22_1") == 932174207
+    assert p.numeric_nodes() and p.hmi_tags()[0]["node_m241"] == f"ns:2;i:{plcme.m241_node_id('GVL.Start_1')}"
+    assert plcme.panel_type("WORD") == "UINT" and plcme.panel_type("bool") == "BOOL"
+    r = p.tag_check([{"name": "GVL.Start_1", "type": "BOOL", "node": f"ns:2;i:{plcme.m241_node_id('GVL.Start_1')}"},
+                     {"name": "GVL.Speed_1", "type": "INT"}, {"name": "GVL.Hours_1", "type": "UDINT", "node": "ns:2;i:5"},
+                     "GVL.Stop_9", "GVL.Noria_1", "gvl.start_1"])
+    assert r["ok"] == 1 and r["missing"] == ["GVL.Stop_9"] and r["unused"] == 0
+    assert r["type"] == [{"name": "GVL.Speed_1", "panel": "INT", "plc": "REAL"}]
+    assert r["node"] == [{"name": "GVL.Hours_1", "panel": 5, "plc": plcme.m241_node_id("GVL.Hours_1")}]
+    assert r["not_plain"] == [{"name": "GVL.Noria_1", "type": "Noria"}]
     (src / "GVL.st").write_text("VAR_GLOBAL\n\tStart_1: BOOL;\n\tNoria_1: Noria;\nEND_VAR\n", encoding="utf-8")
     meta["link"]["lists"] = ["GVL", "Nope"]
     (src / "project.json").write_text(json.dumps(meta), encoding="utf-8")

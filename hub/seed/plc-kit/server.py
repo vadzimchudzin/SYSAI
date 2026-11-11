@@ -17,7 +17,7 @@ import plcproj  # noqa: E402
 import plcstage  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 PATH = {"type": "string", "description": r"Проект ПЛК: файл .export или PLCopen .xml из Machine Expert, либо папка с "
                                          r"файлами .st (plc_export_st), например C:\Projects\line\plc"}
 INSTRUCTIONS = (
@@ -74,6 +74,13 @@ TOOLS = [
         {"path": PATH, "filter": {"type": "string"},
          "link": {"type": "string", "enum": ["modbus", "opcua"], "description": "Связь; по умолчанию — из project.json, иначе Modbus"},
          "out_file": {"type": "string", "description": r"Куда записать CSV (в разрешённой на запись папке)"}}),
+    _ro("plc_tag_check", "Теги панели против программы",
+        "Сверить теги панели с программой ПЛК (связь OPC UA): каких переменных в программе нет (missing), у каких другой "
+        "тип (type), у каких номер node не тот, что даёт контроллер M241 / M251 этому имени (node), какие не простого "
+        "типа (not_plain). tags — имена или записи {name, type, node} (ответ cmtp_tags инструмента ebpro-cmtp); "
+        "tags_file — файл JSON с ними. Перед сдачей экранов список missing должен быть пуст.",
+        {"path": PATH, "tags": {"type": "array", "items": {"type": ["string", "object"]}},
+         "tags_file": {"type": "string", "description": "Файл JSON: список тегов или {tags: [...]}"}}),
     _ro("plc_check", "Проверка",
         "Что видно по тексту до компиляции: незакрытые IF/CASE/FOR, скобки, присваивание без «;», имена, которых нет ни в "
         "POU, ни в GVL, повторные объявления, неизвестные типы, пересечения адресов, задачи, вызывающие несуществующие "
@@ -249,11 +256,27 @@ def _call(name, args):
             if link == "opcua":
                 return _text(_json({"count": len(rows), "link": "opcua",
                                     "note": "теги OPC UA: имя «Список.Переменная», node — s:имя (ns возьмёт таблица панели); "
-                                            "add_tags — готовая правка для cmtp_edit." + note,
-                                    "add_tags": [{"name": t["name"], "type": t["type"]} for t in rows[:3000]],
+                                            "node_m241 — номер, которым ту же переменную называет сервер контроллера "
+                                            "M241 / M251 (ns:2;i:N, считается по имени): если в таблице панели теги "
+                                            "с номерами, cmtp_edit add_tags посчитает его сам. add_tags — готовая "
+                                            "правка для cmtp_edit." + note,
+                                    "add_tags": [{"name": t["name"], "type": t["panel_type"]} for t in rows[:3000]],
                                     "tags": rows[:3000]}))
             return _text(_json({"count": len(rows), "link": "modbus", "note": "регистры Modbus с нуля; у Weintek с единицы." + note,
                                 "tags": rows[:3000]}))
+        if name == "plc_tag_check":
+            tags = args.get("tags") or []
+            if args.get("tags_file"):
+                with open(args["tags_file"], encoding="utf-8-sig") as f:
+                    data = json.load(f)
+                tags = list(tags) + list(data.get("tags", data) if isinstance(data, dict) else data)
+            if not tags:
+                return _text("Нужны tags (имена или {name, type, node} из cmtp_tags) либо tags_file.", True)
+            r = p.tag_check(tags)
+            r["summary"] = (f"тегов панели: {r['ok'] + len(r['missing']) + len(r['type']) + len(r['node']) + len(r['not_plain'])}; "
+                            f"сходятся с программой: {r['ok']}; нет в программе: {len(r['missing'])}; другой тип: {len(r['type'])}; "
+                            f"не тот номер node: {len(r['node'])}; не простой тип: {len(r['not_plain'])}")
+            return _text(_json(r))
         if name == "plc_check":
             issues = p.check()
             levels = {k: sum(1 for i in issues if i["level"] == k) for k in ("error", "warning", "info")}

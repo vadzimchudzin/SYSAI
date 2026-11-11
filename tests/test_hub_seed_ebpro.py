@@ -514,7 +514,7 @@ def test_mcp_server_over_stdio(tmp_path):
 
     try:
         assert rpc(1, "initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"] == {
-            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.5.3"}
+            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.6.0"}
         assert [t["name"] for t in rpc(2, "tools/list")["result"]["tools"]] == TOOLS
         err, text = call(3, "cmtp_info", path=str(src))
         info = json.loads(text)

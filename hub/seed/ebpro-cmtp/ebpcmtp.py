@@ -407,18 +407,23 @@ class Project:
             raise ValueError(f'no free slot for window number {number}')
         info = _map_info(pay, ws)
         rec = _clone_bytes(pay, w['offset'], w['_rec_end'], info)
-        body = bytearray(rec[_cstr_at(rec, 0)[1]:])
+        head = _cstr_at(rec, 0)[1]
+        body = bytearray(rec[head:])
         body[24:40] = uuid.uuid4().bytes
+        for lay in w['_layers'][1:]:        # every layer of the copy gets its own GUID
+            k = lay['_at'] + 2 - w['offset'] - head
+            body[k:k + 16] = uuid.uuid4().bytes
         data = _SLOT + cstring(w['name'] if name is None else name) + bytes(body)
-        self._insert(info, [(at, 4, data, w['declared'])])
+        self._insert(info, [(at, 4, data, map_slots(w))])
         if not any(x['number'] == number and x['guid'] == body[24:40].hex() for x in self.windows()):
             self.payload = pay      # the empty slots before it cannot be told from the end of the window before
             raise ValueError(f'window number {number} cannot be placed reliably; take {prev["number"] + 1}')
         return number
 
-    def clone_object(self, window, index: int, to=None, dx: int = 0, dy: int = 0) -> int:
-        """Copy one object (tags, texts, look) to the end of the object list of the
-        same window or of window `to`, shifted by dx, dy. Returns the copy's index."""
+    def clone_object(self, window, index: int, to=None, dx: int = 0, dy: int = 0, layer=None) -> int:
+        """Copy one object (tags, texts, look) into the same window or window `to`, shifted by dx, dy: to the end
+        of layer `layer` (name or number from 0); by default the layer named as the layer of the original, else
+        the last one. Returns the copy's index."""
         pay, ws = self.payload, self.windows()
         w, (o,) = self._objects(window, index)
         if o['kind'] == 'Window':
@@ -430,7 +435,10 @@ class Project:
         if o is w['objects'][-1] and not w.get('_end_sure'):
             raise ValueError(f'window {w["name"]!r}: where its record ends is not known, copying its last object '
                              f'is not safe')
-        ins, pos = insert_point(d)
+        if layer is None:
+            name = w['_layers'][layer_of(w, o['index'])]['name']
+            layer = next((k for k, x in enumerate(d['_layers']) if x['name'] == name), None)
+        ins, pos, lay = insert_point(d, layer)
         info = _map_info(pay, ws)
         s, e = o['offset'], o['offset'] + o['length']
         rec = bytearray(_clone_bytes(pay, s, e, info))
@@ -446,9 +454,7 @@ class Project:
             for at, x, y in o['_label_pos']:
                 if l - 5 <= x <= r + 5 and t - 5 <= y <= b + 5:
                     struct.pack_into('<ii', rec, at - s - cut, x + dx, y + dy)
-        cnt = d['_first'] - 4
-        self._insert(info, [(ins, 0, bytes(rec), 1)],
-                     [(cnt, cnt + 4, struct.pack('<I', d['declared'] + 1))])
+        self._insert(info, [(ins, 0, bytes(rec), 1)], [count_edit(d, 1, lay)])
         return pos
 
     def _insert(self, info, inserts, extra=()) -> None:
@@ -579,10 +585,21 @@ _TAG = b'\x00\x03TAG'
 _FULL = re.compile(rb'^(.+?) \((ns[:=]\d+;.+?)\)(?:\((.*)\))?$', re.S)
 
 
-def _tag_entry(pay: bytes, i: int):
-    """The tag table entry at i as a dict (start, end, name, type, node, ns, id), None if it is not one."""
-    p = i + 5
-    if pay[i:p] != _TAG or p + 2 > len(pay):
+def _tag_entry(pay: bytes, i: int, style: str = 'a'):
+    """The tag table entry at i as a dict (start, end, name, type, node, ns, id), None if it is not one.
+
+    Two layouts: 'a' (6.10.02) — 00 03 'TAG' … identifier, u32 0; 'b' (6.10.01, a real cMT project) — 03 'TAG' …
+    identifier, nothing after it. The byte before the namespace says what the identifier is: 1 — a string
+    (ns:2;s:GVL.X), 0 — a number (ns:2;i:932174207, the Schneider M241 / M251 server)."""
+    if style == 'a':
+        p = i + 5
+        if pay[i:p] != _TAG:
+            return None
+    else:
+        p = i + 4
+        if pay[i:p] != _TAG[1:]:
+            return None
+    if p + 2 > len(pay):
         return None
     n = int.from_bytes(pay[p:p + 2], 'big')
     full = pay[p + 2:p + 2 + n]
@@ -595,55 +612,68 @@ def _tag_entry(pay: bytes, i: int):
     tl = pay[p]
     typ = pay[p + 1:p + 1 + tl]
     p += 1 + tl + 16
-    if not 0 < tl < 40 or p + 4 > len(pay) or pay[p - 1] != 1:
+    if not 0 < tl < 40 or p + 4 > len(pay) or pay[p - 1] > 1:
         return None
     mid = bytes(pay[p - 16:p])
     ns = int.from_bytes(pay[p:p + 2], 'big')
     il = int.from_bytes(pay[p + 2:p + 4], 'big')
     ident = pay[p + 4:p + 4 + il]
-    p += 4 + il + 4
+    p += 4 + il + (4 if style == 'a' else 0)
     m = _FULL.match(full)
     if not m or p > len(pay):
         return None
     try:
         return {'start': i, 'end': p, 'name': m.group(1).decode('utf-8'), 'type': typ.decode('ascii'),
-                'node': m.group(2).decode('utf-8'), 'ns': ns, 'id': ident.decode('utf-8'), 'mid': mid}
+                'node': m.group(2).decode('utf-8'), 'ns': ns, 'id': ident.decode('utf-8'), 'mid': mid,
+                'style': style, 'numeric': mid[-1] == 0}
     except UnicodeDecodeError:
         return None
 
 
+def _tag_chain(pay: bytes, i: int, style: str) -> list:
+    entries = []
+    while True:
+        e = _tag_entry(pay, i, style)
+        if e is None:
+            return entries
+        entries.append(e)
+        i = e['end']
+
+
 def opcua_table(pay: bytes):
-    """{'count_at', 'count', 'entries': [...], 'end'} of the OPC UA tag table, None if there is none or it does
-    not hold together (count, entries one after another)."""
+    """{'count_at', 'count', 'entries': [...], 'end', 'style'} of the OPC UA tag table, None if there is none or it
+    does not hold together (count, entries one after another)."""
     i = pay.find(_TAG)
     if i == -1:
         return None
-    entries = []
-    while True:
-        e = _tag_entry(pay, i)
-        if e is None:
-            break
-        entries.append(e)
-        i = e['end']
+    a, b = _tag_chain(pay, i, 'a'), _tag_chain(pay, i + 1, 'b')
+    entries = b if len(b) > len(a) else a
     if not entries:
         return None
     first = entries[0]['start']
     for back in range(4, 400):
         if first - back >= 0 and struct.unpack_from('<I', pay, first - back)[0] == len(entries):
-            return {'count_at': first - back, 'count': len(entries), 'entries': entries, 'end': entries[-1]['end']}
+            return {'count_at': first - back, 'count': len(entries), 'entries': entries, 'end': entries[-1]['end'],
+                    'style': entries[0]['style']}
     return None
+
+
+def m241_node_id(name: str) -> int:
+    """The numeric OPC UA identifier the Schneider M241 / M251 server gives a variable: CRC-32 of «List.Variable»
+    without the final inversion (checked on all 587 tags of a real project: ns=2;i=<this>)."""
+    return zlib.crc32(name.encode('ascii')) ^ 0xFFFFFFFF
 
 
 def parse_opcua_tags(pay: bytes) -> list:
     tab = opcua_table(pay)
     if tab is not None:
         return [{'name': e['name'], 'type': e['type'], 'node': e['node']} for e in tab['entries']]
-    out, i = [], pay.find(_TAG)     # not one table: every entry that reads
+    out, i = [], pay.find(_TAG[1:])     # not one table: every entry that reads
     while i != -1:
-        e = _tag_entry(pay, i)
+        e = (i and _tag_entry(pay, i - 1)) or _tag_entry(pay, i, 'b')
         if e:
             out.append({'name': e['name'], 'type': e['type'], 'node': e['node']})
-        i = pay.find(_TAG, i + 5)
+        i = pay.find(_TAG[1:], i + 4)
     return out
 
 
@@ -682,20 +712,98 @@ def _window_header(pay: bytes, e: int):
     w, h = struct.unpack_from('<II', pay, e)
     if not (16 <= w <= 8000 and 16 <= h <= 8000):
         return None
-    if pay[e + 8:e + 18] != bytes(10) or pay[e + 18:e + 24] != b'\x01\x00\x00\x00\x00\x00':
+    # after the size: 10 x 00, u32 (1 in the windows EasyBuilder makes itself; 3 and 4 in the windows of a real cMT
+    # project of 6.10.01), u16 (0 or 2 there). The GUID and the layer name tell a window from look-alike data.
+    kind, sub = struct.unpack_from('<IH', pay, e + 18)
+    if pay[e + 8:e + 18] != bytes(10) or not 1 <= kind <= 8 or sub > 8:
         return None
     ln = struct.unpack_from('<H', pay, e + 40)[0]
-    if ln > 64 or e + 46 + ln > len(pay):
+    if not 0 < ln <= 64 or e + 46 + ln > len(pay) or not any(pay[e + 24:e + 40]):
         return None
     try:
         layer = pay[e + 42:e + 42 + ln].decode('utf-8')
     except UnicodeDecodeError:
         return None
+    if not layer.isprintable():
+        return None
     count = struct.unpack_from('<I', pay, e + 42 + ln)[0]
     if count > 100000:
         return None
     return {'width': w, 'height': h, 'guid': pay[e + 24:e + 40].hex(), 'layer': layer, 'declared': count,
-            '_first': e + 46 + ln}
+            '_first': e + 46 + ln, '_nlayers': kind,
+            '_layers': [{'name': layer, 'guid': pay[e + 24:e + 40].hex(), 'flag': sub, 'count': count,
+                         '_at': e + 22, '_count_at': e + 42 + ln}]}
+
+
+def _layer_header(pay: bytes, h: int, floor: int):
+    """The layer header that ends at h (where the objects of the layer start): u16 flag, 16-byte GUID, u16 length +
+    name (UTF-8), u32 object count. None if the bytes before h are not one."""
+    if h - 4 < floor:
+        return None
+    count = struct.unpack_from('<I', pay, h - 4)[0]
+    if count > 100000:
+        return None
+    for ln in range(1, 65):
+        at = h - 4 - ln - 2
+        if at - 18 < floor:
+            break
+        if struct.unpack_from('<H', pay, at)[0] != ln or not any(pay[at - 16:at]):
+            continue
+        try:
+            name = pay[at + 2:at + 2 + ln].decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if not name.isprintable() or struct.unpack_from('<H', pay, at - 18)[0] > 8:
+            continue
+        return {'name': name, 'guid': pay[at - 16:at].hex(), 'flag': struct.unpack_from('<H', pay, at - 18)[0],
+                'count': count, '_at': at - 18, '_count_at': h - 4}
+    return None
+
+
+def _split_layers(pay: bytes, w: dict, heads: list, a: int, z: int) -> dict:
+    """A window keeps its objects layer by layer (EasyBuilder 6.10: «Основной слой», «Текст», «Область касания»):
+    the header says how many layers, each layer is a header (_layer_header) and its objects. Fills w['_layers'] and
+    w['declared'] (objects of all layers); returns {head index: where the layer header before it starts} — the
+    object before it ends there."""
+    layers, cuts = w['_layers'], {}
+    pos = a + layers[0]['count']
+    while len(layers) < w['_nlayers'] and a <= pos < z:
+        chain, cur = [], heads[pos][0]
+        while len(layers) + len(chain) < w['_nlayers']:
+            lh = _layer_header(pay, cur, heads[pos - 1][0] if pos > a else w['_first'])
+            if lh is None:
+                break
+            chain.insert(0, lh)
+            cur = lh['_at']
+        if not chain or any(x['count'] for x in chain[:-1]):
+            break
+        cuts[pos] = chain[0]['_at']
+        layers += chain
+        pos += chain[-1]['count']
+    w['declared'] = sum(x['count'] for x in layers)
+    w['_layers_ok'] = len(layers) == w['_nlayers']
+    return cuts
+
+
+def map_slots(w: dict) -> int:
+    """How many numbers of the archive map the window takes: one per object (a layer takes none)."""
+    return w['declared']
+
+
+def layer_of(w: dict, index: int) -> int:
+    """Which layer of the window holds object `index`."""
+    n = 0
+    for k, lay in enumerate(w['_layers']):
+        n += lay['count']
+        if index < n:
+            return k
+    return len(w['_layers']) - 1
+
+
+def count_edit(w: dict, delta: int, layer: int = -1):
+    """The edit (start, end, bytes) that changes the object count of layer `layer` (the last one by default)."""
+    lay = w['_layers'][layer]
+    return lay['_count_at'], lay['_count_at'] + 4, struct.pack('<I', lay['count'] + delta)
 
 
 def _part_head(pay: bytes, p: int):
@@ -880,11 +988,16 @@ def parse_windows(pay: bytes) -> list:
         if i + 1 == len(wins) and z > a:    # the last window ends where the settings start (a long zero run)
             zr = re.compile(rb'\x00{256,}').search(pay, heads[z - 1][0])
             end = zr.start() if zr else end
+        cuts = _split_layers(pay, w, heads, a, z)
         objs = []
         for k in range(a, z):
             o, cls, typ, hl = heads[k]
-            oe = heads[k + 1][0] if k + 1 < z else end
+            oe = cuts.get(k + 1) or (heads[k + 1][0] if k + 1 < z else end)
             objs.append(_parse_object(pay, cs, starts, o, oe, cls, typ, hl, len(objs)))
+        if len(w['_layers']) > 1:
+            for ob in objs:
+                ob['layer'] = w['_layers'][layer_of(w, ob['index'])]['name']
+        w['layers'] = [{'name': x['name'], 'objects': x['count']} for x in w['_layers']]
         w['objects'] = objs
         w['_end'] = end
     _number_windows(pay, wins)
@@ -943,14 +1056,31 @@ def _number_windows(pay, wins) -> None:
         n += 1 + (gap if flag else 0)
 
 
-def insert_point(w: dict):
-    """(offset, index) where new objects go into window w: after its last object; when where its record ends is
-    not known — right before the last object (its start is known; the last object stays on top)."""
+def layer_index(w: dict, ref) -> int:
+    """A layer of the window by its name or number (from 0)."""
+    names = [x['name'] for x in w['_layers']]
+    if isinstance(ref, str) and ref in names:
+        return names.index(ref)
+    if isinstance(ref, int) or (isinstance(ref, str) and ref.strip().isdigit()):
+        if 0 <= int(ref) < len(names):
+            return int(ref)
+    raise ValueError(f'window {w["name"]!r} has no layer {ref!r}; its layers: {", ".join(names)}')
+
+
+def insert_point(w: dict, layer=None):
+    """(offset, index, layer number) where new objects go into window w: after the last object of the layer (the
+    last layer by default); when where the record ends is not known — right before the last object (its start is
+    known; the last object stays on top)."""
+    last = len(w['_layers']) - 1
+    if layer is not None:
+        k = layer_index(w, layer)
+        if k < last:       # the layer ends where the header of the next one starts
+            return w['_layers'][k + 1]['_at'], sum(x['count'] for x in w['_layers'][:k + 1]), k
     if w.get('_end_sure'):
-        return w['_rec_end'], len(w['objects'])
-    if len(w['objects']) < 2:
+        return w['_rec_end'], len(w['objects']), last
+    if len(w['objects']) < 2 or not w['_layers'][last]['count']:
         raise ValueError(f'window {w["name"]!r}: where its record ends is not known, inserting is not safe')
-    return w['objects'][-1]['offset'], len(w['objects']) - 1
+    return w['objects'][-1]['offset'], len(w['objects']) - 1, last
 
 
 def public(d: dict) -> dict:
@@ -1242,6 +1372,58 @@ def _look(pay: bytes, o: dict, w: dict, groups: dict) -> dict:
 # classes of the settings after the windows (CTagObject, CDataLog, CMail*...) -- the 16-bit values
 # of their number range among plain data (exactly the 1464 references EasyBuilder 6.10 rewrote when
 # copying a window). The computed number of the first settings class must be the most used value.
+def _array_refs(pay: bytes, d: int, e: int, tb: bytes, wend: int):
+    """References to a class whose objects are kept in arrays (the points of a polyline, the characters of a
+    keypad key): u16 count, then count records of one size, each starting with the class (its definition the very
+    first time, the 2-byte reference afterwards). Returns their offsets, None when the class is not kept so.
+
+    The record size is read from the array that holds the definition; an array is taken only when every one of its
+    records carries the reference, so bytes that merely look like it (a colour, a coordinate) are not counted."""
+    n0 = struct.unpack_from('<H', pay, d - 2)[0] if d >= 2 else 0
+    k = pay.find(tb, e)
+    if not 2 <= n0 <= 4096 or k == -1 or k - e > 64:
+        return None
+    fixed = k - e                                   # the data of one record, after its class
+
+    def by_size(at):
+        return at + fixed
+
+    def by_length(at):                              # u32 count + that many bytes (the characters of a key)
+        n = struct.unpack_from('<I', pay, at)[0] if at + 4 <= len(pay) else 1 << 30
+        return at + 4 + n if n <= 64 else None
+
+    def chain(at, n, end_of):
+        """Offsets of n records from `at`, each starting with the reference; None if they are not there."""
+        out = []
+        for _ in range(n):
+            if pay[at:at + 2] != tb:
+                return None
+            out.append(at)
+            at = end_of(at + 2)
+            if at is None:
+                return None
+        return out
+
+    best = None
+    for end_of in (by_size, by_length):
+        first = end_of(e)
+        refs = chain(first, n0 - 1, end_of) if first is not None else None
+        if refs is None:
+            continue
+        k = pay.find(tb, refs[-1] + 2)
+        while k != -1 and k < wend:
+            n = struct.unpack_from('<H', pay, k - 2)[0]
+            got = chain(k, n, end_of) if 1 <= n <= 4096 else None
+            if got:
+                refs += got
+                k = pay.find(tb, end_of(got[-1] + 2))
+            else:
+                k = pay.find(tb, k + 1)
+        if best is None or len(refs) > len(best):
+            best = refs
+    return best
+
+
 def _nested_classes(pay: bytes, wins: list, defs: list, wend: int) -> list:
     """Classes defined between the windows (CCharDouble, CTrendLimit...): [{name, def, tag, refs}]."""
     imgs = _image_spans(pay)
@@ -1255,7 +1437,7 @@ def _nested_classes(pay: bytes, wins: list, defs: list, wend: int) -> list:
         n = 0
         for w in wins:
             if w['_rec_end'] <= pos:
-                n += w['declared']
+                n += map_slots(w)
                 continue
             if w['_first'] <= pos:
                 n += sum(1 for o in w['objects'] if o['offset'] < pos)
@@ -1270,12 +1452,14 @@ def _nested_classes(pay: bytes, wins: list, defs: list, wend: int) -> list:
             continue
         idx = 1 + sum(1 for x in defs if x[0] < d) + objects_before(d) + \
             sum(1 + sum(1 for k in c['refs'] if k < d) for c in nested)
-        tb, refs = struct.pack('<H', 0x8000 | idx), []
-        k = pay.find(tb, e)
-        while k != -1:
-            if _plain_ref(pay, k) and not in_image(k):
-                refs.append(k)
-            k = pay.find(tb, k + 1)
+        tb = struct.pack('<H', 0x8000 | idx)
+        refs = _array_refs(pay, d, e, tb, wend)
+        if refs is None:        # not an array of equal records: the search by the look of the bytes around
+            refs, k = [], pay.find(tb, e)
+            while k != -1:
+                if _plain_ref(pay, k) and not in_image(k):
+                    refs.append(k)
+                k = pay.find(tb, k + 1)
         nested.append({'name': name, 'def': d, 'tag': 0x8000 | idx, 'refs': refs})
     return nested
 
@@ -1295,7 +1479,7 @@ def _map_info(pay: bytes, wins: list) -> dict:
     if not tail:
         raise ValueError('the settings after the windows were not found')
     nested = _nested_classes(pay, wins, defs, wend)
-    first = 0x8000 | (1 + sum(1 for x in defs if x[0] < tail[0][0]) + sum(w['declared'] for w in wins)
+    first = 0x8000 | (1 + sum(1 for x in defs if x[0] < tail[0][0]) + sum(map_slots(w) for w in wins)
                       + sum(1 + len(c['refs']) for c in nested))
 
     def most_used(start, span, lo, hi, prefer=None):
