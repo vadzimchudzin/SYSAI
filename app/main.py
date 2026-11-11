@@ -3457,7 +3457,7 @@ def telegram_account_logout(request: Request):
 
 # ----------------------------------------------------------------------------- employees
 EMPLOYEE_TABS = ("profile", "departments", "contacts", "voice")
-VOICE_STATUS_RU = {"ready": "признаки готовы", "pending": "ждёт сервиса признаков", "failed": "признаки не извлечены"}
+VOICE_STATUS_RU = {"ready": "признаки готовы", "pending": "признаки ещё не извлечены", "failed": "признаки не извлечены"}
 
 
 def _plural_ru(count: int, forms: tuple) -> str:

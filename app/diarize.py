@@ -181,6 +181,7 @@ def apply(segments: list, labels: list, details: dict | None = None) -> list:
     another person's speech is marked as cross-talk («overlap»)."""
     details = details or {}
     cuts, overlap = details.get("cuts") or {}, details.get("overlap") or set()
+    times = details.get("times") or {}
     ends = {row[0]: row[2] for row in _rows(segments, 0.0)} if cuts else {}
     out = []
     for index, (item, label) in enumerate(zip(segments, labels)):
@@ -192,14 +193,15 @@ def apply(segments: list, labels: list, details: dict | None = None) -> list:
             if index in overlap:
                 item["overlap"] = True
             if cuts.get(index):
-                out.extend(_pieces(item, cuts[index], ends.get(index, _number(item.get("start")))))
+                out.extend(_pieces(item, cuts[index], ends.get(index, _number(item.get("start"))), times.get(index)))
                 continue
         out.append(item)
     return out
 
 
-def _pieces(item: dict, cuts: list, end: float) -> list:
-    """One replica cut where other voices begin; each piece gets its share of the replica's time."""
+def _pieces(item: dict, cuts: list, end: float, stamps: list | None = None) -> list:
+    """One replica cut where other voices begin. A piece takes the time of its own words when the recognition engine
+    gave it (`stamps`: [start, end] of every word), otherwise its share of the replica's time by syllables."""
     text, start = str(item.get("text") or ""), _number(item.get("start"))
     end = max(start, end)
     points, current = [], item["speaker"]
@@ -209,16 +211,23 @@ def _pieces(item: dict, cuts: list, end: float) -> list:
             current = label
     if not points:
         return [item]
+    word_at = {at: k for k, (at, _) in enumerate(_words_of(text))} if stamps else {}
     pieces, begin, label, since = [], 0, item["speaker"], start
     for at, following in points + [(len(text), None)]:
-        until = end if following is None else round(moment(text, start, end, at), 2)
+        k = word_at.get(at)
+        if following is None:
+            until = after = end
+        elif k:   # exact: this piece ends with its last word, the next begins with its first
+            until, after = round(stamps[k - 1][1], 2), round(stamps[k][0], 2)
+        else:
+            until = after = round(moment(text, start, end, at), 2)
         piece = text[begin:at].strip()
         if piece:
-            part = dict(item, speaker=label, text=piece, start=round(since, 2), end=round(until, 2))
+            part = dict(item, speaker=label, text=piece, start=round(since, 2), end=round(max(until, since), 2))
             if pieces:
                 part.pop("overlap", None)
             pieces.append(part)
-        begin, label, since = at, following, until
+        begin, label, since = at, following, after
     return pieces
 
 
@@ -480,6 +489,8 @@ CUT_OTHER_SECONDS = 1.0      # …and the second voice speaks in it at least thi
 CUT_RUN_WORDS = 3            # a voice inside a replica is believed from this many words in a row…
 CUT_OWN_SHARE = 0.7          # …when it speaks over this share of their time…
 CUT_REST_SHARE = 0.2         # …and the voice next to it over no more than this share
+TIMED_OTHER_SECONDS = 0.8    # with the engine's own word times: the second voice speaks at least this long…
+TIMED_RUN_WORDS = 2          # …for this many words inside a replica (one long word is enough at its edge)
 OVERLAP_SHARE = 0.5          # two people at once over this share of a replica: cross-talk
 
 
@@ -535,22 +546,51 @@ class _Timeline:
         return best[1], best[0]
 
 
-def _voice_runs(item: dict, start: float, end: float, line: _Timeline, main, spoken: dict) -> list:
-    """[(character, person)] of the stretches of one voice inside a replica, by its words (their time is their
-    share of the syllables); a stretch shorter than CUT_RUN_WORDS words is not believed."""
+def _stamps(item: dict, times) -> list | None:
+    """The [start, end] of every word of a replica from the recognition engine, when there is one per word."""
+    count = len(_words_of(item.get("text")))
+    if not isinstance(times, list) or not count or len(times) != count:
+        return None
+    try:
+        return [(float(a), max(float(a), float(b))) for a, b in times]
+    except (TypeError, ValueError):
+        return None
+
+
+def _voice_runs(item: dict, start: float, end: float, line: _Timeline, main, spoken: dict, stamps=None) -> list:
+    """[(character, person)] of the stretches of one voice inside a replica, word by word.
+
+    With the word times of the recognition engine (`stamps`) every word takes the person who speaks over it, and a
+    stretch is believed from one word at the edge of a replica («да» glued to another person's phrase). Without
+    them a word's time is only its share of the syllables, so a stretch needs CUT_RUN_WORDS words and a second."""
     text = str(item.get("text") or "")
     words = _words_of(text)
-    if len(words) < CUT_MIN_WORDS or end - start < CUT_MIN_SECONDS:
+    timed = stamps is not None
+    if timed:
+        if len(words) < 2 or sorted(spoken.values(), reverse=True)[1:2] < [TIMED_OTHER_SECONDS]:
+            return []
+    elif len(words) < CUT_MIN_WORDS or end - start < CUT_MIN_SECONDS \
+            or sorted(spoken.values(), reverse=True)[1:2] < [CUT_OTHER_SECONDS]:
         return []
-    if sorted(spoken.values(), reverse=True)[1:2] < [CUT_OTHER_SECONDS]:
-        return []
+
+    def span(first_word: int, last: int) -> tuple:
+        """The time of the words [first_word, last) of the replica."""
+        if timed:
+            return stamps[first_word][0], stamps[last - 1][1]
+        return (moment(text, start, end, words[first_word][0]),
+                moment(text, start, end, words[last][0]) if last < len(words) else end)
+
     whose, current = [], None
-    for k, (at, _) in enumerate(words):
-        until = words[k + 1][0] if k + 1 < len(words) else len(text)
-        middle = (moment(text, start, end, at) + moment(text, start, end, until)) / 2
-        active = line.at(middle)
-        if current not in active and active:
-            current = main if main in active else max(active, key=lambda who: spoken.get(who, 0.0))
+    for k in range(len(words)):
+        a, b = span(k, k + 1)
+        if timed:
+            during = line.during(a - 0.02, b + 0.02)
+            if during and (current not in during or during[current] < 0.5 * max(during.values())):
+                current = max(during, key=during.get)   # the one who goes on speaking keeps a shared word
+        else:
+            active = line.at((a + b) / 2)
+            if current not in active and active:
+                current = main if main in active else max(active, key=lambda who: spoken.get(who, 0.0))
         whose.append(current)
     first = next((who for who in whose if who is not None), main)
     whose = [who if who is not None else first for who in whose]
@@ -560,15 +600,15 @@ def _voice_runs(item: dict, start: float, end: float, line: _Timeline, main, spo
             runs[-1][2] += 1
         else:
             runs.append([who, k, 1])
+
     def sure(k) -> bool:
         """The voice of a stretch really speaks through it, and its neighbour's voice is silent meanwhile."""
         who, first_word, count = runs[k]
-        if count < CUT_RUN_WORDS:
+        edge = k in (0, len(runs) - 1)
+        if count < (1 if timed and edge else TIMED_RUN_WORDS if timed else CUT_RUN_WORDS):
             return False
-        last = first_word + count
-        a = moment(text, start, end, words[first_word][0])
-        b = moment(text, start, end, words[last][0]) if last < len(words) else end
-        if b - a < CUT_OTHER_SECONDS:
+        a, b = span(first_word, first_word + count)
+        if b - a < (TIMED_OTHER_SECONDS if timed else CUT_OTHER_SECONDS):
             return False
         during = line.during(a, b)
         other = runs[k - 1][0] if k else runs[1][0]
@@ -597,17 +637,18 @@ def _voice_runs(item: dict, start: float, end: float, line: _Timeline, main, spo
 
 
 def turn_labels(segments: list, heard: dict, total: float = 0.0, details: dict | None = None,
-                found: dict | None = None, cut: bool = True) -> list:
+                found: dict | None = None, cut: bool = True, word_times: list | None = None) -> list:
     """New label of every replica from the turns the sound engine heard (voice_local.diarize): the person who speaks
     longest over the replica. A replica shared by two people is cut where the voice changes, and one said over
     another person's speech is marked as cross-talk — both through `details`, as for the audio model. `found`
-    receives the voice print of every new label, to recognise the voices remembered at other meetings."""
+    receives the voice print of every new label, to recognise the voices remembered at other meetings. `word_times`
+    ([[start, end] of every word] per replica, from the recognition engine) makes the cuts exact."""
     line = _Timeline(heard.get("turns") or [])
     if not line.turns:
         raise DiarizationError("В записи не слышно речи — размечать голоса не по чему.")
     rows = [row for row in _rows(segments, total) if segments[row[0]].get("speaker_source") != "voiceprint"]
     labels = [None] * len(segments)
-    cuts, overlap = {}, set()
+    cuts, overlap, stamped = {}, set(), {}
     for index, start, end, _ in rows:
         end = max(end, start + 0.2)
         spoken = line.during(start, end)
@@ -619,10 +660,13 @@ def turn_labels(segments: list, heard: dict, total: float = 0.0, details: dict |
                 continue
             spoken = {who: 0.0}
         main = max(spoken, key=lambda who: spoken[who] * (0.5 + 0.5 * line.fit(who, start, end)))
-        runs = _voice_runs(segments[index], start, end, line, main, spoken) if cut else []
+        stamps = _stamps(segments[index], word_times[index]) if word_times and index < len(word_times) else None
+        runs = _voice_runs(segments[index], start, end, line, main, spoken, stamps) if cut else []
         if len(runs) > 1:
             main = runs[0][1]
             cuts[index] = [(at, who) for at, who in runs[1:]][:3]
+            if stamps:
+                stamped[index] = stamps
         labels[index] = main
         if sum(spoken.values()) - (end - start) >= OVERLAP_SHARE * (end - start):
             overlap.add(index)
@@ -634,6 +678,7 @@ def turn_labels(segments: list, heard: dict, total: float = 0.0, details: dict |
     if details is not None:
         details["cuts"] = {index: [(at, order[who]) for at, who in cut_] for index, cut_ in cuts.items()}
         details["overlap"] = overlap
+        details["times"] = stamped
     if found is not None:
         centres, seconds = heard.get("centres") or [], heard.get("seconds") or []
         found.update(centres={order[who]: centres[who] for who in order if isinstance(who, int) and who < len(centres)},
@@ -643,14 +688,15 @@ def turn_labels(segments: list, heard: dict, total: float = 0.0, details: dict |
 
 
 def sound_labels(audio_path, segments: list, total: float, people: int = 0, progress=None,
-                 details: dict | None = None, found: dict | None = None, cut: bool = True) -> list:
+                 details: dict | None = None, found: dict | None = None, cut: bool = True,
+                 word_times: list | None = None) -> list:
     """New label of every replica from the sound of the whole recording, heard on this server."""
     from . import voice_local
     try:
         heard = voice_local.diarize(audio_path, people=people, progress=progress, total=total)
     except voice_local.LocalVoiceError as exc:
         raise DiarizationError(str(exc)) from exc
-    return turn_labels(segments, heard, total, details, found, cut)
+    return turn_labels(segments, heard, total, details, found, cut, word_times)
 
 
 def local_groups(audio_path, segments: list, total: float) -> list:
@@ -816,7 +862,8 @@ def gemini_labels(audio_path, segments: list, total: float, settings: dict, peop
 
 # ------------------------------------------------------------------------------------------------ the pipeline
 def relabel(audio_path, segments: list, total: float, settings: dict, people: int = 0, progress=None,
-            name: str | None = None, meeting_id: int | None = None, allowed=None) -> tuple[list, dict]:
+            name: str | None = None, meeting_id: int | None = None, allowed=None,
+            word_times: list | None = None) -> tuple[list, dict]:
     """The transcript labelled by the chosen way, and what happened: {"method", "wanted", "voices", "error", "seconds",
     "remembered"}. The voice service's way also recognises the voices remembered at other meetings (voice_memory.py).
 
@@ -845,11 +892,9 @@ def relabel(audio_path, segments: list, total: float, settings: dict, people: in
                 log.warning("recognising remembered voices failed", exc_info=True)
         elif name == "sound":
             found = {}
-            labels = sound_labels(audio_path, segments, total, people, progress, details, found)
-            try:
-                known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
-            except Exception:  # noqa: BLE001  the remembered voices are a bonus
-                log.warning("recognising remembered voices failed", exc_info=True)
+            labels = sound_labels(audio_path, segments, total, people, progress, details, found,
+                                  word_times=word_times)
+            known = voice_memory.known_voices(found, meeting_id=meeting_id, allowed=allowed)
         else:
             labels = gemini_labels(audio_path, segments, total, settings, people, progress, details)
     except (DiarizationError, speaker_id.SpeakerIdentityError, llm.LLMError, OSError, ValueError) as exc:
@@ -864,6 +909,7 @@ def relabel(audio_path, segments: list, total: float, settings: dict, people: in
     info.update(voices=len({item["speaker"] for item in result}), seconds=round(time.monotonic() - started, 1))
     if known:
         info["remembered"] = len(known)
+        info["profiles"] = sum(1 for match in known.values() if match.get("memory") is False)
     if details.get("cuts"):
         info["cuts"] = len(details["cuts"])
     if details.get("overlap"):

@@ -139,7 +139,7 @@ def _run_way(name, path, base, truth, total, settings, people, allowed, progress
             details, found = {}, {}
             labels = diarize.sound_labels(path, base, total, people, progress, details, found)
             memory = voice_memory.prints(allowed, exclude_meeting=meeting_id) if voice_memory.enabled() else {}
-            known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed, memory=memory) if memory else {}
+            known = voice_memory.known_voices(found, meeting_id=meeting_id, allowed=allowed, memory=memory)
             result = {"metrics": _measure(truth, base, labels, allowed, details, known)}
         else:
             details = {}  # the replicas the model cut where a second voice begins are measured as cut

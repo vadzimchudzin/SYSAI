@@ -295,6 +295,28 @@ def prints(allowed=None, exclude_meeting: int | None = None) -> dict:
     return out
 
 
+def known_voices(found: dict, meeting_id: int | None = None, allowed=None, memory: dict | None = None) -> dict:
+    """The voices of a meeting that are known people: by the confirmed samples of an employee («Голосовой профиль»,
+    speaker_id.recognise_profiles) and, for the rest, by the voices remembered at other meetings (recognise). A
+    failure of either leaves the voices unnamed: names are a bonus over the labels."""
+    known = {}
+    try:
+        known = speaker_id.recognise_profiles(found, allowed)
+    except Exception:  # noqa: BLE001
+        log.warning("matching the voice samples failed", exc_info=True)
+    try:
+        remembered = recognise(found, meeting_id=meeting_id, allowed=allowed, memory=memory)
+    except Exception:  # noqa: BLE001
+        log.warning("recognising remembered voices failed", exc_info=True)
+        remembered = {}
+    taken = {match["employee_id"] for match in known.values()}
+    for label, match in remembered.items():
+        if label not in known and match["employee_id"] not in taken:
+            known[label] = match
+            taken.add(match["employee_id"])
+    return known
+
+
 def recognise(found: dict, meeting_id: int | None = None, allowed=None, memory: dict | None = None,
               limit: float | None = None) -> dict:
     """{label: {"employee_id", "name", "similarity", "meetings"}} for the voices of a meeting that are remembered."""
@@ -349,7 +371,11 @@ def rename(segments: list, known: dict) -> list:
             continue
         item = {k: v for k, v in seg.items() if k not in ("speaker_confidence",)}
         item.update(speaker=match["name"], speaker_employee_id=match["employee_id"], speaker_source="voiceprint",
-                    speaker_similarity=match["similarity"], speaker_memory=True)
+                    speaker_similarity=match["similarity"])
+        if match.get("memory", True):   # remembered at other meetings; a match with confirmed samples has no mark
+            item["speaker_memory"] = True
+        else:
+            item.pop("speaker_memory", None)
         out.append(item)
     return out
 

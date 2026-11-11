@@ -204,7 +204,7 @@ def propose(transcript: list, path, method: str, settings: dict, total: float, e
     elif method == "sound":
         found = {}  # replicas are not cut here: a relabelling changes only who speaks
         labels = diarize.sound_labels(path, work, total, people, progress, details, found, cut=False)
-        known = voice_memory.recognise(found, meeting_id=meeting_id, allowed=allowed)
+        known = voice_memory.known_voices(found, meeting_id=meeting_id, allowed=allowed)
     elif method == "gemini":
         labels = diarize.gemini_labels(path, work, total, settings, people, progress, details)
     else:

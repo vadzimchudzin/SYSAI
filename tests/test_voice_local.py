@@ -201,3 +201,85 @@ def test_voices_are_remembered_without_the_voice_service(monkeypatch):
     assert sorted(seen) == ["employee-7", "employee-9"] and len(seen["employee-7"]) == 1
     assert [(g["label"], g["model"]) for g in groups] == [("employee-7", voice_local.MODEL_VERSION),
                                                          ("employee-9", voice_local.MODEL_VERSION)]
+
+
+# ---------------------------------------------------------------- the engine's word times and the voice profiles
+def test_recognition_keeps_the_time_of_every_word_for_the_labelling():
+    from app import transcribe
+    text = "Привет всем. Начнём с плана работ"
+    words = [("привет", 0.0, 0.4, "a", 0.9), ("всем", 0.5, 0.9, "a", 0.9), ("начнем", 2.0, 2.4, "a", 0.9),
+             ("с", 2.5, 2.6, "a", 0.9), ("плана", 2.7, 3.1, "a", 0.9), ("работ", 3.2, 3.6, "a", 0.9)]
+    pieces = transcribe._utterances(text, transcribe._timed_text(text, words))
+    assert [len(piece["times"]) for piece in pieces] == [2, 4] and pieces[1]["times"][0] == [2.0, 2.4]
+    joined = transcribe._join([dict(piece, speaker="Спикер 1") for piece in pieces])
+    assert len(joined) == 1 and len(joined[0]["times"]) == 6   # one replica: the times of all its words, in order
+    assert "times" in transcribe.TRACE_KEYS                    # …and they never reach the saved transcript
+    cut = transcribe._word_times(dict(joined[0], text="Привет всем"), first=True)
+    assert cut["times"] == [[0.0, 0.4], [0.5, 0.9]]
+    assert transcribe._word_times(dict(joined[0], text="плана работ"), first=False)["times"] == [[2.7, 3.1], [3.2, 3.6]]
+
+
+def test_with_word_times_a_replica_is_cut_exactly_where_the_voice_changes():
+    text = "первый закончил свою мысль хорошо я понял"
+    stamps = [[7.0, 7.5], [7.6, 8.2], [8.3, 8.9], [9.0, 9.8], [10.4, 10.9], [11.0, 11.3], [11.4, 12.0]]
+    segments = [seg("Спикер 1", 7.0, 12.0, text)]
+    details = {}
+    labels = diarize.turn_labels(segments, HEARD, 36.0, details, word_times=[stamps])
+    out = diarize.apply(segments, labels, details)
+    assert [(item["speaker"], item["text"]) for item in out] == [("Спикер 1", "первый закончил свою мысль"),
+                                                                 ("Спикер 2", "хорошо я понял")]
+    assert out[0]["end"] == 9.8 and out[1]["start"] == 10.4   # the times of the words themselves, not a guess
+    guess = {}   # without the times the cut is a guess by syllables, and so are the times of the pieces
+    diarize.turn_labels(segments, HEARD, 36.0, guess)
+    assert guess["times"] == {} and details["times"] == {0: [tuple(pair) for pair in stamps]}
+    # times that do not fit the text (the text was corrected after recognition) are not used
+    assert diarize._stamps(segments[0], stamps[:-1]) is None
+
+
+def test_a_meeting_voice_is_named_by_the_confirmed_samples_of_an_employee():
+    from app import speaker_id
+    anna, boris, vera = (list(map(float, v)) for v in voices(3, dim=8))
+    found = {"centres": {"Спикер 1": anna, "Спикер 2": boris, "Спикер 3": vera},
+             "seconds": {"Спикер 1": 120.0, "Спикер 2": 80.0, "Спикер 3": 2.0}, "model": voice_local.MODEL_VERSION}
+    profiles = {7: {"name": "Анна Орлова", "vectors": [anna, anna, anna]},
+                8: {"name": "Борис Смирнов", "vectors": [boris, boris]},        # two recordings: not enough yet
+                9: {"name": "Вера Котова", "vectors": [vera, vera, vera]}}      # her voice said two seconds
+    known = speaker_id.recognise_profiles(found, profiles=profiles)
+    assert list(known) == ["Спикер 1"] and known["Спикер 1"]["employee_id"] == 7 and known["Спикер 1"]["memory"] is False
+    assert speaker_id.recognise_profiles(dict(found, model="another-model"), profiles=profiles) == {}
+    twins = {7: {"name": "Анна Орлова", "vectors": [anna] * 3}, 10: {"name": "Анна Вторая", "vectors": [anna] * 3}}
+    assert speaker_id.recognise_profiles(found, profiles=twins) == {}   # two people fit: nobody is named
+    named = voice_memory.rename([seg("Спикер 1", 0, 5), seg("Спикер 2", 5, 9)], known)
+    assert named[0]["speaker"] == "Анна Орлова" and named[0]["speaker_source"] == "voiceprint"
+    assert "speaker_memory" not in named[0] and named[1]["speaker"] == "Спикер 2"
+
+
+def test_samples_win_over_remembered_voices_and_one_person_gets_one_voice(monkeypatch):
+    from app import speaker_id
+    monkeypatch.setattr(speaker_id, "recognise_profiles", lambda found, allowed=None: {
+        "Спикер 1": {"employee_id": 7, "name": "Анна Орлова", "similarity": 0.8, "samples": 3, "memory": False}})
+    monkeypatch.setattr(voice_memory, "recognise", lambda found, **kwargs: {
+        "Спикер 1": {"employee_id": 8, "name": "Борис Смирнов", "similarity": 0.7, "meetings": 2},
+        "Спикер 2": {"employee_id": 7, "name": "Анна Орлова", "similarity": 0.7, "meetings": 2},
+        "Спикер 3": {"employee_id": 9, "name": "Вера Котова", "similarity": 0.7, "meetings": 2}})
+    known = voice_memory.known_voices({"centres": {"x": [1.0]}})
+    assert {label: match["employee_id"] for label, match in known.items()} == {"Спикер 1": 7, "Спикер 3": 9}
+
+
+def test_a_stored_sample_gets_its_voice_print_on_this_server():
+    import io
+    import wave
+    from app import speaker_id
+    rng = np.random.default_rng(6)
+    pcm = (rng.normal(size=6 * 16000) * 3000).astype("<i2").tobytes()
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(pcm)
+    made = speaker_id.local_sample_embedding(buffer.getvalue())
+    assert len(made["embedding"]) == 192 and made["model_version"] == voice_local.MODEL_VERSION
+    assert len(made["waveform"]) == 96 and max(made["waveform"]) == 1.0 and made["duration_seconds"] == 6.0
+    assert speaker_id.local_engine() and speaker_id.local_profiles() == {}
+    voice_local.release()
