@@ -680,6 +680,11 @@ def independent_sample_count(samples):
     return len(sources)
 
 
+def _local_model() -> str:
+    from . import voice_local
+    return voice_local.MODEL_VERSION
+
+
 def identification_readiness(samples_by_employee):
     """Quantity/consistency collection stop, never calibrated recognition readiness.
 
@@ -706,8 +711,9 @@ def identification_readiness(samples_by_employee):
         count = independent_sample_count(rows)
         models = {r.model_version for r in rows}
         vectors = vectors_by_employee[eid]
+        agree = LOCAL_CONSISTENT if models == {_local_model()} else 0.75
         consistent = len(models) == 1 and all(
-            similarity(a, b) >= 0.75 for i, a in enumerate(vectors) for b in vectors[i+1:])
+            similarity(a, b) >= agree for i, a in enumerate(vectors) for b in vectors[i+1:])
         separated = True
         for other_id, other_rows in valid_by_employee.items():
             if other_id == eid or not separated:
@@ -765,6 +771,14 @@ def embed_pending_sample(session, row):
     row.encrypted_embedding = b""
     row.embedding_dimensions = 0
     row.model_version = ""
+    if local_engine():   # the voice print is made on this server (voice_local.py): no outside service
+        try:
+            _accept_embedding(row, local_sample_embedding(decrypt_sample_audio(row)))
+        except SpeakerIdentityError:
+            row.embedding_status = "failed"
+            row.encrypted_embedding = b""
+            return False
+        return True
     if not config.voice_service_enabled():
         row.embedding_status = "pending"
         return False
@@ -779,6 +793,123 @@ def embed_pending_sample(session, row):
             row.encrypted_embedding = b""
             return False
     return True
+
+
+# ------------------------------------------------------------------- voice profiles on this server (voice_local.py)
+# Measured on two AMI meetings of the same four people (docs/SPEAKERS.md): a 6–15 s sample against the voice of a
+# person at another meeting is 0.72–0.90 alike for the same person (5th–95th percentile) and 0.05–0.64 for another.
+LOCAL_MATCH_THRESHOLD = 0.65   # a voice of a meeting this alike to a person's samples is that person…
+LOCAL_MATCH_MARGIN = 0.10      # …when the next person is at least this much less alike
+LOCAL_CONSISTENT = 0.60        # samples of one person agree from this (the voice service's model needs 0.75)
+LOCAL_MIN_VOICE = 6.0          # speech of a voice at a meeting needed to compare it with the samples
+
+
+def local_engine() -> bool:
+    """True when voice prints are made on this server, not by the voice service (diarize.local_prints)."""
+    from . import diarize
+    return diarize.local_prints()
+
+
+def local_sample_embedding(raw: bytes) -> dict:
+    """The voice print of a stored sample (WAV mono PCM16 16 kHz), made on this server: what the voice service
+    returns for a sample, with this server's model version."""
+    import numpy as np
+    from . import voice_local
+    pcm, duration, _ = _wav_info(raw)
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    try:
+        vector = voice_local.embed(samples)
+    except voice_local.LocalVoiceError as exc:
+        raise SpeakerIdentityError(str(exc)) from exc
+    if vector is None:
+        raise SpeakerIdentityError("Из образца не получился отпечаток голоса.")
+    peaks = [float(np.abs(part).max()) if part.size else 0.0 for part in np.array_split(samples, 96)]
+    top = max(peaks) or 1.0
+    return {"embedding": [float(value) for value in vector], "model_version": voice_local.MODEL_VERSION,
+            "waveform": [round(value / top, 4) for value in peaks], "duration_seconds": round(duration, 3),
+            "sample_blob_path": None}
+
+
+def adopt_local_embeddings(session) -> int:
+    """Samples whose voice print was made by another model (the voice service) or never made get this server's
+    print from their stored audio: prints of different models are never compared. Returns how many were made."""
+    from .db import Employee, EmployeeVoiceSample
+    from . import voice_local
+    made = 0
+    rows = (session.query(EmployeeVoiceSample).join(Employee, Employee.id == EmployeeVoiceSample.employee_id)
+            .filter(Employee.active.is_(True), EmployeeVoiceSample.model_version != voice_local.MODEL_VERSION).all())
+    for row in rows:
+        if not _not_expired(row) or not row.consent_at or not row.confirmed_by or not row.encrypted_audio:
+            continue
+        try:
+            _accept_embedding(row, local_sample_embedding(decrypt_sample_audio(row)))
+            made += 1
+        except SpeakerIdentityError:
+            log.warning("Voice sample %s could not be embedded on this server", row.id)
+    return made
+
+
+def local_profiles(allowed=None) -> dict:
+    """{employee id: {"name", "vectors": [voice print per independent recording]}} of the samples with this
+    server's voice prints; a person can be recognised from READY_INDEPENDENT_SAMPLES recordings."""
+    from .db import Employee, EmployeeVoiceSample, SessionLocal
+    from . import voice_local
+    out = {}
+    with SessionLocal() as session:
+        if adopt_local_embeddings(session):
+            session.commit()
+        rows = (session.query(EmployeeVoiceSample).join(Employee, Employee.id == EmployeeVoiceSample.employee_id)
+                .filter(Employee.active.is_(True), EmployeeVoiceSample.model_version == voice_local.MODEL_VERSION)
+                .order_by(EmployeeVoiceSample.employee_id, EmployeeVoiceSample.created_at).all())
+        seen = set()
+        for row in rows:
+            if allowed is not None and row.employee_id not in allowed:
+                continue
+            source = row.source_audio_sha256
+            if not sample_has_usable_embedding(row) or not source or (row.employee_id, source) in seen:
+                continue
+            seen.add((row.employee_id, source))
+            vector = _normalise_embedding(json.loads(decrypt_voiceprint(row.encrypted_embedding)))
+            out.setdefault(row.employee_id, {"name": row.employee.name, "vectors": []})["vectors"].append(vector)
+    return out
+
+
+def recognise_profiles(found: dict, allowed=None, profiles: dict | None = None) -> dict:
+    """{label: {"employee_id", "name", "similarity", "samples", "memory": False}} for the voices of a meeting that
+    match the confirmed samples of an employee: `found` is what the sound engine heard ({"centres": {label: voice
+    print}, "seconds": {label: speech}, "model"}). One person gets one voice; a voice two people fit stays unnamed."""
+    from . import voice_local
+    centres = (found or {}).get("centres") or {}
+    if not centres or (found or {}).get("model") != voice_local.MODEL_VERSION:
+        return {}
+    profiles = local_profiles(allowed) if profiles is None else profiles
+    seconds = (found or {}).get("seconds") or {}
+    scores = {}
+    for label, centre in centres.items():
+        try:
+            if float(seconds.get(label, LOCAL_MIN_VOICE)) < LOCAL_MIN_VOICE:
+                continue
+        except (TypeError, ValueError):
+            continue
+        for employee_id, person in profiles.items():
+            vectors = person["vectors"]
+            if len(vectors) < READY_INDEPENDENT_SAMPLES or (allowed is not None and employee_id not in allowed):
+                continue
+            alike = sorted((_cosine_similarity(list(centre), vector) for vector in vectors), reverse=True)
+            top = alike[:READY_INDEPENDENT_SAMPLES]
+            scores[(label, employee_id)] = (sum(top) / len(top), len(vectors))
+    known, used = {}, set()
+    for (label, employee_id), (score, count) in sorted(scores.items(), key=lambda item: -item[1][0]):
+        if label in known or employee_id in used or score < LOCAL_MATCH_THRESHOLD:
+            continue
+        rival = max((value[0] for (other_label, other), value in scores.items()
+                     if other_label == label and other != employee_id), default=-1.0)
+        if score - rival < LOCAL_MATCH_MARGIN:
+            continue
+        known[label] = {"employee_id": employee_id, "name": profiles[employee_id]["name"],
+                        "similarity": round(score, 3), "samples": count, "memory": False}
+        used.add(employee_id)
+    return known
 
 
 def revoke_employee_voice_data(session, employee_id):

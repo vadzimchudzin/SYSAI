@@ -287,7 +287,9 @@ def _sentences(text, length):
 
 
 JOIN_GAP = 1.5              # seconds of silence inside one person's replica
-TRACE_KEYS = ("heard", "doubts")  # word-time traces a replica carries until the checks (verify.py) are done
+# Word-time traces a replica carries until the checks (verify.py) are done: «heard» and «doubts» for the checks, «times»
+# ([[start, end]] of every word) for the speaker labelling, which cuts a replica exactly where the voice changes.
+TRACE_KEYS = ("heard", "doubts", "times")
 PAUSE_SECONDS = 0.6         # a pause this long between words may be another person starting
 SENTENCE_PAUSE = 0.25       # …and a shorter one after the end of a sentence
 WORDS_MIN_SHARE = 0.6       # the STT word times must cover at least this share of its text
@@ -417,7 +419,8 @@ def _utterances(text, timed):
         piece = text[begin:end].strip()
         if piece:
             item = {"start": round(timed[first][2], 1), "end": round(max(timed[k - 1][3], timed[first][2]), 1),
-                    "text": piece, "heard": _heard(timed[first:k])}
+                    "text": piece, "heard": _heard(timed[first:k]),
+                    "times": [[round(word[2], 2), round(max(word[2], word[3]), 2)] for word in timed[first:k]]}
             doubts = _doubts(text, timed[first:k])
             if doubts:
                 item["doubts"] = doubts
@@ -656,7 +659,7 @@ def _stitch_overlap(segments, new, boundary):
     for index in sorted(cut_old, reverse=True):
         kept = segments[index]["text"][:cut_old[index]].rstrip(" ,;:-–—")
         if _words(index, kept):
-            segments[index] = dict(segments[index], text=kept)
+            segments[index] = _word_times(dict(segments[index], text=kept), first=True)
         else:
             del segments[index]
 
@@ -668,10 +671,20 @@ def _stitch_overlap(segments, new, boundary):
         rest = new[index]["text"][end_char:].lstrip(" ,;:.!?…-–—")
         if _words(index, rest):
             start = max(new[index]["start"] + 0.4 * count, anchor_start)  # about 0.4 s per dropped word
-            new[index] = dict(new[index], text=rest, start=round(start, 1))
+            new[index] = _word_times(dict(new[index], text=rest, start=round(start, 1)), first=False)
         else:
             del new[index]
     return {speaker: next(iter(known)) for speaker, known in pairs.items() if len(known) == 1}
+
+
+def _word_times(segment, first: bool):
+    """A replica whose text lost words at a chunk boundary keeps the times of the words that stayed: the first
+    ones or the last ones."""
+    times = segment.get("times")
+    if times:
+        count = len(_spans(segment["text"]))
+        segment["times"] = times[:count] if first else times[len(times) - count:] if count else []
+    return segment
 
 
 def _merge(segments, new, boundary):
@@ -727,7 +740,7 @@ def _merge(segments, new, boundary):
     segments.sort(key=lambda item: item["start"])
 
 def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=None,
-               info: dict | None = None) -> tuple[float, list]:
+               info: dict | None = None, traces: dict | None = None) -> tuple[float, list]:
     """(duration, replicas) of a recording.
 
     1. The voice detector (vad.py) finds where someone speaks; the recording is cut into parts in pauses.
@@ -735,7 +748,8 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
     3. The parts are stitched; names and terms are corrected by the vocabulary (speech_fix.py).
     4. Checks against the audio (verify.py, meaning.py): voice without words is heard again by the second engine,
        doubtful words are heard again, phrases invented over silence are dropped.
-    ``info`` (when given) receives what the checks found, for the meeting page."""
+    ``info`` (when given) receives what the checks found, for the meeting page; ``traces`` receives
+    {"times": [[[start, end] of every word] or None per replica]} for the speaker labelling (diarize.py)."""
     if not config.llm_enabled():
         raise llm.LLMError("Для настоящего аудио нужен ключ OpenRouter. Демо запускается отдельно.")
     from . import meaning, vad, verify
@@ -884,6 +898,8 @@ def transcribe(path: str, settings: dict, progress=lambda msg: None, checkpoint=
                                   progress=progress, info=info)
     if segments and speech is not None:
         segments = verify.drop_phantoms(segments, speech, info)
+    if traces is not None:
+        traces["times"] = [item.get("times") or None for item in segments]
     segments = [{k: v for k, v in item.items() if k not in TRACE_KEYS} for item in segments]
     if not segments:
         raise llm.LLMError("Речь в записи не распознана. Проверьте аудио; рассылка не запускалась.")

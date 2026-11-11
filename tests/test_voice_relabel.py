@@ -3,7 +3,7 @@ manual corrections stay, and nothing is saved before «было → стало»
 import datetime as dt
 import math
 
-from app import diarize, voice_relabel
+from app import diarize, settings_store, voice_relabel
 from app.db import Employee, Meeting, SessionLocal
 
 TEXT = "обсуждаем план работ на эту неделю подробно"
@@ -34,6 +34,7 @@ AUTO = [seg("Спикер 1", 0, 30), seg("Спикер 2", 30, 60), seg("Спи
 
 def fake_voice(monkeypatch, calls=None):
     monkeypatch.setattr(diarize, "unavailable", lambda name: "")
+    settings_store.set_many({"diarization_method": "voice"})   # these tests are about the voice service's way
 
     def groups(path, segments, total, progress=None):
         if calls is not None:
@@ -155,7 +156,7 @@ def test_without_a_recording_or_a_way_there_is_no_relabelling(client, monkeypatc
     other = meeting(tmp_path)
     monkeypatch.setattr(diarize, "unavailable", lambda name: "нет")
     assert voice_relabel.way({"diarization_method": "voice"}) == ""
-    assert "Нужен свой сервис голосов" in voice_relabel.unavailable(load(other))
+    assert "свой сервис голосов" in voice_relabel.unavailable(load(other))
     monkeypatch.setattr(diarize, "unavailable", lambda name: "" if name == "gemini" else "нет")
     assert voice_relabel.way({"diarization_method": "voice"}) == "gemini"
     assert voice_relabel.way({"diarization_method": "chunks"}) == "gemini"
@@ -163,6 +164,7 @@ def test_without_a_recording_or_a_way_there_is_no_relabelling(client, monkeypatc
 
 def test_a_failed_or_lost_run_says_so_and_can_be_closed(client, monkeypatch, tmp_path):
     monkeypatch.setattr(diarize, "unavailable", lambda name: "")
+    settings_store.set_many({"diarization_method": "voice"})
 
     def broken(*args, **kwargs):
         raise diarize.DiarizationError("Сервис голосов не ответил.")

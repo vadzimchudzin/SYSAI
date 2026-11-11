@@ -31,7 +31,7 @@ from .db import Employee, Meeting, SessionLocal
 
 log = logging.getLogger("sysai.diarization_runs")
 
-ORDER = ("chunks", "voice", "gemini")
+ORDER = ("chunks", "sound", "voice", "gemini")
 _lock = threading.Lock()
 _state = {"running": False, "started": None, "finished": None, "done": 0, "total": 0, "current": "", "step": "",
           "errors": []}
@@ -135,6 +135,12 @@ def _run_way(name, path, base, truth, total, settings, people, allowed, progress
             for threshold in diarize.THRESHOLDS:
                 labels, known = _remembered(base, groups, threshold, people, total, allowed, memory, meeting_id)
                 result["thresholds"][f"{threshold:.2f}"] = _measure(truth, base, labels, allowed, known=known)
+        elif name == "sound":
+            details, found = {}, {}
+            labels = diarize.sound_labels(path, base, total, people, progress, details, found)
+            memory = voice_memory.prints(allowed, exclude_meeting=meeting_id) if voice_memory.enabled() else {}
+            known = voice_memory.known_voices(found, meeting_id=meeting_id, allowed=allowed, memory=memory)
+            result = {"metrics": _measure(truth, base, labels, allowed, details, known)}
         else:
             details = {}  # the replicas the model cut where a second voice begins are measured as cut
             labels = diarize.gemini_labels(path, base, total, settings, people, progress, details)

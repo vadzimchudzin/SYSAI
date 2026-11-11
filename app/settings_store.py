@@ -130,7 +130,8 @@ DEFAULTS = {
     "verify_judge_model": "google/gemini-2.5-pro",        # listens to a doubtful word and chooses between the engines
     "stt_compare": {},                                    # the last comparison of the engines (stt_compare.py)
     "diarization_model": "google/gemini-2.5-flash",
-    "diarization_method": "chunks",      # chunks | voice | gemini — who speaks across the whole recording, see diarize.py
+    "diarization_method": "sound",       # sound | chunks | voice | gemini — who speaks across the whole recording, see diarize.py
+    "diarization_engine": 0,             # 1 once the server moved from «chunks» to the sound engine (adopt_sound_engine)
     "diarization_voice_threshold": 0.5,  # voice prints at least this alike are one person (method «voice»)
     "voice_memory": False,               # remember confirmed voices between meetings (voice_memory.py; with consent)
     "voice_memory_threshold": 0.62,      # a voice this alike to the prints of a person from past meetings is that person
@@ -209,6 +210,22 @@ def set_many(values: dict):
             else:
                 s.add(Setting(key=k, value=json.dumps(v, ensure_ascii=False)))
         s.commit()
+
+
+def adopt_sound_engine() -> bool:
+    """Once, at the first start with the sound engine: a server still on «по кускам» (the old default, saved with
+    any change of the settings) moves to it. A way chosen on purpose — the voice service, Gemini — is kept, and so
+    is «по кускам» chosen after this."""
+    with SessionLocal() as s:
+        if s.get(Setting, "diarization_engine") is not None:
+            return False
+        row = s.get(Setting, "diarization_method")
+        moved = row is not None and json.loads(row.value) == "chunks"
+        if moved:
+            row.value = json.dumps("sound")
+        s.add(Setting(key="diarization_engine", value="1"))
+        s.commit()
+        return moved
 
 
 SECRET_KEYS = ("openrouter_api_key", "telegram_bot_token", "bitrix_webhook_url", "ticnote_appkey")

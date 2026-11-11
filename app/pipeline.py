@@ -198,14 +198,14 @@ def _process(meeting_id: int):
                 # Kept next to the transcription, not after it: a restart of a free instance (a deploy, its sleep) then
                 # finds the copy already in the storage much more often. Called again below once the transcript is saved.
                 _keep_recording(meeting_id, audio_path, source)
-                recognition = {}
+                recognition, traces = {}, {}
                 total, segments = transcribe.transcribe(audio_path, dict(settings, _participants=allowed),
                                                         progress=lambda p: _set(meeting_id, progress=p), checkpoint=checkpoint,
-                                                        info=recognition)
+                                                        info=recognition, traces=traces)
                 _note_recognition(meeting_id, recognition)
                 segments, how = diarize.relabel(audio_path, segments, total, settings, people=people,
                                                 progress=lambda p: _set(meeting_id, progress=p),
-                                                meeting_id=meeting_id, allowed=allowed)
+                                                meeting_id=meeting_id, allowed=allowed, word_times=traces.get("times"))
                 _note_diarization(meeting_id, how)
                 segments = _name_speakers(segments, allowed, meeting_id)
         # A transcript made by this run replaces any earlier one: corrections made to that one do not apply to it.

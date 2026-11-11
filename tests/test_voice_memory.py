@@ -28,7 +28,8 @@ def seg(speaker, start, end, text=TEXT, **extra):
 
 @pytest.fixture
 def memory_on(monkeypatch):
-    settings_store.set_many({"voice_memory": True})
+    # these tests are about the voice service's way; the prints made on the server are in test_voice_local.py
+    settings_store.set_many({"voice_memory": True, "diarization_method": "voice"})
     monkeypatch.setattr(config, "voice_service_enabled", lambda: True)
     monkeypatch.setattr(diarize, "unavailable", lambda name: "")
     VOICE_OF.clear()

@@ -16,6 +16,13 @@ from app import accounts, config, db, main, settings_store, speaker_id
 from app.db import Employee, EmployeeVoiceSample, EmployeeVoiceprint, Meeting, Recording, SessionLocal, User, now
 
 
+@pytest.fixture(autouse=True)
+def service_prints(monkeypatch):
+    """These tests are about the voice service's prints; the ones made on the server are in test_voice_local.py."""
+    from app import speaker_id
+    monkeypatch.setattr(speaker_id, "local_engine", lambda: False)
+
+
 def make_wav(path, seconds=10, frequency=230, amplitude=6000):
     values = array.array('h', (int(amplitude * math.sin(2 * math.pi * frequency * i / 16000)) for i in range(seconds * 16000)))
     with wave.open(str(path), 'wb') as out:

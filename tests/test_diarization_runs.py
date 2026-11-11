@@ -79,8 +79,8 @@ def test_compare_runs_every_way_on_every_reference_and_shows_the_best(client, mo
     assert page.count('class="pill green">лучший') >= 2 and "Gemini слушает всю запись" in page
     overview = diarization_runs.overview([diarization_eval_reference(mid)], "chunks", 0.5)
     assert overview["best"] in ("voice", "gemini") and overview["best_threshold"] in {"0.30", "0.35", "0.40", "0.45", "0.50"}
-    assert [w["name"] for w in overview["ways"]] == ["chunks", "voice", "gemini"]
-    assert overview["ways"][1]["threshold"] == "0.50" and overview["ways"][0]["current"]
+    assert [w["name"] for w in overview["ways"]] == ["chunks", "sound", "voice", "gemini"]
+    assert overview["ways"][2]["threshold"] == "0.50" and overview["ways"][0]["current"]
     meeting_page = client.get(f"/meetings/{mid}").text
     assert "Способы на этой записи" in meeting_page and "Gemini слушает всю запись — <b>100%</b>" in meeting_page
 

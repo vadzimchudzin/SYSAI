@@ -176,7 +176,8 @@ def test_processing_labels_the_whole_record_with_the_number_of_participants(monk
     monkeypatch.setattr(pipeline.transcribe, "transcribe", lambda *a, **kw: (20.0, [dict(s) for s in parts]))
     seen = {}
 
-    def relabel(audio_path, segments, total, settings, people=0, progress=None, name=None, meeting_id=None, allowed=None):
+    def relabel(audio_path, segments, total, settings, people=0, progress=None, name=None, meeting_id=None, allowed=None,
+                **kwargs):
         seen.update(people=people, method=settings.get("diarization_method"), audio=audio_path, meeting_id=meeting_id,
                     allowed=allowed)
         joined = [dict(s, speaker="Спикер 1" if s["speaker"] == "Спикер 3" else s["speaker"]) for s in segments]

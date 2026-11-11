@@ -124,6 +124,8 @@ tpl.env.filters["action_line"] = action_line
 
 def startup():
     init_db()
+    if settings_store.adopt_sound_engine():
+        log.info("speaker labelling moved from the part labels to the sound engine (voice_local.py)")
     accounts.ensure_superuser()
     if accounts.insecure_reason():
         log.error("SIGN-IN IS CLOSED: %s is still the public default from the README. Set a real value in the service "
@@ -3455,7 +3457,7 @@ def telegram_account_logout(request: Request):
 
 # ----------------------------------------------------------------------------- employees
 EMPLOYEE_TABS = ("profile", "departments", "contacts", "voice")
-VOICE_STATUS_RU = {"ready": "признаки готовы", "pending": "ждёт сервиса признаков", "failed": "признаки не извлечены"}
+VOICE_STATUS_RU = {"ready": "признаки готовы", "pending": "признаки ещё не извлечены", "failed": "признаки не извлечены"}
 
 
 def _plural_ru(count: int, forms: tuple) -> str:

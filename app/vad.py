@@ -69,13 +69,13 @@ def _model():
         return _session
 
 
-def _blocks(path):
-    """Mono 16 kHz samples (float32, −1…1) of a recording, BLOCK_SECONDS at a time."""
+def _blocks(path, seconds: float = BLOCK_SECONDS):
+    """Mono 16 kHz samples (float32, −1…1) of a recording, BLOCK_SECONDS (or `seconds`) at a time."""
     import numpy as np
     command = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0", "-ac", "1", "-ar", str(RATE),
                "-f", "s16le", "-"]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    size = int(BLOCK_SECONDS * RATE) * 2
+    size = int(seconds * RATE) * 2
     produced = False
     try:
         while True:

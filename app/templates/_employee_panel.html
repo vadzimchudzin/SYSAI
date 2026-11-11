@@ -30,7 +30,7 @@
       {% if mem.consent %}<div class="emp-meter lg" role="img" aria-label="Голос запомнен с {{ mem.meetings }} из {{ mem.need }} встреч"><i style="width: {{ mem.pct }}%"></i></div>{% endif %}
       <p class="small muted">Голос, подтверждённый на совещании («Кто это?», правка реплики, уверенное представление), запоминается — и на следующих встречах реплики сотрудника подписываются сами, с пометкой «голос совпал». Узнаётся после {{ mem.need }} разных встреч. Аудио не хранится: только зашифрованный отпечаток голоса на {{ mem.days }} дней.</p>
       {% if not mem.on %}<p class="small"><span class="pill gray">Выключено в настройках</span> <a href="/settings#voice-memory">Включить «Запоминать голоса между встречами»</a></p>
-      {% elif not mem.service %}<p class="small"><span class="pill amber">Сервис голосов не подключён</span> Запоминание работает только со своим сервисом голосов — <a href="/settings#speaker-identification">Настройки → Разметка голосов</a>.</p>{% endif %}
+      {% elif not mem.service %}<p class="small"><span class="pill amber">Нет движка голосов</span> Для запоминания нужны модели разметки по звуку на сервере или свой сервис голосов — <a href="/settings#speaker-identification">Настройки → Разметка голосов</a>.</p>{% endif %}
       {% if mem.consent %}
       <p class="small">Согласие сотрудника отмечено {{ mem.consent.strftime('%d.%m.%Y') }}{% if mem.consent_by %} · {{ mem.consent_by }}{% endif %}.</p>
       {% if mem.prints %}
