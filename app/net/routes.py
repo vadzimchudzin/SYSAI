@@ -334,7 +334,7 @@ def access_page(request: Request, msg: str = "", error: str = "", edit: str = ""
     models = settings_store.get("agents_models") or {}
     spare = settings_store.get("agents_fallback")
     return _page(request, "net/access.html", profiles=access.profiles(), msg=msg, error=error, edit=edit,
-                 jev=gateway.jev_status(),
+                 jev=gateway.jev_status(), edits=access.EDITS, edits_ru=access.EDITS_RU,
                  sections=access.SECTION_RU, tiers=access.TIERS, tier_ru=access.TIER_RU, model_tiers=access.MODEL_TIERS,
                  cost_tiers=access.COST_TIERS, cost_ru=access.COST_RU, scopes=access.SCOPES,
                  scope_ru=access.SCOPE_RU, levels=access.LEVELS, level_ru=access.LEVEL_RU, internet=access.INTERNET,

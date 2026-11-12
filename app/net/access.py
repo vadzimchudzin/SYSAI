@@ -25,11 +25,11 @@ from . import journal
 from .models import NetAccessProfile, NetAgent, NetAgentAccess
 
 SECTIONS = ("commands", "folders", "programs", "mcp", "data", "internet", "models", "schedule", "chat", "skills", "files",
-            "plc")
+            "plc", "edits")
 SECTION_RU = {"commands": "Команды на ПК", "folders": "Папки", "programs": "Программы", "mcp": "MCP-инструменты",
               "data": "Данные SYSAI", "internet": "Интернет", "models": "Нейронки", "schedule": "Дела по расписанию",
               "chat": "Кто может писать агенту", "skills": "Хаб: навыки и инструменты", "files": "Хранилище",
-              "plc": "Сеть контроллеров"}
+              "plc": "Сеть контроллеров", "edits": "Правки без вопросов"}
 TIERS = ("cheap", "mid", "strong", "vision", "auto")
 MODEL_TIERS = ("cheap", "mid", "strong", "vision")  # a real model behind each, chosen in the settings
 TEXT_TIERS = ("cheap", "mid", "strong")
@@ -88,7 +88,13 @@ EMPTY = {
     # the controllers the agent may reach over the network (the tool plc-live, reading only): an address, an
     # address:port, a network «192.168.1.0/24», a host name. Empty — none: a controller is not the internet
     "plc": {"hosts": []},
+    # how far «правки без вопросов» of the window may go: «off» — the person is asked before every edit, «project» —
+    # without questions in one project at a time, «projects» — in the project folders. The switch itself is the
+    # person's; this is its ceiling
+    "edits": {"auto": "projects"},
 }
+EDITS = ("off", "project", "projects")
+EDITS_RU = {"off": "нельзя: спрашивать всегда", "project": "в одном проекте за раз", "projects": "в папках проектов"}
 
 _ENGINEER = {
     "commands": {"run": True, "deny": ["git push --force*", "Remove-Item * -Recurse*", "del /s *"]},
@@ -252,6 +258,8 @@ def normalize(rules) -> dict:
     out["skills"] = {"departments": _lines(sk.get("departments"), 50, 100) or ["*"], "propose": bool(sk.get("propose", False))}
     fi = rules.get("files") if isinstance(rules.get("files"), dict) else {}
     out["files"] = {k: _lines(fi.get(k), 50, 100) for k in ("read", "write")}
+    ed = rules.get("edits") if isinstance(rules.get("edits"), dict) else {}
+    out["edits"] = {"auto": ed.get("auto") if ed.get("auto") in EDITS else "projects"}
     pl = rules.get("plc") if isinstance(rules.get("plc"), dict) else {}
     out["plc"] = {"hosts": [h for h in (str(x).strip().lower() for x in _lines(pl.get("hosts"), 50, 80))
                             if h == "*" or re.fullmatch(r"[a-z0-9._\-:\[\]]+(/\d{1,3})?", h)]}
@@ -846,4 +854,5 @@ def rules_from_form(form) -> dict:
         "skills": {"departments": lines("skills_departments"), "propose": bool(get("skills_propose"))},
         "files": {"read": lines("files_read"), "write": lines("files_write")},
         "plc": {"hosts": lines("plc_hosts")},
+        "edits": {"auto": get("edits_auto")},
     })

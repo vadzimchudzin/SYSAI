@@ -788,7 +788,7 @@ test('edits without questions: off by default, only inside a project folder, the
   const { base, root, project, state, make, auto } = autoApprove();
   const inside = path.join(project, '_work', 'st', 'Main.st');
   assert.deepEqual(auto.decide(edit(inside)), { auto: false, why: '' }, 'off until the person switches it on');
-  assert.deepEqual(auto.set(true), { on: true, count: 0, root });
+  assert.deepEqual(auto.set(true), { on: true, count: 0, root, project: '', policy: 'projects' });
   assert.deepEqual(auto.decide(edit(inside)), { auto: true, optionId: 'allow_once', paths: [inside] });
   assert.equal(auto.decide(edit(path.join(project, 'plc', 'new', 'GVL.st'))).auto, true, 'a folder that is not there yet');
   assert.equal(auto.decide(edit('_work/st/Main.st'), project).auto, true, 'a short path counts from the folder of the session');
@@ -1054,4 +1054,69 @@ test('a big text file attached to a message is named by its path, not linked', a
   assert.ok(bigs.includes(`${big} — 200 КБ`) && bigs.includes(`${code} — 31 КБ`) && bigs.includes('целиком не читай'));
   assert.deepEqual(await files.attachments([]), { items: [], text: '' });
   assert.equal((await files.attachments([small])).text, `[Вложения: ${small}]`);
+});
+
+test('edits without questions: one project only, what the profile of SYSAI allows, and an edit taken back', () => {
+  const { root, project, state, make, auto } = autoApprove();
+  const other = path.join(root, 'Линия 2');
+  fs.mkdirSync(path.join(other, '_work'), { recursive: true });
+  const mine = path.join(project, '_work', 'st', 'Main.st');
+  const theirs = path.join(other, '_work', 'a.st');
+
+  // only inside the project named
+  assert.deepEqual(auto.set(true, 'PLC test'), { on: true, count: 0, root, project: 'PLC test', policy: 'projects' });
+  assert.equal(auto.decide(edit(mine)).auto, true);
+  assert.match(auto.decide(edit(theirs)).why, /другой проект: без вопросов сейчас только «PLC test»/);
+  assert.equal(make().state().project, 'PLC test', 'the project survives a restart of the window');
+  assert.throws(() => auto.set(true, '../x'), /нет такого проекта/);
+
+  // the profile is the ceiling: one project at a time, or nothing
+  state.rules = { folders: { read: ['*'], write: ['*'], deny: [] }, edits: { auto: 'project' } };
+  assert.equal(auto.state().policy, 'project');
+  assert.throws(() => auto.set(true), /только в одном проекте/);
+  auto.set(true, 'PLC test');
+  assert.equal(auto.decide(edit(mine)).auto, true);
+  const all = make();
+  all.on = true;                     // switched on for every project before the profile was narrowed
+  all.project = '';
+  assert.match(all.decide(edit(mine)).why, /только в одном проекте/);
+  state.rules = { folders: { read: ['*'], write: ['*'], deny: [] }, edits: { auto: 'off' } };
+  assert.match(auto.decide(edit(mine)).why, /не разрешает/);
+  assert.throws(() => auto.set(true, 'PLC test'), /не разрешает/);
+  assert.equal(auto.set(false).on, false, 'switching off is always possible');
+  state.rules = { folders: { read: ['*'], write: ['*'], deny: [] } };
+
+  // «Вернуть»: the changed file gets its old text, the file the edit made is moved away, nothing is deleted
+  auto.set(true);
+  fs.writeFileSync(mine, 'старый текст');
+  const made = path.join(project, '_work', 'st', 'GVL.st');
+  const params = edit(mine, { content: [{ type: 'diff', path: mine, oldText: 'старый текст', newText: 'новый' },
+    { type: 'diff', path: made, oldText: null, newText: 'VAR_GLOBAL END_VAR' }] });
+  const d = auto.decide(params);
+  assert.equal(d.auto, true);
+  assert.ok(auto.allow(params, d));
+  fs.writeFileSync(mine, 'новый');   // the agent's edit itself
+  fs.writeFileSync(made, 'VAR_GLOBAL END_VAR');
+  const [last] = auto.recentEdits();
+  assert.deepEqual([last.files, last.project, last.undone], [['Main.st', 'GVL.st'], 'PLC test', false]);
+  state.now += 60000;
+  assert.deepEqual(auto.undo(last.id), { restored: ['Main.st'], removed: ['GVL.st'] });
+  assert.equal(fs.readFileSync(mine, 'utf8'), 'старый текст');
+  assert.ok(!fs.existsSync(made));
+  const kept = fs.readdirSync(path.join(path.dirname(auto.file), 'audit', 'undo', '2026-11-12'));
+  assert.ok(kept.some((n) => n.endsWith('-u0-Main.st')) && kept.some((n) => n.endsWith('-un0-GVL.st')), 'what was there is kept aside');
+  assert.equal(auto.recentEdits()[0].undone, true);
+  assert.throws(() => auto.undo(last.id), /уже возвращена/);
+  assert.throws(() => auto.undo('2020-01-01T00:00:00.000Z'), /нет в журнале/);
+  // an edit whose copy is gone, or whose file may no longer be written, is not taken back
+  fs.writeFileSync(mine, 'ещё раз');
+  const p2 = edit(mine, { content: [{ type: 'diff', path: mine, oldText: 'ещё раз', newText: 'x' }] });
+  state.now += 60000;
+  assert.ok(auto.allow(p2, auto.decide(p2)));
+  const id2 = auto.recentEdits()[0].id;
+  state.rules = { folders: { read: ['*'], write: [], deny: [] } };
+  assert.throws(() => auto.undo(id2), /не открыта агенту на запись/);
+  state.rules = { folders: { read: ['*'], write: ['*'], deny: [] } };
+  fs.rmSync(path.join(path.dirname(auto.file), 'audit', 'undo'), { recursive: true });
+  assert.throws(() => auto.undo(id2), /копия старого файла не сохранилась/);
 });

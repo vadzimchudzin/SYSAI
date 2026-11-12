@@ -375,14 +375,31 @@ function onNotification({ method, params }) {
 
 // «Правки без вопросов» (lib/autoapprove.js of the main process): on — the window allows edits inside the project
 // folders itself.
-async function setAuto(on) {
+// folders itself; project — only inside that project (the profile of SYSAI may allow nothing wider).
+async function setAuto(on, project = '') {
   try {
-    S.auto = await api.auto.set(on);
+    if (on && !project && S.auto && S.auto.policy === 'project') {
+      const here = current() && projectOf(current().cwd);
+      project = here ? here.name : '';
+    }
+    S.auto = await api.auto.set(on, project);
     composer.update();
-    toast(on ? 'Правки в папках проектов — без вопросов. Материалы, секреты, удаление и файлы вне проектов агент по-прежнему спросит.'
-      : 'Агент снова спрашивает перед каждой правкой файла.', on ? 'ok' : 'info', 7000);
+    toast(!on ? 'Агент снова спрашивает перед каждой правкой файла.'
+      : `Правки ${project ? `в проекте «${project}»` : 'в папках проектов'} — без вопросов. Материалы, секреты, удаление и `
+        + `файлы ${project ? 'других проектов и ' : ''}вне проектов агент по-прежнему спросит.`, on ? 'ok' : 'info', 7000);
   } catch (err) {
     toast(err.message, 'err');
+  }
+}
+
+// «Вернуть»: an edit allowed without a question is taken back from the copy the window made before it.
+async function undoEdit(id) {
+  try {
+    const done = await api.auto.undo(id);
+    toast(`Возвращено: ${[...done.restored, ...done.removed.map((n) => `${n} (убран)`)].join(', ') || 'нечего возвращать'}`, 'ok', 6000);
+    if (pane && pane.projects && pane.projects.name) pane.projects.open(pane.projects.name, true);
+  } catch (err) {
+    toast(`Не возвращено: ${err.message}`, 'err', 8000);
   }
 }
 
@@ -806,7 +823,8 @@ async function main() {
   S.info = await api.info().catch(() => ({}));
   document.title = S.info.agent ? `Агент SYSAI — ${S.info.agent}` : 'Агент SYSAI';
   S.auto = await api.auto.get().catch(() => ({ on: false, count: 0 }));
-  composer = new Composer({ send, stop, setConfig, auto: () => S.auto, setAuto, ready: () => S.acp.state === 'ready' && Boolean(current()),
+  composer = new Composer({ send, stop, setConfig, auto: () => S.auto, setAuto, undoEdit, recentEdits: () => api.auto.recent(),
+    project: () => { const c = current(); const p = c && projectOf(c.cwd); return p ? p.name : ''; }, ready: () => S.acp.state === 'ready' && Boolean(current()),
     idle: () => (!S.info.connected ? 'Компьютер не подключён к SYSAI' : S.acp.state === 'ready' ? 'Открываю разговор…'
       : !S.acp.state || S.acp.state === 'starting' ? 'Агент запускается…' : 'Агент не запущен — нажмите «Перезапустить»') });
   $('composer-wrap').append(composer.el);

@@ -79,13 +79,39 @@ export class Composer {
       const paths = await api.dialog.files({ title: 'Прикрепить к сообщению' }).catch(() => []);
       this.attachMany(paths || []);
     });
-    this.autoBtn.addEventListener('click', () => {
+    this.autoBtn.addEventListener('click', async () => {
       if (menuOpenFor(this.autoBtn)) { closeMenu(); return; }
-      const on = this._auto().on;
-      openMenu(this.autoBtn, [{ header: 'Правки файлов' },
-        { label: 'Спрашивать', sub: AUTO_OFF, value: false, checked: !on },
-        { label: 'Без вопросов в папках проектов', sub: `${AUTO_ON}. Старый файл копируется, правка пишется в журнал`, value: true, checked: on }],
-      { above: true, minWidth: 320, onPick: (value) => { if (value !== on) this.hooks.setAuto(value); } });
+      const { on, project, policy } = this._auto();
+      const here = (this.hooks.project && this.hooks.project()) || '';
+      const items = [{ header: 'Правки файлов' }, { label: 'Спрашивать', sub: AUTO_OFF, value: 'off', checked: !on }];
+      if (policy === 'off') items.push({ header: 'Профиль доступов SYSAI не разрешает правки без вопросов' });
+      else {
+        const one = here || project;
+        if (one) {
+          items.push({ label: `Без вопросов · ${one}`, sub: 'Только в папке этого проекта; остальное — с вопросом. Старый файл копируется',
+            value: `one:${one}`, checked: on && project === one });
+        }
+        if (policy !== 'project') {
+          items.push({ label: 'Без вопросов во всех проектах', sub: `${AUTO_ON}. Старый файл копируется, правка пишется в журнал`,
+            value: 'all', checked: on && !project });
+        } else if (!one) items.push({ header: 'Профиль разрешает только в одном проекте: откройте разговор проекта' });
+      }
+      // the last edits allowed without a question: each can be taken back from the copy made before it
+      const recent = this.hooks.recentEdits ? await this.hooks.recentEdits().catch(() => []) : [];
+      const fresh = recent.filter((e) => !e.undone).slice(0, 6);
+      if (fresh.length) {
+        items.push({ sep: true }, { header: 'Вернуть правку (файл станет каким был)' });
+        for (const e of fresh) {
+          items.push({ label: `${e.files.slice(0, 2).join(', ')}${e.files.length > 2 ? ` и ещё ${e.files.length - 2}` : ''}`,
+            sub: `${String(e.at).slice(11, 16)} UTC${e.project ? ` · ${e.project}` : ''}${e.title ? ` · ${e.title.slice(0, 60)}` : ''}`, value: `undo:${e.id}` });
+        }
+      }
+      openMenu(this.autoBtn, items, { above: true, minWidth: 340, onPick: (value) => {
+        if (value === 'off') { if (on) this.hooks.setAuto(false); }
+        else if (value === 'all') { if (!on || project) this.hooks.setAuto(true, ''); }
+        else if (String(value).startsWith('one:')) { if (!on || project !== value.slice(4)) this.hooks.setAuto(true, value.slice(4)); }
+        else if (String(value).startsWith('undo:') && this.hooks.undoEdit) this.hooks.undoEdit(value.slice(5));
+      } });
     });
     this.sendBtn.addEventListener('click', () => (this.conv && this.conv.running ? this.hooks.stop() : this.submit()));
   }
@@ -99,10 +125,10 @@ export class Composer {
   }
 
   _drawAuto() {
-    const { on, count } = this._auto();
+    const { on, count, project } = this._auto();
     this.autoBtn.classList.toggle('on', on);
     this.box.classList.toggle('auto', on);
-    this.autoText.textContent = on ? `Правки: без вопросов${count ? ` · ${count}` : ''}` : 'Правки: спрашивать';
+    this.autoText.textContent = on ? `Правки: без вопросов${project ? ` · ${project}` : ''}${count ? ` · ${count}` : ''}` : 'Правки: спрашивать';
     this.autoBtn.title = on ? `${AUTO_ON}.${count ? ` Разрешено без вопроса: ${count}.` : ''} Ctrl+Shift+A — выключить`
       : `${AUTO_OFF}. Нажмите, чтобы разрешить правки в папках проектов без вопросов (Ctrl+Shift+A)`;
   }

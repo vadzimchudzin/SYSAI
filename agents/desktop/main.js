@@ -765,11 +765,13 @@ function ipc() {
     return [...await projects.attach(String(name || ''), fetched, String(role || '')), ...failed];
   });
   handle('auto:get', () => auto.state());
-  handle('auto:set', (on) => {
-    const state = auto.set(Boolean(on));
+  handle('auto:set', (on, project) => {
+    const state = auto.set(Boolean(on), String(project || ''));
     send('auto:state', state);
     return state;
   });
+  handle('auto:recent', () => auto.recentEdits());
+  handle('auto:undo', (id) => auto.undo(String(id || '')));
   handle('clipboard:text', (text) => {
     clipboard.writeText(String(text));
     return true;

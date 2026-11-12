@@ -33,7 +33,9 @@ contextBridge.exposeInMainWorld('sysai', {
   },
   auto: {
     get: () => call('auto:get'),
-    set: (on) => call('auto:set', Boolean(on)),
+    set: (on, project) => call('auto:set', Boolean(on), project || ''),
+    recent: () => call('auto:recent'),
+    undo: (id) => call('auto:undo', id),
     onState: on('auto:state'),
     onToggle: on('auto:toggle'),
   },

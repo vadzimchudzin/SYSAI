@@ -301,3 +301,15 @@ def test_a_tool_added_to_the_seed_is_given_to_the_department_profiles_once(clien
     after = _profile("opo-engineer")
     assert after.rules["mcp"]["plc-live"] == ["*"] and "ebpro-gui" not in after.rules["mcp"]
     assert "plc-live" not in _profile("to").rules["mcp"]
+
+
+def test_the_profile_says_how_far_edits_without_questions_may_go(client, net_agent):
+    """The switch is the person's, its ceiling is the profile's: the window reads rules.edits.auto from the signed rules."""
+    assert access.normalize({})["edits"] == {"auto": "projects"}                 # rules that do not say: as it was
+    assert access.normalize({"edits": {"auto": "всё"}})["edits"] == {"auto": "projects"}
+    assert access.rules_from_form({"edits_auto": "project"})["edits"] == {"auto": "project"}
+    assert access.document(net_agent["id"])["doc"]["rules"]["edits"] == {"auto": "projects"}
+    access.set_agent_access(net_agent["id"], overrides={"edits": {"auto": "off"}})
+    assert access.document(net_agent["id"])["doc"]["rules"]["edits"] == {"auto": "off"}
+    page = client.get("/agents/access").text
+    assert 'name="edits_auto"' in page and "в одном проекте за раз" in page and 'name="plc_hosts"' in page

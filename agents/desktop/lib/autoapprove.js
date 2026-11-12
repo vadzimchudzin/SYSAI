@@ -25,32 +25,52 @@ class AutoApprove {
     Object.assign(this, { file, audit, loadRules, pathAllowed, guarded, log, path, now });
     this.root = path.resolve(root);
     this.on = false;
+    this.project = ''; // "" — every project folder; a name — only that project
     this.count = 0;
     this.recent = [];
     try {
       const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
       this.on = Boolean(saved && saved.on === true);
+      this.project = this.on && typeof saved.project === 'string' ? saved.project : '';
       this.count = this.on && Number.isInteger(saved.count) && saved.count > 0 ? saved.count : 0;
     } catch { /* never switched on, or a damaged file: off */ }
   }
 
-  state() {
-    return { on: this.on, count: this.count, root: this.root };
+  // What the access profile of SYSAI lets the switch do (rules.edits.auto): 'off' — nothing, the person is always
+  // asked; 'project' — one project at a time; 'projects' — the project folders. Rules that do not say — 'projects',
+  // as it was before the profile could say.
+  policy() {
+    let loaded = null;
+    try {
+      loaded = this.loadRules();
+    } catch { /* no rules: nothing is allowed without a question anyway */ }
+    const said = loaded && loaded.rules && loaded.rules.edits && loaded.rules.edits.auto;
+    return ['off', 'project', 'projects'].includes(said) ? said : 'projects';
   }
 
-  set(on) {
+  state() {
+    return { on: this.on, count: this.count, root: this.root, project: this.project, policy: this.policy() };
+  }
+
+  set(on, project = '') {
+    const policy = this.policy();
+    const name = String(project || '').trim();
+    if (on && policy === 'off') throw new Error('профиль доступов SYSAI не разрешает правки без вопросов (SYSAI → Агенты → Доступы)');
+    if (on && policy === 'project' && !name) throw new Error('профиль доступов SYSAI разрешает правки без вопросов только в одном проекте: откройте разговор проекта');
+    if (name && (/[\\/]/.test(name) || name === '.' || name === '..')) throw new Error('нет такого проекта');
     this.on = Boolean(on);
+    this.project = this.on ? name : '';
     this.count = 0;
     this.recent = [];
     this._save();
-    this.log(`правки без вопросов: ${this.on ? 'включены' : 'выключены'}`);
+    this.log(`правки без вопросов: ${this.on ? `включены${this.project ? ` в проекте «${this.project}»` : ''}` : 'выключены'}`);
     return this.state();
   }
 
   _save() {
     try {
       fs.mkdirSync(this.path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file, JSON.stringify({ version: 1, on: this.on, count: this.count, at: new Date(this.now()).toISOString() }));
+      fs.writeFileSync(this.file, JSON.stringify({ version: 1, on: this.on, project: this.project, count: this.count, at: new Date(this.now()).toISOString() }));
     } catch (err) {
       this.log('правки без вопросов: состояние не сохранено:', err.message);
     }
@@ -93,6 +113,7 @@ class AutoApprove {
     const parts = rel.split(/[\\/]+/).filter(Boolean);
     if (parts.length < 2) return 'файл не в папке проекта';
     const low = parts.map((p) => p.toLowerCase());
+    if (this.project && low[0] !== this.project.toLowerCase()) return `другой проект: без вопросов сейчас только «${this.project}»`;
     if (PROTECTED.includes(low[1])) return `исходные материалы (${parts[1]}/) агент только читает`;
     if (low.some((p) => SECRET_DIRS.has(p)) || SECRET_NAME.test(name)) return 'служебный файл или секрет';
     if (!this.pathAllowed(rules, target, true)) return 'папка не открыта агенту на запись (SYSAI → Доступы → Папки)';
@@ -118,6 +139,9 @@ class AutoApprove {
   decide(params, cwd = '') {
     if (!this.on) return { auto: false, why: '' };
     try {
+      const policy = this.policy();
+      if (policy === 'off') return { auto: false, why: 'профиль доступов SYSAI не разрешает правки без вопросов' };
+      if (policy === 'project' && !this.project) return { auto: false, why: 'профиль доступов разрешает правки без вопросов только в одном проекте' };
       const got = this._paths(params);
       if (!got.paths) return { auto: false, why: got.why };
       const loaded = this.loadRules();
@@ -149,8 +173,9 @@ class AutoApprove {
     const day = stamp.toISOString().slice(0, 10);
     try {
       const copies = [];
+      const created = []; // files this edit makes: «Вернуть» takes them away
       decision.paths.forEach((file, i) => {
-        if (!fs.existsSync(file)) return;
+        if (!fs.existsSync(file)) { created.push(file); return; }
         const dir = this.path.join(this.audit, 'undo', day);
         fs.mkdirSync(dir, { recursive: true });
         const copy = this.path.join(dir, `${stamp.getTime().toString(36)}-${i}-${this.path.basename(file)}`);
@@ -160,7 +185,7 @@ class AutoApprove {
       fs.mkdirSync(this.audit, { recursive: true });
       const tc = params.toolCall || {};
       fs.appendFileSync(this.path.join(this.audit, `${day.slice(0, 7)}.jsonl`), `${JSON.stringify({ at: stamp.toISOString(),
-        session: params.sessionId || '', decision: 'auto', title: String(tc.title || '').slice(0, 300), paths: decision.paths, copies })}\n`, 'utf8');
+        session: params.sessionId || '', decision: 'auto', title: String(tc.title || '').slice(0, 300), paths: decision.paths, copies, created })}\n`, 'utf8');
     } catch (err) {
       this.log('правки без вопросов: копия или журнал не записаны:', err.message);
       return false;
@@ -169,6 +194,92 @@ class AutoApprove {
     this.count += 1;
     this._save();
     return true;
+  }
+
+  // ---- «Вернуть»: the journal of what was allowed here, and an edit taken back
+  _lines() {
+    const out = [];
+    let names = [];
+    try {
+      names = fs.readdirSync(this.audit).filter((n) => /^\d{4}-\d{2}\.jsonl$/.test(n)).sort().slice(-2);
+    } catch {
+      return out;
+    }
+    for (const n of names) {
+      let text = '';
+      try {
+        text = fs.readFileSync(this.path.join(this.audit, n), 'utf8');
+      } catch { /* held: without it */ }
+      for (const line of text.split('\n')) {
+        try {
+          if (line.trim()) out.push(JSON.parse(line));
+        } catch { /* a torn line */ }
+      }
+    }
+    return out;
+  }
+
+  // The last edits allowed without a question, newest first: [{id, at, title, files: [name], undone}]
+  recentEdits(limit = 15) {
+    const lines = this._lines();
+    const undone = new Set(lines.filter((l) => l.decision === 'undo').map((l) => l.of));
+    return lines.filter((l) => l.decision === 'auto' && Array.isArray(l.paths)).slice(-limit).reverse()
+      .map((l) => ({ id: l.at, at: l.at, title: String(l.title || ''), files: l.paths.map((p) => this.path.basename(p)),
+        project: this.path.relative(this.root, l.paths[0] || '').split(/[\\/]+/)[0] || '', undone: undone.has(l.at) }));
+  }
+
+  // Takes one edit back: every file it changed gets its old text from the copy, a file it made is moved to the
+  // journal folder (nothing is deleted). What the file holds now is copied aside first, so «Вернуть» can itself be
+  // taken back by hand. -> {restored: [name], removed: [name]} ; throws with the reason when it cannot.
+  undo(id) {
+    const lines = this._lines();
+    const entry = lines.find((l) => l.decision === 'auto' && l.at === id);
+    if (!entry) throw new Error('этой правки нет в журнале (журнал хранится два месяца)');
+    if (lines.some((l) => l.decision === 'undo' && l.of === id)) throw new Error('эта правка уже возвращена');
+    const loaded = this.loadRules();
+    if (!loaded || !loaded.rules) throw new Error('нет подписанных доступов SYSAI на этом компьютере');
+    const created = new Set(Array.isArray(entry.created) ? entry.created : []);
+    const copies = Array.isArray(entry.copies) ? entry.copies : [];
+    const changed = entry.paths.filter((p) => !created.has(p));
+    if (changed.length !== copies.length) throw new Error('в журнале нет копии старого файла');
+    const was = this.project;
+    this.project = ''; // the file is put back where it was, whatever project the switch looks at now
+    try {
+      for (const file of entry.paths) {
+        const why = this._refuse(file, loaded.rules);
+        if (why) throw new Error(`${this.path.basename(file)}: ${why}`);
+      }
+    } finally {
+      this.project = was;
+    }
+    for (const c of copies) if (!fs.existsSync(c)) throw new Error('копия старого файла не сохранилась (копии хранятся месяц)');
+    const stamp = new Date(this.now());
+    const dir = this.path.join(this.audit, 'undo', stamp.toISOString().slice(0, 10));
+    fs.mkdirSync(dir, { recursive: true });
+    const tag = `${stamp.getTime().toString(36)}-u`;
+    const out = { restored: [], removed: [] };
+    const kept = [];
+    changed.forEach((file, i) => {
+      if (fs.existsSync(file)) {
+        const now = this.path.join(dir, `${tag}${i}-${this.path.basename(file)}`);
+        fs.copyFileSync(file, now);
+        kept.push(now);
+      }
+      fs.mkdirSync(this.path.dirname(file), { recursive: true });
+      fs.copyFileSync(copies[i], file);
+      out.restored.push(this.path.basename(file));
+    });
+    [...created].forEach((file, i) => {
+      if (!fs.existsSync(file)) return;
+      const to = this.path.join(dir, `${tag}n${i}-${this.path.basename(file)}`);
+      fs.renameSync(file, to);
+      kept.push(to);
+      out.removed.push(this.path.basename(file));
+    });
+    fs.appendFileSync(this.path.join(this.audit, `${stamp.toISOString().slice(0, 7)}.jsonl`),
+      `${JSON.stringify({ at: stamp.toISOString(), decision: 'undo', of: id, paths: entry.paths, kept })}\n`, 'utf8');
+    this.log(`правки без вопросов: возвращена правка ${id}: ${[...out.restored, ...out.removed].join(', ')}`);
+    return out;
   }
 
   // The copies of old files older than a month go.

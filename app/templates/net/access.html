@@ -50,6 +50,7 @@
       <div class="net-checks"><label><input type="checkbox" name="commands_run" {{ 'checked' if r.commands.run }}> выполнять команды на ПК без вопросов</label></div>
       <label class="f">Запрещённые команды <textarea name="commands_deny" spellcheck="false">{{ r.commands.deny|join('\n') }}</textarea>
         <small class="muted">Шаблон на строку, «*» — любой текст.</small></label>
+      <label class="f">{{ sections.edits }} <select name="edits_auto">{% for e in edits %}<option value="{{ e }}" {{ 'selected' if r.edits.auto == e }}>{{ edits_ru[e] }}</option>{% endfor %}</select><small class="muted">Насколько далеко идёт кнопка «Правки» окна агента: человек включает её сам, здесь — предел. Материалы, секреты, удаление и файлы вне проектов спрашиваются всегда.</small></label>
       <details class="ac-more"><summary>Запрещено всегда, в любом профиле</summary><p class="small muted ac-mono">{{ always_deny|join(' · ') }}</p></details>
       <h3>{{ sections.folders }}</h3>
       <div class="ac-fields three">
