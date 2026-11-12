@@ -408,3 +408,60 @@ def test_bundled_mcp_upload_keeps_existing_published_version(client, net_agent):
     card = hub.card('ebpro-cmtp')
     assert card['current'] == '1.0.0'
     assert next(v for v in card['versions'] if v['version'] == '1.6.0')['status'] == 'draft'
+
+
+def test_ready_packages_say_what_is_new_and_install_in_one_step(client, net_agent):
+    """The list of ready packages tells each one against the Hub — not there, newer, waiting, installed — puts what
+    is new first and installs it with one button."""
+    from app.net import hub_bundles
+    rows = {r['name']: r for r in hub_bundles.listing()}
+    assert {r['state'] for r in rows.values()} == {'new'} and rows['plc-kit']['label'] == 'Нет в Hub'
+    page = client.get('/hub').text
+    assert 'nx-bundles" open' in page and 'Установить все (9)' in page and 'action="/hub/bundled/plc-kit/install"' in page
+
+    # an older version is published: the package is an update, named with both versions, and stands first
+    files = hub.read_zip(hub_bundles.package('plc-kit')['blob'])
+    new = hub_bundles.package('plc-kit')['version']
+    files['TOOL.md'] = files['TOOL.md'].replace(f'version: {new}'.encode(), b'version: 1.0.0')
+    assert 'v=1.0.0' in _upload(client, files).headers['location']
+    client.post('/hub/plc-kit/1.0.0/publish')
+    first = hub_bundles.listing()[0]
+    assert (first['name'], first['state'], first['hub'], first['label']) == ('plc-kit', 'update', '1.0.0', 'Новая версия')
+    page = client.get('/hub').text
+    assert f'<s>1.0.0</s> → <b>{new}</b>' in page and '>Обновить</button>' in page and 'is-update' in page
+
+    # one button: uploaded and published (the test user may publish)
+    r = client.post('/hub/bundled/plc-kit/install', follow_redirects=False)
+    assert r.status_code == 303 and r.headers['location'].startswith('/hub/plc-kit')
+    assert hub.card('plc-kit')['current'] == new
+    row = {r['name']: r for r in hub_bundles.listing()}['plc-kit']
+    assert (row['state'], row['label']) == ('current', 'Установлена')
+    assert hub_bundles.listing()[-1]['name'] == 'plc-kit'                   # installed ones go to the end
+    assert any(x['name'] == 'plc-kit' and x['version'] == new for x in client.get('/agents/api/hub/manifest', headers=net_agent['headers']).json()['tools'])
+    again = client.post('/hub/bundled/plc-kit/install', follow_redirects=False)
+    assert 'error=' in again.headers['location'] and hub.card('plc-kit')['current'] == new
+
+    # uploaded by hand and not published yet: «ждёт публикации», the button publishes that very upload
+    _upload(client, hub.read_zip(hub_bundles.package('doc-kit')['blob']))
+    assert {r['name']: r for r in hub_bundles.listing()}['doc-kit']['state'] == 'pending'
+    client.post('/hub/bundled/doc-kit/install')
+    card = hub.card('doc-kit')
+    assert card['current'] == hub_bundles.package('doc-kit')['version'] and len(card['versions']) == 1
+
+    # the Hub is ahead of the package: nothing to install
+    files = hub.read_zip(hub_bundles.package('pic-index')['blob'])
+    files['TOOL.md'] = files['TOOL.md'].replace(b'version: 1.0.0', b'version: 9.0.0')
+    _upload(client, files)
+    client.post('/hub/pic-index/9.0.0/publish')
+    row = {r['name']: r for r in hub_bundles.listing()}['pic-index']
+    assert (row['state'], row['hub']) == ('older', '9.0.0')
+    assert 'error=' in client.post('/hub/bundled/pic-index/install', follow_redirects=False).headers['location']
+
+    # everything else at once
+    r = client.post('/hub/bundled/install-all', follow_redirects=False)
+    assert r.status_code == 303 and 'msg=' in r.headers['location']
+    states = {r['name']: r['state'] for r in hub_bundles.listing()}
+    assert set(states.values()) == {'current', 'older'} and states['pic-index'] == 'older'
+    page = client.get('/hub').text
+    assert 'всё установлено' in page and 'nx-bundles" open' not in page and 'Установить все' not in page
+    assert client.post('/hub/bundled/not-a-bundle/install', follow_redirects=False).headers['location'].startswith('/hub?error=')

@@ -176,3 +176,34 @@
 .net-more::after { content: " · показать"; color: var(--muted); font-size: 13px; }
 details[open] > .net-more::after { content: " · скрыть"; }
 details[open] > .net-more { margin-bottom: 8px; }
+
+/* Ready packages against the Hub: what is new stands out, what is installed steps back. */
+.nx-bundles { margin-bottom: 14px; }
+.nx-bundles > summary { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.nx-bundles-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 10px 0 12px; }
+.nx-bundles-head p { margin: 0; font-size: 13.5px; color: var(--soft); max-width: 720px; }
+.nx-bundle-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.nx-bundle { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 6px 14px;
+  padding: 9px 12px; border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 10px; }
+.nx-bundle-main { display: grid; gap: 1px; min-width: 0; }
+.nx-bundle-main b { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.nx-bundle-sub { font-size: 12px; color: var(--muted); }
+.nx-bundle-ver { font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--soft); min-width: 104px; text-align: right; }
+.nx-bundle > .pill { min-width: 132px; justify-content: center; }
+.nx-bundle-ver s { color: var(--muted); }
+.nx-bundle-act { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 150px; }
+.nx-bundle-act form { margin: 0; }
+.nx-bundle-act .btn { padding: 6px 12px; font-size: 13px; }
+.nx-bundle-zip { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--muted); }
+.nx-bundle-zip:hover { color: var(--text); background: var(--card2); }
+.nx-bundle-zip svg.i { width: 16px; height: 16px; }
+.nx-bundle.is-update { border-left-color: var(--amber); background: rgba(224,168,90,.07); }
+.nx-bundle.is-new { border-left-color: var(--blue); background: rgba(143,168,216,.07); }
+.nx-bundle.is-pending { border-left-color: var(--amber); }
+.nx-bundle.is-current .nx-bundle-main b, .nx-bundle.is-older .nx-bundle-main b { font-weight: 500; color: var(--soft); }
+@media (max-width: 720px) {
+  .nx-bundles-head { flex-direction: column; align-items: flex-start; }
+  .nx-bundle { grid-template-columns: minmax(0, 1fr) auto; }
+  .nx-bundle-act { grid-column: 1 / -1; justify-content: flex-start; min-width: 0; }
+  .nx-bundle-ver { min-width: 0; } .nx-bundle > .pill { min-width: 0; justify-self: start; }
+}

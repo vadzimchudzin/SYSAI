@@ -728,6 +728,20 @@ def listing(q: str = "", department_id=None, kind: str = "") -> list:
         return out
 
 
+def version_states() -> dict:
+    """{name: {'current': the published version or '', 'versions': {version: status}}} — to tell what a package brings."""
+    with SessionLocal() as s:
+        out = {k.name: {"current": k.current_version or "", "retired": k.status == "retired", "versions": {}, "id": k.id}
+               for k in s.query(NetSkill).all()}
+        by_id = {v["id"]: v for v in out.values()}
+        for skill_id, version, status in s.query(NetSkillVersion.skill_id, NetSkillVersion.version, NetSkillVersion.status):
+            if skill_id in by_id:
+                by_id[skill_id]["versions"][version] = status
+        for v in out.values():
+            v.pop("id")
+        return out
+
+
 def review_queue() -> list:
     with SessionLocal() as s:
         rows = (s.query(NetSkillVersion, NetSkill).join(NetSkill, NetSkill.id == NetSkillVersion.skill_id)

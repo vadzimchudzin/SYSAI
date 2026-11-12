@@ -28,10 +28,36 @@
 <div class="card note nx-hint">Всё, чем работают агенты сети, — в одном месте. <b>Навык</b> (SKILL.md) — как делать работу; <b>MCP-сервер</b> и <b>программа</b> (TOOL.md) — чем её делать на ПК. «Всегда с собой» синхронизатор держит у каждого агента, кому это разрешено; «по запросу» агент находит сам и берёт под задачу. Что агент придумал сам, приходит сюда на проверку.</div>
 
 {% if bundles %}
-<details class="card note">
-  <summary><b>EasyBuilder Pro — готовые пакеты</b></summary>
-  <p>Скачайте ZIP и загрузите его в Hub. Это отдельные версии: они не изменяют опубликованные до проверки и публикации владельцем.</p>
-  <ul>{% for bundle in bundles %}<li>{{ bundle.title }} · {{ bundle.version }} — <a href="/hub/bundled/{{ bundle.name }}.zip">Скачать ZIP</a></li>{% endfor %}</ul>
+{% set fresh = bundles|selectattr('state', 'in', ['update', 'new'])|list %}
+{% set waiting = bundles|selectattr('state', 'equalto', 'pending')|list %}
+<details class="card note nx-bundles"{{ ' open' if fresh or waiting }}>
+  <summary><b>Готовые пакеты SYSAI</b>
+    {% if fresh %}<span class="pill amber">{{ fresh|length }} {{ plural(fresh|length, 'обновление', 'обновления', 'обновлений') }}</span>{% endif %}
+    {% if waiting %}<span class="pill amber">ждут публикации: {{ waiting|length }}</span>{% endif %}
+    {% if not fresh and not waiting %}<span class="pill green">всё установлено</span>{% endif %}</summary>
+  <div class="nx-bundles-head">
+    <p>Инструменты и умения, которые приходят вместе с сервером. Сверху — то, что новее вашего Hub. «Установить» загружает пакет и публикует его; без права публикации он уйдёт на проверку.</p>
+    {% if (fresh|length + waiting|length) > 1 %}<form method="post" action="/hub/bundled/install-all" onsubmit="return confirm('Установить все новые пакеты? Агенты получат их при следующей синхронизации.')"><button class="btn primary">{{ icon('upload') }} Установить все ({{ fresh|length + waiting|length }})</button></form>{% endif %}
+  </div>
+  <ul class="nx-bundle-list">
+    {% for bundle in bundles %}
+    <li class="nx-bundle is-{{ bundle.state }}">
+      <span class="nx-bundle-main"><b>{{ bundle.title }}</b>
+        <span class="nx-bundle-sub">{{ bundle.name }} · {{ bundle.kind }}</span></span>
+      <span class="nx-bundle-ver" title="{{ 'В Hub сейчас ' ~ bundle.hub if bundle.hub else 'В Hub этого пакета нет' }}">
+        {% if bundle.state == 'update' %}<s>{{ bundle.hub }}</s> → <b>{{ bundle.version }}</b>
+        {% elif bundle.state == 'older' %}{{ bundle.version }} <span class="muted">(в Hub {{ bundle.hub }})</span>
+        {% else %}<b>{{ bundle.version }}</b>{% endif %}</span>
+      <span class="pill {{ bundle.colour }}">{{ bundle.label }}</span>
+      <span class="nx-bundle-act">
+        {% if bundle.state in ('update', 'new') %}<form method="post" action="/hub/bundled/{{ bundle.name }}/install"><button class="btn primary">{{ 'Обновить' if bundle.state == 'update' else 'Установить' }}</button></form>
+        {% elif bundle.state == 'pending' %}<a class="btn" href="/hub/{{ bundle.name }}?v={{ bundle.version }}" data-nx-open>Открыть</a>
+        {% elif bundle.state == 'current' %}<a class="btn ghost" href="/hub/{{ bundle.name }}" data-nx-open>Открыть</a>{% endif %}
+        <a class="nx-bundle-zip" href="/hub/bundled/{{ bundle.name }}.zip" title="Скачать ZIP {{ bundle.version }}" aria-label="Скачать ZIP {{ bundle.title }}">{{ icon('download') }}</a>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
 </details>
 {% endif %}
 

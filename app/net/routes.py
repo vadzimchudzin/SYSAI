@@ -497,6 +497,38 @@ def hub_bundled_download(request: Request, name: str):
                              "X-SHA256": item["sha256"], "Cache-Control": "no-store"})
 
 
+def _bundle_install(name: str, me: dict) -> str:
+    done = hub_bundles.install(name, me)
+    if done["published"]:
+        return f"{name} {done['version']} опубликована: агенты получат её при следующей синхронизации"
+    return f"{name} {done['version']} загружена и ждёт публикации ({done['note']})"
+
+
+@router.post("/hub/bundled/install-all")
+def hub_bundled_install_all(request: Request):
+    """Every package that brings something new, in one step."""
+    me = _person(request)
+    lines, errors = [], []
+    for item in hub_bundles.listing():
+        if item["state"] in ("update", "new", "pending"):
+            try:
+                lines.append(_bundle_install(item["name"], me))
+            except (OSError, hub.HubError) as exc:
+                errors.append(f"{item['name']}: {exc}")
+    if errors:
+        return _back("/hub", error="; ".join(errors + lines))
+    return _back("/hub", msg="; ".join(lines) or "Все пакеты уже установлены")
+
+
+@router.post("/hub/bundled/{name}/install")
+def hub_bundled_install(request: Request, name: str):
+    me = _person(request)
+    try:
+        return _back(f"/hub/{name}", msg=_bundle_install(name, me))
+    except (OSError, hub.HubError) as exc:
+        return _back("/hub", error=str(exc))
+
+
 @router.get("/hub/{name}/{version}.zip")
 def hub_download(request: Request, name: str, version: str):
     _person(request)
