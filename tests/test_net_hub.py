@@ -366,8 +366,8 @@ def test_bundled_easybuilder_packages_download_without_publishing(client, net_ag
                                ('ebpro-mnemoscheme', '1.1.0', 'SKILL.md'),
                                ('ebpro-gui', '1.0.0', 'TOOL.md'), ('plc-kit', '1.5.0', 'TOOL.md'),
                                ('machine-expert', '0.1.2', 'TOOL.md'), ('pic-index', '1.0.1', 'TOOL.md'),
-                               ('doc-kit', '1.1.0', 'TOOL.md'), ('plc-project', '2.4.1', 'SKILL.md'),
-                               ('project-docs', '1.1.0', 'SKILL.md')]:
+                               ('doc-kit', '1.1.0', 'TOOL.md'), ('plc-project', '2.5.0', 'SKILL.md'),
+                               ('project-docs', '1.1.0', 'SKILL.md'), ('drawing-kit', '1.0.0', 'TOOL.md')]:
         assert f'/hub/bundled/{name}.zip' in page.text
         result = client.get(f'/hub/bundled/{name}.zip')
         assert result.status_code == 200
@@ -417,7 +417,7 @@ def test_ready_packages_say_what_is_new_and_install_in_one_step(client, net_agen
     rows = {r['name']: r for r in hub_bundles.listing()}
     assert {r['state'] for r in rows.values()} == {'new'} and rows['plc-kit']['label'] == 'Нет в Hub'
     page = client.get('/hub').text
-    assert 'nx-bundles" open' in page and 'Установить все (9)' in page and 'action="/hub/bundled/plc-kit/install"' in page
+    assert 'nx-bundles" open' in page and 'Установить все (10)' in page and 'action="/hub/bundled/plc-kit/install"' in page
 
     # an older version is published: the package is an update, named with both versions, and stands first
     files = hub.read_zip(hub_bundles.package('plc-kit')['blob'])
