@@ -530,3 +530,73 @@ def test_a_dead_token_of_a_known_agent_is_seen_in_its_trace(client, net_agent):
     with SessionLocal() as s:
         row = s.query(NetSpend).one()
         assert row.agent_id == net_agent["id"] and row.ok is False and row.error.startswith("unauthorized: ")
+
+
+def test_jev_is_checked_with_a_button_and_the_page_says_how_it_is(client, net_agent, monkeypatch):
+    monkeypatch.setattr(gateway.config, "OPENROUTER_API_KEY", "k")
+    monkeypatch.setattr(gateway, "prices", lambda: {m: (0.000001, 0.000002) for m in gateway.DEFAULT_MODELS.values() if m})
+    gateway._state.update(jev_rest_until=0.0, jev_why="", jev_probe=None)
+    assert gateway.jev_status()["state"] == "unknown" and "не проверялся" in client.get("/agents/access").text
+    asked = []
+
+    def ok(url, body, headers):
+        asked.append(body)
+        return httpx.Response(200, json={"model": "google/gemini-3.5-flash-lite", "choices": [{"message": {"content": "ok"}}],
+                                         "usage": {"cost": 0.00001}})
+    monkeypatch.setattr(gateway, "_probe_post", ok)
+    r = client.post("/agents/access/jev-probe", follow_redirects=False)
+    assert r.status_code == 303 and "msg=" in r.headers["location"]
+    assert asked[0]["model"] == gateway.JEV_ROUTER and asked[0]["plugins"][0]["id"] == "jev-router" and asked[0]["max_tokens"] == 16
+    assert gateway.jev_status()["state"] == "ok" and "Jev работает" in client.get("/agents/access").text
+    assert "Проверить Jev" in client.get("/agents/access").text
+
+    monkeypatch.setattr(gateway, "_probe_post", lambda *a: httpx.Response(404, json={"error": {"message": "No endpoints found"}}))
+    r = client.post("/agents/access/jev-probe", follow_redirects=False)
+    assert "error=" in r.headers["location"]
+    status = gateway.jev_status()
+    assert status["state"] == "resting" and "No endpoints" in status["why"] and status["minutes"] >= 1 and gateway._jev_resting()
+    assert "Jev не отвечает" in client.get("/agents/access").text
+    # an answer 200 with an error inside is a failure too; a success afterwards ends the rest at once
+    monkeypatch.setattr(gateway, "_probe_post", lambda *a: httpx.Response(200, json={"error": {"message": "router timeout"}}))
+    assert not gateway.probe_jev()["ok"]
+    monkeypatch.setattr(gateway, "_probe_post", ok)
+    assert gateway.probe_jev()["ok"] and not gateway._jev_resting()
+    gateway._state.update(jev_rest_until=0.0, jev_why="", jev_probe=None)
+
+
+def test_an_error_of_jev_as_the_first_event_of_a_stream_never_reaches_the_agent(client, net_agent, monkeypatch):
+    """OpenRouter answers 200 before the router chose a model: its failure is then the first event of the stream."""
+    monkeypatch.setattr(gateway.config, "OPENROUTER_API_KEY", "k")
+    monkeypatch.setattr(gateway, "prices", lambda: {m: (0.000001, 0.000002) for m in gateway.DEFAULT_MODELS.values() if m})
+    gateway._state.update(jev_rest_until=0.0, jev_why="")
+    opened = []
+
+    class Stream:
+        def __init__(self, lines):
+            self.status_code, self.lines = 200, lines
+
+        def iter_lines(self):
+            yield from self.lines
+
+        def close(self):
+            pass
+
+    class Client:
+        def close(self):
+            pass
+
+    def open_(url, body, headers):
+        opened.append(body["model"])
+        if body["model"] == gateway.JEV_ROUTER:
+            return Client(), Stream([": OPENROUTER PROCESSING", "", 'data: {"error": {"message": "router: no model", "code": 502}}', ""])
+        return Client(), Stream(['data: {"model": "%s", "choices": [{"delta": {"content": "привет"}}]}' % body["model"], "",
+                                 'data: {"choices": [], "usage": {"cost": 0.001, "prompt_tokens": 5, "completion_tokens": 1}}', "", "data: [DONE]", ""])
+    monkeypatch.setattr(gateway, "_open", open_)
+    r = client.post("/v1/chat/completions", headers=net_agent["headers"],
+                    json={"model": "sysai/auto", "stream": True, "messages": [{"role": "user", "content": "привет"}]})
+    assert r.status_code == 200 and "привет" in r.text and "router: no model" not in r.text and "error" not in r.text
+    assert opened == [gateway.JEV_ROUTER, gateway.DEFAULT_MODELS["mid"]] and gateway._jev_resting()
+    with SessionLocal() as s:
+        row = s.query(NetSpend).order_by(NetSpend.id.desc()).first()
+        assert row.ok and row.model == gateway.DEFAULT_MODELS["mid"] and row.route.startswith("jev→mid: поток")
+    gateway._state.update(jev_rest_until=0.0, jev_why="")

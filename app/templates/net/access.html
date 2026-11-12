@@ -71,7 +71,7 @@
     <fieldset class="ac-group"><legend>Инструменты и хаб</legend>
       <label class="f">{{ sections.mcp }} <textarea name="mcp" spellcheck="false">{% for srv, tools in r.mcp.items() %}{{ srv }}: {{ tools|join(', ') }}
 {% endfor %}</textarea><small class="muted">Строка — «сервер: инструмент, инструмент» или «сервер: *». MCP-серверы из хаба — по их имени.</small></label>
-      <details class="ac-more"><summary>Какие серверы и инструменты бывают</summary><p class="small muted ac-mono">sysai: {{ sysai_tools|join(', ') }}<br>plc-kit · machine-expert · pic-index · doc-kit · cad</p></details>
+      <details class="ac-more"><summary>Какие серверы и инструменты бывают</summary><p class="small muted ac-mono">sysai: {{ sysai_tools|join(', ') }}<br>plc-kit · machine-expert · ebpro-cmtp · ebpro-gui · pic-index · doc-kit · drawing-kit · plc-live · cad. Инструменты из «Готовых пакетов» встроенные профили ОПО получают сами.</p></details>
       <div class="ac-fields">
         <label class="f">Отделы хаба <textarea name="skills_departments">{{ r.skills.departments|join('\n') }}</textarea><small class="muted">«*» — все. Навыки — по отделам; MCP-серверы и программы хаба — только те, что разрешены выше.</small></label>
         <div class="net-checks ac-col"><label><input type="checkbox" name="skills_propose" {{ 'checked' if r.skills.propose }}> может предлагать свои навыки и инструменты</label></div>
@@ -127,7 +127,7 @@
     {% for t in model_tiers %}<div class="ac-models-r"><span><b>sysai/{{ t }}</b><span class="small muted">{{ tier_ru[t] }}</span></span>
       <input name="model_{{ t }}" value="{{ models[t] }}" placeholder="{{ vision_default if t == 'vision' else '' }}" aria-label="Модель sysai/{{ t }}" spellcheck="false">
       <input name="fallback_{{ t }}" value="{{ fallbacks[t] }}" placeholder="нет запасной" aria-label="Запасная для sysai/{{ t }}" spellcheck="false"></div>{% endfor %}
-    <div class="ac-models-r"><span><b>sysai/auto</b><span class="small muted">модель под запрос</span></span><span class="small muted ac-span2">Своей модели нет: под каждый запрос её выбирает Jev Router среди моделей уровней, разрешённых агенту.</span></div>
+    <div class="ac-models-r"><span><b>sysai/auto</b><span class="small muted">модель под запрос</span></span><span class="small muted ac-span2">Своей модели нет: под каждый запрос её выбирает Jev Router среди моделей уровней, разрешённых агенту.<br><span class="{{ 'warn' if jev.state == 'resting' else '' }}" id="jev-status">{{ jev.text }}</span> <button class="btn sm" type="submit" formaction="/agents/access/jev-probe" formmethod="post" formnovalidate title="Один крошечный запрос через sysai/auto: отвечает ли Jev сейчас">Проверить Jev</button></span></div>
   </div>
   <details class="ac-more"><summary>Как работают запасная модель и кэш</summary>
     <p class="small muted">Запасная — лучше другого поставщика. Сбой у поставщика модели — OpenRouter сам переключается на запасную; всё равно ошибка (модели нет, перегружена) — шлюз спрашивает запасную ещё раз. В трассе видно: «ответила запасная», «mid→запасная: HTTP 503 …». Пусто — без запасной.</p>

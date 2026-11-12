@@ -318,12 +318,23 @@ async def agent_action(request: Request, agent_id: int, action: str):
 
 
 # ============================================================================= pages: access profiles
+@router.post("/agents/access/jev-probe")
+def access_jev_probe(request: Request):
+    """«Проверить Jev»: one tiny request through sysai/auto; what came back is shown on the page."""
+    _person(request, admin=True)
+    res = gateway.probe_jev()
+    if res["ok"]:
+        return _back("/agents/access#models", msg=f"Jev работает: ответила {res['served'] or 'модель'} за {res['ms']} мс")
+    return _back("/agents/access#models", error="Jev не ответил: " + ((f"HTTP {res['status']} " if res["status"] else "") + res["message"])[:200])
+
+
 @router.get("/agents/access", response_class=HTMLResponse)
 def access_page(request: Request, msg: str = "", error: str = "", edit: str = ""):
     _person(request, admin=True)
     models = settings_store.get("agents_models") or {}
     spare = settings_store.get("agents_fallback")
     return _page(request, "net/access.html", profiles=access.profiles(), msg=msg, error=error, edit=edit,
+                 jev=gateway.jev_status(),
                  sections=access.SECTION_RU, tiers=access.TIERS, tier_ru=access.TIER_RU, model_tiers=access.MODEL_TIERS,
                  cost_tiers=access.COST_TIERS, cost_ru=access.COST_RU, scopes=access.SCOPES,
                  scope_ru=access.SCOPE_RU, levels=access.LEVELS, level_ru=access.LEVEL_RU, internet=access.INTERNET,

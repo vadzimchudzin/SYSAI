@@ -122,6 +122,24 @@ def action_line(action) -> str:
 tpl.env.filters["action_line"] = action_line
 
 
+def _probe_jev_later() -> None:
+    """Whether the router of sysai/auto answers is known from the start, not from the first request an agent loses
+    time on: one tiny request a minute after the server is up («Доступы» shows what came back)."""
+    if not config.OPENROUTER_API_KEY:
+        return
+
+    def run():
+        try:
+            from .net import enabled, gateway
+            if enabled():
+                gateway.probe_jev()
+        except Exception:  # noqa: BLE001  a check that failed to run must not touch the service
+            log.exception("the check of Jev did not run")
+    timer = threading.Timer(config.STARTUP_DELAY + 45, run)
+    timer.daemon = True
+    timer.start()
+
+
 def startup():
     init_db()
     if settings_store.adopt_sound_engine():
@@ -137,6 +155,7 @@ def startup():
         return
     server_watch.start()
     pipeline.start_background()
+    _probe_jev_later()
     notion.start_worker()
     if userbot.ai_mode():
         # The AI employee answers from the Telegram account, the bot webhook stays off. The connection waits a little so

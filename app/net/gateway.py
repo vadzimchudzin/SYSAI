@@ -47,7 +47,7 @@ JEV_ROUTER = "typesafe/jev-router"
 JEV_EXCLUDE_MAX = (1024, 65_536)    # patterns and characters the router takes in excluded_models
 JEV_REST = 600                       # seconds without Jev after it failed a request, whatever the reason
 CATALOG_TTL, CATALOG_RETRY = 12 * 3600, 600
-_state = {"prices": {}, "windows": {}, "cache_prices": {}, "prices_at": 0.0, "prices_failed": 0.0, "jev_rest_until": 0.0, "jev_why": ""}
+_state = {"prices": {}, "windows": {}, "cache_prices": {}, "jev_probe": None, "prices_at": 0.0, "prices_failed": 0.0, "jev_rest_until": 0.0, "jev_why": ""}
 # Hermes squeezes a conversation at compression.threshold_tokens (access.render_hermes). The real window of a model is
 # told to it (/v1/models) only when the synchronizer on the computer writes that threshold: without it Hermes would
 # squeeze at half of the window — past 500 thousand tokens for a model of a million.
@@ -256,6 +256,65 @@ def _jev_resting() -> str:
 def _jev_rest(why: str) -> None:
     with _lock:
         _state.update(jev_rest_until=time.time() + JEV_REST, jev_why=why[:60])
+
+
+# ----------------------------------------------------------------------------- is Jev alive
+def _probe_post(url: str, body: dict, headers: dict) -> httpx.Response:
+    return httpx.post(url, json=body, headers=headers, timeout=httpx.Timeout(45.0, connect=10.0))
+
+
+def probe_jev() -> dict:
+    """One tiny request through the real route of sysai/auto, with the plugin of the built-in engineer profile. What
+    it says is shown in «Доступы»; a success lets Jev work again at once, a failure lets it rest. Costs a fraction of
+    a cent; asked for with the button and once after the server starts."""
+    rules = access.cap_by_person(access.normalize(access.BUILTIN[0][3]), "user")
+    plugin, why, _ = jev_plugin(rules)
+    res = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "ok": False, "status": 0, "served": "",
+           "ms": 0, "message": why}
+    if not config.OPENROUTER_API_KEY:
+        res["message"] = "нет ключа OpenRouter"
+    elif plugin is not None:
+        body = {"model": JEV_ROUTER, "messages": [{"role": "user", "content": "Reply with: ok"}], "max_tokens": 16,
+                "plugins": [plugin], "usage": {"include": True}}
+        started = time.monotonic()
+        try:
+            r = _probe_post(f"{config.OPENROUTER_BASE_URL}/chat/completions", body, _headers())
+            res["status"] = r.status_code
+            try:
+                data = r.json()
+            except ValueError:
+                data = {}
+            if r.status_code == 200 and isinstance(data, dict) and data.get("choices") and not data.get("error"):
+                res.update(ok=True, served=str(data.get("model") or ""), message="")
+                llm.record_cost(res["served"], data.get("usage"))
+            else:
+                res["message"] = _message(r.text) if r.status_code != 200 else "HTTP 200 с ошибкой: " + _message(r.text)
+        except httpx.HTTPError as exc:
+            res["message"] = f"{type(exc).__name__}: {exc}"[:300]
+        res["ms"] = _ms(started)
+    with _lock:
+        _state["jev_probe"] = res
+        _state["jev_rest_until"] = 0.0 if res["ok"] else time.time() + JEV_REST
+        _state["jev_why"] = "" if res["ok"] else ("проверка: " + (f"HTTP {res['status']} " if res["status"] else "") + res["message"])[:60]
+    return res
+
+
+def jev_status() -> dict:
+    """For «Доступы»: {'state': 'ok' | 'resting' | 'unknown', 'text', 'why', 'minutes', 'probe'}. «resting» — a
+    request to sysai/auto goes straight to the tier's model until the rest ends."""
+    with _lock:
+        until, why, probe = _state["jev_rest_until"], _state["jev_why"], _state.get("jev_probe")
+    left = until - time.time()
+    if left > 0:
+        minutes = max(1, round(left / 60))
+        return {"state": "resting", "why": why, "minutes": minutes, "probe": probe,
+                "text": f"Jev не отвечает: {why or 'причина не названа'}. Ещё {minutes} мин запросы sysai/auto идут сразу на "
+                        "модель уровня"}
+    if probe and probe.get("ok"):
+        return {"state": "ok", "why": "", "minutes": 0, "probe": probe,
+                "text": f"Jev работает: проверка {probe['at'][11:16]} UTC, ответила {probe['served'] or 'модель'} за {probe['ms']} мс"}
+    return {"state": "unknown", "why": why, "minutes": 0, "probe": probe,
+            "text": "Jev не проверялся с запуска сервера" + (f" (последний сбой: {why})" if why else "")}
 
 
 def _fallback_tier(rules: dict) -> str:
@@ -557,6 +616,45 @@ def _open_stream(plan: Plan):
     raise _upstream_error(resp.status_code, text)
 
 
+def _first_event(plan: Plan, client, resp):
+    """(client, response, its lines) of a stream. OpenRouter answers 200 before the router has chosen a model, so a
+    failure of Jev may come as the very first event of the stream. While Jev is the route, the stream is read up to
+    its first data event before anything goes to the agent: an error there sends the request to the tier's model
+    (and lets Jev rest), and the agent never sees it."""
+    lines = resp.iter_lines()
+    if not plan.jev:
+        return client, resp, lines
+    head = []
+    try:
+        for line in lines:
+            head.append(line)
+            if not line.startswith("data:"):
+                continue  # comments (keep-alive) and blank lines before the first event
+            data = line[5:].strip()
+            try:
+                chunk = json.loads(data) if data and data != "[DONE]" else None
+            except ValueError:
+                chunk = None
+            if isinstance(chunk, dict) and isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
+                resp.close()
+                client.close()
+                _jev_down(plan, "поток: " + str(chunk["error"].get("message") or chunk["error"])[:80])
+                client, resp = _open_stream(plan)
+                return client, resp, resp.iter_lines()
+            break
+    except httpx.HTTPError as exc:
+        resp.close()
+        client.close()
+        _jev_down(plan, f"поток: {type(exc).__name__} {exc}"[:100])
+        client, resp = _open_stream(plan)
+        return client, resp, resp.iter_lines()
+
+    def both():
+        yield from head
+        yield from lines
+    return client, resp, both()
+
+
 def stream(ctx: AgentCtx, body, project: str = "", skill: str = "", task: str = ""):
     """Server-sent events passed through as they come; the usage of the last chunk is recorded at the end."""
     plan = draft(body, project, skill, task, stream=True)
@@ -564,6 +662,7 @@ def stream(ctx: AgentCtx, body, project: str = "", skill: str = "", task: str = 
     try:
         prepare(ctx, body, plan)
         client, resp = _open_stream(plan)
+        client, resp, lines = _first_event(plan, client, resp)
     except GatewayError as exc:
         record(ctx, plan, ms=_ms(started), error=exc)
         raise
@@ -572,7 +671,7 @@ def stream(ctx: AgentCtx, body, project: str = "", skill: str = "", task: str = 
         usage, served, error = None, "", None
         answer = trace.StreamedAnswer() if plan.debug is not None else None
         try:
-            for line in resp.iter_lines():
+            for line in lines:
                 if line.startswith("data:"):
                     data = line[5:].strip()
                     if data and data != "[DONE]":
