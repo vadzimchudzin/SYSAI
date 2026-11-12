@@ -943,3 +943,38 @@ test('projects: only results among the results — the rest is offered to _work 
   assert.equal(after.work.files, 11);
   assert.deepEqual(await pj.tidy(made.name), []);
 });
+
+test('projects: «Убрать в _work» puts the program from plc/ where it is built from and leaves what the programs keep', async () => {
+  const { isService, workPlace } = require('../lib/projects');
+  const pj = new Projects(path.join(tmp(), 'SYSAI Проекты'));
+  const made = await pj.create('Линия 2');
+  const put = (rel) => {
+    fs.mkdirSync(path.dirname(path.join(made.path, rel)), { recursive: true });
+    fs.writeFileSync(path.join(made.path, rel), rel);
+  };
+  // a project made before _work: the program lies right in plc/; Machine Expert has the project open
+  for (const rel of ['plc/Line.project', 'plc/Main.st', 'plc/GVL.st', 'plc/project.json', 'plc/notes.md', 'plc/gen/make.py',
+    'plc/Line.project.~u', 'plc/Line-ivanov-PC7.opt', 'plc/Line.Device.Application.precompilecache', 'plc/Line.backup',
+    'hmi/Line.cmtp', 'hmi/Line.cmtp.bak', 'hmi/tags.csv']) put(rel);
+  assert.deepEqual(['plc/a.project.~u', 'plc/A-User-PC.OPT', 'hmi/a.bak', 'plc/a.st', 'plc/a.project', '_work/a.opt', 'materials/a.bak']
+    .map(isService), [true, true, true, false, false, false, false]);
+  assert.deepEqual([workPlace('plc/Main.st', true), workPlace('plc/project.json', true), workPlace('plc/Main.st', false),
+    workPlace('plc/sub/Main.st', true), workPlace('hmi/a.st', true), workPlace('plc/notes.md', true)],
+  [['st'], ['st'], ['plc'], ['plc', 'sub'], ['hmi'], ['plc']]);
+  const info = await pj.info(made.name);
+  assert.deepEqual(info.results.map((f) => f.rel), ['plc/Line.project', 'hmi/Line.cmtp']);
+  assert.deepEqual(info.extra.map((f) => f.rel).sort(), ['hmi/tags.csv', 'plc/GVL.st', 'plc/Main.st', 'plc/gen/make.py', 'plc/notes.md',
+    'plc/project.json'].sort());
+  const done = await pj.tidy(made.name);
+  assert.ok(done.every((d) => !d.error));
+  const to = Object.fromEntries(done.map((d) => [d.rel, d.to]));
+  assert.deepEqual(to, { 'plc/Main.st': '_work/st/Main.st', 'plc/GVL.st': '_work/st/GVL.st', 'plc/project.json': '_work/st/project.json',
+    'plc/notes.md': '_work/plc/notes.md', 'plc/gen/make.py': '_work/plc/gen/make.py', 'hmi/tags.csv': '_work/hmi/tags.csv' });
+  assert.deepEqual(fs.readdirSync(path.join(made.path, 'plc')).sort(), ['Line-ivanov-PC7.opt', 'Line.Device.Application.precompilecache',
+    'Line.backup', 'Line.project', 'Line.project.~u'].sort());
+  assert.deepEqual(fs.readdirSync(path.join(made.path, 'hmi')).sort(), ['Line.cmtp', 'Line.cmtp.bak']);
+  assert.deepEqual((await pj.info(made.name)).extra, []);
+  // a program is in _work/st already: an old one from plc/ is not mixed into it
+  put('plc/Main.st');
+  assert.equal((await pj.tidy(made.name))[0].to, '_work/plc/Main.st');
+});

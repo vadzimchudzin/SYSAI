@@ -17,10 +17,30 @@ const WORK = '_work';
 // what lies there is a draft and belongs to _work/.
 const RESULTS = { plc: ['.project', '.projectarchive'], hmi: ['.cmtp', '.emtp', '.cxob', '.exob'], docs: ['.docx', '.pdf'] };
 
+// What Machine Expert and EasyBuilder keep next to a project themselves (the lock of an open project, the options of
+// the user, the caches of a compilation, backups) — the same as plcstage.py SERVICE: not a result and not a draft, it
+// stays where the program put it.
+const SERVICE = ['.~u', '.opt', '.precompilecache', '.bootinfo', '.bootinfo_guids', '.compileinfo', '.backup', '.bak'];
+
 function isResult(rel) {
   const part = rel.split('/')[0];
   const low = rel.toLowerCase();
   return Boolean(RESULTS[part]) && RESULTS[part].some((e) => low.endsWith(e));
+}
+
+function isService(rel) {
+  const low = rel.toLowerCase();
+  return Boolean(RESULTS[rel.split('/')[0]]) && SERVICE.some((e) => low.endsWith(e));
+}
+
+// Where «Убрать в _work» puts a draft: the same path under _work/ — but the sources of the program lying right in
+// plc/ (the layout before _work: *.st and project.json) go to _work/st, where the skill and plc_project_build look
+// for them. Only when _work/st holds no program yet: two programs in one folder would be built as one.
+function workPlace(rel, stFree) {
+  const parts = rel.split('/');
+  const name = parts[parts.length - 1].toLowerCase();
+  if (stFree && parts.length === 2 && parts[0] === 'plc' && (name.endsWith('.st') || name === 'project.json')) return ['st'];
+  return parts.slice(0, -1);
 }
 // The stages of a project «с нуля под ключ», in order — the same as hub/seed/plc-kit/plcstage.py (a test compares).
 const STAGES = [
@@ -175,7 +195,7 @@ class Projects {
     return { name: path.basename(dir), path: dir, materials: part('materials'), plc: part('plc'), hmi: part('hmi'),
       docs: part('docs'), pipeline: pipeline(dir),
       // the results (what the engineer takes to the site), what lies among them but is not one, and the drafts
-      results: made.filter((f) => isResult(f.rel)), extra: made.filter((f) => !isResult(f.rel)),
+      results: made.filter((f) => isResult(f.rel)), extra: made.filter((f) => !isResult(f.rel) && !isService(f.rel)),
       work: { path: path.join(dir, WORK), files: work.length, size: work.reduce((n, f) => n + f.size, 0) },
       memory: fs.existsSync(path.join(dir, 'project.md')) ? path.join(dir, 'project.md') : '',
       style: fs.existsSync(path.join(dir, 'style.md')) ? path.join(dir, 'style.md') : '',
@@ -184,14 +204,16 @@ class Projects {
   }
 
   // «Убрать в _work»: what lies in plc/, hmi/, docs/ and is not a result is moved (never deleted) to
-  // _work/<the same path>; a name that is taken there gets « (2)». -> [{rel, to} | {rel, error}]
+  // _work/<the same path> (the program from plc/ — to _work/st, see workPlace); a name that is taken there gets
+  // « (2)»; what Machine Expert and EasyBuilder keep themselves stays. -> [{rel, to} | {rel, error}]
   async tidy(name) {
     const dir = this.dir(name);
     const info = await this.info(name);
     const done = [];
+    const stFree = !(await fsp.readdir(path.join(dir, WORK, 'st')).catch(() => [])).some((n) => n.toLowerCase().endsWith('.st'));
     for (const f of info.extra) {
       try {
-        const target = path.join(dir, WORK, ...f.rel.split('/').slice(0, -1));
+        const target = path.join(dir, WORK, ...workPlace(f.rel, stFree));
         await fsp.mkdir(target, { recursive: true });
         const to = await this._free(target, f.name);
         await fsp.rename(f.path, to);
@@ -292,4 +314,4 @@ function prompts(info) {
   };
 }
 
-module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, isResult, PARTS, STAGES, RESULTS, WORK };
+module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, isResult, isService, workPlace, PARTS, STAGES, RESULTS, SERVICE, WORK };

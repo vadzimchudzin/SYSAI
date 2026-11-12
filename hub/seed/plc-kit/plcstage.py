@@ -86,6 +86,9 @@ def update(project_dir: str, stage: str = '', state: str = '', note=None, facts=
 
 # What a folder of results holds; everything else belongs to _work/ (drafts the window shows folded).
 RESULTS = {'plc': ('.project', '.projectarchive'), 'hmi': ('.cmtp', '.emtp', '.cxob', '.exob'), 'docs': ('.docx', '.pdf')}
+# What Machine Expert and EasyBuilder keep next to a project themselves (the lock of an open project, the options of
+# the user, the caches of a compilation, backups): not a result and not a draft — it stays where the program put it.
+SERVICE = ('.~u', '.opt', '.precompilecache', '.bootinfo', '.bootinfo_guids', '.compileinfo', '.backup', '.bak')
 
 
 def extra(project_dir: str, limit: int = 200) -> list:
@@ -96,7 +99,7 @@ def extra(project_dir: str, limit: int = 200) -> list:
         for base, dirs, files in os.walk(root):
             dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
             for name in sorted(files):
-                if name.startswith(('.', '~$')) or name.lower().endswith(exts):
+                if name.startswith(('.', '~$')) or name.lower().endswith(exts + SERVICE):
                     continue
                 out.append(os.path.relpath(os.path.join(base, name), project_dir).replace(os.sep, '/'))
                 if len(out) >= limit:

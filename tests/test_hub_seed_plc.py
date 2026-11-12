@@ -177,12 +177,17 @@ def test_stages_are_the_same_in_the_tool_and_in_the_window():
     # what a folder of results holds: the same list for the tool (it names the stray files) and the window (it moves them)
     results = re.search(r"const RESULTS = \{(.+?)\};", js).group(1)
     assert {k: tuple(re.findall(r"'([^']+)'", v)) for k, v in re.findall(r"(\w+): \[([^\]]+)\]", results)} == plcstage.RESULTS
+    service = re.search(r"const SERVICE = \[([^\]]+)\];", js).group(1)
+    assert tuple(re.findall(r"'([^']+)'", service)) == plcstage.SERVICE
 
 
 def test_closing_a_stage_names_what_does_not_belong_among_the_results(tmp_path):
     proj = tmp_path / "Линия 1"
     for rel in ("plc/Line.project", "plc/Main.st", "plc/gen/io.py", "hmi/Line.cmtp", "hmi/tags.csv", "docs/Руководство.docx",
-                "docs/~$Руководство.docx", "_work/st/Main.st", "materials/ТЗ.md"):
+                "docs/~$Руководство.docx", "_work/st/Main.st", "materials/ТЗ.md",
+                # what Machine Expert and EasyBuilder keep next to an open project is theirs: it is not named
+                "plc/Line.project.~u", "plc/Line-ivanov-PC7.opt", "plc/Line.Device.Application.precompilecache",
+                "plc/Line.backup", "hmi/Line.cmtp.bak"):
         (proj / rel).parent.mkdir(parents=True, exist_ok=True)
         (proj / rel).write_text("x", encoding="utf-8")
     assert plcstage.extra(str(proj)) == ["plc/Main.st", "plc/gen/io.py", "hmi/tags.csv"]
@@ -344,7 +349,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.4.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.4.1"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3

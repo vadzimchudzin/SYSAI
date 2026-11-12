@@ -288,6 +288,8 @@ function onAcpState(st) {
   composer.update();
 }
 
+const LAST_WAIT_MS = 4000;
+
 async function afterReady(restarted) {
   const keep = S.current && !S.convs.get(S.current)?.draft ? S.current : '';
   if (restarted) {
@@ -301,7 +303,8 @@ async function afterReady(restarted) {
   else if (!current()) {
     // the window opens where the person left: the last conversation, when Hermes still has it; otherwise a new one
     const last = localStorage.getItem('sysai.session.last') || '';
-    if (last) await listed;
+    // the list is waited for a few seconds only: a Hermes that is slow with it must not keep the window empty
+    if (last) await Promise.race([listed, new Promise((done) => setTimeout(done, LAST_WAIT_MS))]);
     if (current()) return;
     if (last && S.sessions.some((s) => s.sessionId === last)) {
       selectConv(last);
