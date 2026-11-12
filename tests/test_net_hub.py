@@ -396,18 +396,19 @@ def test_bundled_skill_can_be_uploaded_and_published_like_any_other(client, net_
 
 def test_bundled_mcp_upload_keeps_existing_published_version(client, net_agent):
     from app.net import hub_bundles
+    shipped = hub_bundles.package('ebpro-cmtp')['version']   # whatever the package is at: the test names no number
     files = hub.read_zip(client.get('/hub/bundled/ebpro-cmtp.zip').content)
-    files['TOOL.md'] = files['TOOL.md'].replace(b'version: 1.7.0', b'version: 1.0.0')
+    files['TOOL.md'] = files['TOOL.md'].replace(f'version: {shipped}'.encode(), b'version: 1.0.0')
     assert 'v=1.0.0' in _upload(client, files).headers['location']
     client.post('/hub/ebpro-cmtp/1.0.0/publish')
     before = hub.blob_of('ebpro-cmtp', '1.0.0')
     r = client.post('/hub/upload', files={'file': ('tool.zip', hub_bundles.package('ebpro-cmtp')['blob'], 'application/zip')},
                     follow_redirects=False)
-    assert 'v=1.7.0' in r.headers['location']
+    assert f'v={shipped}' in r.headers['location']
     assert hub.blob_of('ebpro-cmtp', '1.0.0') == before
     card = hub.card('ebpro-cmtp')
     assert card['current'] == '1.0.0'
-    assert next(v for v in card['versions'] if v['version'] == '1.7.0')['status'] == 'draft'
+    assert next(v for v in card['versions'] if v['version'] == shipped)['status'] == 'draft'
 
 
 def test_ready_packages_say_what_is_new_and_install_in_one_step(client, net_agent):
