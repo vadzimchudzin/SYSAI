@@ -56,6 +56,37 @@ def _row(key, cost, requests, errors, prompt, completion, cached) -> dict:
             "cache_pct": round(100.0 * cached / prompt) if prompt else 0}
 
 
+def split(rows) -> dict:
+    """What a sum of money is made of: {'in', 'cache', 'out'} dollars for rows (model, cost, prompt tokens, completion
+    tokens, cached tokens). The provider bills one number per request; here it is divided in the proportion the
+    catalog prices of the model give to its fresh prompt tokens, the tokens read from the cache and the answer — so
+    the three always add up to what was really paid. 'unknown' — the money of models the catalog does not price."""
+    from . import gateway
+    out = {"in": 0.0, "cache": 0.0, "out": 0.0, "unknown": 0.0}
+    for model, cost, prompt, completion, cached in rows:
+        cost, prompt, completion, cached = float(cost or 0.0), int(prompt or 0), int(completion or 0), int(cached or 0)
+        if cost <= 0:
+            continue
+        price = gateway.price_parts(model or "")
+        parts = None
+        if price:
+            fresh = max(0, prompt - cached)
+            parts = (fresh * price[0], min(cached, prompt) * price[1], completion * price[2])
+        if not parts or sum(parts) <= 0:
+            out["unknown"] += cost
+            continue
+        scale = cost / sum(parts)
+        out["in"] += parts[0] * scale
+        out["cache"] += parts[1] * scale
+        out["out"] += parts[2] * scale
+    return {k: round(v, 6) for k, v in out.items()}
+
+
+def _with_split(row: dict, parts: dict) -> dict:
+    row["cost_in"], row["cost_cache"], row["cost_out"], row["cost_unknown"] = parts["in"], parts["cache"], parts["out"], parts["unknown"]
+    return row
+
+
 def report(agent_ids=None, days: int = 7) -> dict:
     """Everything of the page for the agents given (None — every agent) over the last `days` days (UTC)."""
     days = period(days)
@@ -66,10 +97,18 @@ def report(agent_ids=None, days: int = 7) -> dict:
         conds.append(NetSpend.agent_id.in_(list(agent_ids) or [0]))
     with SessionLocal() as s:
         total = _row("", *s.query(*_measures()).filter(*conds).one())
+        money = (func.coalesce(func.sum(NetSpend.cost), 0.0), func.coalesce(func.sum(NetSpend.prompt_tokens), 0),
+                 func.coalesce(func.sum(NetSpend.completion_tokens), 0), func.coalesce(func.sum(NetSpend.cached_tokens), 0))
+        _with_split(total, split(s.query(NetSpend.model, *money).filter(*conds).group_by(NetSpend.model).all()))
         groups = {}
         for key, _ in GROUPS:
             col = COLUMN[key]
             rows = [_row(k if k is not None else "", *m) for k, *m in s.query(col, *_measures()).filter(*conds).group_by(col)]
+            by_model = {}
+            for k, model, *m in s.query(col, NetSpend.model, *money).filter(*conds).group_by(col, NetSpend.model):
+                by_model.setdefault(k if k is not None else "", []).append((model, *m))
+            for r in rows:
+                _with_split(r, split(by_model.get(r["key"], [])))
             groups[key] = sorted(rows, key=lambda r: (-r["cost"], -r["requests"], str(r["key"])))
         by_day = {k: _row(k, *m) for k, *m in s.query(NetSpend.day, *_measures()).filter(*conds).group_by(NetSpend.day)}
         failures = {}
@@ -156,9 +195,14 @@ def csv_rows(agent_ids=None, days: int = 7) -> str:
     out.write("\ufeff")  # Excel opens UTF-8 with the mark
     w = csv.writer(out, delimiter=";")
     w.writerow(["день", "агент", "проект", "навык", "уровень", "модель", "кто спросил", "запросов", "ошибок",
-                "токенов на входе", "из кэша", "токенов ответа", "стоимость, $"])
+                "токенов на входе", "из кэша", "токенов ответа", "стоимость, $", "из неё вход, $", "чтение кэша, $",
+                "ответ, $"])
+    def money(value) -> str:
+        return f"{float(value or 0.0):.6f}".replace(".", ",")
     for day, agent_id, project, skill, tier, model, role, cost, requests, errors, prompt, completion, cached in rows:
+        parts = split([(model, cost, prompt, completion, cached)])
         w.writerow([day, names.get(agent_id, agent_id or ""), project or "", skill or "", tier or "", model or "",
                     trace.ROLE_RU.get(role or "", role or ""), requests, errors, prompt, cached, completion,
-                    f"{float(cost or 0.0):.6f}".replace(".", ",")])
+                    money(cost), *(money(parts[k]) if float(cost or 0.0) > 0 and not parts["unknown"] else ""
+                                   for k in ("in", "cache", "out"))])
     return out.getvalue()

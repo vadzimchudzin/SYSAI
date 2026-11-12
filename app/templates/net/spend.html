@@ -25,6 +25,9 @@
   <div class="stat"><b>{{ fmt_tokens(r.total.tokens) }}</b><span>токенов{% if r.total.prompt %} · из кэша {{ r.total.cache_pct }}% входа{% endif %}</span></div>
   <div class="stat"><b>{{ usd(r.avg) }}</b><span>в среднем за запрос</span></div>
 </div>
+{% if r.total.cost %}
+<p class="small muted sp-split">Из чего сложилась сумма: вход {{ usd(r.total.cost_in) }} · чтение кэша {{ usd(r.total.cost_cache) }} · ответ {{ usd(r.total.cost_out) }}{% if r.total.cost_unknown %} · модели без цены в каталоге {{ usd(r.total.cost_unknown) }}{% endif %}. Счёт провайдера — одно число за запрос; здесь оно разделено по ценам модели из каталога.</p>
+{% endif %}
 
 {% if not r.total.requests %}
 <section class="card"><p class="muted">За этот период запросов к нейронкам не было.</p></section>
@@ -40,11 +43,11 @@
 {% for key, title in groups %}{% set rows = r.groups[key] %}{% if rows %}
 <section class="card" id="by-{{ key }}"><h2>{{ title }}</h2>
   <div class="table-wrap"><table class="sp-table">
-    <thead><tr><th>{{ head_ru[key] }}</th><th class="num">Сумма</th><th class="num">Доля</th><th class="num">Запросов</th><th class="num">Токенов</th></tr></thead>
+    <thead><tr><th>{{ head_ru[key] }}</th><th class="num">Сумма</th><th class="num" title="Из чего сложилась сумма по ценам модели: новый вход / чтение кэша / ответ">Вход / кэш / ответ</th><th class="num">Доля</th><th class="num">Запросов</th><th class="num">Токенов</th></tr></thead>
     <tbody>{% for x in rows[:30] %}
       <tr><td>{% if x.href %}<a href="{{ x.href }}">{{ x.label }}</a>{% else %}{{ x.label }}{% endif %}{% if x.owner and boss %}<span class="small muted"> · {{ x.owner }}</span>{% endif %}
         {% if x.limit is defined %}<div class="small {{ 'warn' if x.limit and x.budget_pct >= 80 else 'muted' }}">сегодня {{ usd(x.today) }}{% if x.limit %} из {{ usd(x.limit) }} в день · {{ x.budget_pct }}%{% else %} · без дневного лимита{% endif %}</div>{% endif %}</td>
-        <td class="num">{{ usd(x.cost) }}</td><td class="num">{{ x.share }}%</td>
+        <td class="num">{{ usd(x.cost) }}</td><td class="num small muted">{% if x.cost %}{{ usd(x.cost_in) }} / {{ usd(x.cost_cache) }} / {{ usd(x.cost_out) }}{% endif %}</td><td class="num">{{ x.share }}%</td>
         <td class="num">{{ x.requests }}{% if x.errors %}<div class="small warn">{{ x.errors }} с ошибкой</div>{% endif %}</td>
         <td class="num">{{ fmt_tokens(x.tokens) }}{% if x.cache_pct %}<div class="small muted">кэш {{ x.cache_pct }}%</div>{% endif %}</td></tr>
     {% endfor %}</tbody></table></div>

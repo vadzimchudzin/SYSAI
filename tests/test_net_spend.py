@@ -97,3 +97,48 @@ def test_the_tables_fit_their_cards_without_bars(client, net_agent):
     assert "sp-bar" not in page and "Размер запроса" in page  # the share is a column; no stripes under the names
     css = client.get("/static/net.css").text
     assert ".sp-grid .table-wrap" in css and "overflow-x: visible" in css  # no scrollbar under a table of a card
+
+
+def test_a_sum_is_split_into_fresh_input_cache_reads_and_the_answer(client, net_agent, monkeypatch):
+    """One number per request comes from the provider; the page says what it is made of by the prices of the model."""
+    from app.net import gateway
+    prices = {"google/gemini-2.5-flash": (1.0, 0.1, 5.0), "anthropic/claude-sonnet-4.5": (3.0, 3.0, 15.0)}   # in, cache read, out
+    monkeypatch.setattr(gateway, "price_parts", lambda model: prices.get(model))
+    with SessionLocal() as s:
+        # 600 fresh + 400 cached + 200 of the answer at 1 / 0.1 / 5 → 600 : 40 : 1000
+        s.add_all([_row(net_agent["id"], cost=0.164),
+                   _row(net_agent["id"], model="anthropic/claude-sonnet-4.5", project="25-001", cost=0.6, cached_tokens=0),
+                   _row(net_agent["id"], model="some/unknown", project="25-001", cost=0.05)])
+        s.commit()
+    r = spend.report(None, 7)
+    by = {x["label"]: x for x in r["groups"]["project"]}
+    one = by["24-017"]
+    assert (round(one["cost_in"], 4), round(one["cost_cache"], 4), round(one["cost_out"], 4)) == (0.06, 0.004, 0.1)
+    two = by["25-001"]   # 1000 x 3 + 200 x 15 → half and half of the 0.6; the model without a price stays apart
+    assert (round(two["cost_in"], 4), two["cost_cache"], round(two["cost_out"], 4), two["cost_unknown"]) == (0.3, 0.0, 0.3, 0.05)
+    total = r["total"]
+    assert abs(total["cost_in"] + total["cost_cache"] + total["cost_out"] + total["cost_unknown"] - total["cost"]) < 1e-6
+    page = client.get("/agents/spend?days=7").text
+    assert "Из чего сложилась сумма" in page and "Вход / кэш / ответ" in page and "модели без цены в каталоге" in page
+    text = client.get("/agents/spend.csv?days=7").content.decode("utf-8")
+    assert "из неё вход, $;чтение кэша, $;ответ, $" in text and "0,060000;0,004000;0,100000" in text
+    assert spend.split([("google/gemini-2.5-flash", 0, 10, 10, 0)]) == {"in": 0.0, "cache": 0.0, "out": 0.0, "unknown": 0.0}
+
+
+def test_the_catalog_gives_the_price_of_a_cached_token(monkeypatch):
+    from app.net import gateway
+
+    class Reply:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": [{"id": "a/with-cache", "pricing": {"prompt": "0.000002", "completion": "0.00001", "input_cache_read": "0.0000002"}},
+                             {"id": "b/no-cache", "pricing": {"prompt": "0.000001", "completion": "0.000004"}}]}
+    monkeypatch.setattr(gateway, "_get", lambda *a, **k: Reply())
+    monkeypatch.setitem(gateway._state, "prices", {})
+    monkeypatch.setitem(gateway._state, "prices_at", 0.0)
+    monkeypatch.setitem(gateway._state, "prices_failed", 0.0)
+    assert gateway.price_parts("a/with-cache") == (0.000002, 0.0000002, 0.00001)
+    assert gateway.price_parts("b/no-cache") == (0.000001, 0.000001, 0.000004)      # no cache price: the full one
+    assert gateway.price_parts("c/unknown") is None

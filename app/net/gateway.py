@@ -47,7 +47,7 @@ JEV_ROUTER = "typesafe/jev-router"
 JEV_EXCLUDE_MAX = (1024, 65_536)    # patterns and characters the router takes in excluded_models
 JEV_REST = 600                       # seconds without Jev after it failed a request, whatever the reason
 CATALOG_TTL, CATALOG_RETRY = 12 * 3600, 600
-_state = {"prices": {}, "windows": {}, "prices_at": 0.0, "prices_failed": 0.0, "jev_rest_until": 0.0, "jev_why": ""}
+_state = {"prices": {}, "windows": {}, "cache_prices": {}, "prices_at": 0.0, "prices_failed": 0.0, "jev_rest_until": 0.0, "jev_why": ""}
 # Hermes squeezes a conversation at compression.threshold_tokens (access.render_hermes). The real window of a model is
 # told to it (/v1/models) only when the synchronizer on the computer writes that threshold: without it Hermes would
 # squeeze at half of the window — past 500 thousand tokens for a model of a million.
@@ -176,7 +176,7 @@ def prices() -> dict:
     try:
         r = _get(f"{config.OPENROUTER_BASE_URL}/models", _headers())
         rows = r.json().get("data") if r.status_code == 200 else None
-        found, windows = {}, {}
+        found, windows, cached = {}, {}, {}
         for m in rows if isinstance(rows, list) else []:
             try:
                 p = m.get("pricing") or {}
@@ -185,18 +185,36 @@ def prices() -> dict:
                 continue
             if isinstance(m.get("id"), str) and prompt >= 0 and completion >= 0:  # routers are priced -1
                 found[m["id"]] = (prompt, completion)
+                try:  # what a token read from the prompt cache costs, when the catalog says
+                    read = float(p.get("input_cache_read")) if p.get("input_cache_read") not in (None, "") else None
+                except (TypeError, ValueError):
+                    read = None
+                if read is not None and read >= 0:
+                    cached[m["id"]] = read
                 size = m.get("context_length")
                 if isinstance(size, int) and not isinstance(size, bool) and size > 0:
                     windows[m["id"]] = size
         if not found:
             raise ValueError(f"no models (HTTP {r.status_code})")
         with _lock:
-            _state.update(prices=found, windows=windows, prices_at=stamp)
+            _state.update(prices=found, windows=windows, cache_prices=cached, prices_at=stamp)
     except Exception as exc:  # noqa: BLE001  without prices sysai/auto goes to «mid»
         log.warning("the OpenRouter catalog is not available: %s", exc)
         with _lock:
             _state["prices_failed"] = stamp
     return _state["prices"]
+
+
+def price_parts(model: str) -> tuple | None:
+    """(the price of a fresh prompt token, of one read from the cache, of a completion token) by the catalog; None —
+    the model is not in it. A model the catalog gives no cache price for reads its cache at the full price."""
+    table = prices()
+    pair = table.get(model)
+    if pair is None:
+        return None
+    with _lock:
+        read = _state["cache_prices"].get(model)
+    return pair[0], pair[0] if read is None else read, pair[1]
 
 
 def window_of(tier: str, rules: dict) -> int:
