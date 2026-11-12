@@ -6,7 +6,7 @@
 // project of the past is turned into a style with «Разобрать пример». The agent works by the skills plc-project and
 // project-docs.
 import { h, icon, clear, size, when, basename, kindIcon } from './dom.js';
-import { toast } from './ui.js';
+import { openMenu, toast } from './ui.js';
 
 const api = window.sysai;
 const STATE_TEXT = { todo: 'не начат', work: 'идёт', done: 'готов', problem: 'нужен инженер' };
@@ -41,7 +41,8 @@ export class ProjectsView {
 
   _stamp(info) {
     const files = [...info.materials, ...info.plc, ...info.hmi, ...info.docs].map((f) => `${f.rel}:${f.size}:${f.mtime}`);
-    return JSON.stringify([info.pipeline.stages.map((s) => [s.state, s.note]), info.pipeline.facts, files, info.work.files, info.work.size]);
+    return JSON.stringify([info.pipeline.stages.map((s) => [s.state, s.note]), info.pipeline.facts, files, info.work.files, info.work.size,
+      (info.sources || []).map((x) => [x.path, x.role])]);
   }
 
   start() {
@@ -148,6 +149,8 @@ export class ProjectsView {
       h('button', { class: 'icon-btn sm', title: 'К списку проектов', onclick: () => this.list() }, icon('chevL', 'sm')),
       h('div', { class: 'pj-title' }, h('b', { text: info.name }), h('span', { text: info.path, title: info.path })),
       h('button', { class: 'icon-btn sm', title: 'Добавить файлы в материалы', onclick: () => this.pick() }, icon('upload', 'sm')),
+      h('button', { class: 'icon-btn sm', title: 'Добавить из Хранилища SYSAI: откроется Хранилище, у файла или папки нажмите «В материалы проекта»',
+        onclick: () => this.hooks.storage && this.hooks.storage({ name: info.name }) }, icon('archive', 'sm')),
       h('button', { class: 'icon-btn sm', title: 'Открыть папку проекта', onclick: () => api.shell.open(info.path).catch((e) => toast(e.message, 'err')) }, icon('folderOpen', 'sm')),
       h('button', { class: 'icon-btn sm', title: 'Обновить', onclick: () => this.open(info.name) }, icon('refresh', 'sm')));
     const list = h('div', { class: 'ex-list' });
@@ -188,7 +191,7 @@ export class ProjectsView {
       const files = info.materials.filter((f) => f.group === key);
       if (!files.length) continue;
       list.append(h('div', { class: 'pj-group', text: `${label} · ${files.length}` }));
-      for (const f of files) list.append(this._row(f, 'materials/'));
+      for (const f of files) list.append(this._row(f, 'materials/', this._source(info, f)));
     }
     if (info.truncated) list.append(message('Файлов очень много', 'Показаны первые 3000.'));
     if (scroll) list.scrollTop = scroll;
@@ -240,12 +243,32 @@ export class ProjectsView {
     return acts;
   }
 
-  _row(f, strip = '') {
+  // the material a file belongs to: the file or the folder lying right in materials/
+  _source(info, f) {
+    const top = f.rel.split('/').slice(0, 2).join('/');
+    return (info.sources || []).find((x) => x.path === top) || null;
+  }
+
+  _role(info, f, src, anchor) {
+    openMenu(anchor, [{ header: src.kind === 'folder' ? `Папка ${basename(src.path)} — для чего она` : 'Для чего этот файл' },
+      ...(info.roles || []).map(([value, label, sub]) => ({ label, sub, value, checked: src.role === value }))], {
+      minWidth: 260,
+      onPick: (role) => api.projects.role(info.name, src.path, role).then(() => this.open(info.name, true))
+        .catch((e) => toast(e.message, 'err')),
+    });
+  }
+
+  _row(f, strip = '', src = null) {
     const rel = strip && f.rel.startsWith(strip) ? f.rel.slice(strip.length) : f.rel;
     const kind = f.rel.startsWith('docs/') ? 'doc' : f.group === 'plc' ? 'code' : f.group === 'hmi' ? 'image' : f.group === 'scheme' ? 'pdf' : f.group === 'doc' ? 'doc'
       : f.group === 'image' ? 'image' : 'file';
+    const label = src && ((this.info && this.info.roles) || []).find(([key]) => key === src.role);
+    const tag = src ? h('span', { class: `tag role${src.role === 'material' ? ' plain' : ''}`,
+      title: `${src.origin === 'storage' ? `Из Хранилища: ${src.from || ''}\n` : ''}Нажмите — сказать, для чего это агенту`,
+      text: `${label ? label[1] : 'Материал'}${src.origin === 'storage' ? ' · Хранилище' : ''}` }) : null;
+    if (tag) tag.addEventListener('click', (e) => { e.stopPropagation(); this._role(this.info, f, src, tag); });
     return h('button', { class: 'ex-row', title: f.path, onclick: () => this.hooks.open(f.path) }, icon(kindIcon(kind), 'kind'),
-      h('span', { class: 'nm', text: rel }), h('span', { class: 'meta', text: `${size(f.size)} · ${when(f.mtime, { short: true })}` }));
+      h('span', { class: 'nm', text: rel }), tag, h('span', { class: 'meta', text: `${size(f.size)} · ${when(f.mtime, { short: true })}` }));
   }
 
   async tidy() {

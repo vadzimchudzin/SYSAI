@@ -446,9 +446,16 @@ class Pane {
     this.storage = new StorageView({
       open: (p, item) => { this.show('preview'); this.preview.show({ path: p, stored: item }); },
       attach: (p) => composer.attach(p),
+      project: () => (this.projects && this.projects.name) || '', // «В материалы проекта» of a row of the storage
+      attached: (name) => { if (this.projects.name === name && this.projects.info) this.projects.open(name, true); },
     });
     this.canvas = new CanvasView({ focus: () => this.show('canvas'), mention: (t) => composer.fill(t) });
-    this.projects = new ProjectsView({ open: (p) => openPath(p), ask: (t, project) => askInProject(t, project) });
+    this.projects = new ProjectsView({ open: (p) => openPath(p), ask: (t, project) => askInProject(t, project),
+      storage: (project) => {
+        this.show('storage');
+        this.storage.refresh();
+        toast(`Хранилище: у файла или папки нажмите «В материалы проекта «${project.name}»» — они скопируются в проект.`, 'info', 7000);
+      } });
     this.sections = { preview: this.preview, canvas: this.canvas, files: this.explorer, storage: this.storage,
       projects: this.projects };
     this.tabs = {};

@@ -10,6 +10,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const PARTS = ['materials', 'plc', 'hmi', 'docs', '_work'];
 const WORK = '_work';
@@ -42,6 +43,20 @@ function workPlace(rel, stFree) {
   if (stFree && parts.length === 2 && parts[0] === 'plc' && (name.endsWith('.st') || name === 'project.json')) return ['st'];
   return parts.slice(0, -1);
 }
+// What a material is for — kept in <project>/.sysai/sources.json, one record per file or folder lying right in
+// materials/. The agent reads the roles from the request of a button (see prompts), the indexers — from the file.
+const SOURCES = path.join('.sysai', 'sources.json');
+const ROLES = [['material', 'Материал', 'ТЗ, схемы, перечни — по ним делается проект'],
+  ['template', 'Шаблон', 'готовый .project или проект панели: из него берут контроллер, модули, окна'],
+  ['example', 'Пример', 'проект или документ, по образцу которого делать (стиль)'],
+  ['picture-library', 'Картинки', 'библиотека картинок оборудования для экранов']];
+const ROLE_KEYS = ROLES.map(([key]) => key);
+
+function guessRole(name, isDir) {
+  const g = isDir ? '' : groupOf(name);
+  return g === 'image' ? 'picture-library' : 'material';
+}
+
 // The stages of a project «с нуля под ключ», in order — the same as hub/seed/plc-kit/plcstage.py (a test compares).
 const STAGES = [
   ['materials', 'Материалы', 'ТЗ и схемы прочитаны, механизмы и сигналы выписаны'],
@@ -192,8 +207,9 @@ class Projects {
     const part = (p) => files.filter((f) => f.rel.startsWith(`${p}/`));
     const made = [...part('plc'), ...part('hmi'), ...part('docs')];
     const work = part(WORK);
+    const sources = await this.sources(name);
     return { name: path.basename(dir), path: dir, materials: part('materials'), plc: part('plc'), hmi: part('hmi'),
-      docs: part('docs'), pipeline: pipeline(dir),
+      docs: part('docs'), pipeline: pipeline(dir), sources, roles: ROLES,
       // the results (what the engineer takes to the site), what lies among them but is not one, and the drafts
       results: made.filter((f) => isResult(f.rel)), extra: made.filter((f) => !isResult(f.rel) && !isService(f.rel)),
       work: { path: path.join(dir, WORK), files: work.length, size: work.reduce((n, f) => n + f.size, 0) },
@@ -239,10 +255,11 @@ class Projects {
   }
 
   // Copies files and whole folders into materials/; a name that is taken gets « (2)», « (3)»…
-  async add(name, paths) {
+  async add(name, paths, meta = {}) {
     const target = path.join(this.dir(name), 'materials');
     await fsp.mkdir(target, { recursive: true });
     const done = [];
+    const notes = [];
     for (const src of (Array.isArray(paths) ? paths : []).slice(0, 500)) {
       const from = path.resolve(String(src));
       try {
@@ -257,10 +274,132 @@ class Projects {
           await fsp.copyFile(from, to, fs.constants.COPYFILE_EXCL);
         }
         done.push({ path: from, to });
+        notes.push({ to, from, isDir: st.isDirectory(), ...(meta[src] || {}) });
       } catch (err) {
         done.push({ path: from, error: err instanceof ProjectsError ? err.message : err.code === 'ENOENT' ? 'нет такого файла' : err.message });
       }
     }
+    await this._note(name, notes).catch(() => {}); // the copy is what matters; the record is made again by sources()
+    return done;
+  }
+
+  // ---- what each material is for: <project>/.sysai/sources.json
+  async _readSources(name) {
+    try {
+      const data = JSON.parse(await fsp.readFile(path.join(this.dir(name), SOURCES), 'utf8'));
+      return Array.isArray(data.inputs) ? data.inputs.filter((x) => x && typeof x.path === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async _writeSources(name, inputs) {
+    const file = path.join(this.dir(name), SOURCES);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fsp.writeFile(tmp, `${JSON.stringify({ schema: 1, inputs }, null, 1)}\n`, 'utf8');
+    await fsp.rename(tmp, file);
+  }
+
+  async _hash(file) {
+    const hash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(file).on('data', (d) => hash.update(d)).on('end', resolve).on('error', reject);
+    });
+    return hash.digest('hex');
+  }
+
+  async _note(name, notes) {
+    if (!notes.length) return;
+    const dir = this.dir(name);
+    const inputs = await this._readSources(name);
+    for (const n of notes) {
+      const rel = path.relative(dir, n.to).split(path.sep).join('/');
+      const st = await fsp.stat(n.to);
+      const row = { path: rel, kind: n.isDir ? 'folder' : 'file', role: ROLE_KEYS.includes(n.role) ? n.role : guessRole(path.basename(n.to), n.isDir),
+        origin: n.origin === 'storage' ? 'storage' : 'local', from: String(n.source || n.from || ''), added: new Date().toISOString() };
+      if (n.version) row.version = n.version;
+      if (!n.isDir) {
+        row.bytes = st.size;
+        if (st.size <= 200 * 1024 * 1024) row.sha256 = n.sha256 || await this._hash(n.to);
+      }
+      const at = inputs.findIndex((x) => x.path === rel);
+      if (at >= 0) inputs[at] = row; else inputs.push(row);
+    }
+    await this._writeSources(name, inputs);
+  }
+
+  // Every file and folder lying right in materials/ with its role: recorded ones as recorded, the rest (put there by
+  // hand, or before this file existed) with a guessed role; records of what is gone are left out.
+  async sources(name) {
+    const dir = this.dir(name);
+    const known = new Map((await this._readSources(name)).map((x) => [x.path, x]));
+    let entries = [];
+    try {
+      entries = await fsp.readdir(path.join(dir, 'materials'), { withFileTypes: true });
+    } catch { /* no materials yet */ }
+    const out = [];
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name, 'ru', { numeric: true }))) {
+      if (e.name.startsWith('.') || e.name.startsWith('~$') || !(e.isDirectory() || e.isFile())) continue;
+      const rel = `materials/${e.name}`;
+      const row = known.get(rel);
+      out.push(row ? { ...row, role: ROLE_KEYS.includes(row.role) ? row.role : 'material' }
+        : { path: rel, kind: e.isDirectory() ? 'folder' : 'file', role: guessRole(e.name, e.isDirectory()), origin: 'local', guessed: true });
+    }
+    return out;
+  }
+
+  async setRole(name, rel, role) {
+    if (!ROLE_KEYS.includes(role)) throw new ProjectsError('нет такой роли материала');
+    const all = await this.sources(name);
+    const row = all.find((x) => x.path === rel);
+    if (!row) throw new ProjectsError('нет такого материала');
+    row.role = role;
+    delete row.guessed;
+    if (!row.added) row.added = new Date().toISOString();
+    await this._writeSources(name, all.filter((x) => !x.guessed));
+    return row;
+  }
+
+  // «Добавить из Хранилища»: files already fetched into the cache of the window (each {path — the local copy, source —
+  // where it lies in the storage, version, sha256, under — a folder of the storage they came with}) are copied into
+  // materials/ and recorded as taken from the storage. A folder of the storage becomes one material.
+  async attach(name, files, role = '') {
+    const list = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.path === 'string').slice(0, 2000);
+    const target = path.join(this.dir(name), 'materials');
+    await fsp.mkdir(target, { recursive: true });
+    const done = [];
+    const notes = [];
+    const folders = new Map(); // a folder of the storage -> its folder in materials/
+    for (const f of list) {
+      try {
+        const st = await fsp.stat(f.path);
+        if (st.size > MAX_COPY) throw new ProjectsError('файл больше 2 ГБ');
+        const under = String(f.under || '').split('/').filter((x) => x && x !== '.' && x !== '..');
+        let to;
+        if (under.length) {
+          const top = under[0];
+          if (!folders.has(top)) {
+            const made = await this._free(target, top);
+            await fsp.mkdir(made, { recursive: true });
+            folders.set(top, made);
+            notes.push({ to: made, isDir: true, origin: 'storage', source: String(f.root || top), role });
+          }
+          const inside = path.join(folders.get(top), ...under.slice(1));
+          await fsp.mkdir(inside, { recursive: true });
+          to = path.join(inside, path.basename(f.path));
+          await fsp.copyFile(f.path, to);
+        } else {
+          to = await this._free(target, path.basename(f.path));
+          await fsp.copyFile(f.path, to, fs.constants.COPYFILE_EXCL);
+          notes.push({ to, isDir: false, origin: 'storage', source: String(f.source || ''), version: f.version, sha256: f.sha256, role });
+        }
+        done.push({ path: f.source || f.path, to });
+      } catch (err) {
+        done.push({ path: f.source || f.path, error: err instanceof ProjectsError ? err.message : err.message });
+      }
+    }
+    await this._note(name, notes);
     return done;
   }
 
@@ -275,11 +414,37 @@ class Projects {
   }
 }
 
+// The files of what was picked in the storage: the file itself, or every file of a folder (not deeper than 6 folders,
+// not more than `limit` files). `list(folder)` is the storage listing. -> [{item, source, version, sha256, under, root}]
+async function storageFiles(cfg, item, list, limit = 500) {
+  const isFolder = (x) => Boolean(x.is_folder || x.kind === 'section' || x.kind === 'folder');
+  const file = (x, under, root) => ({ item: x, source: x.path, version: x.version, sha256: x.sha256 || '', under, root });
+  if (!isFolder(item)) return [file(item, '', '')];
+  const out = [];
+  const top = String(item.name || item.path.split('/').pop() || 'Хранилище');
+  const walk = async (folder, under, depth) => {
+    const data = await list(folder);
+    for (const x of (data && data.items) || []) {
+      if (out.length >= limit) throw new ProjectsError(`в папке больше ${limit} файлов: возьмите её частями`);
+      if (isFolder(x)) {
+        if (depth < 6) await walk(x.path, `${under}/${x.name}`, depth + 1);
+      } else out.push(file(x, under, item.path));
+    }
+  };
+  await walk(item.path, top, 0);
+  return out;
+}
+
 // What the person sends to the agent with the buttons of a project. The work itself is the agent's (the skills
 // plc-project and project-docs with the tools plc-kit, machine-expert, ebpro-cmtp, pic-index, doc-kit); the folder
 // must be open to it for writing in SYSAI.
 function prompts(info) {
-  const where = `Папка проекта: ${info.path}`;
+  // what each material is for, when somebody said so: the agent need not guess which file is the template
+  const said = (info.sources || []).filter((x) => x.role !== 'material');
+  const by = (role) => said.filter((x) => x.role === role).map((x) => x.path).slice(0, 12).join(', ');
+  const roles = [['template', 'Шаблон'], ['example', 'Пример (образец стиля)'], ['picture-library', 'Библиотека картинок']]
+    .filter(([role]) => by(role)).map(([role, label]) => `${label}: ${by(role)}.`).join(' ');
+  const where = `Папка проекта: ${info.path}${roles ? `\n${roles}` : ''}`;
   const pl = info.pipeline || pipeline(info.path);
   const next = pl.stages.find((s) => s.stage === pl.next);
   const resume = pl.started && next
@@ -314,4 +479,5 @@ function prompts(info) {
   };
 }
 
-module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, isResult, isService, workPlace, PARTS, STAGES, RESULTS, SERVICE, WORK };
+module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, storageFiles, isResult, isService, workPlace, guessRole, PARTS, STAGES, RESULTS, SERVICE, WORK,
+  ROLES, SOURCES };

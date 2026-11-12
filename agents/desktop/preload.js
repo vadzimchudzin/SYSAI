@@ -66,6 +66,8 @@ contextBridge.exposeInMainWorld('sysai', {
     info: (name) => call('projects:info', name),
     add: (name, paths) => call('projects:add', name, paths),
     tidy: (name) => call('projects:tidy', name),
+    role: (name, rel, role) => call('projects:role', name, rel, role),
+    attach: (name, item, role) => call('projects:attach', name, item, role),
   },
   canvas: {
     state: () => call('canvas:state'),

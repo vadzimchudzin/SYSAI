@@ -978,3 +978,62 @@ test('projects: «Убрать в _work» puts the program from plc/ where it is
   put('plc/Main.st');
   assert.equal((await pj.tidy(made.name))[0].to, '_work/plc/Main.st');
 });
+
+test('projects: what each material is for — .sysai/sources.json, from this computer and from the storage', async () => {
+  const { storageFiles, guessRole, SOURCES } = require('../lib/projects');
+  const root = tmp();
+  const pj = new Projects(path.join(root, 'SYSAI Проекты'));
+  const made = await pj.create('Линия 3');
+  const src = path.join(root, 'src');
+  fs.mkdirSync(path.join(src, 'pics'), { recursive: true });
+  for (const [rel, text] of [['ТЗ.docx', 'tz'], ['Rodina.project', 'proj'], ['pics/noria.png', 'png'], ['motor.png', 'm']]) fs.writeFileSync(path.join(src, rel), text);
+  await pj.add(made.name, ['ТЗ.docx', 'Rodina.project', 'pics', 'motor.png'].map((n) => path.join(src, n)));
+  fs.writeFileSync(path.join(made.path, 'materials', 'руками.pdf'), 'x'); // put there in the Explorer, not through the window
+  assert.deepEqual([guessRole('a.png', false), guessRole('a.pdf', false), guessRole('pics', true)], ['picture-library', 'material', 'material']);
+  let rows = await pj.sources(made.name);
+  assert.deepEqual(Object.fromEntries(rows.map((x) => [x.path, [x.kind, x.role, x.origin, Boolean(x.guessed)]])), {
+    'materials/motor.png': ['file', 'picture-library', 'local', false], 'materials/pics': ['folder', 'material', 'local', false],
+    'materials/Rodina.project': ['file', 'material', 'local', false], 'materials/ТЗ.docx': ['file', 'material', 'local', false],
+    'materials/руками.pdf': ['file', 'material', 'local', true] });
+  assert.equal(rows.find((x) => x.path === 'materials/ТЗ.docx').sha256.length, 64);
+  await pj.setRole(made.name, 'materials/Rodina.project', 'template');
+  await pj.setRole(made.name, 'materials/pics', 'picture-library');
+  await assert.rejects(pj.setRole(made.name, 'materials/Rodina.project', 'boss'), /нет такой роли/);
+  await assert.rejects(pj.setRole(made.name, 'materials/нет.pdf', 'template'), /нет такого материала/);
+
+  // from the storage: a file and a whole folder; the listing is the storage's
+  const tree = { 'ОПО/Картинки': [{ name: 'Нории', path: 'ОПО/Картинки/Нории', is_folder: true }, { name: 'a.png', path: 'ОПО/Картинки/a.png', version: 2 }],
+    'ОПО/Картинки/Нории': [{ name: 'n1.png', path: 'ОПО/Картинки/Нории/n1.png', sha256: 'f'.repeat(64) }] };
+  const list = async (folder) => ({ items: tree[folder] || [] });
+  const one = await storageFiles({}, { name: 'Шаблон.project', path: 'ОПО/Шаблоны/Шаблон.project', version: 3 }, list);
+  assert.deepEqual(one.map((f) => [f.source, f.under, f.version]), [['ОПО/Шаблоны/Шаблон.project', '', 3]]);
+  const many = await storageFiles({}, { name: 'Картинки', path: 'ОПО/Картинки', kind: 'folder' }, list);
+  assert.deepEqual(many.map((f) => [f.source, f.under, f.root]), [['ОПО/Картинки/Нории/n1.png', 'Картинки/Нории', 'ОПО/Картинки'],
+    ['ОПО/Картинки/a.png', 'Картинки', 'ОПО/Картинки']]);
+  await assert.rejects(storageFiles({}, { name: 'Картинки', path: 'ОПО/Картинки', kind: 'folder' }, list, 1), /больше 1 файлов/);
+  const cache = path.join(root, 'cache');
+  fs.mkdirSync(cache);
+  const local = (name) => { const p = path.join(cache, name); fs.writeFileSync(p, name); return p; };
+  const done = await pj.attach(made.name, [{ ...one[0], item: undefined, path: local('Шаблон.project') },
+    ...many.map((f) => ({ ...f, item: undefined, path: local(path.basename(f.source)) }))], '');
+  assert.ok(done.every((d) => !d.error) && done.length === 3);
+  assert.deepEqual(fs.readdirSync(path.join(made.path, 'materials', 'Картинки')).sort(), ['a.png', 'Нории']);
+  rows = await pj.sources(made.name);
+  const got = Object.fromEntries(rows.map((x) => [x.path, x]));
+  assert.deepEqual([got['materials/Шаблон.project'].origin, got['materials/Шаблон.project'].from, got['materials/Шаблон.project'].version],
+    ['storage', 'ОПО/Шаблоны/Шаблон.project', 3]);
+  assert.deepEqual([got['materials/Картинки'].kind, got['materials/Картинки'].origin, got['materials/Картинки'].from], ['folder', 'storage', 'ОПО/Картинки']);
+  assert.equal(got['materials/Rodina.project'].role, 'template'); // what the person said is kept
+  const saved = JSON.parse(fs.readFileSync(path.join(made.path, SOURCES), 'utf8'));
+  assert.equal(saved.schema, 1);
+  assert.ok(!saved.inputs.some((x) => x.path === 'materials/руками.pdf')); // a guess is not written down
+
+  // the agent is told the roles with the request of a button; the folder of the project stays a line of its own
+  const info = await pj.info(made.name);
+  assert.deepEqual(info.sources.length, rows.length);
+  const pr = projectPrompts(info);
+  assert.match(pr.create, /Папка проекта: [^\n]+\nШаблон: materials\/Rodina\.project\. Библиотека картинок: [^\n]*materials\/pics/);
+  fs.rmSync(path.join(made.path, 'materials', 'Rodina.project'));
+  assert.ok(!(await pj.sources(made.name)).some((x) => x.path === 'materials/Rodina.project')); // gone from the folder — gone from the list
+  assert.ok(!(await pj.info(made.name)).materials.some((f) => f.rel.startsWith('.sysai'))); // the record is not a material
+});

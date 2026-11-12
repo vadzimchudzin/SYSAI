@@ -18,6 +18,7 @@ const { Canvas, PERSON } = require('./lib/canvas');
 const config = require('./lib/config');
 const files = require('./lib/files');
 const storage = require('./lib/storage');
+const { storageFiles } = require('./lib/projects');
 const { Projects, prompts: projectPrompts, STAGES: projectStages } = require('./lib/projects');
 const shortcuts = require('./lib/shortcuts');
 const { Bridge } = require('./lib/bridge');
@@ -743,6 +744,25 @@ function ipc() {
   });
   handle('projects:add', (name, paths) => projects.add(String(name || ''), Array.isArray(paths) ? paths.map(need) : []));
   handle('projects:tidy', (name) => projects.tidy(String(name || '')));
+  handle('projects:role', (name, rel, role) => projects.setRole(String(name || ''), String(rel || ''), String(role || '')));
+  // «Добавить из Хранилища»: a file or a whole folder of the storage is fetched (the cache of the window, sha256
+  // checked) and copied into materials/ of the project, recorded as taken from the storage
+  handle('projects:attach', async (name, item, role) => {
+    if (!item || typeof item.path !== 'string') throw new Error('нет файла');
+    const cfg = config.load(HOME);
+    const cache = path.join(DESK, 'cache', 'storage');
+    const files = await storageFiles(cfg, item, (folder) => storage.list(cfg, folder, ''));
+    const fetched = [];
+    const failed = [];
+    for (const f of files) {
+      try {
+        fetched.push({ ...f, path: await storage.fetchFile(cfg, f.item, cache), item: undefined });
+      } catch (err) {
+        failed.push({ path: f.source, error: err.message });
+      }
+    }
+    return [...await projects.attach(String(name || ''), fetched, String(role || '')), ...failed];
+  });
   handle('auto:get', () => auto.state());
   handle('auto:set', (on) => {
     const state = auto.set(Boolean(on));

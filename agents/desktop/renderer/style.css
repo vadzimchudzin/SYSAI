@@ -330,6 +330,7 @@ body.resizing { cursor: col-resize; } body.resizing iframe { pointer-events: non
 .ex-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ex-row .meta { flex: none; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .ex-row .row-acts { display: none; gap: 2px; } .ex-row:hover .row-acts { display: flex; } .ex-row:hover .meta { display: none; }
+.ex-row .tag.role { cursor: pointer; } .ex-row .tag.role.plain { color: var(--muted, #8a8a8a); background: transparent; opacity: .7; }
 .ex-row .tag { font-size: 10.5px; color: var(--sblue); background: var(--sblue-bg); padding: 2px 6px; border-radius: 99px; flex: none; }
 .pj-title { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 0 4px; line-height: 1.25; }
 .pj-title b { font-size: 13.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

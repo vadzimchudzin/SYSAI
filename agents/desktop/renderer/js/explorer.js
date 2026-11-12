@@ -265,17 +265,38 @@ export class StorageView {
     const folder = item.is_folder || item.kind === 'section' || item.kind === 'folder';
     const kind = folder ? 'folder' : kindOfName(item.name);
     const meta = folder ? (item.files ? `${item.files} ф.` : '') : [size(item.size), when(item.updated_at, { short: true })].filter(Boolean).join(' · ');
+    const project = (this.hooks.project && this.hooks.project()) || '';
     const row = h('button', { class: `ex-row${folder ? ' dir' : ''}`, title: item.note || item.path },
       icon(item.kind === 'section' ? 'archive' : kindIcon(kind), 'kind'), h('span', { class: 'nm', text: item.name }),
       item.by_agent ? h('span', { class: 'tag', text: 'агент' }) : null,
       h('span', { class: 'meta', text: meta }),
-      folder ? null : rowActs(['В чат — прикрепить к сообщению', 'paperclip', () => this._fetch(item, row).then((p) => p && this.hooks.attach(p))],
-        ['Открыть в программе', 'external', () => this._fetch(item, row).then((p) => p && api.shell.open(p).catch((e) => toast(e.message, 'err')))]));
+      rowActs(project && item.kind !== 'section' ? [`В материалы проекта «${project}»${folder ? ' — всю папку' : ''}`, 'download', () => this._toProject(item, row, project)] : null,
+        folder ? null : ['В чат — прикрепить к сообщению', 'paperclip', () => this._fetch(item, row).then((p) => p && this.hooks.attach(p))],
+        folder ? null : ['Открыть в программе', 'external', () => this._fetch(item, row).then((p) => p && api.shell.open(p).catch((e) => toast(e.message, 'err')))]));
     row.addEventListener('click', () => {
       if (folder) this.go(item.path);
       else this._fetch(item, row).then((p) => p && this.hooks.open(p, item));
     });
     return row;
+  }
+
+  // «Добавить из Хранилища»: the file or the whole folder goes into materials/ of the project that is open in «Проекты»
+  async _toProject(item, row, project) {
+    if (row.classList.contains('busy')) return;
+    row.classList.add('busy');
+    const t = toast(`Беру из Хранилища: ${item.name}…`, 'info', 600000);
+    try {
+      const done = await api.projects.attach(project, item, '');
+      const bad = done.filter((d) => d.error);
+      if (bad.length) toast(bad.map((d) => `${d.path}: ${d.error}`).slice(0, 8).join('\n'), 'err', 9000);
+      if (done.length > bad.length) toast(`В материалы проекта «${project}»: ${done.length - bad.length} ф.`, 'ok', 4000);
+      if (this.hooks.attached) this.hooks.attached(project);
+    } catch (err) {
+      toast(`${item.name}: ${err.message}`, 'err');
+    } finally {
+      t.remove();
+      row.classList.remove('busy');
+    }
   }
 
   async _fetch(item, row) {
