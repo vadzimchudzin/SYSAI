@@ -1,0 +1,69 @@
+--- gateway_orig.py
++++ gateway_minfix.py
+@@ -354,16 +354,27 @@
+ 
+ def _jev_failed(plan: Plan, status: int, text: str) -> bool:
+     """Jev did not route: the request goes again to the fallback tier. True when it should."""
+-    if not plan.jev or status not in FALL_BACK_ON:
++    if not plan.jev or status == 401:  # 401: the key itself is bad, the tier would answer the same
+         return False
+-    why = f"HTTP {status} {_message(text)}"
+-    if status in (404, 503):  # no access to the router or it is down: do not ask it for a while
+-        _jev_rest(why)
++    _jev_down(plan, f"HTTP {status} {_message(text)}")  # whatever the status: the tier answers, Jev rests
++    return True
++
++
++def _jev_down(plan: Plan, why: str) -> None:
++    _jev_rest(why)
+     log.warning("Jev did not route a request (%s): falling back to sysai/%s", why[:200], plan.fallback)
+     plan.fall_back(why)
+-    return True
+ 
+ 
++def _error_body(r: httpx.Response) -> bool:
++    """OpenRouter commits `200` before the provider answers: a later failure is an `error` object in the body."""
++    try:
++        data = r.json()
++    except ValueError:
++        return False
++    return isinstance(data, dict) and bool(data.get("error")) and not data.get("choices")
++
++
+ def _backup_failed(plan: Plan, status: int, text: str) -> bool:
+     """OpenRouter failed the model even with the spare one in `models`: once more to the spare one alone."""
+     if plan.jev or not plan.backup or status not in RETRY_ON:
+@@ -426,9 +437,20 @@
+         prepare(ctx, body, plan)
+         url = f"{config.OPENROUTER_BASE_URL}/chat/completions"
+         try:
+-            r = _post(url, plan.out, _headers())
+-            while r.status_code != 200 and _again(plan, r.status_code, r.text):  # Jev, then the spare model: twice at most
+-                r = _post(url, plan.out, _headers())
++            while True:  # Jev, then the spare model: twice at most
++                try:
++                    r = _post(url, plan.out, _headers())
++                except httpx.HTTPError as exc:
++                    if not plan.jev:
++                        raise
++                    _jev_down(plan, f"{type(exc).__name__} {exc}"[:100])
++                    continue
++                if r.status_code == 200 and plan.jev and _error_body(r):
++                    _jev_down(plan, "HTTP 200 " + _message(r.text))
++                    continue
++                if r.status_code != 200 and _again(plan, r.status_code, r.text):
++                    continue
++                break
+         except httpx.HTTPError as exc:
+             raise GatewayError(502, "upstream_error", f"OpenRouter недоступен: {exc}") from exc
+         if r.status_code != 200:
+@@ -452,6 +474,9 @@
+     try:
+         client, resp = _open(url, plan.out, _headers())
+     except httpx.HTTPError as exc:
++        if plan.jev:
++            _jev_down(plan, f"{type(exc).__name__} {exc}"[:100])
++            return _open_stream(plan)
+         raise GatewayError(502, "upstream_error", f"OpenRouter недоступен: {exc}") from exc
+     if resp.status_code == 200:
+         return client, resp

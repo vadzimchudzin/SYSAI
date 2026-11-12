@@ -11,6 +11,7 @@
 - [docs/PLAN.md](docs/PLAN.md) — план: 31 задача, что готово (27), что в работе и что для этого нужно; сделанное вне плана.
 - [docs/LANDING.md](docs/LANDING.md) — лендинг: что на схеме, как работает анимация, как снять скриншоты и видео.
 - [deploy/README.md](deploy/README.md) — свой сервер (Linux или Windows), [deploy/HOSTING.md](deploy/HOSTING.md) — куда переезжать с Render free и сколько это стоит.
+- [docs/opo/plan-2026-11/PLAN.md](docs/opo/plan-2026-11/PLAN.md) — план улучшения агента ОПО от 12.11.2026: откуда расход токенов, Jev, Machine Expert до компиляции, индексы экранов, автоправки; отчёты исследования — в `research/`.
 - [docs/opo/TASKS.md](docs/opo/TASKS.md), [docs/opo/NET.md](docs/opo/NET.md) — сеть агентов ОПО: агент на ПК инженера, MCP, хаб навыков.
 - [docs/opo/NEW_PROJECT.md](docs/opo/NEW_PROJECT.md) — проект автоматизации с нуля в окне «Агент SYSAI»: материалы → связь (OPC UA / Modbus) → программа ПЛК на ST → проект и компиляция в Machine Expert → экраны панели → документация; [docs/opo/MACHINE_EXPERT.md](docs/opo/MACHINE_EXPERT.md) — как устроен файл `.project` и как агент ведёт Machine Expert.
 - [docs/recognition-pipeline.html](docs/recognition-pipeline.html), [docs/speech_benchmark.md](docs/speech_benchmark.md) — как распознаётся речь и замеры движков.

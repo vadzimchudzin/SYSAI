@@ -1,0 +1,52 @@
+--- gateway_minfix.py
++++ gateway_patched.py
+@@ -245,6 +245,49 @@
+     plan.route = "jev:" + plugin["cost_tier"]
+ 
+ 
++# ----------------------------------------------------------------------------- Jev health probe (prototype, not in the repo)
++def _probe_post(url: str, body: dict, headers: dict) -> httpx.Response:
++    return httpx.post(url, json=body, headers=headers, timeout=httpx.Timeout(45.0, connect=10.0))
++
++
++def probe_jev(big_chars: int = 0) -> dict:
++    """One tiny request through the real Jev route with the real plugin of the built-in engineer profile (or a prompt
++    of `big_chars` characters: the long-conversation case). The result is what the settings page shows; a success
++    closes the rest of the breaker, a failure opens it."""
++    rules = access.cap_by_person(access.normalize(access.BUILTIN[0][3]), "user")
++    plugin, why, _ = jev_plugin(rules)
++    res = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "ok": False, "status": 0, "served": "",
++           "ms": 0, "message": why, "big": big_chars}
++    if plugin is not None:
++        text = "Reply with: ok" if not big_chars else ("lorem ipsum " * (big_chars // 12 + 1))[:big_chars] + "\nReply with: ok"
++        body = {"model": JEV_ROUTER, "messages": [{"role": "user", "content": text}], "max_tokens": 16, "plugins": [plugin],
++                "usage": {"include": True}}
++        started = time.monotonic()
++        try:
++            r = _probe_post(f"{config.OPENROUTER_BASE_URL}/chat/completions", body,
++                            {**_headers(), "X-OpenRouter-Metadata": "enabled"})
++            res["status"] = r.status_code
++            try:
++                data = r.json()
++            except ValueError:
++                data = {}
++            if r.status_code == 200 and isinstance(data, dict) and data.get("choices"):
++                pipeline = [st for st in (data.get("openrouter_metadata") or {}).get("pipeline") or []
++                            if isinstance(st, dict) and st.get("name") == "jev-router"]
++                res.update(ok=True, served=str(data.get("model") or ""), message="",
++                           reason=str(((pipeline[0].get("data") or {}) if pipeline else {}).get("reason") or "")[:120])
++            else:
++                res["message"] = _message(r.text) if r.status_code != 200 else "HTTP 200: " + _message(r.text)
++        except httpx.HTTPError as exc:
++            res["message"] = f"{type(exc).__name__}: {exc}"[:300]
++        res["ms"] = _ms(started)
++    with _lock:
++        _state["jev_probe"] = res
++        _state["jev_rest_until"] = 0.0 if res["ok"] else time.time() + JEV_REST
++        _state["jev_why"] = "" if res["ok"] else f"проверка: HTTP {res['status']} {res['message']}"[:60]
++    return res
++
++
+ # ----------------------------------------------------------------------------- one request
+ def draft(body, project: str = "", skill: str = "", task: str = "", stream: bool = False) -> Plan:
+     """What the trace knows of a request before any check: the tier asked, who asks (the «sysai» tag in the body that
