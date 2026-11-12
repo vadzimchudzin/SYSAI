@@ -2,7 +2,7 @@
 name: pic-index
 kind: mcp
 description: Индекс библиотеки картинок оборудования для экранов панели — находит набор картинок (нория, конвейер, задвижка…) с состояниями off / on / alarm по смыслу запроса, по именам файлов и подписям.
-version: 1.0.1
+version: 1.0.2
 run: python server.py
 platform: any
 tools: pics_index_update, pics_find, pics_list, pics_label_update, pics_check

@@ -365,7 +365,7 @@ class Projects {
   // where it lies in the storage, version, sha256, under — a folder of the storage they came with}) are copied into
   // materials/ and recorded as taken from the storage. A folder of the storage becomes one material.
   async attach(name, files, role = '') {
-    const list = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.path === 'string').slice(0, 2000);
+    const list = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.path === 'string').slice(0, 3000);
     const target = path.join(this.dir(name), 'materials');
     await fsp.mkdir(target, { recursive: true });
     const done = [];
@@ -416,7 +416,7 @@ class Projects {
 
 // The files of what was picked in the storage: the file itself, or every file of a folder (not deeper than 6 folders,
 // not more than `limit` files). `list(folder)` is the storage listing. -> [{item, source, version, sha256, under, root}]
-async function storageFiles(cfg, item, list, limit = 500) {
+async function storageFiles(cfg, item, list, limit = 3000) {
   const isFolder = (x) => Boolean(x.is_folder || x.kind === 'section' || x.kind === 'folder');
   const file = (x, under, root) => ({ item: x, source: x.path, version: x.version, sha256: x.sha256 || '', under, root });
   if (!isFolder(item)) return [file(item, '', '')];
