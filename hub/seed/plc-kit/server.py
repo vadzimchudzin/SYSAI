@@ -14,10 +14,11 @@ import plcbuild  # noqa: E402
 import plclink  # noqa: E402
 import plcme  # noqa: E402
 import plcproj  # noqa: E402
+import plcspec  # noqa: E402
 import plcstage  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 PATH = {"type": "string", "description": r"Проект ПЛК: файл .project Machine Expert, .export или PLCopen .xml из него, "
                                          r"либо папка с файлами .st (plc_export_st), например C:\Projects\line\plc"}
 PROJECT = {"type": "string", "description": r"Файл проекта Machine Expert, например C:\Projects\line\plc\Line.project"}
@@ -127,6 +128,28 @@ TOOLS = [
          "note": {"type": "string", "description": "Одна-две фразы: что сделано или что мешает"},
          "facts": {"type": "object", "description": "Например {\"controller\": \"TM241CE40R\", \"link\": \"opcua\"}"}},
         ("project_dir",)),
+    _rw("plc_spec_new", "Новая спецификация проекта",
+        "Создать пустую спецификацию проекта — _work/spec/project.spec.json: project (name, controller, panel, link, "
+        "template), expected (сколько механизмов и сигналов на схеме — пересчитайте по схеме до того, как выписывать), "
+        "types (виды механизмов: какие сигналы in/out у вида обязаны быть, какие optional), mechanisms ({id, type, title, "
+        "in: {сигнал: \"Устройство.Канал\"}, out, params, interlocks: {requires_running, stops}, src}), signals (сигналы "
+        "вне механизмов: {id, title, dir, channel, src}). В файле два вида механизмов как образец записи. Заполняйте его "
+        "по материалам вместо длинных выписок в разговоре: программа, каналы и экраны делаются по нему.",
+        {"project_dir": {"type": "string", "description": "Папка проекта: файл ляжет в _work/spec/project.spec.json"},
+         "out_file": {"type": "string", "description": "Или свой путь к файлу .json"},
+         "overwrite": {"type": "boolean"}}, ()),
+    _ro("plc_spec_check", "Проверка спецификации",
+        "Проверить спецификацию проекта: поля, повторы id, полнота (на схеме expected.mechanisms / expected.signals — "
+        "столько же в спецификации; у каждого механизма есть все сигналы его вида), каналы («Устройство.Канал», один "
+        "канал — один сигнал, вход не на выходе), блокировки называют существующие механизмы. template_file — шаблон "
+        "или собранный .project: тогда каждый канал ищется в контроллере (есть ли, вход или выход) и считается, сколько "
+        f"каналов свободно. В ответе summary и замечания, сначала ошибки, по {PAGE} на страницу. io_map: true — "
+        "добавить готовые changes для plc_io_map (переменная «<id>_<сигнал>»). Этап materials закрывают при "
+        "summary.complete.",
+        {"project_dir": {"type": "string", "description": "Папка проекта (спецификация — _work/spec/project.spec.json)"},
+         "file": {"type": "string", "description": "Или путь к файлу спецификации"},
+         "template_file": {"type": "string", "description": "Шаблон или проект .project — сверить каналы с контроллером"},
+         "io_map": {"type": "boolean", "description": "Вернуть changes для plc_io_map"}, **PAGING}, ()),
     _rw("plc_export_st", "Проект в папку ST",
         "Разложить проект в папку: по файлу .st на каждый POU, список переменных и тип + project.json (контроллер, задачи). "
         "В таком виде проект читают, правят и пишут с нуля; plc_build собирает папку обратно.",
@@ -268,9 +291,40 @@ def _call(name, args):
             head = (f"Связь: {d['link_ru']}" + ("" if d["sure"] else " (уточнить)") if d["link"] else "Связь решить нельзя")
             lines = [head] + [f"— {w}" for w in d["why"]] + [f"Спросить: {a}" for a in d["ask"]] + d["next"]
             return _text("\n".join(lines), data=d)
+        if name in ("plc_spec_new", "plc_spec_check"):
+            file = args.get("out_file" if name == "plc_spec_new" else "file") or (
+                plcspec.path_of(args["project_dir"]) if args.get("project_dir") else "")
+            if not file:
+                return _text("Назовите папку проекта (project_dir) или файл спецификации.", True)
+            if name == "plc_spec_new":
+                name_of = os.path.basename(os.path.normpath(args["project_dir"])) if args.get("project_dir") else ""
+                plcspec.new(file, name_of, bool(args.get("overwrite")))
+                return _text(f"Спецификация → {file}. Заполните project, expected (счёт по схеме), types, mechanisms, "
+                             "signals и проверьте plc_spec_check.", data={"file": file})
+            data = plcspec.load(file)
+            channels = plcproj.io(args["template_file"]) if args.get("template_file") else None
+            got = plcspec.check(data, channels)
+            part, meta = _page(got["issues"], args)
+            out = {"file": file, "summary": got["summary"], **meta, "issues": part}
+            if args.get("io_map"):
+                changes = plcspec.io_changes(data)
+                out["io_map"] = {"count": len(changes), "changes": changes[:PAGE_MAX]}
+            return _text(_json(out), not got["summary"]["complete"])
         if name == "plc_stage_update":
             got = plcstage.update(args["project_dir"], args.get("stage") or "", args.get("state") or "",
                                   args.get("note"), args.get("facts"))
+            spec_file = plcspec.path_of(args["project_dir"])
+            if os.path.isfile(spec_file):  # the specification is what the stages after «materials» are made from
+                try:
+                    summary = plcspec.check(plcspec.load(spec_file))["summary"]
+                    got["spec"] = {k: summary[k] for k in ("mechanisms", "signals", "errors", "warnings", "complete")}
+                    if not summary["complete"]:
+                        got["spec_note"] = "Спецификация неполная: plc_spec_check покажет, чего не хватает."
+                except plcspec.SpecError as exc:
+                    got["spec_note"] = f"Спецификация не читается: {exc}"
+            elif args.get("stage") == "materials" and args.get("state") == "done":
+                got["spec_note"] = ("Спецификации проекта нет (_work/spec/project.spec.json): создайте plc_spec_new и "
+                                    "выпишите в неё механизмы и сигналы — по ней делаются программа, каналы и экраны.")
             stray = plcstage.extra(args["project_dir"])
             if stray:  # the folders of results hold only results: the engineer opens plc/ and sees the file to take
                 got["extra"] = stray[:30]
@@ -464,7 +518,7 @@ def _call(name, args):
             files = plcbuild.write_dir(p, args["out_dir"])
             return _text(f"Записано файлов: {len(files)} → {args['out_dir']}", data={"files": files})
         return _text(f"нет инструмента {name}", True)
-    except (plcme.PlcError, plcproj.ProjectFileError, plcstage.StageError) as exc:
+    except (plcme.PlcError, plcproj.ProjectFileError, plcstage.StageError, plcspec.SpecError) as exc:
         return _text(str(exc), True)
     except KeyError as exc:
         return _text(f"не хватает поля {exc}", True)

@@ -2,10 +2,10 @@
 name: plc-kit
 kind: mcp
 description: Читает, проверяет и собирает программу ПЛК Schneider Machine Expert / CODESYS на языке ST без Machine Expert — в том числе сам файл .project (читает любой и пишет настоящий из папки ST и шаблона), программы, блоки, переменные, адреса Modbus, каналы ввода-вывода, теги для панели (Modbus и OPC UA), стиль проекта, PLCopen XML; решает связь панели и контроллера по моделям из ТЗ и ведёт этапы проекта «под ключ».
-version: 1.4.2
+version: 1.5.0
 run: python server.py
 platform: any
-tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_tag_check, plc_check, plc_style, plc_link, plc_stage_update, plc_export_st, plc_build, plc_project_build, plc_project_template, plc_io, plc_io_map
+tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_tag_check, plc_check, plc_style, plc_link, plc_stage_update, plc_spec_new, plc_spec_check, plc_export_st, plc_build, plc_project_build, plc_project_template, plc_io, plc_io_map
 requires: python>=3.11
 ---
 # ПЛК: Machine Expert / CODESYS, язык ST
@@ -74,6 +74,7 @@ XML в Machine Expert тоже не проверен.
 | `plc_tag_check` | теги панели против программы: каких переменных нет, у каких другой тип или не тот номер узла |
 | `plc_link` | связь по моделям контроллера и панели или по тексту ТЗ: OPC UA / Modbus TCP / RTU, разрешение панели, что спросить |
 | `plc_stage_update` | этапы проекта в `pipeline.json`: materials, decisions, plc, build, hmi, docs; решения (`facts`) |
+| `plc_spec_new`, `plc_spec_check` | спецификация проекта `_work/spec/project.spec.json`: все механизмы и сигналы одним файлом; проверка полноты и каналов |
 | `plc_check` | ошибки, видные по тексту до компиляции |
 | `plc_style` | как проект построен — для следующего проекта в том же стиле |
 | `plc_export_st` | проект → папка файлов `.st` |
@@ -130,6 +131,34 @@ XML в Machine Expert тоже не проверен.
 остальное (исходники `.st`, шаблоны, таблицы, скрипты, заметки) — в `_work/`; закрывая этап, инструмент называет
 лишние файлы (`extra`), их переносят в `_work/`. Служебные файлы Machine Expert и EasyBuilder рядом с проектом (`.~u`,
 `.opt`, `.precompilecache`, `.bootinfo`, `.compileinfo`, `.backup`, `.bak`) лишними не считаются — их не трогают.
+
+## Спецификация проекта
+
+`_work/spec/project.spec.json` — всё, что прочитано в ТЗ и на схемах, одним компактным файлом (10–20 КБ на линию):
+по нему пишут программу, расставляют каналы и собирают экраны, а не по выпискам в разговоре. `plc_spec_new`
+`{project_dir}` кладёт пустой файл с образцом:
+
+```json
+{"project":  {"name": "Линия 1", "controller": "TM241CE40R", "panel": "cMT3072X", "link": "opcua", "template": "_work/templates/Line.project"},
+ "expected": {"mechanisms": 12, "signals": 96},
+ "types":    {"noria": {"title": "Нория", "in": ["speed", "belt", "local_stop"], "out": ["run"], "optional": ["vfd_ready"]}},
+ "mechanisms": [{"id": "N1", "type": "noria", "title": "Нория 1",
+                 "in": {"speed": "DI.I0", "belt": "DI.I1", "local_stop": "DI.I2"}, "out": {"run": "DQ.Q0"},
+                 "params": {"start_delay_s": 5}, "interlocks": {"requires_running": ["C1"]}, "src": "Э3 лист 7; ТЗ п.4.2"}],
+ "signals":  [{"id": "EStop", "title": "Аварийный стоп", "dir": "in", "channel": "DI.I5", "src": "Э3 лист 2"}]}
+```
+
+- `expected` — сколько механизмов и сигналов **на схеме**: считают по схеме до того, как выписывать. Не сошлось со
+  спецификацией — ошибка: так находится пропущенное.
+- `types` — у каждого вида механизма список сигналов, которые обязаны быть (`in`, `out`), и необязательных
+  (`optional`); виды берут из стиля проекта (`plc_style`: входы и выходы блоков).
+- канал — «Устройство.Канал», как называет `plc_io`: `DI.I0`, `Module_5.I12`, `DQ.Q3`; пусто — сигнал без канала.
+- `src` — откуда взято (файл, лист, пункт ТЗ): инженер проверяет по нему.
+
+`plc_spec_check` `{project_dir}` — поля, повторы, полнота, один канал — один сигнал, вход не на выходе, блокировки
+называют существующие механизмы; с `template_file` — каждый канал ищется в контроллере шаблона. `summary.complete` —
+ошибок нет. `io_map: true` — готовые `changes` для `plc_io_map` (переменная `<id>_<сигнал>`). Чего проверка не
+знает: верно ли прочитана сама схема — счёт `expected` и `src` для этого и нужны.
 
 ## Папка ST — как пишут проект с нуля
 

@@ -23,7 +23,7 @@ import plcst  # noqa: E402
 import plcstage  # noqa: E402
 
 TOOLS = ["plc_info", "plc_pous", "plc_pou", "plc_variables", "plc_addresses", "plc_hmi_tags", "plc_tag_check", "plc_check", "plc_style",
-         "plc_link", "plc_stage_update", "plc_export_st", "plc_build", "plc_project_build", "plc_project_template", "plc_io",
+         "plc_link", "plc_stage_update", "plc_spec_new", "plc_spec_check", "plc_export_st", "plc_build", "plc_project_build", "plc_project_template", "plc_io",
          "plc_io_map"]
 
 GVL = """VAR_GLOBAL
@@ -349,7 +349,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.4.2"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.5.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3
@@ -551,3 +551,79 @@ def test_what_the_compiler_refuses_outright_is_an_error_before_the_build(tmp_pat
     assert any("период «быстро»" in t for t in _errors(tmp_path, meta=task(interval="быстро")))
     assert any("имя задачи" in t for t in _errors(tmp_path, meta=task(name="Main task")))
     assert _errors(tmp_path, meta=task(interval="T#100ms", priority=1)) == []
+
+
+def _spec():
+    return {
+        "project": {"name": "Линия 1", "controller": "TM241CE40R", "panel": "cMT3072X", "link": "opcua"},
+        "expected": {"mechanisms": 2, "signals": 6},
+        "types": {"noria": {"title": "Нория", "in": ["speed", "belt"], "out": ["run"], "optional": ["vfd_ready"]},
+                  "conveyor": {"title": "Конвейер", "in": ["speed"], "out": ["run"]}},
+        "mechanisms": [
+            {"id": "N1", "type": "noria", "title": "Нория 1", "in": {"speed": "DI.I0", "belt": "DI.I1"}, "out": {"run": "DQ.Q0"},
+             "interlocks": {"requires_running": ["C1"]}, "src": "Э3 лист 7"},
+            {"id": "C1", "type": "conveyor", "title": "Конвейер 1", "in": {"speed": "DI.I2"}, "out": {"run": "DQ.Q1"},
+             "src": "Э3 лист 8"}],
+        "signals": [{"id": "EStop", "title": "Аварийный стоп", "dir": "in", "channel": "DI.I5", "src": "Э3 лист 2"}],
+    }
+
+
+def test_the_specification_is_complete_only_when_nothing_of_the_scheme_is_missing(tmp_path):
+    import plcspec
+    proj = tmp_path / "Линия 1"
+    r = _server([("plc_spec_new", {"project_dir": str(proj)}), ("plc_spec_check", {"project_dir": str(proj)})])
+    file = proj / "_work" / "spec" / "project.spec.json"
+    assert file.is_file() and json.loads(file.read_text(encoding="utf-8"))["project"]["name"] == "Линия 1"
+    empty = json.loads(r[3]["result"]["content"][0]["text"])
+    assert r[3]["result"]["isError"] and not empty["summary"]["complete"]      # an empty one is not a specification yet
+    assert any("expected.mechanisms" in i["text"] for i in empty["issues"])
+    assert "уже есть" in _server([("plc_spec_new", {"project_dir": str(proj)})])[2]["result"]["content"][0]["text"]
+
+    good = plcspec.check(_spec())
+    assert good["issues"] == [] and good["summary"] == {
+        "mechanisms": 2, "signals": 6, "inputs": 4, "outputs": 2, "by_type": {"noria": 1, "conveyor": 1},
+        "without_channel": 0, "errors": 0, "warnings": 0, "complete": True}
+
+    def errors(change):
+        s = _spec()
+        change(s)
+        return [i["text"] for i in plcspec.check(s)["issues"] if i["level"] == "error"]
+    assert any("не хватает 1" in t for t in errors(lambda s: s["mechanisms"].pop()) if "механизмов" in t)
+    assert any("speed, belt" in t or "belt" in t for t in errors(lambda s: s["mechanisms"][0]["in"].pop("belt")))
+    assert any("два сигнала" in t and "N1.speed" in t for t in errors(lambda s: s["mechanisms"][1]["in"].update(speed="DI.I0")))
+    assert any("это выход контроллера" in t for t in errors(lambda s: s["mechanisms"][0]["in"].update(speed="DQ.Q7")))
+    assert any("механизма C9" in t for t in errors(lambda s: s["mechanisms"][0]["interlocks"].update(stops=["C9"])))
+    assert any("не описан в types" in t for t in errors(lambda s: s["mechanisms"][0].update(type="шнек")))
+    assert any("id повторяется" in t for t in errors(lambda s: s["mechanisms"][1].update(id="n1")))
+    assert any("Устройство.Канал" in t for t in errors(lambda s: s["mechanisms"][0]["out"].update(run="Q0")))
+    assert any("пересчитайте по схеме" in t for t in errors(lambda s: s.pop("expected")))
+    # a signal the kind does not know, a mechanism nobody can check, a signal without a channel — remarks, not errors
+    s = _spec()
+    s["expected"]["signals"] = 7
+    s["mechanisms"][0]["in"]["plug"] = ""
+    s["mechanisms"][1].pop("src")
+    got = plcspec.check(s)
+    assert got["summary"]["complete"] and got["summary"]["warnings"] == 3 and got["summary"]["without_channel"] == 1
+
+    # against the controller of a template: a channel that is not there, an input the template knows as an output
+    channels = [{"device": "DI", "channel": f"I{i}", "direction": "input"} for i in range(6)] + \
+               [{"device": "DQ", "channel": "Q0", "direction": "output"}, {"device": "DQ", "channel": "Q9", "direction": "output"}]
+    spec = _spec()
+    got = plcspec.check(spec, channels)
+    assert [i["text"] for i in got["issues"]] == ["канала DQ.Q1 в контроллере шаблона нет (plc_io покажет, какие есть)"]
+    assert got["summary"]["template_channels"] == 8 and got["summary"]["template_channels_free"] == 3
+    assert plcspec.io_changes(spec)[:2] == [{"device": "DI", "channel": "I0", "variable": "N1_speed"},
+                                            {"device": "DI", "channel": "I1", "variable": "N1_belt"}]
+
+    # the stage «materials» says what the specification says
+    file.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    r = _server([("plc_stage_update", {"project_dir": str(proj), "stage": "materials", "state": "done"}),
+                 ("plc_spec_check", {"project_dir": str(proj), "io_map": True})])
+    stage = json.loads(r[2]["result"]["content"][0]["text"])
+    assert stage["spec"] == {"mechanisms": 2, "signals": 6, "errors": 0, "warnings": 0, "complete": True}
+    checked = json.loads(r[3]["result"]["content"][0]["text"])
+    assert not r[3]["result"].get("isError") and checked["io_map"]["count"] == 6
+    other = tmp_path / "Линия 2"
+    other.mkdir()
+    r = _server([("plc_stage_update", {"project_dir": str(other), "stage": "materials", "state": "done"})])
+    assert "plc_spec_new" in json.loads(r[2]["result"]["content"][0]["text"])["spec_note"]
