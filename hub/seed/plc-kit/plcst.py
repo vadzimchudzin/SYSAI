@@ -26,6 +26,82 @@ KEYWORDS = {'IF', 'THEN', 'ELSIF', 'ELSE', 'END_IF', 'CASE', 'END_CASE', 'FOR', 
 OPEN = {'IF': 'END_IF', 'CASE': 'END_CASE', 'FOR': 'END_FOR', 'WHILE': 'END_WHILE', 'REPEAT': 'END_REPEAT'}
 CLOSE = {v: k for k, v in OPEN.items()}
 
+# Words of a declaration: a variable or an object cannot be named so, and in a body they are a mistake of layout.
+RESERVED = KEYWORDS | set(OPEN.values()) | {
+    'PROGRAM', 'END_PROGRAM', 'FUNCTION', 'END_FUNCTION', 'FUNCTION_BLOCK', 'END_FUNCTION_BLOCK', 'METHOD', 'END_METHOD',
+    'PROPERTY', 'END_PROPERTY', 'ACTION', 'END_ACTION', 'TYPE', 'END_TYPE', 'STRUCT', 'END_STRUCT', 'UNION', 'END_UNION',
+    'VAR_INPUT', 'VAR_OUTPUT', 'VAR_IN_OUT', 'VAR_GLOBAL', 'VAR_TEMP', 'VAR_STAT', 'VAR_EXTERNAL', 'VAR_CONFIG', 'CONSTANT',
+    'RETAIN', 'PERSISTENT', 'ARRAY', 'OF', 'AT', 'TO', 'BY', 'AND', 'OR', 'XOR', 'NOT', 'MOD', 'TRUE', 'FALSE', 'RETURN',
+    'EXIT', 'CONTINUE', 'JMP', 'EXTENDS', 'IMPLEMENTS', 'INTERFACE', 'END_INTERFACE', 'NAMESPACE', 'END_NAMESPACE',
+    'POINTER', 'REFERENCE', 'THIS', 'SUPER', 'AND_THEN', 'OR_ELSE'}
+# In a body these belong to the declaration above it (or are not written in CODESYS at all).
+NOT_IN_BODY = {'PROGRAM', 'END_PROGRAM', 'FUNCTION_BLOCK', 'END_FUNCTION_BLOCK', 'END_FUNCTION', 'METHOD', 'END_METHOD',
+               'VAR', 'END_VAR', 'VAR_INPUT', 'VAR_OUTPUT', 'VAR_IN_OUT', 'VAR_GLOBAL', 'VAR_TEMP', 'VAR_STAT', 'TYPE', 'END_TYPE',
+               'END_STRUCT', 'ACTION', 'END_ACTION', 'PROPERTY', 'END_PROPERTY'}
+# X_TO_Y of the standard library exist between these types (and TO_Y, TRUNC_Y of CODESYS).
+CONVERTIBLE = {'BOOL', 'BYTE', 'WORD', 'DWORD', 'LWORD', 'SINT', 'INT', 'DINT', 'LINT', 'USINT', 'UINT', 'UDINT', 'ULINT',
+               'REAL', 'LREAL', 'TIME', 'LTIME', 'DATE', 'TOD', 'DT', 'STRING', 'WSTRING', 'BIT'}
+_CONVERSION = re.compile(r'^(?:([A-Z_]+?)_)?TO_([A-Z_]+)$')
+_C_OPERATORS = (('&&', 'AND'), ('||', 'OR'), ('!=', '<>'), ('==', '='), ('++', ':= … + 1'), ('+=', ':= … +'), ('-=', ':= … -'),
+                ('*=', ':= … *'), ('/=', ':= … /'))
+_TIME_LITERAL = re.compile(r'(?<![A-Za-z0-9_])(L?TIME|L?T)#([A-Za-z0-9_.+-]*)', re.I)
+_TIME_VALUE = re.compile(r'[+-]?(?:\d+(?:\.\d+)?(?:d|h|ms|m|s|us|ns))+', re.I)
+
+
+def conversion(name: str):
+    """None — the name is not a type conversion; True — a conversion that exists (INT_TO_REAL, TO_INT); False — it only
+    looks like one (INT_TO_FLOAT): the compiler does not know it."""
+    m = _CONVERSION.match(str(name or '').upper())
+    if not m:
+        return None
+    src, dst = m.group(1), m.group(2)
+    if src is None:
+        return dst in CONVERTIBLE
+    return src in CONVERTIBLE and dst in CONVERTIBLE and src != dst
+
+
+def interval_ms(value) -> float:
+    """The period of a task in milliseconds — 20ms, 1s, T#100ms, 500us, 20; 0 — not a period."""
+    m = re.fullmatch(r'\s*(?:T#)?\s*(\d+)\s*(ms|us|µs|s)?\s*', str(value or ''), re.I)   # as meproject writes it
+    if not m:
+        return 0.0
+    return int(m.group(1)) * {'us': 0.001, 'µs': 0.001, 'ms': 1.0, 's': 1000.0}[(m.group(2) or 'ms').lower()]
+
+
+def unclosed(text: str) -> list:
+    """[(line, what)] — a comment or a string that is opened and never closed: the rest of the text goes into it."""
+    out, i, n = [], 0, len(text or '')
+    text = text or ''
+    while i < n:
+        two = text[i:i + 2]
+        if two == '//':
+            j = text.find('\n', i)
+            i = n if j < 0 else j
+        elif two in ('(*', '/*'):
+            close = '*)' if two == '(*' else '*/'
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if two == '(*' and text[j:j + 2] == '(*':
+                    depth, j = depth + 1, j + 2
+                elif text[j:j + 2] == close:
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            if depth:
+                out.append((text.count('\n', 0, i) + 1, f'комментарий {two} не закрыт: нет {close}'))
+            i = j
+        elif text[i] in '\'"':
+            q, j = text[i], i + 1
+            while j < n and text[j] != q and text[j] != '\n':
+                j += 2 if text[j] == '$' else 1
+            if j >= n or text[j] != q:
+                out.append((text.count('\n', 0, i) + 1, f'строка в кавычках {q} не закрыта'))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
 _ADDRESS = re.compile(r'^%([IQM])([XBWDL]?)(\d+)(?:\.(\d+))?(?:\.(\d+))?$', re.I)
 _IDENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
@@ -241,6 +317,32 @@ def base_type(typ: str) -> str:
     return m.group(1) if m else t
 
 
+def _no_comments(text: str) -> str:
+    """The text with comments (not strings and not time literals) replaced by spaces: positions and lines stay."""
+    out, i, n = list(text), 0, len(text)
+    while i < n:
+        two = text[i:i + 2]
+        if two == '//':
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+        elif two in ('(*', '/*'):
+            j = text.find('*)' if two == '(*' else '*/', i + 2)
+            j = n if j < 0 else j + 2
+        elif text[i] in '\'"':
+            j = i + 1
+            while j < n and text[j] != text[i] and text[j] != '\n':
+                j += 2 if text[j] == '$' else 1
+            j = min(n, j + 1)
+        else:
+            i += 1
+            continue
+        for k in range(i, j):
+            if out[k] != '\n':
+                out[k] = ' '
+        i = j
+    return ''.join(out)
+
+
 def identifiers(body: str) -> list:
     """[(name, line, after a dot)] of every identifier of a body, comments and strings left out."""
     plain = blank_comments(body or '')
@@ -272,8 +374,28 @@ def check_body(body: str) -> list:
 
     def add(level, line, text):
         issues.append({'level': level, 'line': line, 'text': text})
+    for line, what in unclosed(body or ''):
+        add('error', line, what)
+    # what the compiler refuses outright: operators of C, a time that is not a time
+    for n, raw in enumerate(plain.split('\n'), 1):
+        for op, iec in _C_OPERATORS:
+            if op in raw:
+                add('error', n, f'оператор «{op}» — из C, в ST пишут «{iec}»')
+        if re.search(r'(^|[^<>:=!])!\s*[A-Za-z_(]', raw):
+            add('error', n, 'оператор «!» — из C, в ST пишут «NOT»')
+    for m in _TIME_LITERAL.finditer(_no_comments(body or '')):
+        if not _TIME_VALUE.fullmatch(m.group(2).replace('_', '')):
+            add('error', (body or '').count('\n', 0, m.start()) + 1,
+                f'время «{m.group()}» записано неверно: нужно как T#500ms, T#1m30s, T#2h')
     for m in re.finditer(r'[A-Za-z_]\w*', plain):
         w, line = m.group().upper(), plain.count('\n', 0, m.start()) + 1
+        if w in NOT_IN_BODY and not (m.start() and plain[m.start() - 1] == '.'):
+            if w in ('VAR', 'END_VAR') or w.startswith('VAR_'):
+                add('error', line, f'{w} в коде: переменные объявляют над кодом, до его первой строки')
+            elif w.startswith('END_'):
+                add('error', line, f'{w} в коде: в файле ST объект ничем не закрывают, код идёт до конца файла')
+            else:
+                add('error', line, f'{w} в коде: новый объект — отдельный файл .st, внутри кода его не объявляют')
         if w in OPEN:
             stack.append((w, line))
         elif w in CLOSE:

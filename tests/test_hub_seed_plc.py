@@ -174,6 +174,25 @@ def test_stages_are_the_same_in_the_tool_and_in_the_window():
     assert re.findall(r"\['(\w+)', '([^']+)'", block) == [(k, title) for k, title, _ in plcstage.STAGES]
     assert re.search(r"const STATES = \[([^\]]+)\]", js).group(1).replace("'", "").split(", ") == list(plcstage.STATES)
     assert re.search(r"const FACTS = \[([^\]]+)\]", js).group(1).replace("'", "").split(", ") == list(plcstage.FACTS)
+    # what a folder of results holds: the same list for the tool (it names the stray files) and the window (it moves them)
+    results = re.search(r"const RESULTS = \{(.+?)\};", js).group(1)
+    assert {k: tuple(re.findall(r"'([^']+)'", v)) for k, v in re.findall(r"(\w+): \[([^\]]+)\]", results)} == plcstage.RESULTS
+
+
+def test_closing_a_stage_names_what_does_not_belong_among_the_results(tmp_path):
+    proj = tmp_path / "Линия 1"
+    for rel in ("plc/Line.project", "plc/Main.st", "plc/gen/io.py", "hmi/Line.cmtp", "hmi/tags.csv", "docs/Руководство.docx",
+                "docs/~$Руководство.docx", "_work/st/Main.st", "materials/ТЗ.md"):
+        (proj / rel).parent.mkdir(parents=True, exist_ok=True)
+        (proj / rel).write_text("x", encoding="utf-8")
+    assert plcstage.extra(str(proj)) == ["plc/Main.st", "plc/gen/io.py", "hmi/tags.csv"]
+    r = _server([("plc_stage_update", {"project_dir": str(proj), "stage": "materials", "state": "done"})])[2]["result"]
+    got = json.loads(r["content"][0]["text"])
+    assert got["extra"] == ["plc/Main.st", "plc/gen/io.py", "hmi/tags.csv"] and "_work" in got["extra_note"]
+    for rel in ("plc/Main.st", "plc/gen/io.py", "hmi/tags.csv"):
+        (proj / rel).unlink()
+    r = _server([("plc_stage_update", {"project_dir": str(proj)})])[2]["result"]
+    assert "extra" not in json.loads(r["content"][0]["text"])
 
 
 def test_declarations_addresses_and_modbus():
@@ -304,7 +323,7 @@ def test_a_project_written_from_nothing_builds(tmp_path):
     assert [(x["name"], x["kind"]) for x in p.pous] == [("Main", "program"), ("Scale", "function")] and [t["name"] for t in p.types] == ["Motor"]
     assert p.pou("Scale")["body"] == "Scale := INT_TO_REAL(raw) / 10.0;" and p.pou("Scale")["returns"] == "REAL"
     issues = [i for i in p.check() if i["level"] != "info"]
-    assert [i["text"] for i in issues] == ["имя INT_TO_REAL нигде не объявлено (ни в POU, ни в GVL)"]       # a library function
+    assert issues == []                                        # INT_TO_REAL is a conversion of the standard library
     blob, skipped = plcbuild.to_plcopen(p)
     text = blob.decode("utf-8")
     assert skipped == [] and '<dataType name="Motor">' in text and "<struct>" in text and "<returnType>" in text
@@ -325,7 +344,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.3.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.4.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3
@@ -444,3 +463,86 @@ def test_opcua_tags_checks_and_stages(tmp_path):
     assert json.loads(r[2]["content"][0]["text"])["stages"][3]["note"] == "нет Machine Expert"
     assert json.loads((proj / "pipeline.json").read_text(encoding="utf-8"))["stages"]["build"]["state"] == "problem"
     assert r[3]["isError"] and "нет папки проекта" in r[3]["content"][0]["text"]
+
+
+def test_tables_come_in_pages_and_say_what_is_left(tmp_path):
+    """An answer stays in the conversation and is paid for with every next request: a table is never dumped whole."""
+    exp = _export(tmp_path)
+    replies = _server([("plc_variables", {"path": exp}), ("plc_variables", {"path": exp, "limit": 4}),
+                       ("plc_variables", {"path": exp, "limit": 4, "offset": 4}), ("plc_variables", {"path": exp, "limit": 4, "offset": 400}),
+                       ("plc_hmi_tags", {"path": exp, "limit": 2}), ("plc_check", {"path": exp, "limit": 1})])
+    whole, first, second, past, tags, check = (json.loads(x["result"]["content"][0]["text"]) for x in replies[2:])
+    assert whole["count"] == len(whole["variables"]) == whole["returned"] and "next_offset" not in whole  # small: all of it
+    assert first["count"] == whole["count"] and first["returned"] == 4 and first["next_offset"] == 4
+    assert "filter" in first["more"] and "offset=4" in first["more"]
+    assert [v["name"] for v in first["variables"] + second["variables"]] == [v["name"] for v in whole["variables"][:8]]
+    assert past["returned"] == 0 and past["variables"] == [] and past["count"] == whole["count"]
+    assert tags["returned"] == 2 and tags["count"] > 2 and len(tags["tags"]) == 2 and tags["next_offset"] == 2
+    assert check["summary"]["warning"] == check["count"] == 1 and len(check["issues"]) == 1
+    limits = {t["name"]: t["inputSchema"]["properties"] for t in replies[1]["result"]["tools"]}
+    for name in ("plc_variables", "plc_hmi_tags", "plc_io", "plc_check"):
+        assert {"limit", "offset"} <= set(limits[name]), name
+
+
+GOOD_MAIN = """PROGRAM Main
+VAR
+\tstep : INT;
+\tspeed : REAL;
+\tpause : TON;
+\ttext : STRING := 'готово; (* не комментарий *)';
+END_VAR
+// a comment with && and != inside
+pause(IN := step > 0, PT := T#1m30s);
+IF pause.Q AND NOT (step <> 3) THEN
+\tspeed := INT_TO_REAL(step) * 1.5; (* x == y *)
+\tstep := REAL_TO_INT(speed) + TO_INT(speed);
+END_IF
+"""
+
+
+def _errors(tmp_path, main=GOOD_MAIN, meta=None, extra=None):
+    src = tmp_path / "mut"
+    src.mkdir(exist_ok=True)
+    for f in src.iterdir():
+        f.unlink()
+    (src / "Main.st").write_text(main, encoding="utf-8")
+    for name, text in (extra or {}).items():
+        (src / name).write_text(text, encoding="utf-8")
+    (src / "project.json").write_text(json.dumps(meta or {"name": "m", "tasks": [{"name": "MAST", "interval": "20ms", "pous": ["Main"]}]}),
+                                      encoding="utf-8")
+    return [i["text"] for i in plcbuild.load_dir(str(src)).check() if i["level"] == "error"]
+
+
+def test_what_the_compiler_refuses_outright_is_an_error_before_the_build(tmp_path):
+    """Mistakes a model makes when it writes ST the way it writes C or Pascal: each stops the build in Machine Expert,
+    so each is an error here (not a warning the agent may pass by)."""
+    assert _errors(tmp_path) == []                            # the same code, written right: nothing
+    body = {
+        "&&": ("IF pause.Q AND NOT", "IF pause.Q && NOT", "«&&»"),
+        "||": ("pause.Q AND", "pause.Q ||", "«||»"),
+        "!=": ("step <> 3", "step != 3", "«!=»"),
+        "==": ("step > 0", "step == 0", "«==»"),
+        "!": ("NOT (step", "!(step", "«!»"),
+        "+=": ("step := REAL_TO_INT(speed) + TO_INT(speed);", "step += 1;", "«+=»"),
+        "comment": ("(* x == y *)", "(* x = y", "комментарий (* не закрыт"),
+        "string": ("PT := T#1m30s);", "PT := T#1m30s); text := 'обрыв;", "строка в кавычках"),
+        "time": ("T#1m30s", "T#90sec", "время «T#90sec»"),
+        "time2": ("T#1m30s", "T#1.5", "время «T#1.5»"),
+        "conversion": ("INT_TO_REAL(step)", "INT_TO_FLOAT(step)", "преобразования INT_TO_FLOAT нет"),
+        "end": ("END_IF\n", "END_IF\nEND_PROGRAM\n", "END_PROGRAM в коде"),
+        "var": ("IF pause.Q", "VAR\n\tn : INT;\nEND_VAR\nIF pause.Q", "VAR в коде"),
+        "block": ("END_IF\n", "END_IF;\nEND_WHILE\n", "END_WHILE без WHILE"),
+    }
+    for name, (old, new, said) in body.items():
+        assert old in GOOD_MAIN, name
+        got = _errors(tmp_path, GOOD_MAIN.replace(old, new, 1))
+        assert any(said in t for t in got), (name, got)
+    assert any("имя TO занято языком" in t for t in _errors(tmp_path, GOOD_MAIN.replace("\tstep : INT;", "\tstep : INT;\n\tTO : INT;")))
+    # the tasks of project.json: what Machine Expert takes
+    fb = {"Motor.st": "FUNCTION_BLOCK Motor\nVAR_INPUT\n\ton : BOOL;\nEND_VAR\n"}
+    task = lambda **kw: {"name": "m", "tasks": [{"name": "MAST", "interval": "20ms", "pous": ["Main"], **kw}]}  # noqa: E731
+    assert any("не программа" in t for t in _errors(tmp_path, meta=task(pous=["Motor"]), extra=fb))
+    assert any("приоритет «40»" in t for t in _errors(tmp_path, meta=task(priority=40)))
+    assert any("период «быстро»" in t for t in _errors(tmp_path, meta=task(interval="быстро")))
+    assert any("имя задачи" in t for t in _errors(tmp_path, meta=task(name="Main task")))
+    assert _errors(tmp_path, meta=task(interval="T#100ms", priority=1)) == []

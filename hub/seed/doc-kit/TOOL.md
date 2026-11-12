@@ -2,7 +2,7 @@
 name: doc-kit
 kind: mcp
 description: Читает образец документа Word (.docx) — разделы, таблицы, рисунки, титульный лист, поля и шрифты — и собирает новый документ .docx из текста Markdown в том же оформлении, руководство оператора или технический паспорт, без Word.
-version: 1.0.0
+version: 1.1.0
 run: python server.py
 platform: any
 tools: doc_outline, doc_text, doc_export, doc_check

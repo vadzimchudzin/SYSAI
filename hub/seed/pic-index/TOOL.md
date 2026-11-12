@@ -2,7 +2,7 @@
 name: pic-index
 kind: mcp
 description: Индекс библиотеки картинок оборудования для экранов панели — находит набор картинок (нория, конвейер, задвижка…) с состояниями off / on / alarm по смыслу запроса, по именам файлов и подписям.
-version: 1.0.0
+version: 1.0.1
 run: python server.py
 platform: any
 tools: pics_index_update, pics_find, pics_list, pics_label_update, pics_check
@@ -84,7 +84,7 @@ conveyors/belt_0.png   conveyors/belt_1.png  conveyors/belt_2.png
 положений, рядом есть `by_orientation`: та же таблица для `left`, `right` и других. `size` — размер объекта на экране;
 пустой `size` значит, что картинки набора разного размера.
 
-Картинки берут из хранилища SYSAI, раздел «ОПО/Картинки», и копируют в `<проект>/hmi/pictures/` — эту папку и
+Картинки берут из хранилища SYSAI, раздел «ОПО/Картинки», и копируют в `<проект>/_work/hmi/pictures/` (в `hmi/` — только готовый проект панели) — эту папку и
 передают в `dir`. Индекс лежит там же и переезжает вместе с папкой.
 
 ## Ограничения

@@ -308,9 +308,24 @@ def test_the_server_builds_templates_and_maps(tmp_path):
         ("plc_project_build", {"src_dir": str(src), "out_file": str(tmp_path / "srv" / "none.project")}),
         ("plc_project_build", {"src_dir": str(tmp_path / "bad"), "template_file": str(template), "out_file": str(tmp_path / "srv" / "bad.project")}),
         ("plc_export_st", {"path": str(out), "out_dir": str(tmp_path / "srv" / "st")}),
+        ("plc_project_build", {"src_dir": str(src), "template_file": str(tmp_path / "srv" / "t.project"),
+                               "out_file": str(tmp_path / "srv" / "dropped.project"), "io": "drop_undeclared"}),
+        ("plc_project_template", {"path": str(template), "out_file": str(tmp_path / "srv" / "clean.project"), "clear_io": True}),
+        ("plc_project_build", {"src_dir": str(src), "template_file": str(tmp_path / "srv" / "clean.project"),
+                               "out_file": str(tmp_path / "srv" / "clean-line.project")}),
+        ("plc_project_build", {"src_dir": str(tmp_path / "bad"), "template_file": str(template),
+                               "out_file": str(tmp_path / "srv" / "forced.project"), "force": True}),
     ])
     assert "вынуто объектов программы" in r[0]["content"][0]["text"] and "контроллер MyController" in r[0]["content"][0]["text"]
-    assert not r[1].get("isError") and "Новый проект" in r[1]["content"][0]["text"] and "сходится" in r[1]["content"][0]["text"]
+    assert "каналах остались переменные прежней программы" in r[0]["content"][0]["text"]
+    # the file is written and holds the program, but the template's channels still name the variables of the program
+    # taken out: Machine Expert would not compile it, so the answer is an error that says which channels
+    text = r[1]["content"][0]["text"]
+    assert r[1]["isError"] and "Новый проект" in text and "сходится" in text and "вынуто из шаблона" in text
+    assert "ОШИБКА привязок: 4 каналов" in text and "DI.I0 → Application.old_0" in text and "drop_undeclared" in text
+    io = r[1]["structuredContent"]["io"]
+    assert (io["bound"], io["free"], io["undeclared_count"]) == (4, 0, 4) and io["undeclared"][1]["variable"] == "Application.old_1"
+    assert io["duplicates"][0] == {"variable": "Application.old_0", "channels": ["MyController.I0", "DI.I0"]}
     assert r[1]["structuredContent"]["opcua"] == 3
     info = r[2]["structuredContent"]
     assert info["container"] == "sealed" and info["program"]["pous"] == 3 and info["program"]["link"] == {"kind": "opcua", "lists": ["GVL"]}
@@ -324,6 +339,14 @@ def test_the_server_builds_templates_and_maps(tmp_path):
     assert r[9]["isError"] and "template_file" in r[9]["content"][0]["text"]
     assert r[10]["isError"] and "IF не закрыт" in r[10]["content"][0]["text"] and not (tmp_path / "srv" / "bad.project").exists()
     assert len(r[11]["structuredContent"]["files"]) == 6
+    # the ways out: take the unknown variables off while building, or a template with free channels
+    assert not r[12].get("isError") and "С каналов снято переменных: 4" in r[12]["content"][0]["text"]
+    assert r[12]["structuredContent"]["io"] == {"bound": 0, "free": 4, "undeclared": [], "duplicates": [], "types": [],
+                                                "undeclared_count": 0, "duplicates_count": 0, "types_count": 0}
+    assert "С каналов снято переменных: 4" in r[13]["content"][0]["text"] and r[13]["structuredContent"]["channels_with_variables"] == 0
+    assert not r[14].get("isError") and "ОШИБКА" not in r[14]["content"][0]["text"]
+    # a project that fails the check is never written, whatever the agent asks
+    assert r[15]["isError"] and not (tmp_path / "srv" / "forced.project").exists()
     assert plcbuild.load_dir(str(tmp_path / "srv" / "st")).pou("Main")["body"] == "Noria_1(run := Start_1);\nstep := step + 1;"
 
 

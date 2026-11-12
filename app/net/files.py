@@ -27,7 +27,8 @@ from .models import NetAgent, NetFile, NetFileVersion
 MB = 1024 * 1024
 MAX_UPLOAD = 200 * MB          # one file from the browser or through the agent API
 MAX_INLINE_WRITE = 5 * MB      # files_write over MCP (text or base64)
-MAX_INLINE_READ = 200_000      # files_read gives the text itself up to this size; bigger — a download link
+MAX_INLINE_READ = 40_000       # files_read gives the text itself up to this size (it stays in the conversation and
+#                                is paid for with every next request); bigger — a download link
 MAX_LIST = 500
 COMMON = access.FILES_COMMON
 BAD_CHARS = re.compile(r'[\x00-\x1f<>:"|?*]')

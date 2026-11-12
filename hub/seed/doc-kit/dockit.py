@@ -766,12 +766,12 @@ def to_markdown(blocks: list) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip() + "\n"
 
 
-def text(path: str, section: str = "", limit: int = 60000) -> dict:
+def text(path: str, section: str = "", limit: int = 20000) -> dict:
     blocks, doc = load(path)
     if section:
         blocks = _pick(blocks, section)
     body = to_markdown(blocks) if doc or section else read_text(str(path))
-    limit = max(int(limit or 60000), 200)
+    limit = max(int(limit or 20000), 200)
     cut = len(body) > limit
     return {"text": body[:limit] + ("\n\n[… текст обрезан: задайте section или увеличьте limit]" if cut else ""),
             "chars": len(body), "truncated": cut}

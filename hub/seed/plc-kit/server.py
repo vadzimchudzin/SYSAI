@@ -17,7 +17,7 @@ import plcproj  # noqa: E402
 import plcstage  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 PATH = {"type": "string", "description": r"Проект ПЛК: файл .project Machine Expert, .export или PLCopen .xml из него, "
                                          r"либо папка с файлами .st (plc_export_st), например C:\Projects\line\plc"}
 PROJECT = {"type": "string", "description": r"Файл проекта Machine Expert, например C:\Projects\line\plc\Line.project"}
@@ -34,6 +34,13 @@ INSTRUCTIONS = (
     "модулей с переменными, plc_io_map — поставить переменные на каналы. Компиляцию и загрузку в контроллер делает "
     "Machine Expert (инструмент machine-expert). Графические языки (LD/FBD/CFC) читаются как объявления и имена."
 )
+
+
+PAGE = 200       # rows of a table in one answer: the whole answer stays in the conversation and is paid for again
+PAGE_MAX = 1000  # with every next request — so a table comes in pages, the whole of it goes to a file (out_file)
+PAGING = {"limit": {"type": "integer", "minimum": 1, "maximum": PAGE_MAX,
+                    "description": f"Сколько строк вернуть (по умолчанию {PAGE}, не больше {PAGE_MAX})"},
+          "offset": {"type": "integer", "minimum": 0, "description": "С какой строки (0 — с первой): для следующей страницы"}}
 
 
 def _ro(name, title, description, props, required=("path",)):
@@ -64,9 +71,10 @@ TOOLS = [
     _ro("plc_variables", "Переменные",
         "Таблица переменных: где объявлена, имя, тип, адрес (%MX, %MW, %IX, %QX), начальное значение, комментарий, "
         "группа (комментарий-заголовок перед ней), регистр и бит Modbus. filter — подстрока имени или комментария; "
-        "scope — только из этого списка или POU; addressed — только с адресом.",
+        f"scope — только из этого списка или POU; addressed — только с адресом. Отвечает страницами по {PAGE} строк "
+        "(count — сколько всего): ищите нужное через filter и scope, а не листайте всю таблицу.",
         {"path": PATH, "filter": {"type": "string"}, "scope": {"type": "string"},
-         "addressed": {"type": "boolean", "description": "Только переменные с адресом"}}),
+         "addressed": {"type": "boolean", "description": "Только переменные с адресом"}, **PAGING}),
     _ro("plc_addresses", "Карта адресов",
         "Занятые диапазоны по областям (%M, %I, %Q), первое свободное слово и бит, как контроллер считает биты (по байтам "
         "или по словам) и пересечения: один адрес у двух переменных, слово %MW поверх битов %MX того же регистра.",
@@ -75,8 +83,9 @@ TOOLS = [
         "Переменные, которые увидит панель. Modbus (адреса %M): имя, тип, комментарий, регистр, бит и адрес в записи "
         "Weintek (4x — регистр с единицы, 4x_Bit — регистр и две цифры бита). OPC UA (link: opcua или так сказано в "
         "project.json): переменные простых типов из опубликованных списков — имя «GVL.Имя», тип и node; поле "
-        "add_tags готово для cmtp_edit (ebpro-cmtp). out_file — записать CSV; filter — подстрока имени или комментария.",
-        {"path": PATH, "filter": {"type": "string"},
+        "add_tags готово для cmtp_edit (ebpro-cmtp). out_file — записать CSV со всеми тегами (так и берите всю "
+        f"таблицу: в ответе — страница из {PAGE} строк и count); filter — подстрока имени, комментария или группы.",
+        {"path": PATH, "filter": {"type": "string"}, **PAGING,
          "link": {"type": "string", "enum": ["modbus", "opcua"], "description": "Связь; по умолчанию — из project.json, иначе Modbus"},
          "out_file": {"type": "string", "description": r"Куда записать CSV (в разрешённой на запись папке)"}}),
     _ro("plc_tag_check", "Теги панели против программы",
@@ -89,7 +98,8 @@ TOOLS = [
     _ro("plc_check", "Проверка",
         "Что видно по тексту до компиляции: незакрытые IF/CASE/FOR, скобки, присваивание без «;», имена, которых нет ни в "
         "POU, ни в GVL, повторные объявления, неизвестные типы, пересечения адресов, задачи, вызывающие несуществующие "
-        "программы. Пустой список — не гарантия компиляции: собирает Machine Expert.", {"path": PATH}),
+        f"программы. Пустой список — не гарантия компиляции: собирает Machine Expert. Сначала ошибки, по {PAGE} "
+        "замечаний на страницу; summary — сколько всего.", {"path": PATH, **PAGING}),
     _ro("plc_style", "Стиль проекта",
         "Как проект построен: программы и их роли, классы механизмов (функциональные блоки: входы, выходы, таймеры), их "
         "экземпляры, правила имён, группы переменных, диапазоны адресов. По этому пишут следующий проект в том же стиле. "
@@ -109,7 +119,8 @@ TOOLS = [
         "Ход проекта «под ключ» в pipeline.json папки проекта — его показывает окно «Агент SYSAI» полосой этапов: "
         "materials, decisions, plc, build, hmi, docs. state: work (начал), done (готов), problem (нужен инженер — в "
         "note что именно), todo. facts — решения и итоги: controller, panel, resolution, link, style, machine_expert, "
-        "project_file, hmi_file, doc_file. Без stage — только прочитать ход и записать facts.",
+        "project_file, hmi_file, doc_file. Без stage — только прочитать ход и записать facts. В ответе extra — лишние "
+        "файлы в plc/, hmi/, docs/ (там только результат: .project, проект панели, .docx): перенесите их в _work/.",
         {"project_dir": {"type": "string", "description": r"Папка проекта, например C:\Users\me\Documents\SYSAI Проекты\Линия 1"},
          "stage": {"type": "string", "enum": [k for k, _, _ in plcstage.STAGES]},
          "state": {"type": "string", "enum": list(plcstage.STATES)},
@@ -135,27 +146,33 @@ TOOLS = [
         "project.json, при связи OPC UA — список публикуемых переменных; программа самого шаблона вынимается "
         "(keep_program — оставить и сопоставить по именам). Без template_file — обновление: out_file уже есть, "
         "изменённые .st получают новый текст, новые объекты добавляются, остальное в проекте не трогается. Сначала "
-        "plc_check: с ошибками файл не пишется, если не force. После записи файл читается обратно и сверяется с "
-        "папкой. Компилирует Machine Expert: откройте файл в нём (machine-expert: me_build).",
+        "plc_check: с ошибками файл не пишется — исправьте .st. После записи файл читается обратно и сверяется с "
+        "папкой, а каналы ввода-вывода — с программой: шаблон хранит на каналах переменные своей прежней программы, "
+        "и канал с переменной, которой в новой программе нет, Machine Expert не скомпилирует (io: drop_undeclared "
+        "снимает такие, clear — все). Компилирует Machine Expert: откройте файл в нём (machine-expert: me_build).",
         {"src_dir": {"type": "string", "description": r"Папка с файлами .st и project.json"},
          "out_file": {"type": "string", "description": r"Файл .project: куда записать новый или какой обновить"},
          "template_file": {"type": "string", "description": "Шаблон: .project с контроллером и модулями (для нового проекта)"},
          "keep_program": {"type": "boolean", "description": "Оставить программу шаблона (объекты сопоставляются по именам)"},
          "overwrite": {"type": "boolean", "description": "Заменить out_file, если он уже есть (для нового проекта)"},
-         "force": {"type": "boolean", "description": "Записать и с ошибками проверки (черновик)"}},
+         "io": {"type": "string", "enum": list(plcproj.IO_MODES),
+                "description": "Переменные шаблона на каналах: keep — оставить (по умолчанию), drop_undeclared — снять "
+                               "те, которых нет в программе, clear — снять все"}},
         ("src_dir", "out_file")),
     _rw("plc_project_template", "Шаблон из готового проекта",
         "Сделать из готового .project шаблон: программа (программы, блоки, списки, типы, папки) вынимается, остаются "
         "контроллер с модулями и их настройками, библиотеки, конфигурация задач, настройки проекта. Каналы "
-        "ввода-вывода сохраняют свои переменные — посмотрите plc_io и объявите их в новой программе или переназначьте "
-        "plc_io_map.",
+        "ввода-вывода сохраняют переменные прежней программы — посмотрите plc_io и объявите их в новой программе или "
+        "переназначьте plc_io_map; clear_io — снять переменные со всех каналов (чистый шаблон).",
         {"path": PROJECT, "out_file": {"type": "string", "description": r"Куда записать шаблон .project"},
-         "overwrite": {"type": "boolean"}}, ("path", "out_file")),
+         "overwrite": {"type": "boolean"},
+         "clear_io": {"type": "boolean", "description": "Снять переменные со всех каналов ввода-вывода"}}, ("path", "out_file")),
     _ro("plc_io", "Каналы ввода-вывода",
         "Каналы контроллера и модулей из файла .project с переменными на них: устройство, канал (I0, Q3, IW0…), "
         "направление, тип, описание, переменная. «Application.Имя» — переменная программы; new_variable — переменную "
-        "объявляет сама привязка. device — только это устройство; free — только свободные каналы.",
-        {"path": PROJECT, "device": {"type": "string"}, "free": {"type": "boolean"}}),
+        "объявляет сама привязка. device — только это устройство; free — только свободные каналы; filter — подстрока "
+        f"канала, переменной или описания. Отвечает страницами по {PAGE} строк (count — сколько всего).",
+        {"path": PROJECT, "device": {"type": "string"}, "free": {"type": "boolean"}, "filter": {"type": "string"}, **PAGING}),
     _rw("plc_io_map", "Переменные на каналы",
         "Поставить переменные программы на каналы устройств в файле .project: changes — [{device, channel, variable}] "
         "(variable — имя переменной программы, например x0_0 или In_Out.Start; пусто — снять). Переменная должна быть "
@@ -167,6 +184,22 @@ TOOLS = [
                                               "variable": {"type": "string"}}, "required": ["device", "channel"]}}},
         ("path", "out_file", "changes")),
 ]
+
+
+def _page(rows, args):
+    """(the rows of the page, what to say about the rest) — «count» is always the whole table."""
+    try:
+        limit = min(PAGE_MAX, max(1, int(args.get("limit") or PAGE)))
+        offset = max(0, int(args.get("offset") or 0))
+    except (TypeError, ValueError):
+        limit, offset = PAGE, 0
+    part = rows[offset:offset + limit]
+    meta = {"count": len(rows), "offset": offset, "returned": len(part)}
+    if offset + len(part) < len(rows):
+        meta["next_offset"] = offset + len(part)
+        meta["more"] = (f"показаны строки {offset + 1}–{offset + len(part)} из {len(rows)}: сузьте filter или возьмите "
+                        f"следующую страницу offset={offset + len(part)}; целиком таблицу в разговор не выгружайте")
+    return part, meta
 
 
 def _text(s, is_error=False, data=None):
@@ -236,19 +269,27 @@ def _call(name, args):
             lines = [head] + [f"— {w}" for w in d["why"]] + [f"Спросить: {a}" for a in d["ask"]] + d["next"]
             return _text("\n".join(lines), data=d)
         if name == "plc_stage_update":
-            return _text(_json(plcstage.update(args["project_dir"], args.get("stage") or "", args.get("state") or "",
-                                               args.get("note"), args.get("facts"))))
+            got = plcstage.update(args["project_dir"], args.get("stage") or "", args.get("state") or "",
+                                  args.get("note"), args.get("facts"))
+            stray = plcstage.extra(args["project_dir"])
+            if stray:  # the folders of results hold only results: the engineer opens plc/ and sees the file to take
+                got["extra"] = stray[:30]
+                got["extra_note"] = (f"В папках результата лишних файлов: {len(stray)}{'+' if len(stray) >= 200 else ''}. В plc/ — "
+                                     "только .project, в hmi/ — только проект панели, в docs/ — только .docx: исходники, "
+                                     "скрипты, таблицы и заметки перенесите в _work/ (st, hmi, docs, gen, notes).")
+            return _text(_json(got))
         if name == "plc_project_build":
             p = plcbuild.load_dir(args["src_dir"])
             issues = p.check()
             errors = [i for i in issues if i["level"] == "error"]
-            if errors and not args.get("force"):
+            if errors:  # a project that will not compile is not written: the .st is fixed first
                 lines = [f"{i['where']}{':' + str(i['line']) if i['line'] else ''} — {i['text']}" for i in errors[:60]]
                 return _text("Проверка нашла ошибки, файл не записан:\n" + "\n".join(lines), True,
                              {"errors": errors[:200], "written": False})
             out = args["out_file"]
             if args.get("template_file"):
-                rep = plcproj.create(p, args["template_file"], out, bool(args.get("overwrite")), bool(args.get("keep_program")))
+                rep = plcproj.create(p, args["template_file"], out, bool(args.get("overwrite")), bool(args.get("keep_program")),
+                                     str(args.get("io") or "keep"))
                 head = f"Новый проект → {out} (шаблон {os.path.basename(args['template_file'])}, контроллер {rep['controller'] or '—'})"
             else:
                 if not os.path.isfile(out):
@@ -258,7 +299,8 @@ def _call(name, args):
                 head = f"Проект обновлён → {out}"
             _CACHE.clear()
             lines = [head, f"создано {len(rep['created'])}, обновлено {len(rep['updated'])}, без изменений {len(rep['kept'])}"
-                     + (f", вынуто из шаблона {len(rep['removed'])}" if rep["removed"] else "")
+                     + (f", вынуто из шаблона {len(rep['removed'])} ({', '.join(rep['removed'][:30])}"
+                        f"{'…' if len(rep['removed']) > 30 else ''})" if rep["removed"] else "")
                      + (f"; задачи: {', '.join(rep['tasks'])}" if rep["tasks"] else "")
                      + (f"; в OPC UA опубликовано переменных: {rep['opcua']}" if "opcua" in rep else "")]
             if rep.get("left"):
@@ -267,21 +309,52 @@ def _call(name, args):
                 lines.append("Не записаны (не ST): " + ", ".join(rep["skipped"][:40]))
             lines += [f"Замечание: {w}" for w in rep["warnings"]]
             lines.append("Сверка с папкой после записи: " + ("сходится." if not rep["verify"] else "; ".join(rep["verify"][:20])))
-            lines.append("Дальше: откройте файл в Machine Expert и скомпилируйте (machine-expert: me_build) — "
+            io_rep = rep["io"]
+            if rep["io_removed"]:
+                lines.append(f"С каналов снято переменных: {len(rep['io_removed'])} ({', '.join(rep['io_removed'][:20])}"
+                             f"{'…' if len(rep['io_removed']) > 20 else ''})")
+            lines.append(f"Каналы ввода-вывода: с переменной {io_rep['bound']}, свободных {io_rep['free']}.")
+            if io_rep["undeclared"]:
+                shown = ", ".join(f"{r['device']}.{r['channel']} → {r['variable']}" for r in io_rep["undeclared"][:20])
+                lines.append(f"ОШИБКА привязок: {len(io_rep['undeclared'])} каналов называют переменные, которых в программе "
+                             f"нет — Machine Expert не скомпилирует: {shown}{'…' if len(io_rep['undeclared']) > 20 else ''}. "
+                             "Объявите эти переменные в списке переменных, переставьте каналы (plc_io_map) или соберите "
+                             "снова с io: drop_undeclared.")
+            if io_rep["duplicates"]:
+                lines.append("Одна переменная на нескольких каналах: " + "; ".join(
+                    f"{d['variable']} — {', '.join(d['channels'])}" for d in io_rep["duplicates"][:10]))
+            if io_rep["types"]:
+                lines.append("Тип переменной не подходит каналу: " + "; ".join(
+                    f"{r['device']}.{r['channel']} ({r['channel_type']}) ← {r['variable']} ({r['variable_type']})"
+                    for r in io_rep["types"][:10]))
+            bad = bool(rep["verify"]) or bool(io_rep["undeclared"])
+            lines.append("Дальше: " + ("сначала исправьте привязки каналов, затем " if io_rep["undeclared"] else "") +
+                         "откройте файл в Machine Expert и скомпилируйте (machine-expert: me_build) — "
                          "ошибки компилятора исправьте в .st и повторите plc_project_build.")
             rep["written"] = True
             rep["errors"] = errors[:200]
-            return _text("\n".join(lines), bool(rep["verify"]), rep)
+            for key in ("undeclared", "duplicates", "types"):  # the answer stays small; the numbers are whole
+                io_rep[key + "_count"] = len(io_rep[key])
+                io_rep[key] = io_rep[key][:50]
+            return _text("\n".join(lines), bad, rep)
         if name == "plc_project_template":
-            rep = plcproj.template(args["path"], args["out_file"], bool(args.get("overwrite")))
+            rep = plcproj.template(args["path"], args["out_file"], bool(args.get("overwrite")), bool(args.get("clear_io")))
+            left = rep["channels_with_variables"]
             return _text(f"Шаблон → {rep['out_file']}: контроллер {rep['controller'] or '—'}, устройств {len(rep['devices'])}, "
                          f"задачи {', '.join(rep['tasks']) or '—'}, каналов ввода-вывода {rep['channels']}; вынуто объектов "
-                         f"программы: {len(rep['removed'])}.", data=rep)
+                         f"программы: {len(rep['removed'])} ({', '.join(rep['removed'][:30])}{'…' if len(rep['removed']) > 30 else ''}). "
+                         + (f"С каналов снято переменных: {rep['io_cleared']}." if rep["io_cleared"] else
+                            f"На {left} каналах остались переменные прежней программы: объявите их в новой, переставьте "
+                            "(plc_io_map) или сделайте шаблон с clear_io — иначе проект не скомпилируется." if left else
+                            "Каналы свободны."), data=rep)
         if name == "plc_io":
             rows = plcproj.io(args["path"])
             dev = (args.get("device") or "").lower()
-            rows = [r for r in rows if (not dev or r["device"].lower() == dev) and (not args.get("free") or not r["variable"])]
-            return _text(_json({"count": len(rows), "channels": rows[:3000]}))
+            flt = (args.get("filter") or "").lower()
+            rows = [r for r in rows if (not dev or r["device"].lower() == dev) and (not args.get("free") or not r["variable"])
+                    and (not flt or any(flt in str(r.get(k) or "").lower() for k in ("channel", "variable", "description")))]
+            part, meta = _page(rows, args)
+            return _text(_json({**meta, "channels": part}))
         if name == "plc_io_map":
             rep = plcproj.set_io(args["path"], args["changes"], args["out_file"])
             _CACHE.clear()
@@ -320,7 +393,8 @@ def _call(name, args):
             rows = [v for v in p.variables()
                     if (not flt or flt in v["name"].lower() or flt in (v["comment"] or "").lower())
                     and (not scope or v["scope"].lower() == scope) and (not args.get("addressed") or v["address"])]
-            return _text(_json({"count": len(rows), "variables": [_public(v) for v in rows[:3000]]}))
+            part, meta = _page(rows, args)
+            return _text(_json({**meta, "variables": [_public(v) for v in part]}))
         if name == "plc_addresses":
             a = p.addresses()
             return _text(_json({"bit_numbering": a["bit_numbering"], "ranges": a["ranges"], "free": a["free"],
@@ -345,18 +419,19 @@ def _call(name, args):
                 os.makedirs(os.path.dirname(os.path.abspath(args["out_file"])), exist_ok=True)
                 with open(args["out_file"], "w", encoding="utf-8-sig", newline="") as f:
                     f.write(buf.getvalue())
-                note = f" CSV → {args['out_file']}"
+                note = f" CSV со всеми {len(rows)} тегами → {args['out_file']}"
+            part, meta = _page(rows, args)
             if link == "opcua":
-                return _text(_json({"count": len(rows), "link": "opcua",
+                return _text(_json({**meta, "link": "opcua",
                                     "note": "теги OPC UA: имя «Список.Переменная», node — s:имя (ns возьмёт таблица панели); "
                                             "node_m241 — номер, которым ту же переменную называет сервер контроллера "
                                             "M241 / M251 (ns:2;i:N, считается по имени): если в таблице панели теги "
                                             "с номерами, cmtp_edit add_tags посчитает его сам. add_tags — готовая "
                                             "правка для cmtp_edit." + note,
-                                    "add_tags": [{"name": t["name"], "type": t["panel_type"]} for t in rows[:3000]],
-                                    "tags": rows[:3000]}))
-            return _text(_json({"count": len(rows), "link": "modbus", "note": "регистры Modbus с нуля; у Weintek с единицы." + note,
-                                "tags": rows[:3000]}))
+                                    "add_tags": [{"name": t["name"], "type": t["panel_type"]} for t in part],
+                                    "tags": part}))
+            return _text(_json({**meta, "link": "modbus", "note": "регистры Modbus с нуля; у Weintek с единицы." + note,
+                                "tags": part}))
         if name == "plc_tag_check":
             tags = args.get("tags") or []
             if args.get("tags_file"):
@@ -373,7 +448,10 @@ def _call(name, args):
         if name == "plc_check":
             issues = p.check()
             levels = {k: sum(1 for i in issues if i["level"] == k) for k in ("error", "warning", "info")}
-            return _text(_json({"summary": levels, "issues": issues[:2000]}))
+            order = {"error": 0, "warning": 1, "info": 2}
+            issues = sorted(issues, key=lambda i: order.get(i["level"], 3))  # the errors first: they are what stops the build
+            part, meta = _page(issues, args)
+            return _text(_json({"summary": levels, **meta, "issues": part}))
         if name == "plc_style":
             st = p.style()
             md = plcme.style_markdown(st)

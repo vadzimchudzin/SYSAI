@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import picindex  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 DIR = {"type": "string", "description": r"Папка с картинками (вложенные папки тоже), например C:\Projects\line\hmi\pictures"}
 STATE = {"type": "string", "description": "Состояние: " + ", ".join(picindex.STATES)}
 INSTRUCTIONS = (

@@ -443,7 +443,11 @@ class Project:
         gvl_names = {g['name'].lower() for g in self.gvls}
         for scope, decl in [(g['name'], g['declaration']) for g in self.gvls] + [(x['name'], x['declaration']) for x in self.pous] \
                 + [(t['name'], t['declaration']) for t in self.types]:
+            for line, what in plcst.unclosed(decl):
+                add('error', scope, what, line)
             for v in plcst.parse_declaration(decl)['vars']:
+                if v['name'].upper() in plcst.RESERVED or v['name'].upper() in plcst.ELEMENTARY:
+                    add('error', scope, f"имя {v['name']} занято языком: переменную так назвать нельзя", v['line'])
                 bt = plcst.base_type(v['type'])
                 if '.' not in bt and bt.lower() not in known_types and not re.match(r'^\(', v['type'].strip()):
                     add('warning', scope, f"тип {bt} переменной {v['name']} не найден в проекте (библиотека?)", v['line'])
@@ -470,15 +474,40 @@ class Project:
                         or low in known_types or name.upper() in plcst.KEYWORDS or name.upper() in plcst.STANDARD \
                         or low == x['name'].lower():
                     continue
+                fits = plcst.conversion(name)
+                if fits:
+                    continue                      # INT_TO_REAL, TO_INT: the standard library has it
+                if fits is False:
+                    add('error', x['name'], f'преобразования {name} нет: типы пишут как в IEC (INT_TO_REAL, DINT_TO_TIME, '
+                                            'REAL_TO_INT), а не FLOAT / INTEGER / DOUBLE', line)
+                    continue
                 unknown.setdefault(name, line)
             for name, line in unknown.items():
                 add('warning', x['name'], f'имя {name} нигде не объявлено (ни в POU, ни в GVL)', line)
         for c in self.addresses()['conflicts']:
             add(c['level'], 'адреса', c['text'])
+        kinds = {x['name'].lower(): x['kind'] for x in self.pous}
+        task_names = set()
         for t in self.tasks:
+            where = f"задача {t['name']}"
+            if t['name'].lower() in task_names:
+                add('error', where, 'задача с таким именем уже есть')
+            task_names.add(t['name'].lower())
+            if not re.fullmatch(r'[A-Za-z_]\w*', t['name']):
+                add('error', where, 'имя задачи — латиница, цифры и _, не с цифры')
             for name in t['pous']:
-                if name and name.split('.')[0].lower() not in pou_names:
-                    add('error', f"задача {t['name']}", f'вызывает {name}, такой программы нет')
+                low = name.split('.')[0].lower() if name else ''
+                if name and low not in pou_names:
+                    add('error', where, f'вызывает {name}, такой программы нет')
+                elif name and kinds.get(low) != 'program':
+                    add('error', where, f'вызывает {name}, а это не программа (PROGRAM): блок или функцию задача вызвать '
+                                        'не может — вызовите его из программы')
+            if self.source == 'st-folder':  # written by hand in project.json: what Machine Expert takes
+                prio = str(t.get('priority', '')).strip()
+                if not prio.isdigit() or not 0 <= int(prio) <= 31:
+                    add('error', where, f'приоритет «{prio}»: нужно целое от 0 до 31')
+                if str(t.get('kind') or 'Cyclic').lower() == 'cyclic' and not plcst.interval_ms(t.get('interval')):
+                    add('error', where, f"период «{t.get('interval')}»: нужно как 20ms, 1s или T#100ms")
         if self.pous and not self.tasks and self.source != 'plcopen':
             add('warning', 'проект', 'нет ни одной задачи: программы никто не вызывает')
         kind = self.link.get('kind') or ''

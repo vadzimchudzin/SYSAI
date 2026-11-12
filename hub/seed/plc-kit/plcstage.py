@@ -84,6 +84,26 @@ def update(project_dir: str, stage: str = '', state: str = '', note=None, facts=
     return view(data)
 
 
+# What a folder of results holds; everything else belongs to _work/ (drafts the window shows folded).
+RESULTS = {'plc': ('.project', '.projectarchive'), 'hmi': ('.cmtp', '.emtp', '.cxob', '.exob'), 'docs': ('.docx', '.pdf')}
+
+
+def extra(project_dir: str, limit: int = 200) -> list:
+    """Files in plc/, hmi/, docs/ that are not a result: sources, scripts, tables, notes — ['plc/Main.st', …]."""
+    out = []
+    for part, exts in RESULTS.items():
+        root = os.path.join(project_dir, part)
+        for base, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+            for name in sorted(files):
+                if name.startswith(('.', '~$')) or name.lower().endswith(exts):
+                    continue
+                out.append(os.path.relpath(os.path.join(base, name), project_dir).replace(os.sep, '/'))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
 def view(data: dict) -> dict:
     """The pipeline with the titles of the stages and the stage to do next."""
     rows = [{'stage': k, 'title': title, 'goal': goal, **data['stages'][k]} for k, title, goal in STAGES]

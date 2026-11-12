@@ -193,14 +193,78 @@ def _verify(out_file: str, source) -> list:
     return bad
 
 
-def create(source, template_file: str, out_file: str, overwrite=False, keep_program=False) -> dict:
+IO_MODES = ('keep', 'drop_undeclared', 'clear')
+
+
+def _declared(source, app: str) -> dict:
+    """{how a channel may name a variable, lower case: its type} for the program of `source`."""
+    names = {}
+    for v in source.variables():
+        if v['scope_kind'] == 'gvl':
+            names[v['name'].lower()] = v['type']
+            names[f"{v['scope']}.{v['name']}".lower()] = v['type']
+        elif v['scope_kind'] == 'program':
+            names[f"{v['scope']}.{v['name']}".lower()] = v['type']
+    for key, typ in list(names.items()):
+        if app:
+            names[f'{app}.{key}'.lower()] = typ
+    return names
+
+
+def io_report(p: meproject.MEProject, source) -> dict:
+    """The channels against the program: a channel that names a variable the program does not declare stops the
+    build in Machine Expert (a template keeps the variables of the program taken out of it). -> {'bound', 'free',
+    'undeclared': [{device, channel, variable}], 'duplicates': [{variable, channels}], 'types': [...]}."""
+    apps = p.applications()
+    names = _declared(source, apps[0].name if apps else '')
+    rep = {'bound': 0, 'free': 0, 'undeclared': [], 'duplicates': [], 'types': []}
+    used = {}
+    for r in p.io_channels():
+        var = r['variable']
+        if not var:
+            rep['free'] += 1
+            continue
+        rep['bound'] += 1
+        where = f"{r['device']}.{r['channel']}"
+        used.setdefault(var.lower(), [var]).append(where)
+        if r['new_variable']:
+            continue                              # the mapping declares the variable itself
+        typ = names.get(var.lower())
+        if typ is None:
+            rep['undeclared'].append({'device': r['device'], 'channel': r['channel'], 'id': r['id'], 'variable': var})
+            continue
+        have, want = plcst.BITS.get(plcst.base_type(typ).upper()), plcst.BITS.get(str(r['type'] or '').upper())
+        if have and want and (have == 1) != (want == 1):
+            rep['types'].append({'device': r['device'], 'channel': r['channel'], 'variable': var, 'channel_type': r['type'],
+                                 'variable_type': typ})
+    rep['duplicates'] = [{'variable': ch[0], 'channels': ch[1:]} for ch in used.values() if len(ch) > 2]
+    return rep
+
+
+def _clean_io(p: meproject.MEProject, source, mode: str) -> list:
+    """Take variables off channels before the file is written: `clear` — every one, `drop_undeclared` — those the
+    program does not declare. -> what was taken off."""
+    if mode == 'keep':
+        return []
+    rows = [r for r in p.io_channels() if r['variable']] if mode == 'clear' else io_report(p, source)['undeclared']
+    for r in rows:
+        p.set_io(r['device'], r['id'], '')
+    return [f"{r['device']}.{r['channel']} ← {r['variable']}" for r in rows]
+
+
+def create(source, template_file: str, out_file: str, overwrite=False, keep_program=False, io_mode='keep') -> dict:
     """A new `.project`: the template (controller, modules, libraries, settings) with the program of `source` (the
-    model of a folder of ST files). With `keep_program` what the template holds stays and is matched by name."""
+    model of a folder of ST files). With `keep_program` what the template holds stays and is matched by name.
+    `io_mode` — what to do with the variables the template keeps on its channels (IO_MODES)."""
+    if io_mode not in IO_MODES:
+        raise ProjectFileError(f"io: {io_mode} — нужно одно из {', '.join(IO_MODES)}")
     p = open_project(template_file)
     try:
         rep = p.apply(source, clean=not keep_program)
+        rep['io_removed'] = _clean_io(p, source, io_mode)
     except meproject.ProjectError as exc:
         raise ProjectFileError(str(exc)) from None
+    rep['io'] = io_report(p, source)
     rep['bytes'] = _save(p, out_file, overwrite)
     rep['out_file'] = out_file
     rep['verify'] = _verify(out_file, source)
@@ -217,21 +281,34 @@ def update(file: str, source, out_file: str = '') -> dict:
     except meproject.ProjectError as exc:
         raise ProjectFileError(str(exc)) from None
     out = out_file or file
+    rep['io_removed'] = []
+    rep['io'] = io_report(p, source)
     rep['bytes'] = _save(p, out, True)
     rep['out_file'] = out
     rep['verify'] = _verify(out, source)
     return rep
 
 
-def template(file: str, out_file: str, overwrite=False) -> dict:
-    """A template from a finished project: the program is taken out, the controller with its modules stays."""
+def template(file: str, out_file: str, overwrite=False, clear_io=False) -> dict:
+    """A template from a finished project: the program is taken out, the controller with its modules stays. The
+    channels keep the variables of the program taken out unless `clear_io`."""
     p = open_project(file)
     removed = p.strip_program()
+    cleared = 0
+    if clear_io:
+        try:
+            for r in [r for r in p.io_channels() if r['variable']]:
+                p.set_io(r['device'], r['id'], '')
+                cleared += 1
+        except meproject.ProjectError as exc:
+            raise ProjectFileError(str(exc)) from None
     size = _save(p, out_file, overwrite)
     c = p.controller()
+    channels = p.io_channels()
     return {'out_file': out_file, 'bytes': size, 'removed': removed, 'controller': c.name if c else '',
             'devices': [n.name for n in p.objects() if n.kind == 'device'], 'tasks': [t['name'] for t in p.tasks()],
-            'channels': len(p.io_channels())}
+            'channels': len(channels), 'channels_with_variables': sum(1 for r in channels if r['variable']),
+            'io_cleared': cleared}
 
 
 def io(path: str) -> list:

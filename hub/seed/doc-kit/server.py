@@ -12,7 +12,7 @@ import dockit  # noqa: E402
 import docxout  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 FILE = {"type": "string", "description": r"Документ: .docx (или .md), например C:\Projects\line\docs\Руководство.docx"}
 INSTRUCTIONS = (
     "Документация проекта (руководство оператора, технический паспорт) в Word по образцу. Образец .docx: doc_outline — "
@@ -46,9 +46,9 @@ TOOLS = [
     _ro("doc_text", "Текст образца",
         "Текст документа .docx как Markdown: заголовки #, таблицы, списки, листинги, на месте картинок — «[рисунок: "
         "подпись]». section — один раздел по номеру («2.1») или названию, с подразделами; limit — сколько знаков отдать "
-        "(60000). Так читают, как образец сформулирован.",
+        "(20000). Большой документ читайте по разделам (doc_outline покажет их), а не целиком.",
         {"file": FILE, "section": {"type": "string", "description": "Номер или название раздела"},
-         "limit": {"type": "integer", "description": "Сколько знаков текста отдать (по умолчанию 60000)"}}),
+         "limit": {"type": "integer", "description": "Сколько знаков текста отдать (по умолчанию 20000)"}}),
     _rw("doc_export", "Собрать документ Word",
         "Собрать .docx из текста Markdown: заголовки # – #### (стили Word, нумерация 1, 1.1, 1.1.1), абзацы, **жирный**, "
         "*курсив*, `код`, списки (2 уровня), таблицы с шапкой и подписью («Таблица: …» строкой выше), картинки "
@@ -92,7 +92,7 @@ def _call(name, args):
         if name == "doc_outline":
             return _text(_json(dockit.outline(args["file"])))
         if name == "doc_text":
-            got = dockit.text(args["file"], str(args.get("section") or ""), args.get("limit") or 60000)
+            got = dockit.text(args["file"], str(args.get("section") or ""), args.get("limit") or 20000)
             return _text(got["text"], data={"chars": got["chars"], "truncated": got["truncated"]})
         if name == "doc_check":
             return _text(_json(dockit.check(args["file"], str(args.get("outline_from") or ""))))

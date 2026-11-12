@@ -514,7 +514,7 @@ def test_mcp_server_over_stdio(tmp_path):
 
     try:
         assert rpc(1, "initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"] == {
-            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.6.0"}
+            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.7.0"}
         assert [t["name"] for t in rpc(2, "tools/list")["result"]["tools"]] == TOOLS
         err, text = call(3, "cmtp_info", path=str(src))
         info = json.loads(text)
@@ -1085,3 +1085,25 @@ def test_the_lock_keeps_two_writers_apart(tmp_path):
     with server._Lock(out, wait=0.1):
         pass
     assert not stale.exists()
+
+
+def test_a_window_and_the_tables_come_in_pages(tmp_path):
+    """An answer stays in the conversation and is paid for with every next request: a window is read in parts."""
+    import server
+    menu = tmp_path / "menu.cmtp"
+    menu.write_bytes(ebpcmtp.Project(378, "6.10.02.300", True, _menu_payload()).dump())
+    call = lambda name, **args: json.loads(server._call(name, {"path": str(menu), **args})["content"][0]["text"])  # noqa: E731
+    whole = call("cmtp_objects", window="Главное")
+    assert whole["count"] == whole["returned"] == len(whole["objects"]) and "next_offset" not in whole
+    assert sum(whole["window"]["kinds"].values()) == whole["window"]["objects"]
+    first, rest = call("cmtp_objects", window="Главное", limit=1), call("cmtp_objects", window="Главное", limit=50, offset=1)
+    assert first["returned"] == 1 and first["next_offset"] == 1 and "offset=1" in first["more"]
+    assert first["objects"] + rest["objects"] == whole["objects"]
+    scene = call("cmtp_scene", window="Главное", limit=1)
+    assert scene["count"] == whole["window"]["objects"] and len(scene["objects"]) == 1 and scene["window"]["kinds"]
+    links = call("cmtp_links", limit=3)
+    assert links["count"] == 4 and len(links["links"]) == 3 and links["next_offset"] == 3
+    assert call("cmtp_check", limit=1)["count"] >= len(call("cmtp_check", limit=1)["issues"])
+    props = {t["name"]: t["inputSchema"]["properties"] for t in server.TOOLS}
+    for name in ("cmtp_objects", "cmtp_scene", "cmtp_tags", "cmtp_links", "cmtp_labels", "cmtp_check"):
+        assert {"limit", "offset"} <= set(props[name]), name

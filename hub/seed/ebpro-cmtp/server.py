@@ -18,6 +18,12 @@ import ebpedit  # noqa: E402
 PROTOCOL = "2025-06-18"
 PATH = {"type": "string", "description": r"Полный путь к файлу проекта, например C:\Projects\topol.emtp"}
 
+PAGE = 200         # rows of a table in one answer; an answer stays in the conversation and is paid for with every
+PAGE_OBJECTS = 40  # next request, so a table comes in pages and a window — in parts
+PAGE_MAX = 1000
+LIMIT = {"type": "integer", "minimum": 1, "maximum": PAGE_MAX, "description": "Сколько строк вернуть"}
+OFFSET = {"type": "integer", "minimum": 0, "description": "С какой строки (0 — с первой): для следующей страницы"}
+
 TOOLS = [
     {
         "name": "cmtp_info",
@@ -34,7 +40,8 @@ TOOLS = [
         "description": "Выписать все подписи и имена окон проекта (тексты UTF-16) с их смещениями — чтобы понять "
                        "структуру экранов примера и найти, что можно переименовать. filter — показать только с подстрокой.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
-                        "filter": {"type": "string", "description": "Показать только подписи с этой подстрокой"}},
+                        "filter": {"type": "string", "description": "Показать только подписи с этой подстрокой"},
+                        "limit": LIMIT, "offset": OFFSET},
                         "required": ["path"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
@@ -100,10 +107,13 @@ TOOLS = [
         "description": "Объекты одного окна по порядку: index, вид (Text, ToggleSwitch, SetBit, NumericInput, "
                        "FunctionKey, Picture, Rect…; «?» — вид угадан), рамка bbox [лево, верх, право, низ], подписи "
                        "(текст, шрифт, размер, x, y), прочие тексты и адреса (теги OPC UA, локальные адреса). "
-                       "window — имя окна или его номер. kind — показать только объекты этого вида.",
+                       "window — имя окна или его номер. kind — показать только объекты этого вида. В ответе "
+                       f"страница из {PAGE_OBJECTS} объектов (count — сколько всего, window.kinds — сколько каких): "
+                       "берите нужный вид через kind, большое окно — страницами (offset).",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
                         "window": {"type": "string", "description": "Имя окна (точно) или номер, например «Нория 3» или 23"},
-                        "kind": {"type": "string", "description": "Только объекты этого вида, например ToggleSwitch"}},
+                        "kind": {"type": "string", "description": "Только объекты этого вида, например ToggleSwitch"},
+                        "limit": LIMIT, "offset": OFFSET},
                         "required": ["path", "window"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
@@ -111,9 +121,11 @@ TOOLS = [
         "name": "cmtp_tags",
         "title": "Теги OPC UA",
         "description": "Таблица тегов OPC UA проекта (что HMI читает из ПЛК): имя, тип (BOOL, INT, UINT, UDINT…), "
-                       "узел. Нужна, чтобы привязать объекты к нужным тегам. filter — подстрока имени.",
+                       "узел. Нужна, чтобы привязать объекты к нужным тегам. filter — подстрока имени: ищите "
+                       f"нужные теги им, таблица отвечает страницами по {PAGE} строк (count — сколько всего).",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
-                        "filter": {"type": "string", "description": "Подстрока имени тега"}},
+                        "filter": {"type": "string", "description": "Подстрока имени тега"},
+                        "limit": LIMIT, "offset": OFFSET},
                         "required": ["path"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
@@ -125,10 +137,14 @@ TOOLS = [
                        "в пунктах, x, y, цвет, выравнивание), картинки состояний из библиотеки проекта (picture: GUID "
                        "файла и прозрачный цвет) или shape — фигура из библиотеки EasyBuilder, которой нет в проекте. "
                        "images_dir — выложить туда картинки окна (BMP с прозрачным цветом — в PNG с прозрачностью); "
-                       "images — какой файл у какой картинки. window — имя окна или номер.",
+                       "images — какой файл у какой картинки. window — имя окна или номер. В ответе страница из "
+                       f"{PAGE_OBJECTS} объектов (count — сколько всего, window.kinds — сколько каких); kind — только "
+                       "объекты этого вида, offset — следующая страница.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
                         "window": {"type": "string", "description": "Имя окна (точно) или номер"},
-                        "images_dir": {"type": "string", "description": "Папка для картинок окна (в разрешённой на запись)"}},
+                        "images_dir": {"type": "string", "description": "Папка для картинок окна (в разрешённой на запись)"},
+                        "kind": {"type": "string", "description": "Только объекты этого вида"},
+                        "limit": LIMIT, "offset": OFFSET},
                         "required": ["path", "window"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
@@ -140,7 +156,8 @@ TOOLS = [
                        "куда ведёт (target — номер окна). Нужна, чтобы понять меню проекта и перепривязать кнопки. "
                        "window — только кнопки этого окна.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
-                        "window": {"type": "string", "description": "Имя окна или номер"}},
+                        "window": {"type": "string", "description": "Имя окна или номер"},
+                        "limit": LIMIT, "offset": OFFSET},
                         "required": ["path"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
@@ -154,7 +171,8 @@ TOOLS = [
                        "(not_parsed). Уровни: error, warning, info. Проверяют после сборки и перед сдачей. "
                        "window — только это окно.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
-                        "window": {"type": "string", "description": "Имя окна или номер"}},
+                        "window": {"type": "string", "description": "Имя окна или номер"},
+                        "limit": LIMIT, "offset": OFFSET},
                         "required": ["path"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
@@ -313,6 +331,29 @@ def _text(s, is_error=False):
     return r
 
 
+def _page(rows, args, default=PAGE):
+    """(the rows of the page, what to say about the rest) — «count» is always the whole table."""
+    try:
+        limit = min(PAGE_MAX, max(1, int(args.get("limit") or default)))
+        offset = max(0, int(args.get("offset") or 0))
+    except (TypeError, ValueError):
+        limit, offset = default, 0
+    part = rows[offset:offset + limit]
+    meta = {"count": len(rows), "offset": offset, "returned": len(part)}
+    if offset + len(part) < len(rows):
+        meta["next_offset"] = offset + len(part)
+        meta["more"] = (f"показаны {offset + 1}–{offset + len(part)} из {len(rows)}: сузьте запрос (filter, kind, window) "
+                        f"или возьмите следующую страницу offset={offset + len(part)}; целиком в разговор не выгружайте")
+    return part, meta
+
+
+def _kinds(objs):
+    out = {}
+    for o in objs:
+        out[o["kind"]] = out.get(o["kind"], 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
 def _call(name, args):
     try:
         if name == "cmtp_info":
@@ -325,7 +366,8 @@ def _call(name, args):
             p = _load(args["path"])
             flt = (args.get("filter") or "").lower()
             rows = [{"offset": o, "text": s} for o, s in p.labels() if not flt or flt in s.lower()]
-            return _text(json.dumps({"count": len(rows), "labels": rows[:2000]}, ensure_ascii=False))
+            part, meta = _page(rows, args)
+            return _text(json.dumps({**meta, "labels": part}, ensure_ascii=False))
         if name == "cmtp_extract_images":
             p = Project.load(args["path"])
             out = args["out_dir"]
@@ -365,16 +407,25 @@ def _call(name, args):
             w = p.window(args["window"])
             kind = args.get("kind")
             objs = [public(o) for o in w["objects"] if not kind or o["kind"] == kind]
-            head = dict(public(w), objects=len(w["objects"]))
-            return _text(json.dumps({"window": head, "objects": objs}, ensure_ascii=False))
+            head = dict(public(w), objects=len(w["objects"]), kinds=_kinds(w["objects"]))
+            part, meta = _page(objs, args, PAGE_OBJECTS)
+            return _text(json.dumps({"window": head, **meta, "objects": part}, ensure_ascii=False))
         if name == "cmtp_tags":
             p = _load(args["path"])
             flt = (args.get("filter") or "").lower()
             rows = [t for t in p.opcua_tags() if not flt or flt in t["name"].lower()]
-            return _text(json.dumps({"count": len(rows), "tags": rows[:5000]}, ensure_ascii=False))
+            part, meta = _page(rows, args)
+            return _text(json.dumps({**meta, "tags": part}, ensure_ascii=False))
         if name == "cmtp_scene":
             p = _load(args["path"])
-            return _text(json.dumps(p.scene(args["window"], args.get("images_dir") or None), ensure_ascii=False))
+            scene = p.scene(args["window"], args.get("images_dir") or None)
+            kind = args.get("kind")
+            objs = [o for o in scene["objects"] if not kind or o["kind"] == kind]
+            part, meta = _page(objs, args, PAGE_OBJECTS)
+            used = {st["key"] for o in part for st in o.get("picture") or ()}
+            scene["window"]["kinds"] = _kinds(scene["objects"])
+            return _text(json.dumps({"window": scene["window"], **meta, "objects": part,
+                                     "images": {k: v for k, v in scene["images"].items() if k in used}}, ensure_ascii=False))
         if name == "cmtp_links":
             p = _load(args["path"])
             rows = p.links(args.get("window") or None)
@@ -383,12 +434,16 @@ def _call(name, args):
                 r["window_name"] = names.get(r["window"])
                 if r["target"] is not None:
                     r["target_name"] = names.get(r["target"])
-            return _text(json.dumps({"count": len(rows), "links": rows}, ensure_ascii=False))
+            part, meta = _page(rows, args)
+            return _text(json.dumps({**meta, "links": part}, ensure_ascii=False))
         if name == "cmtp_check":
             p = _load(args["path"])
             rows = ebpedit.check(p, args.get("window") or None)
             levels = {k: sum(1 for r in rows if r["level"] == k) for k in ("error", "warning", "info")}
-            return _text(json.dumps({"summary": levels, "issues": rows[:3000]}, ensure_ascii=False))
+            order = {"error": 0, "warning": 1, "info": 2}
+            rows = sorted(rows, key=lambda r: order.get(r["level"], 3))  # the errors first
+            part, meta = _page(rows, args)
+            return _text(json.dumps({"summary": levels, **meta, "issues": part}, ensure_ascii=False))
         if name == "cmtp_render":
             import ebprender
             p = _load(args["path"])
@@ -644,7 +699,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.6.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.7.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})
