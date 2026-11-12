@@ -376,3 +376,22 @@ def test_other_shapes_of_the_file_and_the_variables_of_the_mapping(tmp_path):
     r = m.tag_check(["IoConfig_Globals_Mapping.ixDI_I0", "IoConfig_Globals_Mapping.nope", "Old.a"])
     assert r["ok"] == 2 and r["missing"] == ["IoConfig_Globals_Mapping.nope"]
     assert [x for x in plcproj.io(str(made)) if x["new_variable"]][0]["variable"] == "ixDI_I0"
+
+
+def test_what_the_customer_projects_showed_the_check_is_not_an_error(tmp_path):
+    """Found on the three customer projects (run outside the repository): an output of a call on its own line, the
+    system list of the controller, and a program published in OPC UA are all right in Machine Expert."""
+    main = ("PROGRAM Main\nVAR\n\tstep: INT;\n\tsw: BOOL;\n\tclk: BOOL;\nEND_VAR\n\n"
+            "Noria_1(run :=\n\tStart_1,\n\ton=> sw);\nclk := PLC_GVL.PLC_R.i_x1sClk;\nstep := step + 1;")
+    src = _src(tmp_path, main=main)
+    meta = json.loads((src / "project.json").read_text(encoding="utf-8"))
+    meta["link"]["lists"] = ["GVL", "Main", "IoConfig_Globals_Mapping"]
+    (src / "project.json").write_text(json.dumps(meta), encoding="utf-8")
+    issues = plcbuild.load_dir(str(src)).check()
+    assert not [i for i in issues if i["level"] == "error"], issues
+    assert not [i for i in issues if "вместо «:=»" in i["text"] or "PLC_GVL" in i["text"]], issues
+    meta["link"]["lists"] = ["GVL", "Нет_такого"]
+    (src / "project.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert any("Нет_такого" in i["text"] and i["level"] == "error" for i in plcbuild.load_dir(str(src)).check())
+    # and a real slip is still seen
+    assert any("вместо «:=»" in i["text"] for i in plcbuild.load_dir(str(_src(tmp_path, main=MAIN + "\nstep = 5;"))).check())

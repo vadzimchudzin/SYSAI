@@ -349,7 +349,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.4.1"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.4.2"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3
@@ -442,7 +442,7 @@ def test_opcua_tags_checks_and_stages(tmp_path):
     meta["link"]["lists"] = ["GVL", "Nope"]
     (src / "project.json").write_text(json.dumps(meta), encoding="utf-8")
     texts = [i["text"] for i in plcbuild.load_dir(str(src)).check()]
-    assert any("список Nope" in t for t in texts) and any("attribute 'symbol'" in t for t in texts)
+    assert any("Nope для OPC UA" in t for t in texts) and any("attribute 'symbol'" in t for t in texts)
     # the stages of the project
     proj = tmp_path
     with pytest.raises(plcstage.StageError, match="не готовы materials, decisions"):

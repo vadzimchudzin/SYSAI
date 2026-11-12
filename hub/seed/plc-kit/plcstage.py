@@ -88,7 +88,8 @@ def update(project_dir: str, stage: str = '', state: str = '', note=None, facts=
 RESULTS = {'plc': ('.project', '.projectarchive'), 'hmi': ('.cmtp', '.emtp', '.cxob', '.exob'), 'docs': ('.docx', '.pdf')}
 # What Machine Expert and EasyBuilder keep next to a project themselves (the lock of an open project, the options of
 # the user, the caches of a compilation, backups): not a result and not a draft — it stays where the program put it.
-SERVICE = ('.~u', '.opt', '.precompilecache', '.bootinfo', '.bootinfo_guids', '.compileinfo', '.backup', '.bak')
+SERVICE = ('.~u', '.opt', '.precompilecache', '.bootinfo', '.bootinfo_guids', '.compileinfo', '.map', '.settings.conf',
+           '.backup', '.bak')
 
 
 def extra(project_dir: str, limit: int = 200) -> list:

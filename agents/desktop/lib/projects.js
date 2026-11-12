@@ -20,7 +20,7 @@ const RESULTS = { plc: ['.project', '.projectarchive'], hmi: ['.cmtp', '.emtp', 
 // What Machine Expert and EasyBuilder keep next to a project themselves (the lock of an open project, the options of
 // the user, the caches of a compilation, backups) — the same as plcstage.py SERVICE: not a result and not a draft, it
 // stays where the program put it.
-const SERVICE = ['.~u', '.opt', '.precompilecache', '.bootinfo', '.bootinfo_guids', '.compileinfo', '.backup', '.bak'];
+const SERVICE = ['.~u', '.opt', '.precompilecache', '.bootinfo', '.bootinfo_guids', '.compileinfo', '.map', '.settings.conf', '.backup', '.bak'];
 
 function isResult(rel) {
   const part = rel.split('/')[0];

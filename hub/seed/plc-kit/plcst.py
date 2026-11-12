@@ -21,6 +21,9 @@ STANDARD = {'TON', 'TOF', 'TP', 'RTC', 'R_TRIG', 'F_TRIG', 'CTU', 'CTD', 'CTUD',
             'LE', 'LT', 'NE', 'LEN', 'LEFT', 'RIGHT', 'MID', 'CONCAT', 'INSERT', 'DELETE', 'REPLACE', 'FIND', 'TRUNC',
             'SIZEOF', 'ADR', 'EXPT', 'INDEXOF', 'TIME', 'TRUE', 'FALSE', 'EXIT', 'RETURN', 'CONTINUE', 'THIS', 'SUPER',
             'NULL', 'TO', 'BY', 'AT', 'OF', 'ARRAY', 'STRUCT', 'END_STRUCT', 'REF', 'REFERENCE', 'JMP'}
+# Lists of variables the controller's own libraries bring (M241 / M251: PLC_GVL.PLC_R, PLC_GVL.PLC_W; the mapping of
+# the channels): a program names them without declaring them.
+SYSTEM_LISTS = {'PLC_GVL', 'IOCONFIG_GLOBALS', 'IOCONFIG_GLOBALS_MAPPING'}
 KEYWORDS = {'IF', 'THEN', 'ELSIF', 'ELSE', 'END_IF', 'CASE', 'END_CASE', 'FOR', 'DO', 'END_FOR', 'WHILE', 'END_WHILE',
             'REPEAT', 'UNTIL', 'END_REPEAT', 'VAR', 'END_VAR'}
 OPEN = {'IF': 'END_IF', 'CASE': 'END_CASE', 'FOR': 'END_FOR', 'WHILE': 'END_WHILE', 'REPEAT': 'END_REPEAT'}
@@ -437,7 +440,7 @@ def check_body(body: str) -> list:
         s = raw.strip()
         if not s:
             continue
-        if re.match(r'^[A-Za-z_][\w.\[\]]*\s*=\s*[^=]', s) and ':=' not in s and not re.search(r'\b(IF|ELSIF|WHILE|UNTIL|CASE)\b', s, re.I):
+        if re.match(r'^[A-Za-z_][\w.\[\]]*\s*=\s*[^=>]', s) and ':=' not in s and not re.search(r'\b(IF|ELSIF|WHILE|UNTIL|CASE)\b', s, re.I):
             add('warning', n, 'похоже, вместо «:=» стоит «=» (сравнение вместо присваивания)')
         if re.match(r'^[A-Za-z_][\w.\[\]]*\s*:=.*[^;,(\s]$', s) and not re.search(r'\b(AND|OR|XOR|NOT|MOD)$|[+\-*/<>=,(]$', s, re.I):
             nxt = next((x.strip() for x in plain.split('\n')[n:] if x.strip()), '')

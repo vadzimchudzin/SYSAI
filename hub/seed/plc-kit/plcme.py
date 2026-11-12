@@ -472,6 +472,7 @@ class Project:
                 low = name.lower()
                 if after_dot or low in local or low in globals_ or low in pou_names or low in gvl_names \
                         or low in known_types or name.upper() in plcst.KEYWORDS or name.upper() in plcst.STANDARD \
+                        or name.upper() in plcst.SYSTEM_LISTS \
                         or low == x['name'].lower():
                     continue
                 fits = plcst.conversion(name)
@@ -512,10 +513,13 @@ class Project:
             add('warning', 'проект', 'нет ни одной задачи: программы никто не вызывает')
         kind = self.link.get('kind') or ''
         if kind == 'opcua':
-            have = {g['name'].lower() for g in self.gvls}
+            # what a project publishes: lists of variables, and also the variables of a program and the mapping of the
+            # channels (Machine Expert's symbol configuration names all three)
+            have = {g['name'].lower() for g in self.gvls} | {x['name'].lower() for x in self.pous if x['kind'] == 'program'} \
+                | {n.lower() for n in plcst.SYSTEM_LISTS}
             for n in self.link.get('lists') or []:
                 if str(n).lower() not in have:
-                    add('error', 'связь', f'project.json: список {n} для OPC UA не найден среди списков переменных')
+                    add('error', 'связь', f'project.json: {n} для OPC UA — нет ни такого списка переменных, ни программы')
             for g in self.opcua_lists():
                 if not re.search(r"\{\s*attribute\s+'symbol'", g['declaration'], re.I):
                     add('warning', g['name'], "связь OPC UA: перед VAR_GLOBAL нет строки {attribute 'symbol' := 'readwrite'} — "
