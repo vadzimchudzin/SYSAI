@@ -43,7 +43,6 @@
     <thead><tr><th>{{ head_ru[key] }}</th><th class="num">Сумма</th><th class="num">Доля</th><th class="num">Запросов</th><th class="num">Токенов</th></tr></thead>
     <tbody>{% for x in rows[:30] %}
       <tr><td>{% if x.href %}<a href="{{ x.href }}">{{ x.label }}</a>{% else %}{{ x.label }}{% endif %}{% if x.owner and boss %}<span class="small muted"> · {{ x.owner }}</span>{% endif %}
-        <div class="sp-bar" aria-hidden="true"><i style="width: {{ x.bar }}%"></i></div>
         {% if x.limit is defined %}<div class="small {{ 'warn' if x.limit and x.budget_pct >= 80 else 'muted' }}">сегодня {{ usd(x.today) }}{% if x.limit %} из {{ usd(x.limit) }} в день · {{ x.budget_pct }}%{% else %} · без дневного лимита{% endif %}</div>{% endif %}</td>
         <td class="num">{{ usd(x.cost) }}</td><td class="num">{{ x.share }}%</td>
         <td class="num">{{ x.requests }}{% if x.errors %}<div class="small warn">{{ x.errors }} с ошибкой</div>{% endif %}</td>

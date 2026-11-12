@@ -165,12 +165,16 @@
 .sp-day.bad i { background: linear-gradient(to top, var(--red) 0 3px, var(--clay) 3px); }
 .sp-day:hover i { opacity: 1; }
 .sp-axis { display: flex; justify-content: space-between; margin-top: 4px; font-variant-numeric: tabular-nums; }
-.sp-bar { height: 4px; max-width: 260px; margin-top: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
-.sp-bar i { display: block; height: 100%; background: var(--clay); border-radius: 99px; }
 .sp-table td, .sp-table th { padding: 8px; font-size: 13.5px; }
 .grid2.sp-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
-.sp-table td:first-child { min-width: 170px; overflow-wrap: anywhere; }
-@media (max-width: 600px) { .sp-table td:first-child { min-width: 120px; } .sp-table td, .sp-table th { padding: 7px 6px; } }
+/* the tables of the spend page fit their cards: the first column wraps, the numbers stay on one line */
+.sp-table { width: 100%; }
+.sp-table td:first-child { overflow-wrap: anywhere; }
+.sp-grid .table-wrap, #sizes .table-wrap, #failures .table-wrap { overflow-x: visible; margin: 0; }
+.sp-grid .sp-table td, .sp-grid .sp-table th { padding: 8px 6px; }
+.sp-grid .sp-table td:first-child, .sp-grid .sp-table th:first-child { padding-left: 0; }
+.sp-grid .sp-table td:last-child, .sp-grid .sp-table th:last-child { padding-right: 0; }
+@media (max-width: 600px) { .sp-table td, .sp-table th { padding: 7px 5px; font-size: 13px; } }
 .sp-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .sp-example { max-width: 480px; overflow-wrap: anywhere; color: var(--soft); }
 .net-more::after { content: " · показать"; color: var(--muted); font-size: 13px; }
@@ -207,3 +211,46 @@ details[open] > .net-more { margin-bottom: 8px; }
   .nx-bundle-act { grid-column: 1 / -1; justify-content: flex-start; min-width: 0; }
   .nx-bundle-ver { min-width: 0; } .nx-bundle > .pill { min-width: 0; justify-self: start; }
 }
+
+/* ---------- «Доступы»: profiles as folded cards with a line of facts, the form in named groups ---------- */
+.ac-nav { margin: -6px 0 22px; }
+.ac-title { font-size: 18px; font-weight: 600; margin: 30px 0 4px; scroll-margin-top: 16px; }
+.ac-nav + .ac-title, .card.note + .ac-title { margin-top: 0; }
+.ac-lead { color: var(--muted); font-size: 13.5px; margin: 0 0 14px; max-width: 760px; }
+.ac-profile.card { padding: 0; margin-bottom: 10px; scroll-margin-top: 16px; }
+.ac-head { display: flex; align-items: center; justify-content: space-between; gap: 10px 20px; flex-wrap: wrap; padding: 16px 20px; border-radius: var(--r); }
+.ac-head:hover { background: rgba(255,255,255,.02); }
+.ac-name { display: flex; flex-direction: column; gap: 2px; min-width: 220px; flex: 1 1 280px; } .ac-name b { font-size: 15.5px; font-weight: 600; }
+.ac-facts { display: flex; align-items: center; gap: 6px 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+.ac-fact { white-space: nowrap; } .ac-fact b { color: var(--soft); font-weight: 500; }
+.ac-chev { display: inline-flex; color: var(--muted); transition: transform .15s; } .ac-chev svg { width: 16px; height: 16px; }
+details[open] > .ac-head .ac-chev { transform: rotate(180deg); }
+details[open] > .ac-head { border-bottom: 1px solid var(--line); border-radius: var(--r) var(--r) 0 0; }
+.ac-form { padding: 18px 20px 20px; display: grid; gap: 14px; }
+.ac-group { border: 1px solid var(--line); border-radius: 12px; padding: 4px 16px 16px; margin: 0; min-width: 0; display: grid; gap: 12px; background: rgba(18,18,16,.35); }
+.ac-group > legend { padding: 0 8px; margin-left: -8px; font-size: 13px; font-weight: 600; letter-spacing: .02em; color: var(--text); }
+.ac-group h3 { margin: 6px 0 -2px; font-size: 13px; font-weight: 600; color: var(--soft); }
+.ac-group p { margin: 0; }
+.ac-hint { color: var(--muted); font-size: 13px; margin: 0 0 4px; max-width: 820px; }
+.ac-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; align-items: start; }
+.ac-fields.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ac-fields .f, .ac-group > .f { min-width: 0; }
+.ac-wide { grid-column: 1 / -1; } .ac-col { flex-direction: column; align-items: flex-start; padding-top: 4px; }
+.ac-form textarea, .ac-new textarea, #limits ~ .card textarea { min-height: 76px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.ac-form .f small, .ac-fields .f small { line-height: 1.4; }
+.ac-tiers { gap: 8px; } .ac-tiers label { padding: 6px 12px; border: 1px solid var(--line2); border-radius: 99px; background: var(--bg2); color: var(--muted); cursor: pointer; }
+.ac-tiers label b { color: var(--text); font-weight: 600; } .ac-tiers label:has(input:checked) { border-color: var(--clay); background: var(--clay-bg); color: var(--soft); }
+.ac-more { font-size: 13px; } .ac-more > summary { color: var(--soft); display: inline-block; border-bottom: 1px dashed var(--line2); }
+.ac-more > summary:hover { color: var(--text); } .ac-more p { margin: 8px 0 0; max-width: 900px; }
+.ac-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; }
+.ac-save { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; margin-top: 2px; }
+.ac-new.card { margin-top: 14px; }
+.ac-models { display: grid; gap: 0; margin-bottom: 14px; }
+.ac-models-h, .ac-models-r { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: center; }
+.ac-models-h { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding-bottom: 8px; }
+.ac-models-r { padding: 8px 0; border-top: 1px solid var(--line); } .ac-models-r > span:first-child { display: flex; flex-direction: column; gap: 1px; }
+.ac-models-r input { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; } .ac-span2 { grid-column: 2 / -1; }
+.ac-soul { margin-top: 12px; }
+@media (max-width: 860px) { .ac-fields.three { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .ac-fields, .ac-fields.three { grid-template-columns: 1fr; } .ac-models-h { display: none; }
+  .ac-models-r { grid-template-columns: 1fr; gap: 6px; } .ac-span2 { grid-column: auto; } .ac-head { padding: 14px 16px; } .ac-form { padding: 14px 14px 16px; } }

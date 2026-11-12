@@ -87,3 +87,13 @@ def test_the_page_and_the_csv(client, net_agent):
 def test_an_empty_period_says_so(client, net_on):
     page = client.get("/agents/spend?days=1").text
     assert "запросов к нейронкам не было" in page and "$0.00" in page
+
+
+def test_the_tables_fit_their_cards_without_bars(client, net_agent):
+    with SessionLocal() as s:
+        s.add(_row(net_agent["id"], cost=1.0))
+        s.commit()
+    page = client.get("/agents/spend").text
+    assert "sp-bar" not in page and "Размер запроса" in page  # the share is a column; no stripes under the names
+    css = client.get("/static/net.css").text
+    assert ".sp-grid .table-wrap" in css and "overflow-x: visible" in css  # no scrollbar under a table of a card
