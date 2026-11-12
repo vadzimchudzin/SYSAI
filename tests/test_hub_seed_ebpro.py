@@ -514,7 +514,7 @@ def test_mcp_server_over_stdio(tmp_path):
 
     try:
         assert rpc(1, "initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"] == {
-            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.7.0"}
+            "name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.8.0"}
         assert [t["name"] for t in rpc(2, "tools/list")["result"]["tools"]] == TOOLS
         err, text = call(3, "cmtp_info", path=str(src))
         info = json.loads(text)
@@ -535,7 +535,7 @@ def test_mcp_server_over_stdio(tmp_path):
         ui.write_bytes(_ui_project().dump())
         err, text = call(12, "cmtp_windows", path=str(ui))
         assert not err and [w["name"] for w in json.loads(text)["windows"]] == ["Главное", "Нория 1"]
-        err, text = call(13, "cmtp_objects", path=str(ui), window="Главное", kind="ToggleSwitch")
+        err, text = call(13, "cmtp_objects", path=str(ui), window="Главное", kind="ToggleSwitch", detail=True)
         objs = json.loads(text)["objects"]
         assert not err and [o["index"] for o in objs] == [2] and objs[0]["addresses"][0]["tag"] == "GVL.A"
         err, text = call(14, "cmtp_tags", path=str(ui), filter="gvl.n")
@@ -1093,10 +1093,16 @@ def test_a_window_and_the_tables_come_in_pages(tmp_path):
     menu = tmp_path / "menu.cmtp"
     menu.write_bytes(ebpcmtp.Project(378, "6.10.02.300", True, _menu_payload()).dump())
     call = lambda name, **args: json.loads(server._call(name, {"path": str(menu), **args})["content"][0]["text"])  # noqa: E731
-    whole = call("cmtp_objects", window="Главное")
+    lines = call("cmtp_objects", window="Главное")
+    whole = call("cmtp_objects", window="Главное", detail=True)
+    # by default a line per object: the same objects, several times shorter
+    assert lines["count"] == whole["count"] == len(lines["lines"]) and "objects" not in lines and "слот" in lines["format"]
+    assert [ln.split()[0] for ln in lines["lines"]] == [str(o["index"]) for o in whole["objects"]]
+    assert all(ln.split()[1] == o["kind"] and ",".join(str(v) for v in o["bbox"]) in ln for ln, o in zip(lines["lines"], whole["objects"]))
+    assert len(json.dumps(lines["lines"], ensure_ascii=False)) * 2 < len(json.dumps(whole["objects"], ensure_ascii=False))
     assert whole["count"] == whole["returned"] == len(whole["objects"]) and "next_offset" not in whole
     assert sum(whole["window"]["kinds"].values()) == whole["window"]["objects"]
-    first, rest = call("cmtp_objects", window="Главное", limit=1), call("cmtp_objects", window="Главное", limit=50, offset=1)
+    first, rest = call("cmtp_objects", window="Главное", limit=1, detail=True), call("cmtp_objects", window="Главное", limit=50, offset=1, detail=True)
     assert first["returned"] == 1 and first["next_offset"] == 1 and "offset=1" in first["more"]
     assert first["objects"] + rest["objects"] == whole["objects"]
     scene = call("cmtp_scene", window="Главное", limit=1)

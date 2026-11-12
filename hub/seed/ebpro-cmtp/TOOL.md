@@ -2,7 +2,7 @@
 name: ebpro-cmtp
 kind: mcp
 description: Читает, рисует и собирает проекты Weintek EasyBuilder Pro (.cmtp/.emtp) без EasyBuilder — окна, объекты, теги OPC UA, меню (какая кнопка какое окно открывает), картинки; PNG окна как на панели; проверка (за краем, не влезает текст, кнопка в никуда, тега нет); правки в новый файл — тексты, сдвиг, размер, теги, копии и удаление окон и объектов, кнопки на окна, новые теги, окна и объекты из проекта-донора. Основа навыков ebpro-project, ebpro-donor, ebpro-team и холста окна «Агент SYSAI».
-version: 1.7.0
+version: 1.8.0
 run: python server.py
 platform: any
 tools: cmtp_info, cmtp_labels, cmtp_extract_images, cmtp_unpack, cmtp_pack, cmtp_relabel, cmtp_windows, cmtp_objects, cmtp_tags, cmtp_scene, cmtp_links, cmtp_check, cmtp_render, cmtp_edit
@@ -73,6 +73,10 @@ requires: python>=3.11
 удалений смотри их заново. В конце — `cmtp_check` и `cmtp_render` изменённых окон.
 
 ## Объекты окна (cmtp_objects)
+
+По умолчанию — строка на объект: `9 ToggleSwitch 163,594,421,682 [Область касания] 1,2=VariableList.Mode_och` (index,
+вид, рамка, слой, подписи в «», слот=адрес). Так окно из 30 объектов занимает впятеро меньше, чем целиком. `detail:
+true` — объекты целиком, с полями ниже: берите так те, что будете править.
 
 - `index` — порядок в окне (на него ссылаются правки), `kind` — вид: Window (рамка окна, всегда первый), Text, Picture,
   BitLamp, SetBit, ToggleSwitch, NumericInput, NumericDisplay, FunctionKey, ASCII, QRCode, Rect, Line; со знаком «?» —

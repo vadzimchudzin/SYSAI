@@ -20,6 +20,7 @@ PATH = {"type": "string", "description": r"Полный путь к файлу �
 
 PAGE = 200         # rows of a table in one answer; an answer stays in the conversation and is paid for with every
 PAGE_OBJECTS = 40  # next request, so a table comes in pages and a window — in parts
+PAGE_LINES = 200  # objects of a window as lines: a fifth of the same objects as JSON
 PAGE_MAX = 1000
 LIMIT = {"type": "integer", "minimum": 1, "maximum": PAGE_MAX, "description": "Сколько строк вернуть"}
 OFFSET = {"type": "integer", "minimum": 0, "description": "С какой строки (0 — с первой): для следующей страницы"}
@@ -108,11 +109,14 @@ TOOLS = [
                        "FunctionKey, Picture, Rect…; «?» — вид угадан), рамка bbox [лево, верх, право, низ], подписи "
                        "(текст, шрифт, размер, x, y), прочие тексты и адреса (теги OPC UA, локальные адреса). "
                        "window — имя окна или его номер. kind — показать только объекты этого вида. В ответе "
-                       f"страница из {PAGE_OBJECTS} объектов (count — сколько всего, window.kinds — сколько каких): "
-                       "берите нужный вид через kind, большое окно — страницами (offset).",
+                       f"по строке на объект (format говорит, что в строке), до {PAGE_LINES} строк; count — сколько "
+                       "всего, window.kinds — сколько каких. detail: true — объекты целиком (шрифты подписей, "
+                       f"устройства и узлы адресов), по {PAGE_OBJECTS} на страницу: берите так только те, что будете "
+                       "править, через kind и offset.",
         "inputSchema": {"type": "object", "properties": {"path": PATH,
                         "window": {"type": "string", "description": "Имя окна (точно) или номер, например «Нория 3» или 23"},
                         "kind": {"type": "string", "description": "Только объекты этого вида, например ToggleSwitch"},
+                        "detail": {"type": "boolean", "description": "Объекты целиком (JSON), а не строками"},
                         "limit": LIMIT, "offset": OFFSET},
                         "required": ["path", "window"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -347,6 +351,27 @@ def _page(rows, args, default=PAGE):
     return part, meta
 
 
+LINE_FORMAT = "index вид лево,верх,право,низ [слой] «подпись» слот=адрес (слоты: 1 чтение, 2 запись, 3 доп., 0 прочие)"
+
+
+def _line(o: dict) -> str:
+    """An object of a window as one line — what is needed to choose and to edit it; the whole of it is `detail`."""
+    out = [str(o.get("index")), str(o.get("kind")), ",".join(str(int(v)) for v in o.get("bbox") or [])]
+    if o.get("layer"):
+        out.append(f"[{o['layer']}]")
+    for lab in (o.get("labels") or [])[:3]:
+        out.append("«" + str(lab.get("text") or "").replace("\n", " ")[:60] + "»")
+    for t in (o.get("texts") or [])[:2]:
+        out.append("“" + str(t if isinstance(t, str) else (t.get("text") if isinstance(t, dict) else t))[:40] + "”")
+    by = {}
+    for a in o.get("addresses") or []:
+        by.setdefault(str(a.get("tag") or a.get("address") or ""), []).append(str(a.get("slot")))
+    for where, slots in by.items():
+        if where:
+            out.append(f"{','.join(slots)}={where}")
+    return " ".join(out)
+
+
 def _kinds(objs):
     out = {}
     for o in objs:
@@ -408,8 +433,12 @@ def _call(name, args):
             kind = args.get("kind")
             objs = [public(o) for o in w["objects"] if not kind or o["kind"] == kind]
             head = dict(public(w), objects=len(w["objects"]), kinds=_kinds(w["objects"]))
-            part, meta = _page(objs, args, PAGE_OBJECTS)
-            return _text(json.dumps({"window": head, **meta, "objects": part}, ensure_ascii=False))
+            if args.get("detail"):
+                part, meta = _page(objs, args, PAGE_OBJECTS)
+                return _text(json.dumps({"window": head, **meta, "objects": part}, ensure_ascii=False))
+            part, meta = _page(objs, args, PAGE_LINES)
+            return _text(json.dumps({"window": head, **meta, "format": LINE_FORMAT, "lines": [_line(o) for o in part]},
+                                    ensure_ascii=False))
         if name == "cmtp_tags":
             p = _load(args["path"])
             flt = (args.get("filter") or "").lower()
@@ -699,7 +728,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.7.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.8.0"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})
