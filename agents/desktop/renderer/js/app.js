@@ -203,15 +203,20 @@ async function send({ text, files }) {
   }
   if (conv.running) return false;
   const wasDraft = conv.draft;
+  // a big text file is named by its path, not linked: linked, its whole text would go into every next request
+  let attached;
+  let linked;
   let urls;
   try {
-    urls = await Promise.all(files.map((p) => api.fs.url(p)));
+    attached = files.length ? await api.fs.attachments(files) : { items: [], text: '' };
+    linked = attached.items.filter((x) => x.link).map((x) => x.path);
+    urls = await Promise.all(linked.map((p) => api.fs.url(p)));
   } catch (err) {
     toast(err.message, 'err');
     return false;
   }
-  const said = files.length ? `${text}${text ? '\n\n' : ''}[Вложения: ${files.join('; ')}]` : text;
-  const prompt = [{ type: 'text', text: said }, ...files.map((p, i) => ({ type: 'resource_link', uri: urls[i], name: basename(p) }))];
+  const said = attached.text ? `${text}${text ? '\n\n' : ''}${attached.text}` : text;
+  const prompt = [{ type: 'text', text: said }, ...linked.map((p, i) => ({ type: 'resource_link', uri: urls[i], name: basename(p) }))];
   conv.addUser(text, files.map((p) => ({ name: basename(p), path: p })));
   conv.start();
   if (wasDraft) {

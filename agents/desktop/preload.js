@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('sysai', {
     text: (path) => call('fs:text', path),
     bytes: (path) => call('fs:bytes', path),
     url: (path) => call('fs:url', path),
+    attachments: (paths) => call('fs:attachments', paths),
     paste: (name, bytes) => call('fs:paste', name, bytes),
   },
   shell: {

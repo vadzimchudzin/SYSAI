@@ -704,6 +704,7 @@ function ipc() {
   handle('fs:text', (p) => files.readText(need(p)));
   handle('fs:bytes', (p) => files.readBytes(need(p)));
   handle('fs:url', (p) => pathToFileURL(need(p)).href);
+  handle('fs:attachments', (paths) => files.attachments((Array.isArray(paths) ? paths : []).map(need)));
   handle('fs:paste', async (name, bytes) => {
     if (!(bytes instanceof Uint8Array) || !bytes.length) throw new Error('пустая вставка');
     if (bytes.length > PASTE_LIMIT) throw new Error('вставка больше 30 МБ');

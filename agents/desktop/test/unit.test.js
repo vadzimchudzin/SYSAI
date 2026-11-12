@@ -1037,3 +1037,21 @@ test('projects: what each material is for — .sysai/sources.json, from this com
   assert.ok(!(await pj.sources(made.name)).some((x) => x.path === 'materials/Rodina.project')); // gone from the folder — gone from the list
   assert.ok(!(await pj.info(made.name)).materials.some((f) => f.rel.startsWith('.sysai'))); // the record is not a material
 });
+
+test('a big text file attached to a message is named by its path, not linked', async () => {
+  const dir = tmp();
+  const put = (name, bytes) => { const p = path.join(dir, name); fs.writeFileSync(p, Buffer.alloc(bytes, 97)); return p; };
+  const small = put('notes.md', 2000);
+  const big = put('tags.csv', 200 * 1024);
+  const code = put('Main.st', 31 * 1024);
+  const pdf = put('scheme.pdf', 5 * 1024 * 1024);
+  const png = put('screen.png', 900 * 1024);
+  const got = await files.attachments([small, big, code, pdf, png, path.join(dir, 'нет.txt')]);
+  assert.deepEqual(got.items.map((x) => x.link), [true, false, false, true, true, true]); // only big texts are held back
+  assert.equal(files.INLINE_TEXT_MAX, 30 * 1024);
+  const [links, bigs] = got.text.split('\n[Большие файлы');
+  assert.ok(links.includes(small) && links.includes(pdf) && links.includes(png) && !links.includes(big) && !links.includes(code));
+  assert.ok(bigs.includes(`${big} — 200 КБ`) && bigs.includes(`${code} — 31 КБ`) && bigs.includes('целиком не читай'));
+  assert.deepEqual(await files.attachments([]), { items: [], text: '' });
+  assert.equal((await files.attachments([small])).text, `[Вложения: ${small}]`);
+});

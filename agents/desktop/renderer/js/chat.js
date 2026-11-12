@@ -224,7 +224,7 @@ export class Conversation {
 
   _drawUser(b) {
     // what the window adds to the prompt for the agent (paths of attachments) is not shown twice
-    b.bubble.textContent = b.text.replace(/\n*\[Вложения: [^\]]*\]\s*$/, '').trim();
+    b.bubble.textContent = b.text.replace(/\n*(\[Вложения: [^\]]*\]\s*)?(\[Большие файлы[^\]]*\]\s*)?$/, '').trim();
     b.bubble.hidden = !b.bubble.textContent;
     clear(b.filesEl);
     for (const f of b.files) {

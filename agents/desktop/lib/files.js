@@ -132,6 +132,32 @@ async function info(file) {
   }
 }
 
+// A file attached to a message. Hermes puts the text of a linked text file into the request, and what is in a request
+// stays in the conversation and is paid for with every next one: a 200 KB table costs its 60 thousand tokens again and
+// again. So a big text file is not linked — the agent is told where it lies and how big it is, and reads the part it
+// needs with its own tools. Pictures, PDF and small texts go as before.
+const INLINE_TEXT_MAX = 30 * 1024;
+const TEXT_KINDS = new Set(['code', 'markdown', 'html']);
+
+async function attachment(file) {
+  const i = await info(file);
+  const texty = TEXT_KINDS.has(i.kind) || ['csv', 'tsv'].includes(i.ext);
+  const link = !(i.exists && !i.dir && texty && i.size > INLINE_TEXT_MAX);
+  return { path: file, name: i.name, size: i.size || 0, kind: i.kind, link,
+    note: link ? '' : `${file} — ${Math.round((i.size || 0) / 1024)} КБ текста, в сообщение не вложен: читай нужную часть сам (поиск по файлу, строки с … по …), целиком не читай` };
+}
+
+// What goes into the message for the files attached: the line of the text and which of them are linked.
+async function attachments(paths) {
+  const items = await Promise.all((paths || []).map((p) => attachment(p)));
+  const linked = items.filter((x) => x.link);
+  const big = items.filter((x) => !x.link);
+  const lines = [];
+  if (linked.length) lines.push(`[Вложения: ${linked.map((x) => x.path).join('; ')}]`);
+  if (big.length) lines.push(`[Большие файлы — по пути, не вложены:\n${big.map((x) => x.note).join('\n')}]`);
+  return { items, text: lines.join('\n') };
+}
+
 async function mapLimit(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
@@ -201,4 +227,4 @@ async function drives(platform = process.platform) {
 }
 
 module.exports = { ext, kindOf, runnable, mimeOf, hidden, decode, binary, readText, readBytes, info, list, places,
-  drives, TEXT_LIMIT, BYTES_LIMIT, MAX_ENTRIES };
+  drives, attachment, attachments, TEXT_LIMIT, BYTES_LIMIT, MAX_ENTRIES, INLINE_TEXT_MAX };
