@@ -1,0 +1,2 @@
+# Non-3S plug-ins added to the harness profile (GUID, then comment). Only object plug-ins that load without the Schneider ProductManager host.
+9e0890f2-142a-4b3b-a60c-d6e0bd712e1e # SchneiderElectric.CtrlIo.OpcUa.plugin 22.0.109.0 - OpcUaSymbolConfigurationObject {54fe9644-...}

@@ -15,7 +15,7 @@ import mehost  # noqa: E402
 import mesrc  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 FILE = {"type": "string", "description": r"Файл проекта Machine Expert, например C:\Projects\line\plc\Line.project"}
 SRC = {"type": "string", "description": r"Папка с файлами .st и project.json (её пишут и проверяют с plc-kit)"}
 TIMEOUT = {"type": "integer", "minimum": 30, "maximum": 3600,

@@ -492,7 +492,9 @@ SYSAI (сервер)
 
 **ОПО-11.2 · Инструменты Machine Expert** · L · ИИ · 🟡 прототип: `hub/seed/machine-expert` 0.1.0 (`me_find`,
 `me_devices`, `me_create`, `me_update`, `me_build`, `me_export`, `me_scan`, `me_online`, `me_open`) — логика проверена
-на подставной программе, на живом Machine Expert не запускался ([MACHINE_EXPERT.md](MACHINE_EXPERT.md), раздел 7)
+на подставной программе, на живом Machine Expert не запускался ([MACHINE_EXPERT.md](MACHINE_EXPERT.md), раздел 8).
+С 12.11.2026 файл `.project` читает и пишет plc-kit 1.3.0 без программы (`plc_project_build`, `plc_project_template`,
+`plc_io`, `plc_io_map`); machine-expert нужен для компиляции и контроллера
 - `me_new_project` (из шаблона компании), `me_add_modules`, `me_import_plcopen`, `me_import_io`, `me_build` (ошибки
   и предупреждения), `me_export_plcopen`, `me_archive`, `me_open` (открыть у инженера) — скриптами Machine Expert
   (Python, как в CODESYS); где скрипты не умеют — автоматизация окон.
@@ -502,8 +504,8 @@ SYSAI (сервер)
   или симуляцию; чтение — свободно; загрузка, пуск, стоп и запись в настоящий контроллер — только с `confirm` после
   явного согласия инженера в разговоре. Без оборудования проверка идёт в симуляции Machine Expert.
 
-**ОПО-11.4 · Особенности Machine Expert** · S · ИИ + ОПО · 🟡 `docs/opo/MACHINE_EXPERT.md` написан (формат `.project`,
-скриптовый интерфейс, связь); порядок работы — в навыке `plc-project` 2.0.0
+**ОПО-11.4 · Особенности Machine Expert** · S · ИИ + ОПО · 🟡 `docs/opo/MACHINE_EXPERT.md` написан (формат `.project`
+целиком — контейнер, архивы, объекты; что проверено ядром CODESYS; связь); порядок работы — в навыке `plc-project` 2.2.0
 - `docs/opo/MACHINE_EXPERT.md` + навык «сборка в Machine Expert» в хабе.
 
 **ОПО-11.5 · cad** · M · ИИ

@@ -23,7 +23,8 @@ import plcst  # noqa: E402
 import plcstage  # noqa: E402
 
 TOOLS = ["plc_info", "plc_pous", "plc_pou", "plc_variables", "plc_addresses", "plc_hmi_tags", "plc_tag_check", "plc_check", "plc_style",
-         "plc_link", "plc_stage_update", "plc_export_st", "plc_build"]
+         "plc_link", "plc_stage_update", "plc_export_st", "plc_build", "plc_project_build", "plc_project_template", "plc_io",
+         "plc_io_map"]
 
 GVL = """VAR_GLOBAL
 	PUSK AT %MX0.0:BOOL; //ПУСК
@@ -324,7 +325,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.2.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.3.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3
@@ -352,66 +353,19 @@ def test_server_reads_checks_and_builds(tmp_path):
 
 
 # ------------------------------------------------------------------------------------- .project, the link, the stages
-def _varint(n):
-    out = bytearray()
-    while True:
-        b = n & 0x7F
-        n >>= 7
-        out.append(b | (0x80 if n else 0))
-        if not n:
-            return bytes(out)
-
-
-def _project_file(path, objects):
-    """A `.project` in the open container, as Machine Expert / CODESYS writes it: a ZIP of <guid>.meta / <guid>.object
-    and the shared string table. objects: [(guid, parent, name, type guid)]."""
-    import zipfile
-    strings, index = [], {}
-
-    def s(text):
-        if text not in index:
-            index[text] = len(strings)
-            strings.append(text)
-        return index[text]
-    head = bytes.fromhex("02200928") + bytes(12)
-    metas = {}
-    for guid, parent, name, typ in objects:
-        body = b"\x0f" + _varint(20) + _varint(s(guid)) + _varint(s(parent)) + _varint(s(name)) + b"\x00\x00\x00" \
-            + _varint(s(typ)) + b"\x00"
-        metas[guid] = head + len(body).to_bytes(4, "little") + body + bytes(8)
-    table = _varint(len(strings)) + b"".join(_varint(i) + _varint(len(t.encode())) + t.encode() for i, t in enumerate(strings))
-    with zipfile.ZipFile(path, "w") as z:
-        for guid, blob in metas.items():
-            z.writestr(f"{guid}.meta", blob)
-            z.writestr(f"{guid}.object", head + b"\x02\x00\x00\x00\x0f\x15")
-        z.writestr(plcproj.STRINGS, table)
-    return str(path)
-
-
-def test_project_file_is_probed_not_guessed(tmp_path):
-    null = plcproj.NULL
-    kinds = {v: k for k, v in plcproj.TYPES.items()}
-    dev, app = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
-    path = _project_file(tmp_path / "line.project", [
-        (dev, null, "MyController", kinds["device"]), (app, dev, "Application", kinds["application"]),
-        ("33333333-3333-3333-3333-333333333333", app, "Main", kinds["pou"]),
-        ("44444444-4444-4444-4444-444444444444", app, "GVL", kinds["gvl"]),
-        ("55555555-5555-5555-5555-555555555555", app, "MAST", kinds["task"]),
-    ])
-    d = plcproj.probe(path)
-    assert d["container"] == "zip" and d["counts"] == {"device": 1, "application": 1, "pou": 1, "gvl": 1, "task": 1}
-    assert {"kind": "pou", "name": "Main", "path": "MyController/Application"} in d["objects"]
-    closed = tmp_path / "closed.project"
-    closed.write_bytes(plcproj.MAGIC_CLOSED + bytes(range(256)) * 4)
-    assert plcproj.probe(str(closed))["container"] == "encrypted" and "me_export" in plcproj.probe(str(closed))["note"]
+def test_project_file_that_is_not_one_is_refused(tmp_path):
+    """Reading and writing real `.project` files — tests/test_hub_seed_plc_project.py. Here: what is not a project."""
     (tmp_path / "junk.project").write_bytes(b"not a project at all")
     with pytest.raises(plcproj.ProjectFileError, match="не файл проекта"):
         plcproj.probe(str(tmp_path / "junk.project"))
-    replies = _server([("plc_info", {"path": path}), ("plc_pous", {"path": path}), ("plc_info", {"path": str(closed)})])
+    broken = tmp_path / "broken.project"
+    broken.write_bytes(plcproj.MAGIC_CLOSED + bytes(range(256)) * 4)          # the head of a container, garbage inside
+    with pytest.raises(plcproj.ProjectFileError, match="не разобран"):
+        plcproj.probe(str(broken))
+    replies = _server([("plc_info", {"path": str(broken)}), ("plc_pous", {"path": str(tmp_path / "junk.project")})])
     r = [x["result"] for x in replies[2:]]
-    assert r[0]["structuredContent"]["container"] == "zip" and "дерево объектов" in r[0]["content"][0]["text"]
-    assert r[1]["isError"] and "machine-expert" in r[1]["content"][0]["text"]
-    assert r[2]["structuredContent"]["container"] == "encrypted"
+    assert r[0]["isError"] and "не разобран" in r[0]["content"][0]["text"]
+    assert r[1]["isError"] and "не файл проекта" in r[1]["content"][0]["text"]
 
 
 def test_link_is_decided_from_the_models():

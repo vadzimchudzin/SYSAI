@@ -173,8 +173,9 @@ def decide(controller_model: str = '', panel_model: str = '', wish: str = '', te
         nxt = ['В project.json: "link": {"kind": "opcua", "lists": ["GVL"]} — списки, которые видит панель.',
                "В начале каждого такого списка — строка {attribute 'symbol' := 'readwrite'} перед VAR_GLOBAL.",
                'Адреса %M переменным панели не нужны. Теги для панели: plc_hmi_tags (link берётся из project.json).',
-               'В Machine Expert: machine-expert me_create сам добавит «Конфигурацию символов» с поддержкой OPC UA; '
-               'сервер OPC UA контроллера включает инженер (Ethernet_1 → OPC UA Server Configuration).']
+               'Файл .project: plc_project_build записывает список публикуемых переменных в «OPC UA Symbol '
+               'Configuration» шаблона (шаблон — проект, где сервер OPC UA контроллера уже включён: Ethernet_1 → '
+               'OPC UA Server Configuration).']
     elif link in (MODBUS_TCP, MODBUS_RTU):
         nxt = [f'В project.json: "link": {{"kind": "{link}"}}.',
                'Каждой переменной панели — адрес в %M (биты %MX, слова %MW, REAL и DINT — %MD), подряд и без '

@@ -1,0 +1,2 @@
+# Plug-ins left out of the harness profile (GUID, then comment).
+28dc0613-8ce7-4d1c-a6c9-cf1321e8445e # CODESYS "License Provider" 1.1.0.0 (LicenseProvider.plugin.dll): creating its system instance never returns under Wine (no CodeMeter/FlexNet runtime on this box)

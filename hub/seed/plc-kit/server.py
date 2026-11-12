@@ -17,18 +17,22 @@ import plcproj  # noqa: E402
 import plcstage  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.2.0"
-PATH = {"type": "string", "description": r"Проект ПЛК: файл .export или PLCopen .xml из Machine Expert, либо папка с "
-                                         r"файлами .st (plc_export_st), например C:\Projects\line\plc"}
+VERSION = "1.3.0"
+PATH = {"type": "string", "description": r"Проект ПЛК: файл .project Machine Expert, .export или PLCopen .xml из него, "
+                                         r"либо папка с файлами .st (plc_export_st), например C:\Projects\line\plc"}
+PROJECT = {"type": "string", "description": r"Файл проекта Machine Expert, например C:\Projects\line\plc\Line.project"}
 INSTRUCTIONS = (
     "Программа ПЛК (Machine Expert / CODESYS, ST). Читать: plc_info → plc_pous → plc_pou; переменные и адреса — "
     "plc_variables, plc_addresses; теги для панели по Modbus — plc_hmi_tags; как проект построен — plc_style. "
     "Создавать: написать папку файлов .st (plc_export_st показывает пример на готовом проекте), проверить plc_check, "
     "собрать plc_build в PLCopen XML. До программы — plc_link: по моделям контроллера и панели из ТЗ решает связь "
     "(OPC UA или Modbus) и что из этого следует для переменных; plc_hmi_tags даёт теги панели под выбранную связь. "
-    "Ход проекта «под ключ» отмечают plc_stage_update (его показывает окно «Агент SYSAI»). Проект Machine Expert "
-    "(.project), компиляцию и связь с контроллером делает инструмент machine-expert; у файла .project plc_info "
-    "показывает только вид контейнера и дерево объектов. Графические языки (LD/FBD/CFC) читаются как объявления."
+    "Ход проекта «под ключ» отмечают plc_stage_update (его показывает окно «Агент SYSAI»). Файл .project Machine "
+    "Expert читается и пишется здесь, без программы: все инструменты чтения работают прямо на нём; plc_project_build "
+    "делает настоящий .project из папки ST и шаблона (готового проекта с тем же контроллером; plc_project_template "
+    "вынимает из него программу) или записывает изменённые .st в существующий проект; plc_io — каналы контроллера и "
+    "модулей с переменными, plc_io_map — поставить переменные на каналы. Компиляцию и загрузку в контроллер делает "
+    "Machine Expert (инструмент machine-expert). Графические языки (LD/FBD/CFC) читаются как объявления и имена."
 )
 
 
@@ -48,7 +52,8 @@ TOOLS = [
     _ro("plc_info", "Сведения о проекте ПЛК",
         "Прочитать проект ПЛК: контроллер, задачи (период, какие программы вызывают), сколько программ, блоков и функций, "
         "сколько на ST и сколько графических, списки глобальных переменных, сколько переменных с адресами и сколько "
-        "доступно панели по Modbus. С этого начинают разбор.", {"path": PATH}),
+        "доступно панели по Modbus. У файла .project — ещё дерево объектов, устройства, сколько каналов ввода-вывода "
+        "занято переменными и сколько переменных опубликовано в OPC UA. С этого начинают разбор.", {"path": PATH}),
     _ro("plc_pous", "Программы и блоки",
         "Список POU: имя, вид (program / function_block / function), язык, сколько строк, сколько входов и выходов.",
         {"path": PATH}),
@@ -123,6 +128,44 @@ TOOLS = [
          "out_file": {"type": "string", "description": r"Куда записать .xml (в разрешённой на запись папке)"},
          "force": {"type": "boolean", "description": "Записать и с ошибками проверки (черновик)"}},
         ("src_dir", "out_file")),
+    _rw("plc_project_build", "Проект Machine Expert из папки ST",
+        "Записать папку ST в настоящий файл .project — без Machine Expert. С template_file — новый проект: шаблон (файл "
+        ".project с тем же контроллером, модулями и библиотеками; годится готовый проект прошлых лет или шаблон из "
+        "plc_project_template) + программа из папки: типы, списки переменных, функции, блоки, программы, задачи из "
+        "project.json, при связи OPC UA — список публикуемых переменных; программа самого шаблона вынимается "
+        "(keep_program — оставить и сопоставить по именам). Без template_file — обновление: out_file уже есть, "
+        "изменённые .st получают новый текст, новые объекты добавляются, остальное в проекте не трогается. Сначала "
+        "plc_check: с ошибками файл не пишется, если не force. После записи файл читается обратно и сверяется с "
+        "папкой. Компилирует Machine Expert: откройте файл в нём (machine-expert: me_build).",
+        {"src_dir": {"type": "string", "description": r"Папка с файлами .st и project.json"},
+         "out_file": {"type": "string", "description": r"Файл .project: куда записать новый или какой обновить"},
+         "template_file": {"type": "string", "description": "Шаблон: .project с контроллером и модулями (для нового проекта)"},
+         "keep_program": {"type": "boolean", "description": "Оставить программу шаблона (объекты сопоставляются по именам)"},
+         "overwrite": {"type": "boolean", "description": "Заменить out_file, если он уже есть (для нового проекта)"},
+         "force": {"type": "boolean", "description": "Записать и с ошибками проверки (черновик)"}},
+        ("src_dir", "out_file")),
+    _rw("plc_project_template", "Шаблон из готового проекта",
+        "Сделать из готового .project шаблон: программа (программы, блоки, списки, типы, папки) вынимается, остаются "
+        "контроллер с модулями и их настройками, библиотеки, конфигурация задач, настройки проекта. Каналы "
+        "ввода-вывода сохраняют свои переменные — посмотрите plc_io и объявите их в новой программе или переназначьте "
+        "plc_io_map.",
+        {"path": PROJECT, "out_file": {"type": "string", "description": r"Куда записать шаблон .project"},
+         "overwrite": {"type": "boolean"}}, ("path", "out_file")),
+    _ro("plc_io", "Каналы ввода-вывода",
+        "Каналы контроллера и модулей из файла .project с переменными на них: устройство, канал (I0, Q3, IW0…), "
+        "направление, тип, описание, переменная. «Application.Имя» — переменная программы; new_variable — переменную "
+        "объявляет сама привязка. device — только это устройство; free — только свободные каналы.",
+        {"path": PROJECT, "device": {"type": "string"}, "free": {"type": "boolean"}}),
+    _rw("plc_io_map", "Переменные на каналы",
+        "Поставить переменные программы на каналы устройств в файле .project: changes — [{device, channel, variable}] "
+        "(variable — имя переменной программы, например x0_0 или In_Out.Start; пусто — снять). Переменная должна быть "
+        "объявлена в программе (в списке без qualified_only — по короткому имени). out_file — куда записать (можно "
+        "тот же файл).",
+        {"path": PROJECT, "out_file": {"type": "string", "description": "Куда записать (можно тот же файл)"},
+         "changes": {"type": "array", "minItems": 1, "maxItems": 2000, "items": {
+             "type": "object", "properties": {"device": {"type": "string"}, "channel": {"type": "string"},
+                                              "variable": {"type": "string"}}, "required": ["device", "channel"]}}},
+        ("path", "out_file", "changes")),
 ]
 
 
@@ -142,9 +185,10 @@ def _open(path):
     path = str(path)
     if os.path.isdir(path):
         return plcbuild.load_dir(path)
-    if path.lower().endswith(('.project', '.projectarchive')):
-        return plcme.Project.load(path)          # says what the file is and how to open it
-    st = os.stat(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return plcme.Project.load(path)          # says why the file is not read
     key = os.path.abspath(path)
     got = _CACHE.get(key)
     if got and got[0] == (st.st_mtime_ns, st.st_size):
@@ -194,11 +238,60 @@ def _call(name, args):
         if name == "plc_stage_update":
             return _text(_json(plcstage.update(args["project_dir"], args.get("stage") or "", args.get("state") or "",
                                                args.get("note"), args.get("facts"))))
-        if name == "plc_info" and str(args["path"]).lower().endswith((".project", ".projectarchive")):
-            d = plcproj.probe(str(args["path"]))
-            return _text(d["note"] + "\n" + _json({k: d[k] for k in d if k != "note"}), data=d)
+        if name == "plc_project_build":
+            p = plcbuild.load_dir(args["src_dir"])
+            issues = p.check()
+            errors = [i for i in issues if i["level"] == "error"]
+            if errors and not args.get("force"):
+                lines = [f"{i['where']}{':' + str(i['line']) if i['line'] else ''} — {i['text']}" for i in errors[:60]]
+                return _text("Проверка нашла ошибки, файл не записан:\n" + "\n".join(lines), True,
+                             {"errors": errors[:200], "written": False})
+            out = args["out_file"]
+            if args.get("template_file"):
+                rep = plcproj.create(p, args["template_file"], out, bool(args.get("overwrite")), bool(args.get("keep_program")))
+                head = f"Новый проект → {out} (шаблон {os.path.basename(args['template_file'])}, контроллер {rep['controller'] or '—'})"
+            else:
+                if not os.path.isfile(out):
+                    return _text(f"Файла {out} нет: для нового проекта назовите template_file — шаблон .project с "
+                                 "контроллером (готовый проект или plc_project_template).", True)
+                rep = plcproj.update(out, p)
+                head = f"Проект обновлён → {out}"
+            _CACHE.clear()
+            lines = [head, f"создано {len(rep['created'])}, обновлено {len(rep['updated'])}, без изменений {len(rep['kept'])}"
+                     + (f", вынуто из шаблона {len(rep['removed'])}" if rep["removed"] else "")
+                     + (f"; задачи: {', '.join(rep['tasks'])}" if rep["tasks"] else "")
+                     + (f"; в OPC UA опубликовано переменных: {rep['opcua']}" if "opcua" in rep else "")]
+            if rep.get("left"):
+                lines.append("В проекте остались объекты, которых нет в папке: " + ", ".join(rep["left"][:40]))
+            if rep["skipped"]:
+                lines.append("Не записаны (не ST): " + ", ".join(rep["skipped"][:40]))
+            lines += [f"Замечание: {w}" for w in rep["warnings"]]
+            lines.append("Сверка с папкой после записи: " + ("сходится." if not rep["verify"] else "; ".join(rep["verify"][:20])))
+            lines.append("Дальше: откройте файл в Machine Expert и скомпилируйте (machine-expert: me_build) — "
+                         "ошибки компилятора исправьте в .st и повторите plc_project_build.")
+            rep["written"] = True
+            rep["errors"] = errors[:200]
+            return _text("\n".join(lines), bool(rep["verify"]), rep)
+        if name == "plc_project_template":
+            rep = plcproj.template(args["path"], args["out_file"], bool(args.get("overwrite")))
+            return _text(f"Шаблон → {rep['out_file']}: контроллер {rep['controller'] or '—'}, устройств {len(rep['devices'])}, "
+                         f"задачи {', '.join(rep['tasks']) or '—'}, каналов ввода-вывода {rep['channels']}; вынуто объектов "
+                         f"программы: {len(rep['removed'])}.", data=rep)
+        if name == "plc_io":
+            rows = plcproj.io(args["path"])
+            dev = (args.get("device") or "").lower()
+            rows = [r for r in rows if (not dev or r["device"].lower() == dev) and (not args.get("free") or not r["variable"])]
+            return _text(_json({"count": len(rows), "channels": rows[:3000]}))
+        if name == "plc_io_map":
+            rep = plcproj.set_io(args["path"], args["changes"], args["out_file"])
+            _CACHE.clear()
+            return _text(f"Каналов изменено: {len(rep['changed'])} → {rep['out_file']}", data=rep)
         p = _open(args["path"])
         if name == "plc_info":
+            if str(args["path"]).lower().endswith((".project", ".projectarchive")):
+                d = plcproj.probe(str(args["path"]))
+                d["program"] = p.info()
+                return _text(d["note"] + "\n" + _json({k: d[k] for k in d if k != "note"}), data=d)
             return _text(_json(p.info()))
         if name == "plc_pous":
             import plcst

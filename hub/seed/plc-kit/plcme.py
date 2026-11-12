@@ -1,6 +1,7 @@
 """A PLC project (Schneider Machine Expert / CODESYS V3) as data.
 
-Read from what the engineer can save without the closed `.project` format:
+Read from the project file itself and from what the engineer can save:
+- `.project` -- the file of Machine Expert (module plcproj);
 - `.export` -- Machine Expert «Проект → Экспорт…» (the native export, an XML of archived objects);
 - PLCopen XML (`.xml`) -- «Проект → Экспорт PLCopenXML…».
 
@@ -68,6 +69,7 @@ class Project:
         self.pous, self.gvls, self.types, self.tasks, self.devices = [], [], [], [], []
         self.path, self._vars, self.word_bits = '', None, False
         self.link = {}      # how the panel talks to the controller: {'kind': opcua | modbus_tcp | modbus_rtu, 'lists'}
+        self.io_variables = set()   # names the I/O mapping of the devices declares itself (read from a .project)
 
     # ------------------------------------------------------------------------------------------------ reading
     @classmethod
@@ -75,7 +77,7 @@ class Project:
         if str(path).lower().endswith(('.project', '.projectarchive')):
             import plcproj
             try:
-                raise PlcError(plcproj.probe(str(path))['note'])
+                return plcproj.load(str(path))
             except plcproj.ProjectFileError as exc:
                 raise PlcError(str(exc)) from None
         try:
@@ -330,6 +332,10 @@ class Project:
         want = [str(n).lower() for n in (self.link.get('lists') or [])]
         return [g for g in self.gvls if not want or g['name'].lower() in want]
 
+    def opcua_variables(self) -> list:
+        """The names (`List.Variable`) the controller is to publish over OPC UA: what a panel can bind to."""
+        return [t['name'] for t in self.hmi_tags('opcua')]
+
     def numeric_nodes(self) -> bool:
         """The OPC UA server of a Schneider M241 / M251 names variables by numbers (ns=2;i=N), not by strings."""
         return bool(re.search(r'T?M2[45]1', str(getattr(self, 'controller', '') or ''), re.I))
@@ -351,6 +357,10 @@ class Project:
                 continue
             seen.add(key)
             if key not in have:
+                # a variable the I/O mapping declares lives in the implicit list IoConfig_Globals_Mapping
+                if key.startswith('ioconfig_globals_mapping.') and key.split('.', 1)[1] in self.io_variables:
+                    out['ok'] += 1
+                    continue
                 if key in every:
                     out['not_plain'].append({'name': name, 'type': every[key]['type']})
                 else:

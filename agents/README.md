@@ -19,7 +19,7 @@
   [desktop/README.md](desktop/README.md).
 
 Инструменты хаба для проекта «под ключ» (`hub/seed/`, [docs/opo/NEW_PROJECT.md](../docs/opo/NEW_PROJECT.md)):
-`plc-kit` (программа на ST, связь, этапы), `machine-expert` (проект `.project`, компиляция, контроллер),
+`plc-kit` (программа на ST, файл `.project`, связь, этапы), `machine-expert` (компиляция, контроллер),
 `ebpro-cmtp` (экраны), `pic-index` (картинки), `doc-kit` (документация).
 
 Будет:
