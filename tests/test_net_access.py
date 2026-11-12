@@ -27,6 +27,10 @@ def test_builtin_profiles_and_the_hermes_configuration(client, net_agent):
     # the size of a conversation is its cost: squeezed at a count of tokens said outright, big results go to a file
     assert hermes["compression"] == {"enabled": True, "threshold_tokens": access.COMPRESS_AT} and access.COMPRESS_AT < 272_000
     assert hermes["tool_budget"] == {"mcp_result_size_chars": 20000} and hermes["tool_output"] == {"max_bytes": 20000}
+    # the schemas of MCP tools on demand on every Hermes alike; «on» is a string in YAML, not a boolean
+    assert hermes["tools"] == {"tool_search": {"enabled": "on"}} and 'enabled: "on"' in access.to_yaml(hermes)
+    assert access.hermes_note({"hermes": "0.22.1"}) == "" and access.hermes_note({}) == "" and access.hermes_note(None) == ""
+    assert "hermes update" in access.hermes_note({"hermes": "0.19.4"}) and "новее" in access.hermes_note({"hermes": "0.31.0"})
     # the helpers carry the token themselves: a helper refused with 401 is a conversation never squeezed
     assert {hermes["auxiliary"][k]["api_key"] for k in ("compression", "vision")} == {"${SYSAI_AGENT_TOKEN}"}
     assert hermes["delegation"]["max_iterations"] == 60 and hermes["delegation"]["max_summary_chars"] == 8000

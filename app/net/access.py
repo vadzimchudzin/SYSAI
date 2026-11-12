@@ -59,6 +59,10 @@ HOOK_TIMEOUT = 30
 # The whole conversation goes to the model again with every request, so its size is the cost. Hermes squeezes it at
 # this many tokens — said outright: by itself it waits for half of the model's window (hundreds of thousands), and
 # from 272 thousand the big models cost twice as much. Big results of tools go to a file the agent reads in parts.
+# Hermes on the computers: the configuration SYSAI writes (compression, limits of results, Tool Search) was read and
+# checked against these versions. Older — some keys do nothing; newer than checked — nobody has looked yet.
+HERMES_MIN = (0, 22, 0)
+HERMES_CHECKED = (0, 23)
 COMPRESS_AT = 150_000
 RESULT_CHARS = 20_000
 
@@ -527,6 +531,24 @@ def _yaml_scalar(value) -> str:
     return json.dumps(str(value), ensure_ascii=False)  # a JSON string is a valid YAML double-quoted scalar
 
 
+def hermes_note(versions) -> str:
+    """What to say about the Hermes of a computer («Версии» on the agent's page): "" — the version is one SYSAI's
+    configuration was checked with, or the computer has not said its version yet."""
+    text = str((versions or {}).get("hermes") or "") if isinstance(versions, dict) else ""
+    m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
+    if not m:
+        return ""
+    have = (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+    low = ".".join(str(n) for n in HERMES_MIN[:2])
+    if have < HERMES_MIN:
+        return (f"Hermes {text} старше {low}: сжатие разговора, лимиты ответов и Tool Search на нём работают не все — "
+                "на ПК выполните hermes update")
+    if have[:2] > HERMES_CHECKED:
+        return (f"Hermes {text} новее проверенного {'.'.join(str(n) for n in HERMES_CHECKED)}: настройки SYSAI на нём "
+                "ещё не сверялись — посмотрите «Трассу» первого запроса (инструменты, размер)")
+    return ""
+
+
 def to_yaml(obj, indent: int = 0) -> str:
     """A small YAML writer for the harness configuration (no PyYAML on the server)."""
     pad = "  " * indent
@@ -629,6 +651,9 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None, cache=()) ->
         "compression": {"enabled": True, "threshold_tokens": COMPRESS_AT},
         "tool_budget": {"mcp_result_size_chars": RESULT_CHARS},
         "tool_output": {"max_bytes": RESULT_CHARS},
+        # MCP tools are named to the model, their schemas are fetched when one is needed (Hermes Tool Search). «auto»
+        # of Hermes before 0.20 switched it on only for a big catalog; «on» is the same on every version
+        "tools": {"tool_search": {"enabled": "on"}},
         "approvals": {"mode": "off", "deny": deny},
         # the rules reach Hermes's own tools too: files, the internet, commands (fail closed — no answer, no action)
         "hooks": {"pre_tool_call": [{"command": HOOK_COMMAND, "matcher": "|".join(hook_tools(rules)),

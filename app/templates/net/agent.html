@@ -33,7 +33,7 @@
 <section class="card"><h2>Компьютер</h2>
   <dl class="net-kv">
     <dt>Компьютер</dt><dd>{{ a.host or '—' }}</dd>
-    <dt>Версии</dt><dd>{% for k, v in a.versions.items() %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}{% set sv = (a.versions or {}).get('sync') %}{% if sv and sv != sync_version %}<div class="small warn">на сервере синхронизатор {{ sync_version }}: получите код и запустите строку установки на ПК снова</div>{% endif %}</dd>
+    <dt>Версии</dt><dd>{% for k, v in a.versions.items() %}{{ k }} {{ v }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}{% set sv = (a.versions or {}).get('sync') %}{% if sv and sv != sync_version %}<div class="small warn">на сервере синхронизатор {{ sync_version }}: получите код и запустите строку установки на ПК снова</div>{% endif %}{% if hermes_note %}<div class="small warn">{{ hermes_note }}</div>{% endif %}</dd>
     <dt>Из хаба на ПК</dt><dd>{% set hs = (agent.hub_state or {}).get('skills') or {} %}{% set ht = (agent.hub_state or {}).get('tools') or {} %}навыков: {{ hs|length }} · инструментов: {{ ht|length }}{% set cf = (agent.hub_state or {}).get('conflicts') or [] %}{% if cf %} · <span class="net-err">конфликт имён: {{ cf|join(', ') }}</span>{% endif %}</dd>
     <dt>Последняя ошибка</dt><dd class="{{ 'net-err' if a.last_error }}">{{ a.last_error or '—' }}</dd>
   </dl>

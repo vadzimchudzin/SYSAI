@@ -5,4 +5,4 @@ them to the Hermes profile (config.yaml, .env, SOUL.md), keeps SYSAI_Hub skills 
 skills the agent wrote as proposals, reports its pulse and wraps the hub's MCP servers with the same rules. Checks
 every action of Hermes's own tools by those rules (`sysai-agent hook`), updates itself to the version SYSAI signed and
 installs the window «Агент SYSAI» (`sysai-agent desktop`)."""
-__version__ = "0.4.0"
+__version__ = "0.4.1"

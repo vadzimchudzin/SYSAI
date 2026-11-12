@@ -217,6 +217,7 @@ def _agent_view(request: Request, me: dict, agent_id: int, msg: str = "", error:
     harness_yaml = access.to_yaml(doc["doc"]["harness_config"]) if doc["doc"]["harness_config"] else ""
     return _page(request, "net/agent.html", a=item, agent=agent, doc=doc, rules=doc["rules"], boss=boss, msg=msg,
                  error=error, code=code, server=_server(request), tokens=tokens, harness_yaml=harness_yaml,
+                 hermes_note=access.hermes_note(item.get("versions")),
                  spend=gateway.summary(agent.id, days=7), events=journal.feed(agent.id, 40), profiles=access.profiles(),
                  runs=trace.runs(agent.id, days=2)[:3], debug_until=trace.debug_until(agent.id), fmt_tokens=trace.tokens,
                  fmt_ms=trace.duration, clock=clock, debug_hours=trace.DEBUG_HOURS,
