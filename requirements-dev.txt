@@ -1,4 +1,5 @@
 -r requirements.txt
 pytest==8.3.5
 pypdfium2==5.15.2  # hub/seed/drawing-kit reads PDF with it (on the PCs — from the tool's requirements.txt)
+asyncua==2.1.0  # hub/seed/plc-live reads a controller with it; the tests start an OPC UA server of their own
 PyYAML==6.0.3  # the tests of the synchronizer (agents/sync); on the PCs it comes with the wheel

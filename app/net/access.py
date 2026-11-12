@@ -24,10 +24,12 @@ from ..db import Department, SessionLocal, User, now
 from . import journal
 from .models import NetAccessProfile, NetAgent, NetAgentAccess
 
-SECTIONS = ("commands", "folders", "programs", "mcp", "data", "internet", "models", "schedule", "chat", "skills", "files")
+SECTIONS = ("commands", "folders", "programs", "mcp", "data", "internet", "models", "schedule", "chat", "skills", "files",
+            "plc")
 SECTION_RU = {"commands": "Команды на ПК", "folders": "Папки", "programs": "Программы", "mcp": "MCP-инструменты",
               "data": "Данные SYSAI", "internet": "Интернет", "models": "Нейронки", "schedule": "Дела по расписанию",
-              "chat": "Кто может писать агенту", "skills": "Хаб: навыки и инструменты", "files": "Хранилище"}
+              "chat": "Кто может писать агенту", "skills": "Хаб: навыки и инструменты", "files": "Хранилище",
+              "plc": "Сеть контроллеров"}
 TIERS = ("cheap", "mid", "strong", "vision", "auto")
 MODEL_TIERS = ("cheap", "mid", "strong", "vision")  # a real model behind each, chosen in the settings
 TEXT_TIERS = ("cheap", "mid", "strong")
@@ -83,6 +85,9 @@ EMPTY = {
     "chat": {"owner": True, "others": []},
     "skills": {"departments": ["*"], "propose": False},
     "files": {"read": [], "write": []},
+    # the controllers the agent may reach over the network (the tool plc-live, reading only): an address, an
+    # address:port, a network «192.168.1.0/24», a host name. Empty — none: a controller is not the internet
+    "plc": {"hosts": []},
 }
 
 _ENGINEER = {
@@ -247,6 +252,9 @@ def normalize(rules) -> dict:
     out["skills"] = {"departments": _lines(sk.get("departments"), 50, 100) or ["*"], "propose": bool(sk.get("propose", False))}
     fi = rules.get("files") if isinstance(rules.get("files"), dict) else {}
     out["files"] = {k: _lines(fi.get(k), 50, 100) for k in ("read", "write")}
+    pl = rules.get("plc") if isinstance(rules.get("plc"), dict) else {}
+    out["plc"] = {"hosts": [h for h in (str(x).strip().lower() for x in _lines(pl.get("hosts"), 50, 80))
+                            if h == "*" or re.fullmatch(r"[a-z0-9._\-:\[\]]+(/\d{1,3})?", h)]}
     return out
 
 
@@ -297,6 +305,51 @@ def cap_by_person(rules: dict, role: str, department: str = "") -> dict:
             deny.append(pattern)
     out["commands"]["deny"] = deny
     return out
+
+
+def plc_allowed(rules: dict, target: str) -> bool:
+    """May the agent reach this controller: `target` — «192.168.1.10», «192.168.1.10:4840», «opc.tcp://host:4840/…» or
+    a network to scan «192.168.1.0/28». Rules — rules["plc"]["hosts"]: an address, address:port (only that port), a
+    network, a host name, «*» (any — for a bench, not for a plant network). Empty — nothing is allowed. The same
+    text lives on the server (app/net/access.py), in the synchronizer (rules.py) and in the tool plc-live — a test
+    compares them."""
+    import ipaddress
+    import re
+    text = re.sub(r"^[a-z.+]+://", "", str(target or "").strip().lower())
+    allowed = [str(r).strip().lower() for r in (rules.get("plc") or {}).get("hosts") or []]
+    if re.fullmatch(r"[0-9a-f.:]+/\d{1,3}", text):  # a network: every address of it must be inside an allowed network
+        try:
+            net = ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            return False
+        for rule in allowed:
+            if rule == "*":
+                return True
+            try:
+                if "/" in rule and net.subnet_of(ipaddress.ip_network(rule, strict=False)):
+                    return True
+            except (ValueError, TypeError):
+                continue
+        return False
+    text = text.split("/")[0]
+    host, _, port = text.rpartition(":") if re.search(r":\d+$", text) else (text, "", "")
+    host = host.strip("[]")
+    if not host:
+        return False
+    for rule in allowed:
+        if rule == "*":
+            return True
+        if "/" in rule:
+            try:
+                if ipaddress.ip_address(host) in ipaddress.ip_network(rule, strict=False):
+                    return True
+            except ValueError:
+                pass
+            continue
+        r_host, _, r_port = rule.rpartition(":") if re.search(r":\d+$", rule) else (rule, "", "")
+        if r_host.strip("[]") == host and (not r_port or r_port == port):
+            return True
+    return False
 
 
 def tool_allowed(rules: dict, server: str, tool: str) -> bool:
@@ -792,4 +845,5 @@ def rules_from_form(form) -> dict:
         "chat": {"owner": bool(get("chat_owner")), "others": lines("chat_others")},
         "skills": {"departments": lines("skills_departments"), "propose": bool(get("skills_propose"))},
         "files": {"read": lines("files_read"), "write": lines("files_write")},
+        "plc": {"hosts": lines("plc_hosts")},
     })

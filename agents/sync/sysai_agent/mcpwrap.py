@@ -15,6 +15,7 @@ from . import fsutil, paths, rules as R, signing
 
 PATH_KEYS = ("path", "file", "dir", "folder", "cwd", "directory")
 COMMAND_KEYS = ("command", "cmd", "commandline", "command_line", "shell", "powershell")
+PLC_KEYS = {"plc", "plcs", "plc_host", "plc_hosts", "plc_network"}  # arguments that name a controller or its network
 WRITE_TOKENS = {"write", "save", "delete", "remove", "move", "rename", "create", "put", "edit", "update", "export",
                 "out", "output", "dest", "destination", "target"}
 
@@ -79,6 +80,11 @@ class Guard:
                     return f"сайт {value[:80]} не в разрешённых"
                 continue
             low = key.lower()
+            if low in PLC_KEYS or value.lower().startswith("opc.tcp://"):  # a controller is reached only when named in
+                if not R.plc_allowed(rules, value):                         # «Доступы → Сеть контроллеров»
+                    return (f"контроллер {value[:80]} агенту не открыт: адрес добавляют в SYSAI → Агенты → Доступы → "
+                            "«Сеть контроллеров»")
+                continue
             if low in COMMAND_KEYS or low.endswith("command"):
                 pattern = R.command_denied(rules, value)
                 if pattern:

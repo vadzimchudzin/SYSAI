@@ -64,6 +64,7 @@
       <div class="ac-fields">
         <label class="f">Режим <select name="internet_mode">{% for s in internet %}<option value="{{ s }}" {{ 'selected' if r.internet.mode == s }}>{{ internet_ru[s] }}</option>{% endfor %}</select><small class="muted">«Весь» — поиск, браузер и любые сайты; «только список» — сайты из списка по адресу, без поиска и браузера</small></label>
         <label class="f">Сайты для «только список» <textarea name="internet_sites" spellcheck="false">{{ r.internet.sites|join('\n') }}</textarea></label>
+        <label class="f">{{ sections.plc }} <textarea name="plc_hosts" spellcheck="false" placeholder="192.168.1.10&#10;192.168.1.0/24">{{ r.plc.hosts|join('\n') }}</textarea><small class="muted">Контроллеры, к которым агент может подключиться по сети (инструмент plc-live, только чтение): адрес, адрес:порт, сеть или имя — по строке. Пусто — ни к одному: контроллер — не интернет.</small></label>
       </div>
     </fieldset>
 
