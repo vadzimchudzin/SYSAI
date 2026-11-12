@@ -13,12 +13,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plcbuild  # noqa: E402
 import plclink  # noqa: E402
 import plcme  # noqa: E402
+import plcgen  # noqa: E402
 import plcproj  # noqa: E402
 import plcspec  # noqa: E402
 import plcstage  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 PATH = {"type": "string", "description": r"Проект ПЛК: файл .project Machine Expert, .export или PLCopen .xml из него, "
                                          r"либо папка с файлами .st (plc_export_st), например C:\Projects\line\plc"}
 PROJECT = {"type": "string", "description": r"Файл проекта Machine Expert, например C:\Projects\line\plc\Line.project"}
@@ -150,6 +151,18 @@ TOOLS = [
          "file": {"type": "string", "description": "Или путь к файлу спецификации"},
          "template_file": {"type": "string", "description": "Шаблон или проект .project — сверить каналы с контроллером"},
          "io_map": {"type": "boolean", "description": "Вернуть changes для plc_io_map"}, **PAGING}, ()),
+    _rw("plc_generate", "Программа по спецификации",
+        "Написать программу ПЛК по спецификации проекта — кодом, без модели: каналы и привязка (IO, BIND, BIND_OUT, «!» у "
+        "канала — нормально замкнутый контакт), сигналы (Signals), команды и состояния для панели (HMI: опубликованы в "
+        "OPC UA или с адресами %M для Modbus), блок на механизм (свой блок вида — types.<вид>.fb и pins, иначе "
+        "встроенный FB_Mech), защиты (faults, pulse — датчик скорости), блокировки (interlocks), маршруты (routes: пуск "
+        "от конца потока, останов от начала), задача и project.json. Одна спецификация — всегда один и тот же текст. "
+        "Файлы генератора перезаписываются, ваши файлы в той же папке не трогаются (свои программы — в "
+        "project.programs). После записи папка проверяется (plc_check). В ответе: что записано, выходы, которыми ничто "
+        "не управляет, замечания и io_map — changes для plc_io_map после plc_project_build.",
+        {"project_dir": {"type": "string", "description": "Папка проекта: спецификация _work/spec/project.spec.json → _work/st"},
+         "spec_file": {"type": "string", "description": "Или путь к файлу спецификации"},
+         "out_dir": {"type": "string", "description": r"Или своя папка для файлов .st"}}, ()),
     _rw("plc_export_st", "Проект в папку ST",
         "Разложить проект в папку: по файлу .st на каждый POU, список переменных и тип + project.json (контроллер, задачи). "
         "В таком виде проект читают, правят и пишут с нуля; plc_build собирает папку обратно.",
@@ -291,6 +304,30 @@ def _call(name, args):
             head = (f"Связь: {d['link_ru']}" + ("" if d["sure"] else " (уточнить)") if d["link"] else "Связь решить нельзя")
             lines = [head] + [f"— {w}" for w in d["why"]] + [f"Спросить: {a}" for a in d["ask"]] + d["next"]
             return _text("\n".join(lines), data=d)
+        if name == "plc_generate":
+            base = args.get("project_dir") or ""
+            spec_file = args.get("spec_file") or (plcspec.path_of(base) if base else "")
+            out_dir = args.get("out_dir") or (os.path.join(base, "_work", "st") if base else "")
+            if not spec_file or not out_dir:
+                return _text("Назовите папку проекта (project_dir) или файл спецификации и папку (spec_file, out_dir).", True)
+            rep = plcgen.generate(spec_file, out_dir)
+            issues = plcbuild.load_dir(out_dir).check()
+            errors = [i for i in issues if i["level"] == "error"]
+            rep["check"] = {"errors": len(errors), "warnings": sum(1 for i in issues if i["level"] == "warning"),
+                            "issues": [f"{i['where']}{':' + str(i['line']) if i['line'] else ''} — {i['text']}" for i in errors[:40]]}
+            changes = rep.pop("io_map")
+            rep["io_map"] = {"count": len(changes), "changes": changes[:PAGE_MAX]}
+            lines = [f"Программа по спецификации → {out_dir}: механизмов {rep['mechanisms']}, маршрутов {rep['routes']}, каналов "
+                     f"{rep['channels']}; файлов {len(rep['written'])}. Проверка: ошибок {len(errors)}."]
+            if rep["outputs_nothing_drives"]:
+                lines.append("Выходы, которыми ничто не управляет (напишите логику в своём файле): " + ", ".join(rep["outputs_nothing_drives"][:30]))
+            if rep["signals_without_channel"]:
+                lines.append("Сигналы без канала: " + ", ".join(rep["signals_without_channel"][:30]))
+            lines += [f"Замечание: {n}" for n in rep["notes"][:20]]
+            lines.append("Дальше: plc_project_build {src_dir, template_file, out_file, io: clear}, затем plc_io_map с changes из "
+                         "io_map этого ответа; логику защит и маршрутов проверяет инженер.")
+            _CACHE.clear()
+            return _text("\n".join(lines), bool(errors), rep)
         if name in ("plc_spec_new", "plc_spec_check"):
             file = args.get("out_file" if name == "plc_spec_new" else "file") or (
                 plcspec.path_of(args["project_dir"]) if args.get("project_dir") else "")
@@ -518,7 +555,7 @@ def _call(name, args):
             files = plcbuild.write_dir(p, args["out_dir"])
             return _text(f"Записано файлов: {len(files)} → {args['out_dir']}", data={"files": files})
         return _text(f"нет инструмента {name}", True)
-    except (plcme.PlcError, plcproj.ProjectFileError, plcstage.StageError, plcspec.SpecError) as exc:
+    except (plcme.PlcError, plcproj.ProjectFileError, plcstage.StageError, plcspec.SpecError, plcgen.GenError) as exc:
         return _text(str(exc), True)
     except KeyError as exc:
         return _text(f"не хватает поля {exc}", True)

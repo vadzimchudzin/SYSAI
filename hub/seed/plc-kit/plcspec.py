@@ -5,14 +5,17 @@ made from this file, not from what was said in a conversation.
 
     {"project":    {"name", "controller", "panel", "link": "opcua" | "modbus_tcp" | "modbus_rtu", "template"},
      "expected":   {"mechanisms": 12, "signals": 96},      counted on the scheme itself, before anything is written out
-     "types":      {"noria": {"title": "Нория", "in": ["speed", "belt"], "out": ["run"], "optional": ["vfd_ready"]}},
+     "types":      {"noria": {"title": "Нория", "in": ["speed", "belt"], "out": ["run"], "optional": ["vfd_ready"],
+                              "faults": ["belt"], "pulse": ["speed"]}},      what the generator makes protections of
      "mechanisms": [{"id": "N1", "type": "noria", "title": "Нория 1",
                      "in": {"speed": "DI.I0", "belt": "DI.I1"}, "out": {"run": "DQ.Q0"},
                      "params": {"start_delay_s": 5}, "interlocks": {"requires_running": ["C1"], "stops": ["S2"]},
                      "src": "Э3 лист 7; ТЗ п.4.2"}],
-     "signals":    [{"id": "EStop", "title": "Аварийный стоп", "dir": "in", "channel": "DI.I5", "src": "Э3 лист 2"}]}
+     "signals":    [{"id": "EStop", "title": "Аварийный стоп", "dir": "in", "channel": "!DI.I5", "role": "estop", "src": "Э3 лист 2"}],
+     "routes":     [{"id": "R1", "title": "Приём в силос 1", "mechanisms": ["N1", "C1"]}]}        from the start of the flow
 
-A channel is «Устройство.Канал» as `plc_io` names them («DI.I0», «Module_5.I12», «DQ.Q3»); "" — the signal has no
+A channel is «Устройство.Канал» as `plc_io` names them («DI.I0», «Module_5.I12», «DQ.Q3»), «!» before it — a normally
+closed contact; "" — the signal has no
 channel (it comes over the network or is not wired yet — the check says so).
 
 `check` answers what a compiler never will: is anything of the scheme missing (the counts), does every mechanism have
@@ -32,11 +35,14 @@ SKELETON = {
     'project': {'name': '', 'controller': '', 'panel': '', 'link': 'opcua', 'template': ''},
     'expected': {'mechanisms': 0, 'signals': 0},
     'types': {
-        'noria': {'title': 'Нория', 'in': ['speed', 'belt', 'local_stop'], 'out': ['run'], 'optional': ['vfd_ready', 'plug']},
-        'conveyor': {'title': 'Конвейер', 'in': ['speed', 'local_stop'], 'out': ['run'], 'optional': ['plug']},
+        'noria': {'title': 'Нория', 'in': ['speed', 'belt', 'local_stop'], 'out': ['run'], 'optional': ['vfd_ready', 'plug'],
+                  'faults': ['belt', 'local_stop', 'plug'], 'pulse': ['speed']},
+        'conveyor': {'title': 'Конвейер', 'in': ['speed', 'local_stop'], 'out': ['run'], 'optional': ['plug'],
+                     'faults': ['local_stop', 'plug'], 'pulse': ['speed']},
     },
     'mechanisms': [],
     'signals': [],
+    'routes': [],
 }
 
 
@@ -74,6 +80,11 @@ def load(file: str) -> dict:
     if not isinstance(data, dict):
         raise SpecError('спецификация — объект JSON с полями project, types, mechanisms, signals')
     return data
+
+
+def _role(item) -> str:
+    """The name of a signal of a kind: «level:INT» (a signal that is a number) → «level»."""
+    return str(item).partition(':')[0].strip()
 
 
 def _direction(channel: str) -> str:
@@ -128,9 +139,16 @@ def check(data: dict, channels=None) -> dict:
         if not isinstance(t, dict):
             add('error', f'types.{name}', 'вид механизма — объект {title, in, out, optional}')
             continue
-        for side in ('in', 'out', 'optional'):
+        for side in ('in', 'out', 'optional', 'faults', 'pulse'):
             if not isinstance(t.get(side, []), list) or not all(isinstance(x, str) for x in t.get(side, [])):
                 add('error', f'types.{name}', f'{side} — список имён сигналов')
+        roles = {_role(x) for side in ('in', 'out', 'optional') for x in (t.get(side) if isinstance(t.get(side), list) else [])}
+        for side in ('faults', 'pulse'):   # what the generator makes protections of: signals the kind really has
+            for x in (t.get(side) if isinstance(t.get(side), list) else []):
+                if isinstance(x, str) and x.lstrip('!') not in roles:
+                    add('error', f'types.{name}', f'{side}: сигнала «{x.lstrip("!")}» у вида нет (in, out, optional)')
+        if 'pins' in t and not isinstance(t.get('pins'), dict):
+            add('error', f'types.{name}', 'pins — объект «вход или выход блока: сигнал»')
         if not (t.get('in') or t.get('out')):
             add('warning', f'types.{name}', 'у вида нет ни одного обязательного сигнала: проверка полноты его не видит')
 
@@ -163,11 +181,11 @@ def check(data: dict, channels=None) -> dict:
             have = m.get(side) if isinstance(m.get(side), dict) else {}
             if side in m and not isinstance(m.get(side), dict):
                 add('error', where, f'{side} — объект «сигнал: канал»')
-            missing = [r for r in t.get(side, []) if isinstance(r, str) and r not in have]
+            missing = [_role(r) for r in t.get(side, []) if isinstance(r, str) and _role(r) not in have]
             if missing:
                 add('error', where, f'у вида «{kind}» должны быть сигналы {side}: {", ".join(missing)} — их нет. Нет на схеме — '
                                     'спросите инженера; не нужен этому виду — перенесите в optional')
-            known = set(t.get(side, [])) | set(t.get('optional', []))
+            known = {_role(r) for r in list(t.get(side, [])) + list(t.get('optional', [])) if isinstance(r, str)}
             extra = [r for r in have if r not in known]
             if extra:
                 add('warning', where, f'сигналы {side}, которых у вида «{kind}» нет: {", ".join(extra)} — допишите в types '
@@ -176,10 +194,33 @@ def check(data: dict, channels=None) -> dict:
         locks = m.get('interlocks') if isinstance(m, dict) and isinstance(m.get('interlocks'), dict) else {}
         for rule, names in locks.items():
             for other in (names if isinstance(names, list) else [names]):
+                if rule not in ('requires_running', 'stops'):
+                    add('warning', str(m.get('id') or f'mechanisms[{n}]'), f'блокировка «{rule}» генератору неизвестна: он знает '
+                                                                         'requires_running (работает, пока работают они) и '
+                                                                         'stops (они работают, пока работает он)')
+                    break
                 if str(other).lower() not in ids:
                     add('error', str(m.get('id') or f'mechanisms[{n}]'), f'блокировка {rule}: механизма {other} в спецификации нет')
                 elif str(other).lower() == str(m.get('id') or '').lower():
                     add('error', str(m.get('id')), f'блокировка {rule}: механизм ссылается сам на себя')
+
+    route_ids = set()
+    for n, r in enumerate(data.get('routes') if isinstance(data.get('routes'), list) else [], 1):
+        where = str(r.get('id') or f'routes[{n}]') if isinstance(r, dict) else f'routes[{n}]'
+        if not isinstance(r, dict) or not ID.match(str(r.get('id') or '')):
+            add('error', where, 'маршрут — объект {id латиницей, title, mechanisms: [от начала потока к концу]}')
+            continue
+        if str(r['id']).lower() in route_ids or str(r['id']).lower() in ids:
+            add('error', where, 'id маршрута повторяется или занят механизмом')
+        route_ids.add(str(r['id']).lower())
+        chain = r.get('mechanisms') if isinstance(r.get('mechanisms'), list) else []
+        if not chain:
+            add('error', where, 'в маршруте нет механизмов (mechanisms: от начала потока к концу)')
+        for other in chain:
+            if str(other).lower() not in ids:
+                add('error', where, f'механизма {other} в спецификации нет')
+        if len({str(x).lower() for x in chain}) != len(chain):
+            add('error', where, 'механизм назван в маршруте дважды')
 
     seen = set()
     for n, s in enumerate(data.get('signals') if isinstance(data.get('signals'), list) else [], 1):
@@ -208,8 +249,10 @@ def check(data: dict, channels=None) -> dict:
         if not ch:
             no_channel += 1
             continue
+        ch = ch.lstrip('!').strip()   # «!DI.I11» — a normally closed contact: the generator puts NOT on it
         if not CHANNEL.match(ch):
-            add('error', where, f'канал «{ch}» — нужно «Устройство.Канал», как в plc_io: DI.I0, Module_5.I12, DQ.Q3')
+            add('error', where, f'канал «{ch}» — нужно «Устройство.Канал», как в plc_io: DI.I0, Module_5.I12, DQ.Q3 '
+                                '(«!» впереди — нормально замкнутый контакт)')
             continue
         used.setdefault(ch.lower(), []).append(where)
         way = _direction(ch)

@@ -23,7 +23,7 @@ import plcst  # noqa: E402
 import plcstage  # noqa: E402
 
 TOOLS = ["plc_info", "plc_pous", "plc_pou", "plc_variables", "plc_addresses", "plc_hmi_tags", "plc_tag_check", "plc_check", "plc_style",
-         "plc_link", "plc_stage_update", "plc_spec_new", "plc_spec_check", "plc_export_st", "plc_build", "plc_project_build", "plc_project_template", "plc_io",
+         "plc_link", "plc_stage_update", "plc_spec_new", "plc_spec_check", "plc_generate", "plc_export_st", "plc_build", "plc_project_build", "plc_project_template", "plc_io",
          "plc_io_map"]
 
 GVL = """VAR_GLOBAL
@@ -349,7 +349,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.5.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.6.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3

@@ -2,10 +2,10 @@
 name: plc-kit
 kind: mcp
 description: Читает, проверяет и собирает программу ПЛК Schneider Machine Expert / CODESYS на языке ST без Machine Expert — в том числе сам файл .project (читает любой и пишет настоящий из папки ST и шаблона), программы, блоки, переменные, адреса Modbus, каналы ввода-вывода, теги для панели (Modbus и OPC UA), стиль проекта, PLCopen XML; решает связь панели и контроллера по моделям из ТЗ и ведёт этапы проекта «под ключ».
-version: 1.5.0
+version: 1.6.0
 run: python server.py
 platform: any
-tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_tag_check, plc_check, plc_style, plc_link, plc_stage_update, plc_spec_new, plc_spec_check, plc_export_st, plc_build, plc_project_build, plc_project_template, plc_io, plc_io_map
+tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_tag_check, plc_check, plc_style, plc_link, plc_stage_update, plc_spec_new, plc_spec_check, plc_generate, plc_export_st, plc_build, plc_project_build, plc_project_template, plc_io, plc_io_map
 requires: python>=3.11
 ---
 # ПЛК: Machine Expert / CODESYS, язык ST
@@ -74,6 +74,7 @@ XML в Machine Expert тоже не проверен.
 | `plc_tag_check` | теги панели против программы: каких переменных нет, у каких другой тип или не тот номер узла |
 | `plc_link` | связь по моделям контроллера и панели или по тексту ТЗ: OPC UA / Modbus TCP / RTU, разрешение панели, что спросить |
 | `plc_stage_update` | этапы проекта в `pipeline.json`: materials, decisions, plc, build, hmi, docs; решения (`facts`) |
+| `plc_generate` | программа ПЛК по спецификации — кодом: каналы, сигналы, теги панели, блоки механизмов, защиты, блокировки, маршруты, задача |
 | `plc_spec_new`, `plc_spec_check` | спецификация проекта `_work/spec/project.spec.json`: все механизмы и сигналы одним файлом; проверка полноты и каналов |
 | `plc_check` | ошибки, видные по тексту до компиляции |
 | `plc_style` | как проект построен — для следующего проекта в том же стиле |
@@ -159,6 +160,48 @@ XML в Machine Expert тоже не проверен.
 называют существующие механизмы; с `template_file` — каждый канал ищется в контроллере шаблона. `summary.complete` —
 ошибок нет. `io_map: true` — готовые `changes` для `plc_io_map` (переменная `<id>_<сигнал>`). Чего проверка не
 знает: верно ли прочитана сама схема — счёт `expected` и `src` для этого и нужны.
+
+## Программа по спецификации (plc_generate)
+
+`plc_generate` `{project_dir}` пишет в `_work/st` программу по `project.spec.json` — без модели, одна спецификация
+всегда даёт один и тот же текст:
+
+| Файл | Что в нём |
+|---|---|
+| `IO.st` | переменные каналов: `x_DI_I0`, `y_DQ_Q3` — их ставит на каналы `plc_io_map` (`io_map` из ответа) |
+| `BIND.st`, `BIND_OUT.st` | каналы → сигналы и сигналы → выходы; канал `!DI.I1` — нормально замкнутый контакт, ставится `NOT` |
+| `Signals.st` | переменная на сигнал: `N1_speed`, `N1_run`; `N1_fault`, `N1_permit`, `N1_want`; сигналы вне механизмов |
+| `HMI.st` | для панели: `N1_auto`, `N1_cmd_start`, `N1_cmd_stop`, `N1_on`, `N1_alarm`, `N1_state`, `R1_cmd_start`, `R1_active`, `Alarms_reset` — опубликованы в OPC UA или с адресами `%M` (Modbus) |
+| `Mechs.st`, `Mech.st` | экземпляр блока на механизм; его защиты, разрешение, вызов |
+| `Routes.st` | маршруты: пуск от конца потока к началу, останов от начала к концу, с задержками |
+| `FB_Mech.st`, `FB_Pulse.st` | встроенные блоки: привод с режимами авто / ручной и аварией; контроль импульсов датчика скорости |
+| `project.json` | задача MAST: `BIND`, `Routes`, `Mech`, ваши программы, `BIND_OUT`; связь с панелью |
+
+Что генератор берёт из спецификации сверх проверки:
+
+- `types.<вид>.faults` — сигналы-защиты: `["belt", "!ready"]` — авария при `belt` = 1 или `ready` = 0;
+  `pulse` — импульсные датчики (скорость): авария, если при работе сигнал не меняется `<сигнал>_timeout_s` (5 с);
+  `run` — какой выход включает привод (по умолчанию `run`).
+- `types.<вид>.fb` и `pins` — свой блок вида из проекта-образца (`plc_export_st`, файл блока кладут в ту же папку):
+  `"fb": "Noria_class", "pins": {"DKS_noria": "speed", "noria_on": "@on", "usl_noria": "@permit", "prev_noria": "=C1_on"}` —
+  вход или выход блока → сигнал механизма, служебное (`@auto`, `@want`, `@permit`, `@fault`, `@reset`, `@m_start`,
+  `@m_stop`, `@on`, `@alarm`, `@state`) или выражение после `=` (`{id}` — id механизма).
+- `interlocks.requires_running` — механизм работает, только пока работают названные; `stops` — названные работают,
+  только пока работает он. Сигнал с `"role": "estop"` снимает разрешение у всех.
+- `params`: `start_delay_s`, `stop_delay_s` — задержки пуска и останова в маршруте (3 с).
+- `routes`: `[{"id": "R1", "title": "Приём", "mechanisms": ["C1", "N1"]}]` — механизмы **от начала потока к концу**.
+- сигнал-число: `"level:INT"` в `types` (по умолчанию BOOL).
+- `project.programs` — ваши программы (файлы `.st` в той же папке), которые надо вызвать в задаче.
+
+Файлы генератора начинаются со строки `// GENERATED…` и перезаписываются при каждом запуске — их не правят. Чего
+генератор не знает (особая последовательность, расчёт, выход вроде лампы — он назовёт их в
+`outputs_nothing_drives`), пишут в своих файлах рядом. Файл с именем генератора, но без этой строки, останавливает
+запуск.
+
+**Чего генератор не гарантирует.** Что блокировки и защиты соответствуют ТЗ — он делает ровно то, что сказано в
+спецификации; что Machine Expert скомпилирует результат — это проверяет компиляция; что логика безопасна для
+объекта — это проверяет инженер. Встроенный блок после сброса аварии в автоматическом режиме запускается сам, если
+маршрут включён.
 
 ## Папка ST — как пишут проект с нуля
 
