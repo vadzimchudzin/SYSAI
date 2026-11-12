@@ -293,6 +293,13 @@ export class Conversation {
     this._grow();
   }
 
+  // What was said, without the page: for «Сохранить разговор» (lib/export.js).
+  plain() {
+    return this.blocks.filter((b) => b.type === 'user' || b.type === 'agent' || b.type === 'tools').map((b) => (b.type === 'tools'
+      ? { type: 'tools', tools: [...(b.names || [])] }
+      : { type: b.type, text: b.text || '', files: (b.files || []).map((f) => ({ name: f.name, path: f.path || '' })) }));
+  }
+
   // ---------- actions
   _toolsGroup() {
     const last = this.last();
@@ -308,6 +315,7 @@ export class Conversation {
     const t = { id: u.toolCallId, data: { status: 'pending', ...u }, el, row, body: null, open: false };
     row.addEventListener('click', () => { t.open = !t.open; this._drawToolBody(t); });
     this.tools.set(u.toolCallId, t);
+    (group.names = group.names || []).push(String(u.title || u.kind || 'инструмент'));
     group.el.append(el);
     this._drawTool(t);
     this._grow();

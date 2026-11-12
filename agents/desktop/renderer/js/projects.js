@@ -42,7 +42,7 @@ export class ProjectsView {
   _stamp(info) {
     const files = [...info.materials, ...info.plc, ...info.hmi, ...info.docs].map((f) => `${f.rel}:${f.size}:${f.mtime}`);
     return JSON.stringify([info.pipeline.stages.map((s) => [s.state, s.note]), info.pipeline.facts, files, info.work.files, info.work.size,
-      (info.sources || []).map((x) => [x.path, x.role])]);
+      (info.sources || []).map((x) => [x.path, x.role]), (info.dialogs || []).map((d) => [d.id, d.messages])]);
   }
 
   start() {
@@ -185,6 +185,15 @@ export class ProjectsView {
         list.append(h('button', { class: 'ex-row dir', title: `${info.work.path}\nЧерновики агента: исходники ST, шаблоны, таблицы, заметки. Нажмите — открыть папку.`,
           onclick: () => api.shell.open(info.work.path).catch((e) => toast(e.message, 'err')) }, icon('folder', 'kind'),
         h('span', { class: 'nm', text: '_work — черновики' }), h('span', { class: 'meta', text: `${info.work.files} ф. · ${size(info.work.size)}` })));
+      }
+    }
+    // the conversations about this project, kept with it (.sysai/dialogs.json)
+    if ((info.dialogs || []).length) {
+      list.append(h('div', { class: 'pj-group', text: `Разговоры · ${info.dialogs.length}` }));
+      for (const d of info.dialogs.slice(0, 8)) {
+        list.append(h('button', { class: 'ex-row', title: `${d.title || 'Без названия'}\nНачат ${String(d.started || '').slice(0, 16).replace('T', ' ')} UTC · сообщений: ${d.messages || 0}`,
+          onclick: () => this.hooks.dialog && this.hooks.dialog(d.id) }, icon('chat', 'kind'),
+        h('span', { class: 'nm', text: d.title || 'Без названия' }), h('span', { class: 'meta', text: when(Date.parse(d.updated), { short: true }) })));
       }
     }
     for (const [key, label] of GROUPS) {

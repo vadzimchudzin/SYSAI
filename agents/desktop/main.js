@@ -18,6 +18,7 @@ const { Canvas, PERSON } = require('./lib/canvas');
 const config = require('./lib/config');
 const files = require('./lib/files');
 const storage = require('./lib/storage');
+const convExport = require('./lib/export');
 const { storageFiles } = require('./lib/projects');
 const { Projects, prompts: projectPrompts, STAGES: projectStages } = require('./lib/projects');
 const shortcuts = require('./lib/shortcuts');
@@ -745,6 +746,13 @@ function ipc() {
   });
   handle('projects:add', (name, paths) => projects.add(String(name || ''), Array.isArray(paths) ? paths.map(need) : []));
   handle('projects:tidy', (name) => projects.tidy(String(name || '')));
+  handle('projects:dialog', (name, dialog) => projects.noteDialog(String(name || ''), dialog || {}));
+  // «Сохранить разговор»: Markdown into the project (_work/notes) or into «SYSAI Разговоры» of the documents
+  handle('conv:export', async (data) => {
+    const d = data && typeof data === 'object' ? data : {};
+    const dir = d.project ? path.join(projects.dir(String(d.project)), '_work', 'notes') : path.join(app.getPath('documents'), 'SYSAI Разговоры');
+    return convExport.save(dir, { ...d, at: new Date() });
+  });
   handle('projects:role', (name, rel, role) => projects.setRole(String(name || ''), String(rel || ''), String(role || '')));
   // «Добавить из Хранилища»: a file or a whole folder of the storage is fetched (the cache of the window, sha256
   // checked) and copied into materials/ of the project, recorded as taken from the storage

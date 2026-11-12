@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('sysai', {
     external: (url) => call('shell:external', url),
   },
   dialog: { files: (opts) => call('dialog:files', opts || {}) },
+  conv: { export: (data) => call('conv:export', data) },
   clipboard: { write: (text) => call('clipboard:text', String(text ?? '')) },
   storage: {
     list: (folder, q) => call('storage:list', folder || '', q || ''),
@@ -69,6 +70,7 @@ contextBridge.exposeInMainWorld('sysai', {
     info: (name) => call('projects:info', name),
     add: (name, paths) => call('projects:add', name, paths),
     tidy: (name) => call('projects:tidy', name),
+    dialog: (name, dialog) => call('projects:dialog', name, dialog),
     role: (name, rel, role) => call('projects:role', name, rel, role),
     attach: (name, item, role) => call('projects:attach', name, item, role),
   },

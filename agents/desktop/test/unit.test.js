@@ -1120,3 +1120,34 @@ test('edits without questions: one project only, what the profile of SYSAI allow
   fs.rmSync(path.join(path.dirname(auto.file), 'audit', 'undo'), { recursive: true });
   assert.throws(() => auto.undo(id2), /копия старого файла не сохранилась/);
 });
+
+test('a conversation is saved as a Markdown file and a project remembers its conversations', async () => {
+  const convExport = require('../lib/export');
+  const at = new Date('2026-11-13T09:05:00Z');
+  const md = convExport.markdown({ title: 'Этап: программа ПЛК', project: 'Линия 1', agent: 'opo-ivan', at, blocks: [
+    { type: 'user', text: 'Собери проект\n\n[Вложения: C:\\ТЗ.pdf]', files: [{ name: 'ТЗ.pdf', path: 'C:\\ТЗ.pdf' }] },
+    { type: 'tools', tools: ['plc_spec_check', 'plc_check'] }, { type: 'agent', text: 'Готово: **12 механизмов**.' },
+    { type: 'thought', text: 'не для файла' }, { type: 'user', text: 'спасибо', files: [] }] });
+  assert.ok(md.startsWith('# Этап: программа ПЛК\n\nПроект: Линия 1 · Агент: opo-ivan · Сохранён: 2026-11-13 09:05 UTC\n'));
+  assert.ok(md.includes('## Человек\n\nСобери проект\n\n- вложение: C:\\ТЗ.pdf') && !md.includes('[Вложения'));
+  assert.ok(md.includes('*Инструменты: plc_spec_check, plc_check*\n\n## Агент\n\nГотово: **12 механизмов**.'));
+  assert.ok(!md.includes('не для файла') && md.trimEnd().endsWith('спасибо'));
+  assert.equal(convExport.fileName('Этап: «плк» / 1?', at), '2026-11-13-09-05 Этап «плк» 1.md');
+  const dir = path.join(tmp(), 'notes');
+  const one = await convExport.save(dir, { title: 'Разговор', at, blocks: [{ type: 'user', text: 'привет' }] });
+  const two = await convExport.save(dir, { title: 'Разговор', at, blocks: [] });
+  assert.ok(fs.readFileSync(one, 'utf8').includes('привет') && two.endsWith(' (2).md'));
+
+  const pj = new Projects(path.join(tmp(), 'SYSAI Проекты'));
+  const made = await pj.create('Линия 4');
+  assert.deepEqual(await pj.dialogs(made.name), []);
+  await pj.noteDialog(made.name, { id: 's-1', title: 'Материалы' });
+  await pj.noteDialog(made.name, { id: 's-2', title: 'Программа ПЛК' });
+  const again = await pj.noteDialog(made.name, { id: 's-1', title: 'другое название не затирает первое' });
+  assert.deepEqual([again.title, again.messages], ['Материалы', 2]);
+  const info = await pj.info(made.name);
+  assert.deepEqual(info.dialogs.map((d) => [d.id, d.messages]).sort(), [['s-1', 2], ['s-2', 1]]);
+  assert.equal(await pj.noteDialog('Нет такого', { id: 'x' }), null);
+  assert.equal(await pj.noteDialog(made.name, {}), null);
+  assert.ok(!info.materials.length && !info.other.some((f) => f.rel.includes('dialogs')));
+});

@@ -46,6 +46,9 @@ function workPlace(rel, stFree) {
 // What a material is for — kept in <project>/.sysai/sources.json, one record per file or folder lying right in
 // materials/. The agent reads the roles from the request of a button (see prompts), the indexers — from the file.
 const SOURCES = path.join('.sysai', 'sources.json');
+// The conversations of a project, kept with the project: who talked about it and when — also when Hermes on this
+// computer no longer has them (another computer, a profile made anew).
+const DIALOGS = path.join('.sysai', 'dialogs.json');
 const ROLES = [['material', 'Материал', 'ТЗ, схемы, перечни — по ним делается проект'],
   ['template', 'Шаблон', 'готовый .project или проект панели: из него берут контроллер, модули, окна'],
   ['example', 'Пример', 'проект или документ, по образцу которого делать (стиль)'],
@@ -209,7 +212,7 @@ class Projects {
     const work = part(WORK);
     const sources = await this.sources(name);
     return { name: path.basename(dir), path: dir, materials: part('materials'), plc: part('plc'), hmi: part('hmi'),
-      docs: part('docs'), pipeline: pipeline(dir), sources, roles: ROLES,
+      docs: part('docs'), pipeline: pipeline(dir), sources, roles: ROLES, dialogs: await this.dialogs(name),
       // the results (what the engineer takes to the site), what lies among them but is not one, and the drafts
       results: made.filter((f) => isResult(f.rel)), extra: made.filter((f) => !isResult(f.rel) && !isService(f.rel)),
       work: { path: path.join(dir, WORK), files: work.length, size: work.reduce((n, f) => n + f.size, 0) },
@@ -281,6 +284,41 @@ class Projects {
     }
     await this._note(name, notes).catch(() => {}); // the copy is what matters; the record is made again by sources()
     return done;
+  }
+
+  // ---- the conversations of a project: <project>/.sysai/dialogs.json
+  async dialogs(name) {
+    try {
+      const data = JSON.parse(await fsp.readFile(path.join(this.dir(name), DIALOGS), 'utf8'));
+      return (Array.isArray(data.dialogs) ? data.dialogs : []).filter((d) => d && typeof d.id === 'string')
+        .sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+    } catch {
+      return [];
+    }
+  }
+
+  // A conversation said something in the project: it is added, or its title and time are brought up to date.
+  async noteDialog(name, { id, title = '', stage = '' } = {}) {
+    if (!id) return null;
+    const st = await fsp.stat(this.dir(name)).catch(() => null);
+    if (!st || !st.isDirectory()) return null;
+    const all = await this.dialogs(name);
+    const at = new Date().toISOString();
+    let row = all.find((d) => d.id === String(id));
+    if (!row) {
+      row = { id: String(id), title: '', started: at, updated: at, messages: 0 };
+      all.push(row);
+    }
+    if (title && !row.title) row.title = String(title).slice(0, 120);
+    if (stage) row.stage = String(stage).slice(0, 40);
+    row.updated = at;
+    row.messages = (row.messages || 0) + 1;
+    const file = path.join(this.dir(name), DIALOGS);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fsp.writeFile(tmp, `${JSON.stringify({ schema: 1, dialogs: all.slice(-200) }, null, 1)}\n`, 'utf8');
+    await fsp.rename(tmp, file);
+    return row;
   }
 
   // ---- what each material is for: <project>/.sysai/sources.json
@@ -480,4 +518,4 @@ function prompts(info) {
 }
 
 module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, storageFiles, isResult, isService, workPlace, guessRole, PARTS, STAGES, RESULTS, SERVICE, WORK,
-  ROLES, SOURCES };
+  ROLES, SOURCES, DIALOGS };

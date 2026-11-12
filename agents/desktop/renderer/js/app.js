@@ -227,6 +227,8 @@ async function send({ text, files }) {
     localStorage.setItem('sysai.session.last', conv.id);
   }
   touch(conv.id);
+  const inProject = projectOf(conv.cwd);
+  if (inProject) api.projects.dialog(inProject.name, { id: conv.id, title: text.slice(0, 80) || basename(files[0] || '') }).catch(() => {});
   S.stuck = true;
   drawThread();
   drawTop();
@@ -473,6 +475,10 @@ class Pane {
     });
     this.canvas = new CanvasView({ focus: () => this.show('canvas'), mention: (t) => composer.fill(t) });
     this.projects = new ProjectsView({ open: (p) => openPath(p), ask: (t, project) => askInProject(t, project),
+      dialog: (id) => {
+        if (S.sessions.some((s) => s.sessionId === id) || S.convs.has(id)) selectConv(id);
+        else toast('Этого разговора у агента на этом компьютере нет: он шёл на другом компьютере или профиль агента создан заново.', 'info', 7000);
+      },
       storage: (project) => {
         this.show('storage');
         this.storage.refresh();
@@ -601,9 +607,24 @@ function drawSessions() {
       : S.acp.state !== 'ready' ? 'Разговоры появятся, когда агент запустится.' : 'Здесь будут ваши разговоры с агентом.' }));
     return;
   }
+  // by time (today, yesterday…) or by project: the conversations of a project together, the newest project first
+  const byProject = localStorage.getItem('sysai.sessions.by') === 'project';
+  const nameOf = (s) => (projectOfSession(s.sessionId) || {}).name || '';
+  if (byProject) {
+    const newest = new Map();
+    for (const s of items) if (!newest.has(nameOf(s))) newest.set(nameOf(s), String(s.updatedAt || ''));
+    const order = [...newest.keys()].sort((x, y) => (x === '' ? 1 : y === '' ? -1 : newest.get(y).localeCompare(newest.get(x))));
+    items.sort((x, y) => order.indexOf(nameOf(x)) - order.indexOf(nameOf(y)));
+  }
+  const some = S.sessions.some((s) => nameOf(s));
+  if (some && !q) {
+    el.append(h('button', { class: 's-by', title: 'Как сложить список разговоров',
+      onclick: () => { localStorage.setItem('sysai.sessions.by', byProject ? 'time' : 'project'); drawSessions(); } },
+    icon(byProject ? 'folder' : 'clock', 'sm'), h('span', { text: byProject ? 'По проектам' : 'По времени' })));
+  }
   let last = '';
   for (const s of items) {
-    const g = group(s.updatedAt);
+    const g = byProject ? (nameOf(s) || 'Без проекта') : group(s.updatedAt);
     if (g !== last) { el.append(h('div', { class: 's-group', text: g })); last = g; }
     const conv = S.convs.get(s.sessionId);
     const busy = conv && (conv.running || conv.waiting);
@@ -617,14 +638,34 @@ function drawSessions() {
   if (S.cursor && !q) el.append(h('button', { class: 's-more', text: 'Показать ещё', onclick: () => loadSessions(true) }));
 }
 
+// «Сохранить разговор»: a Markdown file of what was asked and answered — into the project of the conversation or into
+// the person's documents.
+async function exportConv() {
+  const conv = current();
+  if (!conv || conv.empty) return;
+  const s = S.sessions.find((x) => x.sessionId === conv.id);
+  const project = projectOf(conv.cwd || (s && s.cwd));
+  try {
+    const file = await api.conv.export({ title: conv.title || (s && s.title) || 'Разговор', project: project ? project.name : '',
+      agent: S.info.agent || '', blocks: conv.plain() });
+    toast(`Разговор сохранён: ${file}`, 'ok', 7000);
+    if (project && pane.projects.name === project.name) pane.projects.open(project.name, true);
+  } catch (err) {
+    toast(`Разговор не сохранён: ${err.message}`, 'err');
+  }
+}
+
 function drawTop() {
   const conv = current();
   const s = conv && S.sessions.find((x) => x.sessionId === conv.id);
   const project = conv && projectOf(conv.cwd || (s && s.cwd));
   $('top-title').textContent = conv ? `${project ? `${project.name} · ` : ''}${conv.title || (s && s.title) || (conv.draft ? 'Новый разговор' : 'Разговор')}` : '';
   const acts = $('top-actions');
-  acts.replaceChildren(h('button', { class: `icon-btn${pane && pane.opened ? ' on' : ''}`, title: 'Файлы и просмотр (Ctrl+B)',
-    onclick: () => pane.toggle() }, icon('panel')));
+  acts.replaceChildren(
+    conv && !conv.empty ? h('button', { class: 'icon-btn', title: project ? `Сохранить разговор в проект «${project.name}» (_work/notes)`
+      : 'Сохранить разговор файлом (Документы → SYSAI Разговоры)', onclick: () => exportConv() }, icon('download')) : null,
+    h('button', { class: `icon-btn${pane && pane.opened ? ' on' : ''}`, title: 'Файлы и просмотр (Ctrl+B)',
+      onclick: () => pane.toggle() }, icon('panel')));
 }
 
 function bootScreen() {
