@@ -20,7 +20,9 @@ function message(title, text) {
 
 export class ProjectsView {
   constructor(hooks = {}) {
-    this.hooks = hooks; // open(path), ask(text) — put a request for the agent into the message box
+    // open(path), ask(text, {name, path}) — put a request for the agent into the message box of a conversation
+    // opened in the folder of the project
+    this.hooks = hooks;
     this.el = h('div', { class: 'pane-section projects' });
     this.name = localStorage.getItem('sysai.project') || '';
     this.started = false;
@@ -39,7 +41,7 @@ export class ProjectsView {
 
   _stamp(info) {
     const files = [...info.materials, ...info.plc, ...info.hmi, ...info.docs].map((f) => `${f.rel}:${f.size}:${f.mtime}`);
-    return JSON.stringify([info.pipeline.stages.map((s) => [s.state, s.note]), info.pipeline.facts, files]);
+    return JSON.stringify([info.pipeline.stages.map((s) => [s.state, s.note]), info.pipeline.facts, files, info.work.files, info.work.size]);
   }
 
   start() {
@@ -155,14 +157,32 @@ export class ProjectsView {
       list.append(message('Материалов пока нет', 'Перетащите сюда всё, что есть по объекту: ТЗ, схемы, чертежи, таблицы '
         + 'сигналов, пример руководства — файлы и целые папки. Они скопируются в проект. Потом нажмите «Создать проект».'));
     }
+    // the results first: what the engineer takes to the site — the Machine Expert project, the panel project, the
+    // documents; what else lies among them is offered to be moved to _work; the drafts are one folded line
     const made = [['Память проекта', info.memory, 'fileText'], ['Стиль', info.style, 'fileText']].filter((x) => x[1]);
-    if (made.length || info.plc.length || info.hmi.length || info.docs.length) {
-      list.append(h('div', { class: 'pj-group', text: 'Сделано агентом' }));
+    if (info.results.length || info.extra.length) {
+      list.append(h('div', { class: 'pj-group', text: info.results.length ? `Результат · ${info.results.length}` : 'Результат' }));
+      for (const f of info.results) list.append(this._row(f));
+      if (!info.results.length) list.append(h('div', { class: 'pj-hint', text: 'Готовых файлов пока нет: проект Machine Expert появится в plc, проект панели — в hmi, документы — в docs.' }));
+      if (info.extra.length) {
+        const where = [...new Set(info.extra.map((f) => f.rel.split('/')[0]))].join(', ');
+        list.append(h('div', { class: 'pj-extra' }, icon('alert', 'sm'),
+          h('span', { text: `Лишнее в ${where}: ${info.extra.length} — черновики среди результатов`, title: info.extra.slice(0, 40).map((f) => f.rel).join('\n') }),
+          h('button', { class: 'btn sm', title: 'Перенести (не удалить) эти файлы в _work — там же по папкам', onclick: () => this.tidy() },
+            h('span', { text: 'Убрать в _work' }))));
+      }
+    }
+    if (made.length || info.work.files) {
+      list.append(h('div', { class: 'pj-group', text: 'Рабочее' }));
       for (const [label, p, ico] of made) {
         list.append(h('button', { class: 'ex-row', title: p, onclick: () => this.hooks.open(p) }, icon(ico, 'kind'),
           h('span', { class: 'nm', text: `${label} — ${basename(p)}` })));
       }
-      for (const f of [...info.plc, ...info.hmi, ...info.docs]) list.append(this._row(f));
+      if (info.work.files) {
+        list.append(h('button', { class: 'ex-row dir', title: `${info.work.path}\nЧерновики агента: исходники ST, шаблоны, таблицы, заметки. Нажмите — открыть папку.`,
+          onclick: () => api.shell.open(info.work.path).catch((e) => toast(e.message, 'err')) }, icon('folder', 'kind'),
+        h('span', { class: 'nm', text: '_work — черновики' }), h('span', { class: 'meta', text: `${info.work.files} ф. · ${size(info.work.size)}` })));
+      }
     }
     for (const [key, label] of GROUPS) {
       const files = info.materials.filter((f) => f.group === key);
@@ -184,7 +204,7 @@ export class ProjectsView {
     const steps = h('div', { class: 'pj-steps' }, ...pl.stages.map((s, i) => h('button', {
       class: `pj-step ${s.state}${current && current.stage === s.stage ? ' cur' : ''}`,
       title: `${s.title}: ${STATE_TEXT[s.state]}. ${s.goal}.${s.note ? `\n${s.note}` : ''}\nНажмите — поручить этот этап агенту.`,
-      onclick: () => this.hooks.ask && this.hooks.ask(info.prompts.stages[s.stage]),
+      onclick: () => this.hooks.ask && this.hooks.ask(info.prompts.stages[s.stage], { name: info.name, path: info.path }),
     }, h('span', { class: 'n' }, s.state === 'done' ? icon('check', 'sm') : s.state === 'problem' ? icon('alert', 'sm') : h('i', { text: String(i + 1) })),
     h('span', { class: 't', text: s.title }))));
     const facts = FACTS.filter(([k]) => pl.facts[k]).map(([k, label]) => h('span', { class: 'pj-fact' },
@@ -228,9 +248,22 @@ export class ProjectsView {
       h('span', { class: 'nm', text: rel }), h('span', { class: 'meta', text: `${size(f.size)} · ${when(f.mtime, { short: true })}` }));
   }
 
+  async tidy() {
+    if (!this.name) return;
+    try {
+      const done = await api.projects.tidy(this.name);
+      const bad = done.filter((d) => d.error);
+      if (bad.length) toast(bad.map((d) => `${d.rel}: ${d.error}`).slice(0, 8).join('\n'), 'err', 9000);
+      if (done.length > bad.length) toast(`Перенесено в _work: ${done.length - bad.length}`, 'ok', 3000);
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+    this.open(this.name);
+  }
+
   ask(what) {
     if (!this.info || !this.hooks.ask) return;
-    this.hooks.ask(this.info.prompts[what]);
+    this.hooks.ask(this.info.prompts[what], { name: this.info.name, path: this.info.path });
   }
 
   async pick() {

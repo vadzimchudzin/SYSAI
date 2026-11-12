@@ -13,7 +13,7 @@ const { AcpClient, commandLine } = require('../lib/acp');
 const { Bridge } = require('../lib/bridge');
 const config = require('../lib/config');
 const files = require('../lib/files');
-const { Projects, prompts: projectPrompts, pipeline: projectPipeline, groupOf, cleanName, STAGES } = require('../lib/projects');
+const { Projects, prompts: projectPrompts, pipeline: projectPipeline, groupOf, cleanName, isResult, STAGES } = require('../lib/projects');
 const rules = require('../lib/rules');
 const { AutoApprove, MAX_PER_HOUR } = require('../lib/autoapprove');
 const storage = require('../lib/storage');
@@ -706,7 +706,7 @@ test('projects: a folder per project — create, drop materials in, what is insi
   assert.deepEqual(await pj.list(), { root, projects: [] }); // the folder appears with the first project
   const made = await pj.create('  ЕФБШ-621   Достоево ');
   assert.equal(made.name, 'ЕФБШ-621 Достоево');
-  assert.deepEqual(fs.readdirSync(made.path).sort(), ['docs', 'hmi', 'materials', 'plc', 'project.md']);
+  assert.deepEqual(fs.readdirSync(made.path).sort(), ['_work', 'docs', 'hmi', 'materials', 'plc', 'project.md']);
   assert.match(fs.readFileSync(made.memory, 'utf8'), /^# ЕФБШ-621 Достоево\n/);
   await assert.rejects(pj.create('ЕФБШ-621 Достоево'), /уже есть/);
   for (const bad of ['', 'a/b', '..', 'con', 'x'.repeat(81), 'a:b']) await assert.rejects(pj.create(bad));
@@ -903,4 +903,43 @@ test('edits without questions: the window answers the fake Hermes itself inside 
   assert.equal(await run(tmp()), 'reject_once');
   assert.deepEqual(answered, [true, false]);
   assert.equal(auto.state().count, 1);
+});
+
+test('projects: only results among the results — the rest is offered to _work and moved there, never deleted', async () => {
+  const pj = new Projects(path.join(tmp(), 'SYSAI Проекты'));
+  const made = await pj.create('Линия 1');
+  const put = (rel, text = 'x') => {
+    fs.mkdirSync(path.dirname(path.join(made.path, rel)), { recursive: true });
+    fs.writeFileSync(path.join(made.path, rel), text);
+  };
+  for (const rel of ['plc/Line.project', 'plc/Main.st', 'plc/project.json', 'plc/gen/make_io.py', 'plc/notes.md', 'hmi/Line.cmtp',
+    'hmi/tags.csv', 'hmi/pictures/noria.png', 'docs/Руководство.docx', 'docs/Руководство.md', 'docs/img/main.png',
+    '_work/st/GVL.st', '_work/notes/io.csv', 'materials/ТЗ.md']) put(rel, rel);
+  put('_work/plc/Main.st', 'старый черновик');
+  assert.deepEqual(['plc/A.project', 'plc/a.PROJECTARCHIVE', 'hmi/a.emtp', 'docs/a.pdf', 'plc/a.st', 'hmi/a.png', 'docs/a.md', '_work/a.project',
+    'materials/a.project'].map(isResult), [true, true, true, true, false, false, false, false, false]);
+  const info = await pj.info(made.name);
+  assert.deepEqual(info.results.map((f) => f.rel), ['plc/Line.project', 'hmi/Line.cmtp', 'docs/Руководство.docx']);
+  assert.deepEqual(info.extra.map((f) => f.rel).sort(), ['docs/img/main.png', 'docs/Руководство.md', 'hmi/pictures/noria.png', 'hmi/tags.csv',
+    'plc/gen/make_io.py', 'plc/Main.st', 'plc/notes.md', 'plc/project.json'].sort());
+  assert.equal(info.work.files, 3);
+  assert.deepEqual(info.other, []); // _work is the drafts, not «прочее»
+  const pr = projectPrompts(info);
+  assert.ok(pr.create.includes('_work') && pr.build.includes('_work/st') && pr.docs.includes('_work/docs'));
+
+  const done = await pj.tidy(made.name);
+  assert.equal(done.length, 8);
+  assert.ok(done.every((d) => !d.error && d.to.startsWith('_work/')));
+  assert.equal(done.find((d) => d.rel === 'plc/Main.st').to, '_work/plc/Main (2).st'); // a name that is taken is kept
+  assert.equal(fs.readFileSync(path.join(made.path, '_work', 'plc', 'Main (2).st'), 'utf8'), 'plc/Main.st');
+  assert.equal(fs.readFileSync(path.join(made.path, '_work', 'plc', 'Main.st'), 'utf8'), 'старый черновик');
+  assert.equal(fs.readFileSync(path.join(made.path, '_work', 'hmi', 'pictures', 'noria.png'), 'utf8'), 'hmi/pictures/noria.png');
+  assert.deepEqual(fs.readdirSync(path.join(made.path, 'plc')), ['Line.project']);
+  assert.deepEqual(fs.readdirSync(path.join(made.path, 'hmi')), ['Line.cmtp']); // the emptied folders went
+  assert.deepEqual(fs.readdirSync(path.join(made.path, 'docs')), ['Руководство.docx']);
+  assert.deepEqual(fs.readdirSync(path.join(made.path, 'materials')), ['ТЗ.md']); // what the engineer gave is not touched
+  const after = await pj.info(made.name);
+  assert.deepEqual(after.extra, []);
+  assert.equal(after.work.files, 11);
+  assert.deepEqual(await pj.tidy(made.name), []);
 });

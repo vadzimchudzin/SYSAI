@@ -742,6 +742,7 @@ function ipc() {
     return { ...info, prompts: { ...pr, stages: Object.fromEntries(projectStages.map(([key]) => [key, stage(key)])) } };
   });
   handle('projects:add', (name, paths) => projects.add(String(name || ''), Array.isArray(paths) ? paths.map(need) : []));
+  handle('projects:tidy', (name) => projects.tidy(String(name || '')));
   handle('auto:get', () => auto.state());
   handle('auto:set', (on) => {
     const state = auto.set(Boolean(on));

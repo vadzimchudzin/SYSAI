@@ -1,16 +1,27 @@
 'use strict';
 // «Проекты» of the window: one folder per project on this computer. A project holds everything the engineer gives
 // (materials/: the terms of reference, drawings, documentation, finished projects of the PLC and of the panel) and
-// everything the agent makes (plc/: the PLC program as ST files, the PLCopen XML and the Machine Expert project, hmi/:
-// the panel project and its pictures, docs/: the manual and the passport, project.md: the memory of the project,
-// style.md: the style it is made in, pipeline.json: where the work is — the agent marks the stages with the tool
-// plc_stage_update of plc-kit, the window shows them). Files are copied in, never moved; nothing is deleted from
-// here -- the person does that in the folder.
+// the results the agent makes — and only the results: plc/ holds the Machine Expert project, hmi/ the panel project,
+// docs/ the manual and the passport. Everything on the way to them (ST sources, templates, tables, scripts, notes,
+// pictures) lives in _work/, which the window shows folded. project.md is the memory of the project, style.md the
+// style it is made in, pipeline.json where the work is — the agent marks the stages with the tool plc_stage_update of
+// plc-kit, the window shows them. Materials are copied in, never moved; nothing is deleted from here — «Убрать в
+// _work» only moves what does not belong among the results.
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
-const PARTS = ['materials', 'plc', 'hmi', 'docs'];
+const PARTS = ['materials', 'plc', 'hmi', 'docs', '_work'];
+const WORK = '_work';
+// What a folder of results holds — the same as hub/seed/plc-kit/plcstage.py RESULTS (a test compares); the rest of
+// what lies there is a draft and belongs to _work/.
+const RESULTS = { plc: ['.project', '.projectarchive'], hmi: ['.cmtp', '.emtp', '.cxob', '.exob'], docs: ['.docx', '.pdf'] };
+
+function isResult(rel) {
+  const part = rel.split('/')[0];
+  const low = rel.toLowerCase();
+  return Boolean(RESULTS[part]) && RESULTS[part].some((e) => low.endsWith(e));
+}
 // The stages of a project «с нуля под ключ», in order — the same as hub/seed/plc-kit/plcstage.py (a test compares).
 const STAGES = [
   ['materials', 'Материалы', 'ТЗ и схемы прочитаны, механизмы и сигналы выписаны'],
@@ -159,12 +170,50 @@ class Projects {
     const files = [];
     await this._walk(dir, '', files);
     const part = (p) => files.filter((f) => f.rel.startsWith(`${p}/`));
+    const made = [...part('plc'), ...part('hmi'), ...part('docs')];
+    const work = part(WORK);
     return { name: path.basename(dir), path: dir, materials: part('materials'), plc: part('plc'), hmi: part('hmi'),
       docs: part('docs'), pipeline: pipeline(dir),
+      // the results (what the engineer takes to the site), what lies among them but is not one, and the drafts
+      results: made.filter((f) => isResult(f.rel)), extra: made.filter((f) => !isResult(f.rel)),
+      work: { path: path.join(dir, WORK), files: work.length, size: work.reduce((n, f) => n + f.size, 0) },
       memory: fs.existsSync(path.join(dir, 'project.md')) ? path.join(dir, 'project.md') : '',
       style: fs.existsSync(path.join(dir, 'style.md')) ? path.join(dir, 'style.md') : '',
-      other: files.filter((f) => !/^(materials|plc|hmi|docs)\//.test(f.rel) && !/^(project\.md|style\.md|pipeline\.json)$/.test(f.rel)),
+      other: files.filter((f) => !/^(materials|plc|hmi|docs|_work)\//.test(f.rel) && !/^(project\.md|style\.md|pipeline\.json)$/.test(f.rel)),
       truncated: files.length >= MAX_FILES };
+  }
+
+  // «Убрать в _work»: what lies in plc/, hmi/, docs/ and is not a result is moved (never deleted) to
+  // _work/<the same path>; a name that is taken there gets « (2)». -> [{rel, to} | {rel, error}]
+  async tidy(name) {
+    const dir = this.dir(name);
+    const info = await this.info(name);
+    const done = [];
+    for (const f of info.extra) {
+      try {
+        const target = path.join(dir, WORK, ...f.rel.split('/').slice(0, -1));
+        await fsp.mkdir(target, { recursive: true });
+        const to = await this._free(target, f.name);
+        await fsp.rename(f.path, to);
+        done.push({ rel: f.rel, to: path.relative(dir, to).split(path.sep).join('/') });
+      } catch (err) {
+        done.push({ rel: f.rel, error: err.code === 'EBUSY' || err.code === 'EPERM' ? 'файл занят программой' : err.message });
+      }
+    }
+    for (const part of Object.keys(RESULTS)) await this._prune(path.join(dir, part), false);
+    return done;
+  }
+
+  // Folders left empty after the move go; the folder of results itself stays.
+  async _prune(dir, self = true) {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) if (e.isDirectory()) await this._prune(path.join(dir, e.name));
+    if (self) await fsp.rmdir(dir).catch(() => {});
   }
 
   // Copies files and whole folders into materials/; a name that is taken gets « (2)», « (3)»…
@@ -223,15 +272,18 @@ function prompts(info) {
       + 'решения (контроллер, панель и связь OPC UA или Modbus — plc_link по ТЗ; шаблон проекта) → программа ПЛК на ST → файл '
       + 'проекта Machine Expert (plc_project_build по шаблону; компиляция — me_build, без шаблона — me_create; исправляй ошибки '
       + 'до нуля) → экраны панели (картинки — pic-index, теги — plc_hmi_tags) → '
-      + `в конце предложи мне документацию. Чего нет в материалах — спроси, не додумывай. ${resume}\nСтиль: `,
+      + 'в конце предложи мне документацию. В plc, hmi и docs — только готовые файлы (.project, проект панели, .docx); '
+      + `исходники ST, таблицы, скрипты и заметки — в _work. Чего нет в материалах — спроси, не додумывай. ${resume}\nСтиль: `,
     build: `Собери проект «${info.name}» по навыку plc-project. ${where}\n`
       + 'По материалам в materials: выпиши в project.md все механизмы и сигналы (ничего не пропусти), напиши программу '
-      + 'ПЛК на ST в plc, проверь (plc_check) и собери plc.xml, затем собери экраны панели в hmi с адресами из '
-      + 'plc_hmi_tags; картинки — из Хранилища SYSAI, раздел «ОПО». Стиль: ',
+      + 'ПЛК на ST в _work/st, проверь (plc_check) и собери проект в plc, затем собери экраны панели в hmi с адресами из '
+      + 'plc_hmi_tags; картинки — из Хранилища SYSAI, раздел «ОПО». В plc, hmi и docs — только готовые файлы, всё '
+      + 'остальное — в _work. Стиль: ',
     docs: `Создай техническую документацию проекта «${info.name}» по навыку project-docs. ${where}\n`
       + 'Руководство пользователя (оператора) и технический паспорт — по материалам, программе в plc и экранам в hmi; '
       + 'снимки экранов — cmtp_render. Если в materials есть пример руководства (.docx) — сделай по нему (doc_outline, '
-      + 'style_from); если нет — спроси меня, по какому образцу. Результат — в docs, этап docs отметь (plc_stage_update).',
+      + 'style_from); если нет — спроси меня, по какому образцу. Готовые .docx — в docs, текст и рисунки к ним — в '
+      + '_work/docs; этап docs отметь (plc_stage_update).',
     stage: (stage) => {
       const s = pl.stages.find((x) => x.stage === stage);
       return s ? `Проект «${info.name}», навык plc-project. ${where}\nЗаймись этапом «${s.title}» (${s.goal.toLowerCase()})`
@@ -240,4 +292,4 @@ function prompts(info) {
   };
 }
 
-module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, PARTS, STAGES };
+module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, isResult, PARTS, STAGES, RESULTS, WORK };

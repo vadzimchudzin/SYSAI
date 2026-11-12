@@ -34,6 +34,13 @@ export class Composer {
     this.conv = null;
     this.files = [];
     this.drafts = new Map();
+    // what was typed and not sent survives a restart of the window: by the conversation, and for a conversation
+    // not started yet — by its folder
+    try {
+      this.kept = JSON.parse(localStorage.getItem('sysai.drafts') || '{}') || {};
+    } catch {
+      this.kept = {};
+    }
     this.slashHot = 0;
     this.plan = h('div', { class: 'plan', hidden: true });
     this.planFolded = false;
@@ -55,7 +62,7 @@ export class Composer {
 
   _wire() {
     const input = this.input;
-    input.addEventListener('input', () => { this._size(); this._slash(); this.update(); });
+    input.addEventListener('input', () => { this._size(); this._slash(); this.update(); this._keep(); });
     input.addEventListener('keydown', (e) => {
       if (this.slash && this._slashKey(e)) return;
       if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
@@ -108,15 +115,34 @@ export class Composer {
     this.input.value = text;
     this._size();
     this.update();
+    this._keep();
     this.focus();
     this.input.setSelectionRange(text.length, text.length);
+  }
+
+  _key(conv) {
+    return conv ? (conv.draft ? `new:${conv.cwd || ''}` : conv.id) : '';
+  }
+
+  _keep() {
+    const key = this._key(this.conv);
+    if (!key) return;
+    const text = this.input.value;
+    if (text.trim()) this.kept[key] = text.slice(0, 20000);
+    else delete this.kept[key];
+    const keys = Object.keys(this.kept);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 50))) delete this.kept[k]; // the oldest go
+    clearTimeout(this.keepTimer);
+    this.keepTimer = setTimeout(() => {
+      try { localStorage.setItem('sysai.drafts', JSON.stringify(this.kept)); } catch { /* not kept */ }
+    }, 400);
   }
 
   setConversation(conv) {
     if (this.conv === conv) { this.update(); this.drawPlan(); return; }
     if (this.conv) this.drafts.set(this.conv.id, { text: this.input.value, files: this.files });
     this.conv = conv;
-    const d = (conv && this.drafts.get(conv.id)) || { text: '', files: [] };
+    const d = (conv && this.drafts.get(conv.id)) || { text: (conv && this.kept[this._key(conv)]) || '', files: [] };
     this.input.value = d.text;
     this.files = [...d.files];
     this._size();
@@ -158,7 +184,10 @@ export class Composer {
     if ((!text && !this.files.length) || !this.hooks.ready() || (this.conv && this.conv.running)) return;
     const files = [...this.files];
     const sent = { text: this.input.value, files };
+    const key = this._key(this.conv);
     this.input.value = '';
+    delete this.kept[key];
+    this._keep();
     this.files = [];
     this._size();
     this._drawFiles();

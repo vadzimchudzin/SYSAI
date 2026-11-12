@@ -83,27 +83,64 @@ function onConvChange(conv, what) {
   }
 }
 
+// The project a folder belongs to: «SYSAI Проекты/<проект>/…» → {name, path}; null — not a project.
+function projectOf(cwd) {
+  const root = String((S.auto && S.auto.root) || '');
+  const dir = String(cwd || '');
+  if (!root || dir.length <= root.length + 1 || dir.slice(0, root.length).toLowerCase() !== root.toLowerCase() || !/[\\/]/.test(dir[root.length])) return null;
+  const name = dir.slice(root.length + 1).split(/[\\/]/)[0];
+  return name ? { name, path: `${root}${dir[root.length]}${name}` } : null;
+}
+
+function projectOfSession(id) {
+  const conv = S.convs.get(id);
+  const s = S.sessions.find((x) => x.sessionId === id);
+  return projectOf((conv && conv.cwd) || (s && s.cwd) || '');
+}
+
+// A request from «Проекты» (a stage, «Создать проект», «Документация»): a new conversation opened in the folder of
+// the project — one stage, one conversation. The state of the work is in project.md and pipeline.json, not in what
+// was said before, and a conversation that starts anew costs a fraction of one that carries every earlier stage.
+async function askInProject(text, project) {
+  const conv = current();
+  const here = conv && project && conv.empty && !conv.running && conv.cwd === project.path;
+  if (project && !here) {
+    try {
+      await newDraft({ cwd: project.path });
+      if (conv && !conv.empty) toast(`Новый разговор в проекте «${project.name}». Прежний остался в списке слева.`, 'info', 6000);
+    } catch (err) {
+      toast(`Разговор в проекте не начался: ${err.message}`, 'err');
+    }
+  }
+  composer.fill(text);
+}
+
 async function newChat() {
   const conv = current();
   if (conv && conv.draft && conv.empty) { composer.focus(); return; }
   try {
-    await newDraft();
+    const project = conv && projectOf(conv.cwd); // «новый разговор» from a project's conversation stays in the project
+    await newDraft(project ? { cwd: project.path } : {});
   } catch (err) {
     toast(`Новый разговор не начался: ${err.message}`, 'err');
   }
 }
 
-async function newDraft({ select = true } = {}) {
+// cwd — the folder the conversation works in (a project); without it — the person's home folder.
+async function newDraft({ select = true, cwd = '' } = {}) {
   const ready = S.convs.get(S.draft);
-  if (ready && ready.draft && ready.empty) {
+  if (ready && ready.draft && ready.empty && (ready.cwd || '') === cwd) {
     if (select) selectConv(ready.id);
     return ready;
   }
+  if (S.creating && S.creatingCwd !== cwd) await S.creating.catch(() => {});
   if (!S.creating) {
+    S.creatingCwd = cwd;
     S.creating = (async () => {
-      const res = await api.acp.request('session/new', {});
+      const res = await api.acp.request('session/new', cwd ? { cwd } : {});
       const conv = makeConv(res.sessionId);
       conv.loaded = true;
+      conv.cwd = cwd;
       conv.config = res.configOptions || [];
       S.draft = conv.id;
       return conv;
@@ -124,6 +161,8 @@ function selectConv(id) {
   }
   const s = S.sessions.find((x) => x.sessionId === id);
   if (s && !conv.title && s.title) conv.title = s.title;
+  if (s && s.cwd && !conv.cwd) conv.cwd = s.cwd;
+  if (!conv.draft) localStorage.setItem('sysai.session.last', id); // opened again when the window starts
   drawThread();
   drawSessions();
   drawTop();
@@ -137,7 +176,7 @@ async function loadConv(conv) {
   conv.loading = true;
   drawThread();
   try {
-    const res = await api.acp.request('session/load', { sessionId: conv.id });
+    const res = await api.acp.request('session/load', conv.cwd ? { sessionId: conv.id, cwd: conv.cwd } : { sessionId: conv.id });
     if (res && Array.isArray(res.configOptions)) conv.config = res.configOptions;
     conv.loaded = true;
   } catch (err) {
@@ -177,8 +216,10 @@ async function send({ text, files }) {
   conv.start();
   if (wasDraft) {
     S.draft = '';
-    S.sessions.unshift({ sessionId: conv.id, title: text.slice(0, 80) || basename(files[0] || ''), updatedAt: new Date().toISOString(), local: true });
+    S.sessions.unshift({ sessionId: conv.id, title: text.slice(0, 80) || basename(files[0] || ''), updatedAt: new Date().toISOString(), local: true,
+      cwd: conv.cwd || '' });
     if (!conv.title) conv.title = '';
+    localStorage.setItem('sysai.session.last', conv.id);
   }
   touch(conv.id);
   S.stuck = true;
@@ -255,9 +296,17 @@ async function afterReady(restarted) {
     S.draft = '';
     S.current = '';
   }
-  loadSessions();
+  const listed = loadSessions();
   if (keep && restarted) selectConv(keep);
   else if (!current()) {
+    // the window opens where the person left: the last conversation, when Hermes still has it; otherwise a new one
+    const last = localStorage.getItem('sysai.session.last') || '';
+    if (last) await listed;
+    if (current()) return;
+    if (last && S.sessions.some((s) => s.sessionId === last)) {
+      selectConv(last);
+      return;
+    }
     try {
       await newDraft();
     } catch (err) {
@@ -280,6 +329,7 @@ async function loadSessions(more = false) {
       for (const g of got) {
         const conv = S.convs.get(g.sessionId);
         if (conv && conv.title && !g.title) g.title = conv.title;
+        if (conv && conv.cwd && !g.cwd) g.cwd = conv.cwd;
       }
       S.sessions = [...local, ...got];
     }
@@ -395,7 +445,7 @@ class Pane {
       attach: (p) => composer.attach(p),
     });
     this.canvas = new CanvasView({ focus: () => this.show('canvas'), mention: (t) => composer.fill(t) });
-    this.projects = new ProjectsView({ open: (p) => openPath(p), ask: (t) => composer.fill(t) });
+    this.projects = new ProjectsView({ open: (p) => openPath(p), ask: (t, project) => askInProject(t, project) });
     this.sections = { preview: this.preview, canvas: this.canvas, files: this.explorer, storage: this.storage,
       projects: this.projects };
     this.tabs = {};
@@ -511,7 +561,8 @@ function drawSidebar() {
 function drawSessions() {
   const el = $('sessions');
   const q = $('search').value.trim().toLowerCase();
-  const items = S.sessions.filter((s) => !q || String(s.title || '').toLowerCase().includes(q));
+  const items = S.sessions.filter((s) => !q || String(s.title || '').toLowerCase().includes(q)
+    || ((projectOfSession(s.sessionId) || {}).name || '').toLowerCase().includes(q));
   clear(el);
   if (!items.length) {
     el.append(h('div', { class: 's-empty', text: q ? 'Ничего не нашлось.' : S.listError ? `Список разговоров не загрузился: ${S.listError}`
@@ -525,9 +576,10 @@ function drawSessions() {
     const conv = S.convs.get(s.sessionId);
     const busy = conv && (conv.running || conv.waiting);
     const title = (conv && conv.title) || s.title || 'Без названия';
-    el.append(h('button', { class: `s-item${s.sessionId === S.current ? ' on' : ''}${conv && conv.waiting ? ' waits' : ''}`, title,
-      onclick: () => selectConv(s.sessionId) },
-    h('span', { class: 't', text: title }), busy ? h('span', { class: 'busy', title: conv.waiting ? 'Ждёт вашего ответа' : 'Работает' })
+    const project = projectOfSession(s.sessionId);
+    el.append(h('button', { class: `s-item${s.sessionId === S.current ? ' on' : ''}${conv && conv.waiting ? ' waits' : ''}`,
+      title: project ? `${title}\nПроект: ${project.name}` : title, onclick: () => selectConv(s.sessionId) },
+    h('span', { class: 't' }, project ? h('i', { class: 's-project', text: project.name }) : null, title), busy ? h('span', { class: 'busy', title: conv.waiting ? 'Ждёт вашего ответа' : 'Работает' })
       : h('span', { class: 'when', text: when(s.updatedAt, { short: true }) })));
   }
   if (S.cursor && !q) el.append(h('button', { class: 's-more', text: 'Показать ещё', onclick: () => loadSessions(true) }));
@@ -536,7 +588,8 @@ function drawSessions() {
 function drawTop() {
   const conv = current();
   const s = conv && S.sessions.find((x) => x.sessionId === conv.id);
-  $('top-title').textContent = conv ? (conv.title || (s && s.title) || (conv.draft ? 'Новый разговор' : 'Разговор')) : '';
+  const project = conv && projectOf(conv.cwd || (s && s.cwd));
+  $('top-title').textContent = conv ? `${project ? `${project.name} · ` : ''}${conv.title || (s && s.title) || (conv.draft ? 'Новый разговор' : 'Разговор')}` : '';
   const acts = $('top-actions');
   acts.replaceChildren(h('button', { class: `icon-btn${pane && pane.opened ? ' on' : ''}`, title: 'Файлы и просмотр (Ctrl+B)',
     onclick: () => pane.toggle() }, icon('panel')));

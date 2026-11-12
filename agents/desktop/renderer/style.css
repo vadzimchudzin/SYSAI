@@ -453,3 +453,7 @@ body.resizing { cursor: col-resize; } body.resizing iframe { pointer-events: non
 .cv-busy .spin { width: 10px; height: 10px; flex: none; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: cv-spin .8s linear infinite; }
 @keyframes cv-spin { to { transform: rotate(360deg); } }
 .cv-anchor { position: fixed; width: 0; height: 0; }
+.pj-hint { padding: 4px 8px 8px; font-size: 12px; color: var(--faint); line-height: 1.45; }
+.pj-extra { display: flex; align-items: center; gap: 8px; margin: 6px 8px 4px; padding: 7px 10px; border-radius: var(--r-sm); background: var(--amber-bg); color: var(--amber); font-size: 12px; line-height: 1.4; }
+.pj-extra span { flex: 1; min-width: 0; } .pj-extra .btn { flex: none; }
+.s-item .s-project { font-style: normal; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--clay); background: var(--clay-bg); border-radius: 4px; padding: 1px 5px; margin-right: 6px; vertical-align: 1px; }
