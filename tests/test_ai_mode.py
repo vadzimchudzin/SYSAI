@@ -779,3 +779,48 @@ def test_the_telethon_names_we_rely_on_exist():
     for method in ("send_code_request", "sign_in", "send_message", "send_file", "iter_dialogs", "get_messages",
                    "send_read_acknowledge", "action", "log_out", "get_entity", "is_user_authorized"):
         assert hasattr(TelegramClient, method), method
+
+
+def test_a_message_that_met_the_spent_daily_limit_waits_and_is_answered_when_there_is_money(tgacc, model, monkeypatch):
+    """The limit of the day is not a fault of the message: it is not one of the three attempts, it is not given up —
+    it waits and gets its answer when the limit is raised or the next day begins."""
+    make_meeting(task_status="sent")
+    spent = {"on": True}
+    real = model.__call__
+
+    def chat(model_name, messages, **kwargs):
+        if spent["on"]:
+            raise llm.BudgetError("Дневной лимит расходов на ИИ исчерпан: $5.05 из $5.00")
+        return real(model_name, messages, **kwargs)
+    monkeypatch.setattr(llm, "chat", chat)
+    agent.handle_incoming(incoming(text="привет"))
+    with SessionLocal() as s:
+        row_id = s.query(ConversationMessage).filter_by(chat_id="42").one().id
+    for _ in range(5):
+        agent.process(row_id)
+    with SessionLocal() as s:
+        row = s.get(ConversationMessage, row_id)
+        assert row.status == "agent_pending" and "Дневной лимит" in row.error and not row.result.get("attempts")
+        assert row.result["retry_at"] > now().isoformat()
+        row.created_at = now() - dt.timedelta(minutes=5)
+        s.commit()
+    spent["on"] = False
+    model.decisions.append({"reply": "Привет! Чем помочь?", "actions": []})
+    agent.run_pending()                      # not yet: the message is tried again in ten minutes, not every pass
+    assert tgacc.sent == []
+    with SessionLocal() as s:
+        row = s.get(ConversationMessage, row_id)
+        row.result = {**row.result, "retry_at": (now() - dt.timedelta(seconds=1)).isoformat()}
+        s.commit()
+    agent.run_pending()
+    assert tgacc.sent == [("42", "Привет! Чем помочь?")]
+
+
+def test_an_answer_is_held_at_night_but_not_on_a_day_off(tgacc, model, monkeypatch):
+    seen = []
+    monkeypatch.setattr(agent.userbot, "quiet_until", lambda *a, **kw: seen.append(kw.get("answering")))
+    make_meeting(task_status="sent")
+    model.decisions.append({"reply": "Привет!", "actions": []})
+    agent.handle_incoming(incoming(text="привет"))
+    agent.run_pending()
+    assert seen and all(seen)

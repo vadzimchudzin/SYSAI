@@ -2,6 +2,7 @@
 import json
 
 import httpx
+import pytest
 
 from app import llm, settings_store
 from app.db import LlmSpend, SessionLocal
@@ -88,6 +89,15 @@ def test_budgets_stop_the_agent_with_a_clear_reason(client, net_agent, monkeypat
     assert r.status_code == 429 and "лимит" in r.json()["error"]["message"].lower()
     assert len(up.bodies) == 2
     assert llm.spent_today() > 0
+    # what the agents on the computers spent stops them, not the AI employee and the meetings: these are measured by
+    # the company's own spend
+    assert llm.spent_today(own=True) == 0 and llm.spent_by_agents_today() == llm.spent_today()
+    llm.check_budget()
+    with pytest.raises(llm.BudgetError):
+        llm.check_budget(everything=True)
+    llm.record_cost("x/own", {"cost": 0.02})
+    with pytest.raises(llm.BudgetError, match="Дневной лимит"):
+        llm.check_budget()
 
 
 def test_no_key_and_upstream_failures(client, net_agent, monkeypatch):

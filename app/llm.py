@@ -31,6 +31,11 @@ class LLMError(RuntimeError):
         super().__init__(*(redact(a) if isinstance(a, str) else a for a in args))
 
 
+class BudgetError(LLMError):
+    """The daily limit is spent: nothing is wrong with the request, it only has to wait for the next day or a
+    bigger limit."""
+
+
 class IncompleteResponse(LLMError):
     pass
 
@@ -75,10 +80,21 @@ def _today() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
 
-def spent_today() -> float:
-    """Money spent on OpenRouter today (UTC), from the costs the service itself recorded."""
+def spent_today(own: bool = False) -> float:
+    """Money spent on OpenRouter today (UTC), from the costs the service itself recorded. `own` — without what the
+    agents on the computers spent through the gateway (app/net): the AI employee, the meetings, the checks."""
     with db.SessionLocal() as s:
         total = s.query(func.coalesce(func.sum(db.LlmSpend.cost), 0.0)).filter(db.LlmSpend.day == _today()).scalar()
+    total = float(total or 0.0)
+    return max(0.0, total - spent_by_agents_today()) if own else total
+
+
+def spent_by_agents_today() -> float:
+    """What the agents on the computers spent today (UTC): the gateway writes every request of theirs both here
+    (net_spend) and into the company's spend."""
+    from .net.models import NetSpend
+    with db.SessionLocal() as s:
+        total = s.query(func.coalesce(func.sum(NetSpend.cost), 0.0)).filter(NetSpend.day == _today()).scalar()
     return float(total or 0.0)
 
 
@@ -90,13 +106,16 @@ def budget_usd() -> float:
         return 0.0
 
 
-def check_budget() -> None:
+def check_budget(everything: bool = False) -> None:
+    """The daily limit. The company's own work (the AI employee, the meetings) is measured by its own spend: an agent
+    on a computer that worked all day must not leave the AI employee silent. The agents (`everything` — the gateway
+    asks so) stop when the whole spend of the day, theirs included, reaches the limit."""
     limit = budget_usd()
     if limit <= 0:
         return
-    spent = spent_today()
+    spent = spent_today(own=not everything)
     if spent >= limit:
-        raise LLMError(f"Дневной лимит расходов на ИИ исчерпан: ${spent:.2f} из ${limit:.2f}. "
+        raise BudgetError(f"Дневной лимит расходов на ИИ исчерпан: ${spent:.2f} из ${limit:.2f}. "
                        "Новые запросы пойдут завтра (по UTC) или после увеличения лимита в настройках")
 
 

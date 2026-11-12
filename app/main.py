@@ -2917,6 +2917,7 @@ def settings_view(request: Request, msg: str = ""):
     return page(request, "settings.html", s=st, chats=[] if ai else known_chats(), msg=msg, masked=masked, env=env,
                 digest_frequencies=digest.FREQUENCY_RU, weekdays=digest.WEEKDAYS_RU, digest_people=_telegram_people(),
                 account=userbot.status(), persona_default=voice_default_persona(), spent=round(llm.spent_today(), 2),
+                spent_agents=round(llm.spent_by_agents_today(), 2),
                 notion=notion.connection_status(), storage=storage.describe(), storage_usage=audio_archive.usage(),
                 retention_days=config.RECORDING_RETENTION_DAYS, diarization_methods=diarize.METHODS,
                 diarization_hints=diarize.HINTS, voice_service=config.voice_service_enabled(),

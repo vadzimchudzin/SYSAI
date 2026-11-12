@@ -1308,7 +1308,7 @@ def _run(run_id: int) -> None:
 
 def _limit_hit(run_id: int) -> bool:
     limit = llm.budget_usd()
-    return bool(limit) and llm.spent_today() >= limit
+    return bool(limit) and llm.spent_today(own=True) >= limit
 
 
 # ----------------------------------------------------------------------------- the comparison

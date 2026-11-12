@@ -33,6 +33,7 @@ log = logging.getLogger("sysai.agent")
 MAX_ATTEMPTS = 3
 RECENT_FILES_HOURS = 48
 RETRY_AFTER = 20        # seconds before a waiting message is picked up again
+BUDGET_RETRY = 600      # seconds before a message that met the spent daily limit is tried again
 TALKING_HOURS = 8       # within this time a conversation is "going on": no new greeting
 MAX_REPLY = 3500
 OPEN_STATUSES = ("draft", "sent", "awaiting_deadline", "in_progress", "blocked")
@@ -42,6 +43,11 @@ _locks = collections.defaultdict(threading.Lock)
 
 class AgentError(RuntimeError):
     """The model's decision cannot be carried out; the message is retried or given up, never answered."""
+
+
+class AgentWaits(AgentError):
+    """Nothing is wrong with the message: the daily limit is spent. It waits (BUDGET_RETRY) and is answered when the
+    limit is raised or the next day begins — it is not one of the attempts and is never given up for this."""
 
 
 def _testing() -> bool:
@@ -181,8 +187,8 @@ def handle_incoming(msg: dict) -> None:
     if row_id is None:
         return
     _link_case(row_id)
-    if userbot.quiet_until() is not None:
-        return  # the reply waits in the queue until the quiet hours end (see run_pending)
+    if userbot.quiet_until(answering=True) is not None:
+        return  # the reply waits in the queue until the quiet hours end (see run_pending); a day off does not hold it
     if _testing():
         process(row_id)
     else:
@@ -350,13 +356,15 @@ def run_pending() -> None:
     """Retries messages that could not be answered yet (model unavailable, Telegram hiccup)."""
     if not userbot.ai_mode():
         return
-    if userbot.quiet_until() is not None:
+    if userbot.quiet_until(answering=True) is not None:
         return
     limit = now() - dt.timedelta(seconds=RETRY_AFTER)
+    moment = now().isoformat()
     with SessionLocal() as s:
         ids = [r.id for r in s.query(ConversationMessage).filter(
             ConversationMessage.role == "user", ConversationMessage.status == "agent_pending",
-            ConversationMessage.created_at < limit).order_by(ConversationMessage.id).all()]
+            ConversationMessage.created_at < limit).order_by(ConversationMessage.id).all()
+            if str((r.result or {}).get("retry_at") or "") <= moment]
     for row_id in ids:
         process(row_id) if _testing() else POOL.submit(process, row_id)
 
@@ -381,9 +389,13 @@ def process(row_id: int) -> None:
                 row = s.get(ConversationMessage, row_id)
                 if row is not None and row.status == "agent_pending":
                     result = dict(row.result or {})
-                    result["attempts"] = int(result.get("attempts", 0)) + 1
+                    if isinstance(exc, AgentWaits):  # the limit of the day: not an attempt, tried again later
+                        result["retry_at"] = (now() + dt.timedelta(seconds=BUDGET_RETRY)).isoformat()
+                    else:
+                        result.pop("retry_at", None)
+                        result["attempts"] = int(result.get("attempts", 0)) + 1
                     row.result, row.error = result, str(exc)[:500]
-                    if result["attempts"] >= MAX_ATTEMPTS:
+                    if result.get("attempts", 0) >= MAX_ATTEMPTS:
                         row.status = "agent_failed"
                     s.commit()
 
@@ -915,6 +927,8 @@ def _decide(system: str, ctx: dict, text: str, feedback: str = "", *, model: str
         return _decide_tools(system, ctx, text, feedback, model, person, recall)
     except llm.ToolsUnsupported:
         raise
+    except llm.BudgetError as exc:
+        raise AgentWaits(str(exc)[:300]) from exc
     except llm.LLMError as exc:
         raise AgentError(f"модель недоступна: {str(exc)[:200]}") from exc
 

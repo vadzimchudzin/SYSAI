@@ -313,7 +313,7 @@ def prepare(ctx: AgentCtx, body, plan: Plan) -> Plan:
         if spent >= project_limit:
             raise GatewayError(429, "budget_exceeded", f"Бюджет проекта {plan.project} исчерпан: ${spent:.2f} из ${project_limit:.2f}")
     try:
-        llm.check_budget()
+        llm.check_budget(everything=True)  # the agents stop at the whole spend of the day; the AI employee — at its own
     except llm.LLMError as exc:
         raise GatewayError(429, "budget_exceeded", str(exc)) from exc
     out = {k: v for k, v in body.items() if k not in DROP}
