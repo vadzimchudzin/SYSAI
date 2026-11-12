@@ -28,23 +28,30 @@ from .. import config, llm, settings_store
 from ..db import SessionLocal
 from . import access, trace
 from .agents import AgentCtx
-from .models import NetSpend
+from .models import NetAgent, NetSpend
 
 log = logging.getLogger("sysai.net.gateway")
 TIERS = access.TIERS
-DEFAULT_MODELS = {"cheap": "google/gemini-2.5-flash-lite", "mid": "google/gemini-2.5-flash", "strong": "google/gemini-2.5-pro",
-                  "vision": ""}
+# Models with no shutdown date in the OpenRouter catalog (checked 12.11.2026). The ones before them left or leave:
+# gemini-2.5-flash and -pro are re-routed by Google on 01.12.2026 (to the two below, at their prices), gpt-4.1-nano
+# was shut down on 23.10.2026, gpt-5 goes on 11.12.2026, gpt-4.1-mini on 14.01.2027.
+DEFAULT_MODELS = {"cheap": "google/gemini-2.5-flash-lite", "mid": "google/gemini-3.5-flash-lite",
+                  "strong": "google/gemini-3.8-flash", "vision": ""}
+VISION_DEFAULT = "google/gemini-3.5-flash-lite"
 # the spare model of each tier: another provider, about the same price and strength, pictures too
-DEFAULT_FALLBACK = {"cheap": "openai/gpt-4.1-nano", "mid": "openai/gpt-4.1-mini", "strong": "openai/gpt-5",
-                    "vision": "openai/gpt-4.1-mini"}
+DEFAULT_FALLBACK = {"cheap": "openai/gpt-6-luna", "mid": "anthropic/claude-haiku-5.5", "strong": "openai/gpt-6.1-terra",
+                    "vision": "openai/gpt-6-luna"}
 RETRY_ON = (404, 408, 429, 500, 502, 503, 504)  # OpenRouter failed the model: the spare one may answer
 DROP = ("models", "route", "user", "sysai")  # no way around the tier: no own model lists or routing
 JEV_ROUTER = "typesafe/jev-router"
 JEV_EXCLUDE_MAX = (1024, 65_536)    # patterns and characters the router takes in excluded_models
-JEV_REST = 600                       # seconds without Jev after it said «unavailable» or «no access»
-FALL_BACK_ON = (400, 404, 500, 502, 503, 504)
+JEV_REST = 600                       # seconds without Jev after it failed a request, whatever the reason
 CATALOG_TTL, CATALOG_RETRY = 12 * 3600, 600
-_state = {"prices": {}, "prices_at": 0.0, "prices_failed": 0.0, "jev_rest_until": 0.0, "jev_why": ""}
+_state = {"prices": {}, "windows": {}, "prices_at": 0.0, "prices_failed": 0.0, "jev_rest_until": 0.0, "jev_why": ""}
+# Hermes squeezes a conversation at compression.threshold_tokens (access.render_hermes). The real window of a model is
+# told to it (/v1/models) only when the synchronizer on the computer writes that threshold: without it Hermes would
+# squeeze at half of the window — past 500 thousand tokens for a model of a million.
+SYNC_WITH_COMPRESSION = (0, 4, 0)
 _lock = threading.Lock()
 
 
@@ -68,6 +75,7 @@ class Plan:
     task: str = ""
     role: str = ""
     route: str = ""
+    anatomy: dict | None = None  # what the request is made of (trace.anatomy)
     fallback: str = ""        # sysai/auto: the tier when Jev cannot route
     includes: tuple = ()      # sysai/auto: the models of the agent's tiers
     backup: str = ""          # the spare model of the tier (ОПО-5.5); "" — none or already asked
@@ -116,7 +124,7 @@ def model_for(tier: str) -> str:
     models = settings_store.get("agents_models") or {}
     name = str((models.get(tier) if isinstance(models, dict) else "") or DEFAULT_MODELS.get(tier) or "").strip()
     if tier == "vision" and not name:
-        name = str(settings_store.get("vision_model") or "google/gemini-2.5-flash")
+        name = str(settings_store.get("vision_model") or VISION_DEFAULT)
     return name
 
 
@@ -168,7 +176,7 @@ def prices() -> dict:
     try:
         r = _get(f"{config.OPENROUTER_BASE_URL}/models", _headers())
         rows = r.json().get("data") if r.status_code == 200 else None
-        found = {}
+        found, windows = {}, {}
         for m in rows if isinstance(rows, list) else []:
             try:
                 p = m.get("pricing") or {}
@@ -177,15 +185,30 @@ def prices() -> dict:
                 continue
             if isinstance(m.get("id"), str) and prompt >= 0 and completion >= 0:  # routers are priced -1
                 found[m["id"]] = (prompt, completion)
+                size = m.get("context_length")
+                if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                    windows[m["id"]] = size
         if not found:
             raise ValueError(f"no models (HTTP {r.status_code})")
         with _lock:
-            _state.update(prices=found, prices_at=stamp)
+            _state.update(prices=found, windows=windows, prices_at=stamp)
     except Exception as exc:  # noqa: BLE001  without prices sysai/auto goes to «mid»
         log.warning("the OpenRouter catalog is not available: %s", exc)
         with _lock:
             _state["prices_failed"] = stamp
     return _state["prices"]
+
+
+def window_of(tier: str, rules: dict) -> int:
+    """The context window of the tier's model by the OpenRouter catalog (0 — not known); of sysai/auto — the smallest
+    of the models Jev may pick."""
+    prices()
+    with _lock:
+        windows = dict(_state["windows"])
+    if tier == "auto":
+        sizes = [windows.get(model_for(t), 0) for t in rules["models"]["tiers"] if t in access.TEXT_TIERS]
+        return min(sizes) if sizes and all(sizes) else 0
+    return windows.get(model_for(tier), 0)
 
 
 def jev_plugin(rules: dict) -> tuple[dict | None, str, list]:
@@ -253,9 +276,16 @@ def draft(body, project: str = "", skill: str = "", task: str = "", stream: bool
     tag = body.get("sysai") if isinstance(body.get("sysai"), dict) else {}
     role = str(tag.get("role") or "")
     tier = tier_of(body.get("model"))
-    return Plan(tier=tier, model="" if tier else _clip(body.get("model"), 120), out={}, project=_clip(project),
+    try:
+        anatomy = trace.anatomy(body)
+    except Exception:  # noqa: BLE001  the request is served whatever its shape
+        log.exception("could not measure a request")
+        anatomy = None
+    # the window names the folder of the project in the first message of a conversation: Hermes sends no headers
+    return Plan(tier=tier, model="" if tier else _clip(body.get("model"), 120), out={},
+                project=_clip(project) or _clip((anatomy or {}).get("project")),
                 skill=_clip(skill), task=_clip(task or tag.get("task")), role=role if role in trace.ROLES else "",
-                stream=stream)
+                stream=stream, anatomy=anatomy)
 
 
 def prepare(ctx: AgentCtx, body, plan: Plan) -> Plan:
@@ -354,14 +384,25 @@ def _upstream_error(status: int, text: str) -> GatewayError:
 
 def _jev_failed(plan: Plan, status: int, text: str) -> bool:
     """Jev did not route: the request goes again to the fallback tier. True when it should."""
-    if not plan.jev or status not in FALL_BACK_ON:
+    if not plan.jev or status == 401:  # 401: the key itself is bad, the tier would answer the same
         return False
-    why = f"HTTP {status} {_message(text)}"
-    if status in (404, 503):  # no access to the router or it is down: do not ask it for a while
-        _jev_rest(why)
+    _jev_down(plan, f"HTTP {status} {_message(text)}")  # whatever the status: the tier answers, Jev rests
+    return True
+
+
+def _jev_down(plan: Plan, why: str) -> None:
+    _jev_rest(why)
     log.warning("Jev did not route a request (%s): falling back to sysai/%s", why[:200], plan.fallback)
     plan.fall_back(why)
-    return True
+
+
+def _error_body(r: httpx.Response) -> bool:
+    """OpenRouter commits `200` before the provider answers: a later failure is an `error` object in the body."""
+    try:
+        data = r.json()
+    except ValueError:
+        return False
+    return isinstance(data, dict) and bool(data.get("error")) and not data.get("choices")
 
 
 def _backup_failed(plan: Plan, status: int, text: str) -> bool:
@@ -406,7 +447,8 @@ def record(ctx: AgentCtx, plan: Plan, usage=None, served: str = "", ms: int = 0,
                            completion_tokens=int(usage.get("completion_tokens") or 0), cached_tokens=_cached(usage),
                            cost=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else 0.0,
                            ms=ms, ok=error is None, error=f"{error.code}: {error.message}"[:300] if error else "",
-                           role=plan.role, task=plan.task, route=route)
+                           role=plan.role, task=plan.task, route=route,
+                           **trace.anatomy_columns(plan.anatomy, int(usage.get("prompt_tokens") or 0)))
             s.add(row)
             s.flush()
             if plan.debug is not None:
@@ -419,6 +461,24 @@ def record(ctx: AgentCtx, plan: Plan, usage=None, served: str = "", ms: int = 0,
         log.exception("could not record the request of agent %s", ctx.name)
 
 
+def record_refused_token(agent_id: int, user_id, why: str) -> None:
+    """A request with a token SYSAI no longer takes: a row of the trace, at no cost — at most one a minute per agent
+    (the harness asks again and again)."""
+    stamp = time.time()
+    with _lock:
+        seen = _state.setdefault("refused", {})
+        if stamp - seen.get(agent_id, 0.0) < 60:
+            return
+        seen[agent_id] = stamp
+    try:
+        with SessionLocal() as s:
+            s.add(NetSpend(day=_today(), agent_id=agent_id, user_id=user_id, tier="", model="", ok=False,
+                           error=f"unauthorized: {why}"[:300]))
+            s.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("could not record a refused token of agent %s", agent_id)
+
+
 def complete(ctx: AgentCtx, body, project: str = "", skill: str = "", task: str = "") -> dict:
     plan = draft(body, project, skill, task)
     started = time.monotonic()
@@ -426,9 +486,20 @@ def complete(ctx: AgentCtx, body, project: str = "", skill: str = "", task: str 
         prepare(ctx, body, plan)
         url = f"{config.OPENROUTER_BASE_URL}/chat/completions"
         try:
-            r = _post(url, plan.out, _headers())
-            while r.status_code != 200 and _again(plan, r.status_code, r.text):  # Jev, then the spare model: twice at most
-                r = _post(url, plan.out, _headers())
+            while True:  # Jev, then the spare model: twice at most
+                try:
+                    r = _post(url, plan.out, _headers())
+                except httpx.HTTPError as exc:
+                    if not plan.jev:
+                        raise
+                    _jev_down(plan, f"{type(exc).__name__} {exc}"[:100])
+                    continue
+                if r.status_code == 200 and plan.jev and _error_body(r):
+                    _jev_down(plan, "HTTP 200 " + _message(r.text))
+                    continue
+                if r.status_code != 200 and _again(plan, r.status_code, r.text):
+                    continue
+                break
         except httpx.HTTPError as exc:
             raise GatewayError(502, "upstream_error", f"OpenRouter недоступен: {exc}") from exc
         if r.status_code != 200:
@@ -452,6 +523,9 @@ def _open_stream(plan: Plan):
     try:
         client, resp = _open(url, plan.out, _headers())
     except httpx.HTTPError as exc:
+        if plan.jev:
+            _jev_down(plan, f"{type(exc).__name__} {exc}"[:100])
+            return _open_stream(plan)
         raise GatewayError(502, "upstream_error", f"OpenRouter недоступен: {exc}") from exc
     if resp.status_code == 200:
         return client, resp
@@ -512,10 +586,33 @@ def stream(ctx: AgentCtx, body, project: str = "", skill: str = "", task: str = 
     return relay()
 
 
+def _version(text) -> tuple:
+    parts = []
+    for piece in str(text or "").split(".")[:3]:
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts + [0] * (3 - len(parts)))
+
+
+def squeezes(agent_id: int) -> bool:
+    """The synchronizer of the agent's computer writes the compression threshold into the Hermes profile."""
+    with SessionLocal() as s:
+        agent = s.get(NetAgent, agent_id)
+        versions = agent.versions if agent is not None and isinstance(agent.versions, dict) else {}
+    return _version(versions.get("sysai-agent")) >= SYNC_WITH_COMPRESSION
+
+
 def models_list(ctx: AgentCtx) -> dict:
     rules = access.rules_for(ctx.agent_id)
-    return {"object": "list", "data": [{"id": f"sysai/{t}", "object": "model", "created": 0, "owned_by": "sysai",
-                                        "name": f"SYSAI · {access.TIER_RU[t]}"} for t in rules["models"]["tiers"]]}
+    known = squeezes(ctx.agent_id)
+    out = []
+    for t in rules["models"]["tiers"]:
+        item = {"id": f"sysai/{t}", "object": "model", "created": 0, "owned_by": "sysai", "name": f"SYSAI · {access.TIER_RU[t]}"}
+        size = window_of(t, rules) if known else 0
+        if size:
+            item["context_length"] = size
+        out.append(item)
+    return {"object": "list", "data": out}
 
 
 def summary(agent_id: int | None = None, days: int = 7) -> dict:

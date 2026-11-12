@@ -5,7 +5,9 @@ Steps go together into runs: one task of the board (X-SYSAI-Task) or, without it
 The debug mode of an agent (24 hours, then it turns itself off) also keeps the texts: the end of every request and
 the answer of the model, the arguments and the result of every MCP call (net_debug, kept 7 days)."""
 import datetime as dt
+import hashlib
 import json
+import re
 import threading
 import time
 
@@ -147,6 +149,88 @@ def request_excerpt(body: dict) -> dict:
                          if k in body}}
 
 
+# ----------------------------------------------------------------------------- what a request is made of
+PROJECT_LINE = re.compile(r"Папка проекта:[ \t]*([^\r\n]+)")  # the window's requests of a project (lib/projects.js)
+PRICE_STEP = 272_000   # prompt tokens from which the big models cost twice as much (OpenRouter, 11.2026)
+IMAGE_PARTS = ("image_url", "input_image", "image")
+
+
+def _chars(content) -> tuple[int, int]:
+    """(characters of the text, pictures) of the content of a message."""
+    if isinstance(content, str):
+        return len(content), 0
+    size = images = 0
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in IMAGE_PARTS:
+            images += 1
+        elif isinstance(part.get("text"), str):
+            size += len(part["text"])
+    return size, images
+
+
+def anatomy(body) -> dict:
+    """The parts of a model request by size, in characters: the definitions of the tools, the system prompt, the
+    conversation (with the results of the tools) and the results the last step brought; pictures; which request of
+    the conversation it is; the conversation's mark; the project the window named in its first message. Every request
+    carries the whole conversation again, so this is where its tokens come from."""
+    body = body if isinstance(body, dict) else {}
+    messages = [m for m in body.get("messages") or [] if isinstance(m, dict)] if isinstance(body.get("messages"), list) else []
+    tools = [t for t in body.get("tools") or [] if isinstance(t, dict)] if isinstance(body.get("tools"), list) else []
+    names = [str((t.get("function") or {}).get("name") or t.get("name") or "") for t in tools]
+    out = {"n_msgs": len(messages), "n_tools": len(tools), "system_chars": 0, "history_chars": 0, "last_result_chars": 0,
+           "tools_chars": len(json.dumps(tools, ensure_ascii=False)) if tools else 0, "last_result_tool": "", "n_images": 0,
+           "turn": 1, "conv": "", "project": "", "tool_mode": "bridge" if "tool_search" in names else "eager" if tools else ""}
+    called, first_user, system_start, tail = {}, None, "", []
+    for m in messages:
+        role = m.get("role")
+        size, images = _chars(m.get("content"))
+        out["n_images"] += images
+        if role == "system":
+            out["system_chars"] += size
+            system_start = system_start or text_of(m.get("content"))[:200]
+            continue
+        for call in m.get("tool_calls") or [] if isinstance(m.get("tool_calls"), list) else []:
+            fn = call.get("function") if isinstance(call, dict) and isinstance(call.get("function"), dict) else {}
+            size += len(str(fn.get("name") or "")) + len(str(fn.get("arguments") or ""))
+            if isinstance(call, dict) and call.get("id"):
+                called[str(call["id"])] = str(fn.get("name") or "")
+        out["history_chars"] += size
+        if role == "assistant":
+            out["turn"] += 1
+        if role == "user" and first_user is None:
+            first_user = text_of(m.get("content"))
+        if role == "tool":
+            tail.append((size, str(m.get("name") or called.get(str(m.get("tool_call_id") or ""), ""))))
+        else:
+            tail = []
+    if tail:  # the conversation ends with the results of tools: what the last step added
+        out["last_result_chars"] = sum(size for size, _ in tail)
+        out["last_result_tool"] = max(tail)[1][:64]
+    if first_user is not None:
+        out["conv"] = hashlib.sha1((system_start + "\n" + first_user[:2000]).encode("utf-8", "replace")).hexdigest()[:10]
+        found = PROJECT_LINE.search(first_user[:4000])
+        if found:
+            out["project"] = re.split(r"[\\/]+", found.group(1).strip().rstrip("\\/"))[-1].strip()[:64]
+    return out
+
+
+def anatomy_columns(a, prompt_tokens: int = 0) -> dict:
+    """The columns of net_spend for the anatomy of a request. Tokens of the parts are estimates: the prompt tokens the
+    provider counted, shared by the characters of the parts (pictures are not in the shares)."""
+    if not isinstance(a, dict):
+        return {}
+    total = a["tools_chars"] + a["system_chars"] + a["history_chars"]
+
+    def share(chars):
+        return int(round(prompt_tokens * chars / total)) if total and prompt_tokens > 0 else 0
+    return {"n_msgs": a["n_msgs"], "n_tools": a["n_tools"], "tok_tools": share(a["tools_chars"]),
+            "tok_system": share(a["system_chars"]), "tok_history": share(a["history_chars"]),
+            "tok_last_result": share(a["last_result_chars"]), "last_result_tool": a["last_result_tool"],
+            "n_images": a["n_images"], "turn": a["turn"], "conv": a["conv"]}
+
+
 def answer_of(data: dict) -> dict:
     """The answer of a model (not streamed)."""
     choice = ((data.get("choices") or [{}])[0] if isinstance(data.get("choices"), list) else {}) or {}
@@ -198,7 +282,17 @@ def _model_step(r: NetSpend, texts: dict) -> dict:
             "role": ROLE_RU.get(r.role or "", r.role or ""), "route": r.route or "", "tokens": tokens,
             "prompt": r.prompt_tokens or 0, "completion": r.completion_tokens or 0, "cached": r.cached_tokens or 0,
             "cost": r.cost or 0.0, "ms": r.ms or 0, "error": r.error or "", "task": r.task or "",
-            "project": r.project or "", "skill": r.skill or "", "detail": "", "text": texts.get(("model", r.id))}
+            "project": r.project or "", "skill": r.skill or "", "detail": "", "text": texts.get(("model", r.id)),
+            "anatomy": _anatomy_step(r)}
+
+
+def _anatomy_step(r: NetSpend):
+    """What the request was made of, for the «Подробности» of a step; None for the rows written before it was kept."""
+    if not r.n_msgs:
+        return None
+    return {"turn": r.turn or 0, "conv": r.conv or "", "tools": r.tok_tools or 0, "n_tools": r.n_tools or 0,
+            "system": r.tok_system or 0, "history": r.tok_history or 0, "last": r.tok_last_result or 0,
+            "last_tool": r.last_result_tool or "", "images": r.n_images or 0}
 
 
 def _event_step(e: NetEvent, texts: dict) -> dict:
@@ -217,7 +311,7 @@ def _event_step(e: NetEvent, texts: dict) -> dict:
         rest = {k: v for k, v in d.items() if k not in ("task",)}
         detail = (e.target or "") + (" " + json.dumps(rest, ensure_ascii=False, default=str) if rest else "")
     return {"at": aware(e.at), "kind": kind, "ok": ok, "title": title, "model": "", "role": "", "route": "", "tokens": 0,
-            "prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "ms": int(d.get("ms") or 0), "error": error,
+            "prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "ms": int(d.get("ms") or 0), "error": error, "anatomy": None,
             "task": str(d.get("task") or ""), "project": "", "skill": "", "detail": clip(detail.strip(), 300),
             "text": texts.get(("mcp", e.id))}
 
@@ -240,7 +334,8 @@ def runs(agent_id: int, days: int = 3, limit: int = 3000) -> list:
         run = out[-1] if out else None
         if run is None or step["at"] - run["end"] > GAP or (step["task"] and run["task"] and step["task"] != run["task"]):
             run = {"start": step["at"], "end": step["at"], "task": "", "steps": [], "models": 0, "mcp": 0, "errors": 0,
-                   "tokens": 0, "cached": 0, "prompt": 0, "cost": 0.0, "model_ms": 0, "by_role": {}, "first_error": ""}
+                   "tokens": 0, "cached": 0, "prompt": 0, "cost": 0.0, "model_ms": 0, "by_role": {}, "first_error": "",
+                   "peak": 0, "over": 0}
             out.append(run)
         run["end"] = step["at"]
         run["task"] = run["task"] or step["task"]
@@ -252,6 +347,8 @@ def runs(agent_id: int, days: int = 3, limit: int = 3000) -> list:
             run["cached"] += step["cached"]
             run["cost"] += step["cost"]
             run["model_ms"] += step["ms"]
+            run["peak"] = max(run["peak"], step["prompt"])
+            run["over"] += step["prompt"] >= PRICE_STEP
             role = step["role"] or "главная"
             run["by_role"][role] = run["by_role"].get(role, 0) + step["tokens"]
         elif step["kind"] == "mcp":

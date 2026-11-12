@@ -3,5 +3,6 @@
 <span class="tr-when">{{ net_when(r.start) }}{% if r.steps|length > 1 %}–{{ clock(r.end)[:5] }}{% endif %}</span>
 <span class="tr-task">{% if r.task %}задача <b>{{ r.task }}</b>{% else %}<span class="muted">без задачи</span>{% endif %}</span>
 <span class="tr-nums">{{ r.models }} к моделям · {{ r.mcp }} MCP · {{ fmt_tokens(r.tokens) }} токенов{% if r.cached %} · из кэша {{ r.cache_pct }}%{% endif %} · ${{ '%.4f'|format(r.cost) if r.cost < 0.01 else '%.2f'|format(r.cost) }} · {{ r.minutes }} мин</span>
+{% if r.peak %}<span class="tr-nums{{ ' warn' if r.over }}" title="Самый большой запрос запуска. От 272 тыс. токенов большие модели стоят вдвое дороже.">до {{ fmt_tokens(r.peak) }} в запросе{% if r.over %} · {{ r.over }} от 272 тыс.{% endif %}</span>{% endif %}
 {% if r.errors %}<span class="pill red">ошибок: {{ r.errors }}</span>{% endif %}
 {% endmacro %}

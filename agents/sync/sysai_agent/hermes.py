@@ -16,11 +16,16 @@ from . import fsutil, paths
 # whole keys SYSAI owns; and parts of shared sections
 OWNED = ("model", "fallback_providers", "delegation", "approvals", "memory", "mcp_servers")
 OWNED_PARTS = {"providers": ("sysai",), "auxiliary": ("vision", "compression"), "skills": ("external_dirs", "create_dir"),
-               "security": ("redact_secrets",), "hooks": ("pre_tool_call",)}
+               "security": ("redact_secrets",), "hooks": ("pre_tool_call",),
+               # the size of a conversation is its cost: when it is squeezed and how big a result of a tool may be
+               "compression": ("enabled", "threshold_tokens"), "tool_budget": ("mcp_result_size_chars",),
+               "tool_output": ("max_bytes",)}
 ENV_MARK = "# SYSAI: строки ниже ведёт синхронизатор"
 CONFIG_HEAD = ("# model, delegation, fallback_providers, approvals, memory, mcp_servers, providers.sysai, auxiliary.vision,\n"
                "# auxiliary.compression, skills.external_dirs, skills.create_dir, security.redact_secrets,\n"
-               "# hooks.pre_tool_call ведёт SYSAI (синхронизатор перезапишет их правки); остальное — ваше.\n")
+               "# hooks.pre_tool_call, compression.enabled, compression.threshold_tokens,\n"
+               "# tool_budget.mcp_result_size_chars, tool_output.max_bytes ведёт SYSAI (синхронизатор перезапишет их\n"
+               "# правки); остальное — ваше.\n")
 CONFIG_BACKUP = "config.before-sysai.yaml"
 # Hermes runs a shell hook only after consent per (event, command); the synchronizer gives it for its own hook
 ALLOWLIST = "shell-hooks-allowlist.json"

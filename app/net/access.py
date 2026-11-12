@@ -54,6 +54,11 @@ WHOLE_PC = "*"
 # closed): `sysai-agent hook` checks the call by the signed rules (agents/sync/sysai_agent/hook.py).
 HOOK_COMMAND = "sysai-agent hook"
 HOOK_TIMEOUT = 30
+# The whole conversation goes to the model again with every request, so its size is the cost. Hermes squeezes it at
+# this many tokens — said outright: by itself it waits for half of the model's window (hundreds of thousands), and
+# from 272 thousand the big models cost twice as much. Big results of tools go to a file the agent reads in parts.
+COMPRESS_AT = 150_000
+RESULT_CHARS = 20_000
 
 # Never allowed, whatever the profile says (on top of the harness's own hard blocklist).
 ALWAYS_DENY = ("format *:*", "diskpart*", "bcdedit*", "vssadmin delete*", "cipher /w*", "rm -rf /*", "rm -rf ~*",
@@ -81,7 +86,9 @@ _ENGINEER = {
     "mcp": {"sysai": ["*"], "plc-kit": ["*"], "machine-expert": ["*"], "pic-index": ["*"], "doc-kit": ["*"], "cad": ["*"]},
     "data": {"projects": "own", "to_base": "read", "tags": "write", "questions": True, "people": True},
     "internet": {"mode": "all", "sites": []},
-    "models": {"tiers": ["cheap", "mid", "strong", "vision", "auto"], "main": "auto", "workers": "cheap",
+    # the main model is one for the whole conversation: a model that changes between requests (sysai/auto) reads
+    # nothing from the prompt cache; sysai/auto stays allowed — it is chosen in the profile or in the window
+    "models": {"tiers": ["cheap", "mid", "strong", "vision", "auto"], "main": "mid", "workers": "cheap",
                "auto_cost": "low", "budget_day_usd": 3.0, "budget_project_usd": 30.0},
     "schedule": [{"when": "каждые 15 минут", "task": "Проверить новые пакеты ТО по моим проектам"},
                  {"when": "пн–пт 09:00", "task": "Сводка: что сделано вчера и что ждёт меня"}],
@@ -99,7 +106,7 @@ _TO = {
     "mcp": {"sysai": ["*"], "cad": ["*"]},
     "data": {"projects": "department", "to_base": "write", "tags": "read", "questions": True, "people": True},
     "internet": {"mode": "all", "sites": []},
-    "models": {"tiers": ["cheap", "mid", "vision", "auto"], "main": "auto", "workers": "cheap", "auto_cost": "low",
+    "models": {"tiers": ["cheap", "mid", "vision", "auto"], "main": "mid", "workers": "cheap", "auto_cost": "low",
                "budget_day_usd": 2.0, "budget_project_usd": 0.0},
     "schedule": [],
     "chat": {"owner": True, "others": []},
@@ -543,14 +550,20 @@ def render_hermes(agent: str, rules: dict, server: str, tools=None, cache=()) ->
         "fallback_providers": [],
         "delegation": {"model": f"sysai/{workers}", "base_url": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}",
                        "max_concurrent_children": 3, "max_spawn_depth": 1,  # flat: workers do not delegate further
+                       "max_iterations": 60, "max_summary_chars": 8000,
                        "fallback_providers": [],
                        "request_overrides": {"extra_body": {"sysai": {"role": "workers"}}}},
-        "auxiliary": {"vision": {"provider": "custom", "base_url": f"{server}/v1",
+        # the helpers carry the agent's token themselves: without it they depend on Hermes passing the main one on,
+        # and a helper refused with 401 means a conversation that is never squeezed
+        "auxiliary": {"vision": {"provider": "custom", "base_url": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}",
                                  "model": "sysai/" + _plain(tiers, ("vision", "mid", "strong", "cheap"), main),
                                  "extra_body": {"sysai": {"role": "vision"}}},
-                      "compression": {"provider": "custom", "base_url": f"{server}/v1",
+                      "compression": {"provider": "custom", "base_url": f"{server}/v1", "api_key": "${SYSAI_AGENT_TOKEN}",
                                       "model": "sysai/" + _plain(tiers, ("cheap", "mid", "strong"), main),
                                       "extra_body": {"sysai": {"role": "compression"}}}},
+        "compression": {"enabled": True, "threshold_tokens": COMPRESS_AT},
+        "tool_budget": {"mcp_result_size_chars": RESULT_CHARS},
+        "tool_output": {"max_bytes": RESULT_CHARS},
         "approvals": {"mode": "off", "deny": deny},
         # the rules reach Hermes's own tools too: files, the internet, commands (fail closed — no answer, no action)
         "hooks": {"pre_tool_call": [{"command": HOOK_COMMAND, "matcher": "|".join(hook_tools(rules)),

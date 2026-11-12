@@ -214,6 +214,17 @@ class NetSpend(Base):
     role = Column(String(16), default="")                              # "" the main model | workers | compression | vision
     task = Column(String(64), default="")                              # X-SYSAI-Task: the task of the board
     route = Column(String(120), default="")                            # sysai/auto: «jev:low», «jev→mid: HTTP 503 …»
+    # what the request was made of (trace.anatomy); the tokens of the parts are estimates by their characters
+    n_msgs = Column(Integer, default=0)                                # messages of the conversation in the request
+    n_tools = Column(Integer, default=0)                               # definitions of tools in the request
+    tok_tools = Column(Integer, default=0)                             # … their tokens
+    tok_system = Column(Integer, default=0)                            # the system prompt
+    tok_history = Column(Integer, default=0)                           # the conversation: messages, results of tools
+    tok_last_result = Column(Integer, default=0)                       # of it — the results the last step brought
+    last_result_tool = Column(String(64), default="")                  # the tool of the biggest of them
+    n_images = Column(Integer, default=0)
+    turn = Column(Integer, default=0)                                  # which request of the conversation
+    conv = Column(String(12), default="")                              # the conversation's mark (system + first message)
 
 
 class NetDebug(Base):

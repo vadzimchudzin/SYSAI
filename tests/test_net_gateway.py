@@ -164,15 +164,15 @@ def test_web_plugins_need_the_whole_internet(client, net_agent, monkeypatch):
 # ----------------------------------------------------------------------------- sysai/auto: Jev Router (ОПО-5.8)
 CATALOG = {"data": [
     {"id": "google/gemini-2.5-flash-lite", "pricing": {"prompt": "0.0000001", "completion": "0.0000004"}},
-    {"id": "google/gemini-2.5-flash", "pricing": {"prompt": "0.0000003", "completion": "0.0000025"}},
-    {"id": "google/gemini-2.5-pro", "pricing": {"prompt": "0.00000125", "completion": "0.00001"}},
+    {"id": "google/gemini-3.5-flash-lite", "pricing": {"prompt": "0.0000003", "completion": "0.0000025"}},
+    {"id": "google/gemini-3.8-flash", "pricing": {"prompt": "0.00000125", "completion": "0.00001"}},
     {"id": "deepseek/deepseek-v3.2", "pricing": {"prompt": "0.00000027", "completion": "0.0000004"}},
     {"id": "anthropic/claude-opus-4.1", "pricing": {"prompt": "0.000015", "completion": "0.000075"}},
     {"id": "openai/o3-pro", "pricing": {"prompt": "0.00002", "completion": "0.00008"}},
     {"id": "x-ai/grok-long", "pricing": {"prompt": "0.000001", "completion": "0.00002"}},
     {"id": "typesafe/jev-router", "pricing": {"prompt": "-1", "completion": "-1"}},
 ]}
-SERVED = {"id": "gen-2", "model": "google/gemini-2.5-flash", "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+SERVED = {"id": "gen-2", "model": "google/gemini-3.5-flash-lite", "choices": [{"message": {"role": "assistant", "content": "ok"}}],
           "usage": {"prompt_tokens": 1000, "completion_tokens": 50, "cost": 0.001,
                     "prompt_tokens_details": {"cached_tokens": 600}}}
 
@@ -199,12 +199,12 @@ def test_auto_lets_jev_pick_only_among_the_agents_models(client, net_agent, monk
     assert body["reasoning"] == {"effort": "high"}  # a budget of tokens the router refuses; the effort is a hint
     plugin = body["plugins"][-1]
     assert plugin["id"] == "jev-router" and plugin["cost_tier"] == "low"
-    assert plugin["models"] == ["google/gemini-2.5-flash", "google/gemini-2.5-flash-lite", "google/gemini-2.5-pro"]
-    # dearer than gemini-2.5-pro per prompt or per completion token: never; routers (-1) are not models
+    assert plugin["models"] == ["google/gemini-2.5-flash-lite", "google/gemini-3.5-flash-lite", "google/gemini-3.8-flash"]
+    # dearer than gemini-3.8-flash per prompt or per completion token: never; routers (-1) are not models
     assert plugin["excluded_models"] == ["anthropic/claude-opus-4.1", "openai/o3-pro", "x-ai/grok-long"]
     with SessionLocal() as s:
         spend = s.query(NetSpend).one()
-        assert (spend.tier, spend.model, spend.route, spend.role) == ("auto", "google/gemini-2.5-flash", "jev:low", "workers")
+        assert (spend.tier, spend.model, spend.route, spend.role) == ("auto", "google/gemini-3.5-flash-lite", "jev:low", "workers")
         assert spend.cached_tokens == 600 and spend.ok and spend.error == "" and spend.ms >= 0
     access.set_agent_access(net_agent["id"], overrides={"models": {"auto_cost": "high"}})
     _ask(client, net_agent, model="sysai/auto")
@@ -289,7 +289,7 @@ def test_a_stream_through_jev_keeps_the_served_model_and_a_broken_end(client, ne
 def test_a_stream_the_agent_leaves_is_closed_and_counted(client, net_agent, monkeypatch):
     import anyio
     from app.net import agents, routes
-    lines = ["data: " + json.dumps({"model": "google/gemini-2.5-flash", "choices": [{"delta": {"content": "x"}}]}), "",
+    lines = ["data: " + json.dumps({"model": "google/gemini-3.5-flash-lite", "choices": [{"delta": {"content": "x"}}]}), "",
              "data: [DONE]", ""]
     upstream = FakeStream(lines)
     monkeypatch.setattr(gateway, "_open", lambda url, body, headers: (FakeClient(), upstream))
@@ -304,7 +304,7 @@ def test_a_stream_the_agent_leaves_is_closed_and_counted(client, net_agent, monk
     assert upstream.closed
     with SessionLocal() as s:
         spend = s.query(NetSpend).one()
-        assert spend.ok is False and spend.error.startswith("client_closed") and spend.model == "google/gemini-2.5-flash"
+        assert spend.ok is False and spend.error.startswith("client_closed") and spend.model == "google/gemini-3.5-flash-lite"
 
 
 # ----------------------------------------------------------------------------- spare models (ОПО-5.5)
@@ -377,3 +377,146 @@ def test_claude_tiers_get_prompt_cache_marks_in_the_hermes_config(client, net_ag
     assert provider["api"] == "https://sysai.example/v1" and provider["api_key"] == "${SYSAI_AGENT_TOKEN}"
     assert provider["models"]["sysai/strong"] == {"prompt_caching": True} and "sysai/mid" not in provider["models"]
     assert after["rev"] != before["rev"]  # the computer re-applies the configuration
+
+
+def test_the_default_models_are_not_the_ones_that_are_shut_down():
+    gone = ("google/gemini-2.5-flash", "google/gemini-2.5-pro", "openai/gpt-4.1-nano", "openai/gpt-4.1-mini", "openai/gpt-5")
+    named = [*gateway.DEFAULT_MODELS.values(), *gateway.DEFAULT_FALLBACK.values(), gateway.VISION_DEFAULT,
+             settings_store.DEFAULTS["vision_model"]]
+    assert not [m for m in named if m in gone]
+    for tier in ("cheap", "mid", "strong"):  # the spare one is of another provider
+        assert gateway.DEFAULT_MODELS[tier].split("/")[0] != gateway.DEFAULT_FALLBACK[tier].split("/")[0]
+
+
+# ----------------------------------------------------------------------------- Jev fails in any way: the tier answers
+class JevFails(Upstream):
+    """Jev answers with `status` (or `data` at 200, or the connection breaks); the tier's model answers well."""
+
+    def __init__(self, status=200, data=None, broken=None):
+        super().__init__(status, data)
+        self.broken = broken
+
+    def post(self, url, body, headers):
+        self.bodies.append(body)
+        if body["model"] != gateway.JEV_ROUTER:
+            return httpx.Response(200, json={**SERVED, "model": body["model"]})
+        if self.broken:
+            raise self.broken
+        return httpx.Response(self.status, json=self.data or {"error": {"message": "no"}})
+
+
+def test_any_failure_of_jev_goes_to_the_tier_and_lets_jev_rest(client, net_agent, monkeypatch):
+    _catalog(monkeypatch)
+    cases = [JevFails(s) for s in (400, 402, 403, 404, 408, 413, 422, 429, 500, 502, 503, 504, 529)]
+    cases.append(JevFails(200, {"error": {"message": "provider returned error", "code": 502}}))  # 200 with an error inside
+    cases.append(JevFails(broken=httpx.ReadTimeout("timed out")))
+    for up in cases:
+        gateway._state["jev_rest_until"] = 0.0
+        monkeypatch.setattr(gateway, "_post", up.post)
+        r = _ask(client, net_agent, model="sysai/auto")
+        assert r.status_code == 200, (up.status, r.text)
+        assert [b["model"] for b in up.bodies] == [gateway.JEV_ROUTER, gateway.DEFAULT_MODELS["mid"]]
+        assert gateway._jev_resting()  # whatever the reason: not asked again for a while
+        with SessionLocal() as s:
+            row = s.query(NetSpend).order_by(NetSpend.id.desc()).first()
+            assert row.ok and row.model == gateway.DEFAULT_MODELS["mid"] and row.route.startswith("jev→mid: ")
+    # the key itself is bad: the tier would hear the same, so the agent hears it
+    gateway._state["jev_rest_until"] = 0.0
+    up = JevFails(401)
+    monkeypatch.setattr(gateway, "_post", up.post)
+    assert _ask(client, net_agent, model="sysai/auto").status_code == 502 and len(up.bodies) == 1
+    with SessionLocal() as s:
+        row = s.query(NetSpend).order_by(NetSpend.id.desc()).first()
+        assert row.ok is False and row.model == gateway.JEV_ROUTER and row.error.startswith("upstream_auth")
+
+
+def test_a_stream_jev_cannot_open_goes_to_the_tier(client, net_agent, monkeypatch):
+    _catalog(monkeypatch)
+    opened = []
+
+    def fake_open(url, body, headers):
+        opened.append(body["model"])
+        if body["model"] == gateway.JEV_ROUTER:
+            if len(opened) == 1:
+                raise httpx.ConnectError("no route")
+            return FakeClient(), FakeStream([], status=429)
+        lines = ["data: " + json.dumps({"model": body["model"], "choices": [{"delta": {"content": "x"}}],
+                                        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "cost": 0.0}}), "", "data: [DONE]", ""]
+        return FakeClient(), FakeStream(lines)
+    monkeypatch.setattr(gateway, "_open", fake_open)
+    for _ in range(2):  # the connection breaks; then 429
+        gateway._state["jev_rest_until"] = 0.0
+        opened.clear()
+        r = _ask(client, net_agent, model="sysai/auto", stream=True)
+        assert r.status_code == 200 and "[DONE]" in r.text
+        assert opened == [gateway.JEV_ROUTER, gateway.DEFAULT_MODELS["mid"]]
+    with SessionLocal() as s:
+        assert all(r.ok and r.route.startswith("jev→mid: ") for r in s.query(NetSpend))
+
+
+# ----------------------------------------------------------------------------- the size of a request
+def test_the_window_of_a_model_is_told_only_with_the_compression_threshold(client, net_agent, monkeypatch):
+    """Hermes squeezes at half of the window it is told: a million-token window without SYSAI's threshold in the
+    profile would mean no squeezing below 500 thousand. So the window goes only to a synchronizer that writes it."""
+    catalog = {"data": [{**m, "context_length": 1_048_576 if "lite" in m["id"] else 400_000} for m in CATALOG["data"]]}
+    asked = _catalog(monkeypatch, catalog)
+    from app.net.models import NetAgent
+
+    def versions(value):
+        with SessionLocal() as s:
+            s.get(NetAgent, net_agent["id"]).versions = value
+            s.commit()
+    versions({"sysai-agent": "0.3.1"})
+    assert all("context_length" not in m for m in client.get("/v1/models", headers=net_agent["headers"]).json()["data"])
+    assert asked == []
+    versions({"sysai-agent": "0.4.0"})
+    got = {m["id"]: m.get("context_length") for m in client.get("/v1/models", headers=net_agent["headers"]).json()["data"]}
+    assert got["sysai/cheap"] == 1_048_576 and got["sysai/mid"] == 1_048_576 and got["sysai/strong"] == 400_000
+    assert got["sysai/auto"] == 400_000  # the smallest of the models Jev may pick
+    assert access.COMPRESS_AT < min(v for v in got.values() if v)
+
+
+def test_what_a_request_is_made_of_is_kept_and_the_project_is_read_from_the_first_message(client, net_agent, monkeypatch):
+    up = Upstream(data={"id": "g", "model": "m", "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                        "usage": {"prompt_tokens": 10_000, "completion_tokens": 20, "cost": 0.01}})
+    monkeypatch.setattr(gateway, "_post", up.post)
+    tools = [{"type": "function", "function": {"name": "tool_search", "description": "д" * 300, "parameters": {}}}]
+    messages = [{"role": "system", "content": "с" * 1000},
+                {"role": "user", "content": "Сделай проект.\nПапка проекта: C:\\Users\\ivan\\Documents\\SYSAI Проекты\\PLC test\nНачни с материалов."},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "plc_variables", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "р" * 6000},
+                {"role": "tool", "tool_call_id": "c2", "name": "read_file", "content": [{"type": "text", "text": "x" * 500},
+                                                                                         {"type": "image_url", "image_url": {"url": "data:"}}]}]
+    r = client.post("/v1/chat/completions", headers=net_agent["headers"], json={"model": "sysai/mid", "messages": messages, "tools": tools})
+    assert r.status_code == 200, r.text
+    assert "sysai" not in up.bodies[0] and up.bodies[0]["messages"] == messages  # the request itself goes on as it came
+    with SessionLocal() as s:
+        row = s.query(NetSpend).one()
+        assert row.project == "PLC test"  # no header: the window named the folder in the first message
+        assert (row.n_msgs, row.n_tools, row.turn, row.n_images, row.last_result_tool) == (5, 1, 2, 1, "plc_variables")
+        assert row.tok_tools + row.tok_system + row.tok_history in (9_999, 10_000, 10_001)
+        assert row.tok_history > row.tok_last_result > row.tok_system > row.tok_tools > 0 and len(row.conv) == 10
+        conv = row.conv
+    # the header of a harness that sends one wins; the next request of the same conversation has the same mark
+    messages += [{"role": "assistant", "content": "готово"}, {"role": "user", "content": "дальше"}]
+    client.post("/v1/chat/completions", headers={**net_agent["headers"], "X-SYSAI-Project": "24-017"},
+                json={"model": "sysai/mid", "messages": messages})
+    with SessionLocal() as s:
+        row = s.query(NetSpend).order_by(NetSpend.id.desc()).first()
+        assert (row.project, row.conv, row.turn, row.last_result_tool, row.tok_last_result) == ("24-017", conv, 3, "", 0)
+    page = client.get(f"/agents/{net_agent['id']}/trace").text
+    assert "запрос №2" in page and "последний результат plc_variables" in page and "проект PLC test" in page
+    spend = client.get("/agents/spend").text
+    assert "Размер запроса" in spend and "Из чего состоит средний запрос" in spend and "PLC test" in spend
+
+
+def test_a_dead_token_of_a_known_agent_is_seen_in_its_trace(client, net_agent):
+    from app.net import agents
+    body = {"model": "sysai/mid", "messages": [{"role": "user", "content": "привет"}]}
+    assert client.post("/v1/chat/completions", headers={"Authorization": "Bearer sya_nobody"}, json=body).status_code == 401
+    agents.revoke(net_agent["id"], by="SYSAI")
+    for _ in range(3):  # the harness asks again and again: one row a minute
+        assert client.post("/v1/chat/completions", headers=net_agent["headers"], json=body).status_code == 401
+    with SessionLocal() as s:
+        row = s.query(NetSpend).one()
+        assert row.agent_id == net_agent["id"] and row.ok is False and row.error.startswith("unauthorized: ")

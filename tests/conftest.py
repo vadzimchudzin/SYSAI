@@ -59,7 +59,7 @@ def net_on():
     mcp._calls.clear()
     mcp._notes.clear()
     # the catalog of OpenRouter and the rest of Jev are kept per process: every test starts without them
-    gateway._state.update(prices={}, prices_at=0.0, prices_failed=0.0, jev_rest_until=0.0, jev_why="")
+    gateway._state.update(prices={}, windows={}, prices_at=0.0, prices_failed=0.0, jev_rest_until=0.0, jev_why="", refused={})
     return True
 
 

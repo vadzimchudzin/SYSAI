@@ -88,7 +88,7 @@ def _pdf(data: bytes) -> str:
 
 def _vision(data: bytes, mime: str, filename: str) -> str:
     """A scan or a photo: the vision model copies the text out (nothing is invented; unreadable parts are marked)."""
-    model = str(settings_store.get("vision_model") or "google/gemini-2.5-flash")
+    model = str(settings_store.get("vision_model") or "google/gemini-3.5-flash-lite")
     b64 = base64.b64encode(data).decode()
     if mime == "application/pdf" or filename.lower().endswith(".pdf"):
         part = {"type": "file", "file": {"filename": filename or "document.pdf",

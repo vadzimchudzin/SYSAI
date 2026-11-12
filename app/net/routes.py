@@ -1068,6 +1068,10 @@ def v1_models(request: Request):
 async def v1_chat(request: Request):
     ctx, problem = await _in_thread(_agent_ctx, request)
     if problem:
+        if problem.status_code == 401:  # a dead token of a known agent: seen in its trace and in «Отказы и сбои»
+            who = await _in_thread(agents.refused, agents.bearer(request.headers))
+            if who:
+                await _in_thread(gateway.record_refused_token, *who)
         return problem
     try:
         body = await request.json()

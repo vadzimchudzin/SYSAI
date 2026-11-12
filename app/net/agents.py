@@ -199,6 +199,27 @@ def authenticate(raw: str, ip: str = "") -> AgentCtx | None:
                         department_id=agent.department_id, employee_id=agent.employee_id, token_id=row.id)
 
 
+def refused(raw: str):
+    """Whose token was refused and why — (agent id, user id, the reason), or None when the token is of no agent at
+    all. For the trace: a computer that keeps asking with a dead token is otherwise seen nowhere."""
+    if not raw or not raw.startswith(TOKEN_PREFIX) or len(raw) > 200:
+        return None
+    with SessionLocal() as s:
+        row = s.query(NetAgentToken).filter(NetAgentToken.token_hash == token_hash(raw), NetAgentToken.kind == "agent").first()
+        agent = s.get(NetAgent, row.agent_id) if row is not None else None
+        if agent is None:
+            return None
+        if row.revoked_at is not None:
+            why = "токен отозван"
+        elif _aware(row.expires_at) is not None and _aware(row.expires_at) < now():
+            why = "срок токена истёк"
+        elif agent.status != "active":
+            why = "агент выключен"
+        else:
+            why = "у человека агента нет доступа к SYSAI"
+        return agent.id, agent.user_id, why
+
+
 def revoke(agent_id: int, by: str = "") -> None:
     """Switch the agent off: every token stops working at once (MCP and the gateway refuse the next call)."""
     with SessionLocal() as s:

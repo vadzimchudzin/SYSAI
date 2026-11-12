@@ -105,7 +105,7 @@ DEFAULTS = {
     "backup_state": {},              # the dumps copied there [{"name", "size", "at"}], the last error, when checked
     "memory_autolearn": True,        # after an approved meeting the assistant adds facts to memory (with the quote)
     "embedding_model": "openai/text-embedding-3-small",  # memory search; empty = words only
-    "vision_model": "google/gemini-2.5-flash",           # reading scans and photos of documents
+    "vision_model": "google/gemini-3.5-flash-lite",      # reading scans and photos of documents
     "case_autonomy": "auto",         # cases the assistant runs itself: auto | approve (director confirms the plan) | suggest
     "case_reminder_hours": 4,        # no answer this long: a polite reminder (quiet hours are respected)
     "case_max_reminders": 2,         # reminders before the director is told

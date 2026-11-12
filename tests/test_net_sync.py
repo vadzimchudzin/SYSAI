@@ -140,6 +140,7 @@ def test_sync_applies_only_its_keys_and_keeps_the_persons(pc, monkeypatch):
     own = {"display": {"skin": "mono"}, "model": {"default": "openai/gpt-4o", "provider": "openrouter"},
            "mcp_servers": {"mine": {"command": "my-mcp"}}, "skills": {"external_dirs": ["C:/my-skills"], "own": 1},
            "auxiliary": {"web_extract": {"model": "x"}}, "sysai": {"stale": True},
+           "compression": {"threshold_tokens": 900000, "tail_mode": "lean"}, "tool_output": {"max_bytes": 50000, "max_lines": 500},
            "hooks": {"post_tool_call": [{"command": "my-hook"}], "pre_tool_call": [{"command": "rm-guard"}]}}
     (profile / "config.yaml").write_text(yaml.safe_dump(own, allow_unicode=True), encoding="utf-8")
     (profile / "SOUL.md").write_text("Мой характер", encoding="utf-8")
@@ -154,6 +155,11 @@ def test_sync_applies_only_its_keys_and_keeps_the_persons(pc, monkeypatch):
     assert cfg["display"] == {"skin": "mono"} and cfg["skills"]["own"] == 1  # the person's own stays
     assert cfg["auxiliary"]["web_extract"] == {"model": "x"} and set(cfg["auxiliary"]) == {"web_extract", "vision", "compression"}
     assert cfg["model"]["base_url"] == "http://testserver/v1" and cfg["model"]["default"].startswith("sysai/")
+    # when a conversation is squeezed and how big a result may be is SYSAI's; the person's other keys there stay
+    assert cfg["compression"] == {"threshold_tokens": access.COMPRESS_AT, "tail_mode": "lean", "enabled": True}
+    assert cfg["tool_output"] == {"max_bytes": access.RESULT_CHARS, "max_lines": 500}
+    assert cfg["tool_budget"] == {"mcp_result_size_chars": access.RESULT_CHARS}
+    assert cfg["auxiliary"]["compression"]["api_key"] == "${SYSAI_AGENT_TOKEN}"
     assert cfg["model"]["api_key"] == "${SYSAI_AGENT_TOKEN}" and "provider" in cfg["model"]
     assert "mine" not in cfg["mcp_servers"] and cfg["fallback_providers"] == []
     assert cfg["skills"]["external_dirs"] == [home + "/hub"] and "sysai" not in cfg

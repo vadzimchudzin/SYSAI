@@ -55,7 +55,7 @@ def test_steps_go_together_into_runs(client, net_agent, monkeypatch):
     page = client.get(f"/agents/{net_agent['id']}").text
     assert "Трасса" in page and "T-17" in page and f"/agents/{net_agent['id']}/trace" in page
     page = client.get(f"/agents/{net_agent['id']}/trace").text
-    assert "T-17" in page and "whoami" in page and "google/gemini-2.5-flash" in page and "model_not_allowed" in page
+    assert "T-17" in page and "whoami" in page and gateway.DEFAULT_MODELS["mid"] in page and "model_not_allowed" in page
     assert "без задачи" in page
     only = client.get(f"/agents/{net_agent['id']}/trace?errors=1").text
     assert "T-17" in only and "без задачи" not in only

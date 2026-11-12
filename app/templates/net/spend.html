@@ -54,6 +54,19 @@
 {% endif %}{% endfor %}
 </div>
 
+<section class="card" id="sizes"><h2>Размер запроса</h2>
+  <p class="small muted">Каждый запрос несёт весь разговор заново, поэтому платят за размер запроса, умноженный на число запросов. От 272 тыс. токенов на входе большие модели стоят вдвое дороже.</p>
+  <div class="table-wrap"><table class="sp-table">
+    <thead><tr><th>Токенов на входе</th><th class="num">Сумма</th><th class="num">Доля</th><th class="num">Запросов</th><th class="num">В среднем</th></tr></thead>
+    <tbody>{% for x in r.sizes %}{% if x.requests %}
+      <tr><td>{% if x.over %}<span class="warn">{{ x.label }}</span>{% else %}{{ x.label }}{% endif %}</td><td class="num">{{ usd(x.cost) }}</td><td class="num">{{ x.share }}%</td>
+        <td class="num">{{ x.requests }}</td><td class="num">{{ fmt_tokens(x.avg) }}{% if x.cache_pct %}<div class="small muted">кэш {{ x.cache_pct }}%</div>{% endif %}</td></tr>
+    {% endif %}{% endfor %}</tbody></table></div>
+  {% if r.anatomy %}{% set a = r.anatomy %}
+  <p class="small" id="anatomy"><b>Из чего состоит средний запрос</b> (по {{ a.requests }} запросам, оценка по размеру частей): история разговора {{ fmt_tokens(a.history) }} — {{ a.history_pct }}%{% if a.last %}, из неё результат последнего шага {{ fmt_tokens(a.last) }}{% endif %} · определения инструментов {{ fmt_tokens(a.tools) }} — {{ a.tools_pct }}% · системный текст {{ fmt_tokens(a.system) }} — {{ a.system_pct }}%. Самый большой запрос — {{ fmt_tokens(a.biggest) }}. По шагам — в трассе агента.</p>
+  {% else %}<p class="small muted">Из чего состоит запрос (инструменты, система, история) видно для запросов, сделанных после обновления SYSAI.</p>{% endif %}
+</section>
+
 {% if r.failures %}
 <section class="card" id="failures"><div class="row between"><h2>Отказы и сбои</h2>
   {% if chosen %}<a class="btn sm" href="/agents/{{ chosen }}/trace?days={{ [r.days, 7]|min }}&errors=1">В трассе →</a>{% endif %}</div>

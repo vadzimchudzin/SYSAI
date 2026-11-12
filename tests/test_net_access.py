@@ -21,7 +21,15 @@ def test_builtin_profiles_and_the_hermes_configuration(client, net_agent):
     hermes = doc["doc"]["harness_config"]
     assert hermes["approvals"]["mode"] == "off"  # no confirmations: what is not allowed is forbidden
     assert set(access.ALWAYS_DENY) <= set(hermes["approvals"]["deny"])
-    assert hermes["model"]["base_url"] == "https://sysai.example/v1" and hermes["model"]["default"] == "sysai/auto"
+    # one model for the whole conversation (a model that changes between requests reads nothing from the cache)
+    assert hermes["model"]["base_url"] == "https://sysai.example/v1" and hermes["model"]["default"] == "sysai/mid"
+    assert "auto" in doc["rules"]["models"]["tiers"]  # sysai/auto stays allowed: chosen in the profile or the window
+    # the size of a conversation is its cost: squeezed at a count of tokens said outright, big results go to a file
+    assert hermes["compression"] == {"enabled": True, "threshold_tokens": access.COMPRESS_AT} and access.COMPRESS_AT < 272_000
+    assert hermes["tool_budget"] == {"mcp_result_size_chars": 20000} and hermes["tool_output"] == {"max_bytes": 20000}
+    # the helpers carry the token themselves: a helper refused with 401 is a conversation never squeezed
+    assert {hermes["auxiliary"][k]["api_key"] for k in ("compression", "vision")} == {"${SYSAI_AGENT_TOKEN}"}
+    assert hermes["delegation"]["max_iterations"] == 60 and hermes["delegation"]["max_summary_chars"] == 8000
     # who asks is told to the gateway (the trace); the helpers of Hermes get tiers with models of their own, not Jev
     assert hermes["delegation"]["request_overrides"]["extra_body"] == {"sysai": {"role": "workers"}}
     assert hermes["auxiliary"]["compression"]["model"] == "sysai/cheap"
@@ -142,7 +150,7 @@ def test_tier_models_are_set_for_the_whole_network(client, net_agent):
     from app.net import gateway
     assert gateway.model_for("cheap") == "openai/gpt-4o-mini"
     assert gateway.model_for("mid") == gateway.DEFAULT_MODELS["mid"]
-    assert gateway.model_for("vision") == "google/gemini-2.5-flash"  # the vision model of SYSAI
+    assert gateway.model_for("vision") == gateway.VISION_DEFAULT  # the vision model of SYSAI
     bad = client.post("/agents/access/settings", data={"model_cheap": "bad model; rm"}, follow_redirects=False)
     assert "error=" in bad.headers["location"]
     assert agents  # the module is used by the fixture

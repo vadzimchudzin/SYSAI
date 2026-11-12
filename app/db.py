@@ -1210,6 +1210,12 @@ def init_db():
                         ("error", "VARCHAR(300) DEFAULT ''"), ("role", "VARCHAR(16) DEFAULT ''"),
                         ("task", "VARCHAR(64) DEFAULT ''"), ("route", "VARCHAR(120) DEFAULT ''")):
         _add_column_if_missing("net_spend", column, f"{column} {ddl}")
+    # what a request is made of (trace.anatomy): the sizes of its parts next to its tokens and cost
+    for column, ddl in (("n_msgs", "INTEGER DEFAULT 0"), ("n_tools", "INTEGER DEFAULT 0"), ("tok_tools", "INTEGER DEFAULT 0"),
+                        ("tok_system", "INTEGER DEFAULT 0"), ("tok_history", "INTEGER DEFAULT 0"),
+                        ("tok_last_result", "INTEGER DEFAULT 0"), ("last_result_tool", "VARCHAR(64) DEFAULT ''"),
+                        ("n_images", "INTEGER DEFAULT 0"), ("turn", "INTEGER DEFAULT 0"), ("conv", "VARCHAR(12) DEFAULT ''")):
+        _add_column_if_missing("net_spend", column, f"{column} {ddl}")
     _add_column_if_missing("net_agents", "debug_until", "debug_until TIMESTAMP")
     _add_column_if_missing("net_agents", "debug_by", "debug_by VARCHAR(64) DEFAULT ''")
     _add_column_if_missing("meetings", "options", "options JSON")

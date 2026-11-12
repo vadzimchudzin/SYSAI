@@ -2,7 +2,7 @@
 {% block head %}<link rel="stylesheet" href="{{ asset('net.css') }}">{% endblock %}
 {% block body %}
 <div class="page-h"><div><h1>Трасса · {{ agent.name }}</h1>
-  <p>Что агент делал по шагам: каждый запрос к нейронке (кто спросил, какой уровень, какая модель ответила, токены, цена, время, чем кончился) и каждый вызов MCP SYSAI. Шаги одной задачи доски или идущие подряд (перерыв меньше 15 минут) — один запуск.</p></div>
+  <p>Что агент делал по шагам: каждый запрос к нейронке (кто спросил, какой уровень, какая модель ответила, токены, цена, время, чем кончился) и каждый вызов MCP SYSAI. Под моделью — из чего состоял запрос: определения инструментов, системный текст, история разговора и результат последнего шага (оценка по размеру частей). Шаги одной задачи доски или идущие подряд (перерыв меньше 15 минут) — один запуск.</p></div>
   <div class="actions"><a class="btn" href="/agents/{{ agent.id }}">← Агент</a></div></div>
 {% if msg %}<div class="card note" role="status">{{ msg }}</div>{% endif %}
 {% if error %}<div class="card note warn" role="alert">{{ error }}</div>{% endif %}
@@ -31,7 +31,7 @@
     <tr class="tr-{{ s.kind }}{{ ' bad' if not s.ok }}">
       <td class="tr-clock">{{ clock(s.at) }}</td>
       <td><span class="tr-kind">{{ 'модель' if s.kind == 'model' else ('MCP' if s.kind == 'mcp' else 'событие') }}</span> <b>{{ s.title }}</b>{% if s.role and s.kind == 'model' and s.role != 'главная' %} <span class="pill blue">{{ s.role }}</span>{% endif %}</td>
-      <td class="tr-detail">{% if s.kind == 'model' %}{{ s.model or '—' }}{% if s.route %}<div class="small muted">{{ s.route }}</div>{% endif %}{% if s.skill or s.project %}<div class="small muted">{% if s.skill %}<span class="nowrap">навык {{ s.skill }}</span>{% endif %}{{ ' · ' if s.skill and s.project }}{% if s.project %}<span class="nowrap">проект {{ s.project }}</span>{% endif %}</div>{% endif %}{% else %}<span class="small">{{ s.detail }}</span>{% endif %}</td>
+      <td class="tr-detail">{% if s.kind == 'model' %}{{ s.model or '—' }}{% if s.route %}<div class="small muted">{{ s.route }}</div>{% endif %}{% if s.skill or s.project %}<div class="small muted">{% if s.skill %}<span class="nowrap">навык {{ s.skill }}</span>{% endif %}{{ ' · ' if s.skill and s.project }}{% if s.project %}<span class="nowrap">проект {{ s.project }}</span>{% endif %}</div>{% endif %}{% if s.anatomy %}{% set a = s.anatomy %}<div class="small muted tr-anatomy" title="Из чего состоит запрос. Доли — оценка по размеру частей.">запрос №{{ a.turn }}{% if a.conv %} беседы {{ a.conv }}{% endif %} · инструменты {{ fmt_tokens(a.tools) }}{% if a.n_tools %} ({{ a.n_tools }}){% endif %} · система {{ fmt_tokens(a.system) }} · история {{ fmt_tokens(a.history) }}{% if a.last %} · последний результат{% if a.last_tool %} {{ a.last_tool }}{% endif %} {{ fmt_tokens(a.last) }}{% endif %}{% if a.images %} · картинок: {{ a.images }}{% endif %}</div>{% endif %}{% else %}<span class="small">{{ s.detail }}</span>{% endif %}</td>
       <td class="num">{% if s.kind == 'model' %}{{ fmt_tokens(s.prompt) }} → {{ fmt_tokens(s.completion) }}{% if s.cached %}<div class="small muted">кэш {{ fmt_tokens(s.cached) }}</div>{% endif %}{% endif %}</td>
       <td class="num">{{ fmt_ms(s.ms) if s.ms else '' }}</td>
       <td class="num">{% if s.cost %}${{ '%.4f'|format(s.cost) }}{% endif %}</td>
