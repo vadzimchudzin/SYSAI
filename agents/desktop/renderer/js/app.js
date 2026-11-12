@@ -315,6 +315,19 @@ function onNotification({ method, params }) {
   }
 }
 
+// «Правки без вопросов» (lib/autoapprove.js of the main process): on — the window allows edits inside the project
+// folders itself.
+async function setAuto(on) {
+  try {
+    S.auto = await api.auto.set(on);
+    composer.update();
+    toast(on ? 'Правки в папках проектов — без вопросов. Материалы, секреты, удаление и файлы вне проектов агент по-прежнему спросит.'
+      : 'Агент снова спрашивает перед каждой правкой файла.', on ? 'ok' : 'info', 7000);
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
 function onRequest({ id, method, params }) {
   const conv = S.convs.get(params && params.sessionId);
   if (!conv) {
@@ -724,7 +737,8 @@ function wire() {
 async function main() {
   S.info = await api.info().catch(() => ({}));
   document.title = S.info.agent ? `Агент SYSAI — ${S.info.agent}` : 'Агент SYSAI';
-  composer = new Composer({ send, stop, setConfig, ready: () => S.acp.state === 'ready' && Boolean(current()),
+  S.auto = await api.auto.get().catch(() => ({ on: false, count: 0 }));
+  composer = new Composer({ send, stop, setConfig, auto: () => S.auto, setAuto, ready: () => S.acp.state === 'ready' && Boolean(current()),
     idle: () => (!S.info.connected ? 'Компьютер не подключён к SYSAI' : S.acp.state === 'ready' ? 'Открываю разговор…'
       : !S.acp.state || S.acp.state === 'starting' ? 'Агент запускается…' : 'Агент не запущен — нажмите «Перезапустить»') });
   $('composer-wrap').append(composer.el);
@@ -736,6 +750,8 @@ async function main() {
   api.acp.onNotification(onNotification);
   api.acp.onRequest(onRequest);
   api.acp.onRequestGone(onRequestGone);
+  api.auto.onState((state) => { S.auto = state; composer.update(); });
+  api.auto.onToggle(() => setAuto(!S.auto.on));
   api.win.onShow(({ path, line }) => openPath(path, line));
   api.win.onNotice(({ text, kind }) => toast(text, kind || 'info', 15000));
   const reopen = localStorage.getItem('sysai.pane.open');

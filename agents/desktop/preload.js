@@ -31,6 +31,12 @@ contextBridge.exposeInMainWorld('sysai', {
     onRequest: on('acp:request'),
     onRequestGone: on('acp:request-gone'),
   },
+  auto: {
+    get: () => call('auto:get'),
+    set: (on) => call('auto:set', Boolean(on)),
+    onState: on('auto:state'),
+    onToggle: on('auto:toggle'),
+  },
   fs: {
     places: () => call('fs:places'),
     drives: () => call('fs:drives'),

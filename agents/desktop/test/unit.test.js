@@ -15,6 +15,7 @@ const config = require('../lib/config');
 const files = require('../lib/files');
 const { Projects, prompts: projectPrompts, pipeline: projectPipeline, groupOf, cleanName, STAGES } = require('../lib/projects');
 const rules = require('../lib/rules');
+const { AutoApprove, MAX_PER_HOUR } = require('../lib/autoapprove');
 const storage = require('../lib/storage');
 
 const FAKE = path.join(__dirname, 'fake-hermes.js');
@@ -762,4 +763,144 @@ test('projects: a folder per project — create, drop materials in, what is insi
   assert.deepEqual((await pj.list()).projects[0].stages, ['done', 'done', 'work', 'todo', 'todo', 'todo']);
   fs.writeFileSync(path.join(made.path, 'pipeline.json'), '{broken');
   assert.equal(projectPipeline(made.path).started, false);
+});
+
+// ------------------------------------------------------------------------------------------------ правки без вопросов
+function autoApprove({ rulesDoc = { folders: { read: ['*'], write: ['*'], deny: [] } }, guarded = () => false } = {}) {
+  const base = fs.realpathSync(tmp());
+  const root = path.join(base, 'SYSAI Проекты');
+  const project = path.join(root, 'PLC test');
+  for (const d of ['materials', 'plc', '_work/st', '.git']) fs.mkdirSync(path.join(project, d), { recursive: true });
+  fs.mkdirSync(path.join(base, 'SYSAI Проекты 2'), { recursive: true });
+  const state = { rules: rulesDoc, now: Date.parse('2026-11-12T10:00:00Z') };
+  const make = () => new AutoApprove({ file: path.join(base, 'desk', 'autoapprove.json'), root, audit: path.join(base, 'desk', 'audit'),
+    loadRules: () => (state.rules ? { rules: state.rules } : { error: 'нет' }),
+    pathAllowed: (r, p, write) => (r.folders[write ? 'write' : 'read'].includes('*') && !r.folders.deny.some((d) => p.startsWith(d))),
+    guarded, now: () => state.now });
+  return { base, root, project, state, make, auto: make() };
+}
+
+const OPTIONS = [{ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }];
+const edit = (file, extra = {}) => ({ sessionId: 's1', options: OPTIONS, toolCall: { toolCallId: 'e1', title: `Approve edit: ${file}`, kind: 'edit',
+  content: [{ type: 'diff', path: file, oldText: null, newText: 'x := 1;\n' }], ...extra } });
+
+test('edits without questions: off by default, only inside a project folder, the rest is asked with a reason', () => {
+  const { base, root, project, state, make, auto } = autoApprove();
+  const inside = path.join(project, '_work', 'st', 'Main.st');
+  assert.deepEqual(auto.decide(edit(inside)), { auto: false, why: '' }, 'off until the person switches it on');
+  assert.deepEqual(auto.set(true), { on: true, count: 0, root });
+  assert.deepEqual(auto.decide(edit(inside)), { auto: true, optionId: 'allow_once', paths: [inside] });
+  assert.equal(auto.decide(edit(path.join(project, 'plc', 'new', 'GVL.st'))).auto, true, 'a folder that is not there yet');
+  assert.equal(auto.decide(edit('_work/st/Main.st'), project).auto, true, 'a short path counts from the folder of the session');
+  const asked = (params, cwd) => {
+    const d = auto.decide(params, cwd);
+    assert.equal(d.auto, false);
+    return d.why;
+  };
+  assert.match(asked(edit('_work/st/Main.st'), base), /вне папки проектов/);
+  assert.match(asked(edit('_work/st/Main.st')), /не полный/);
+  assert.match(asked(edit(path.join(base, 'notes.md'))), /вне папки проектов/);
+  assert.match(asked(edit(path.join(project, '..', '..', 'notes.md'))), /вне папки проектов/);
+  assert.match(asked(edit(path.join(base, 'SYSAI Проекты 2', 'a', 'b.st'))), /вне папки проектов/, 'a folder that only starts the same');
+  assert.match(asked(edit(path.join(root, 'заметка.md'))), /не в папке проекта/);
+  assert.match(asked(edit(path.join(project, 'materials', 'ТЗ.md'))), /материалы/);
+  assert.match(asked(edit(path.join(project, 'MATERIALS', 'sub', 'a.csv'))), /материалы/);
+  for (const name of ['.env', '.env.local', 'plc/server.pem', '.git/config', 'plc/id_rsa', 'hmi/keys.kdbx']) {
+    assert.match(asked(edit(path.join(project, name))), /секрет/, name);
+  }
+  assert.match(asked(edit(path.join(project, 'plc', 'a.st:stream'))), /необычное имя/);
+  assert.match(asked(edit(path.join(project, 'plc'))), /не файл/);
+  assert.match(asked({ ...edit(inside), toolCall: { ...edit(inside).toolCall, kind: 'execute' } }), /не правка/);
+  assert.match(asked({ ...edit(inside), toolCall: { kind: 'edit', title: 'patch' } }), /не назван файл/);
+  assert.match(asked(edit(inside, { content: [{ type: 'diff', path: inside, oldText: 'a', newText: 'я'.repeat(1024 * 1024 + 1) }] })), /большой файл/);
+  assert.match(asked(edit(inside, { content: [{ type: 'diff', path: inside, oldText: 'a', newText: null }] })), /удаление/);
+  // a patch names its files itself: every one of them is checked, deletions and moves are always asked
+  const patch = (text) => edit(inside, { rawInput: { tool: 'patch', arguments: { mode: 'patch', patch: text } } });
+  assert.equal(auto.decide(patch(`*** Begin Patch\n*** Update File: ${inside}\n@@\n-a\n+b\n*** End Patch`)).auto, true);
+  assert.match(asked(patch(`*** Begin Patch\n*** Update File: ${inside}\n*** Add File: ${path.join(base, 'evil.ps1')}\n*** End Patch`)), /evil\.ps1: файл вне/);
+  assert.match(asked(patch(`*** Begin Patch\n*** Delete File: ${inside}\n*** End Patch`)), /удаление/);
+  assert.match(asked(patch(`*** Begin Patch\n*** Update File: ${inside}\n*** Move to: ${inside}.bak\n*** End Patch`)), /перенос/);
+  assert.match(asked(edit(inside, { locations: [{ path: path.join(project, 'materials', 'a.pdf') }] })), /материалы/);
+  assert.match(asked({ ...edit(inside), options: [{ optionId: 'always', kind: 'allow_always' }, { optionId: 'deny', kind: 'reject_once' }] }), /разового/);
+  // the signed rules of SYSAI stay the limit; without them nothing is allowed here
+  state.rules = { folders: { read: ['*'], write: [], deny: [] } };
+  assert.match(asked(edit(inside)), /не открыта агенту на запись/);
+  state.rules = null;
+  assert.match(asked(edit(inside)), /нет подписанных доступов/);
+  state.rules = { folders: { read: ['*'], write: ['*'], deny: [] } };
+  const guardedOne = autoApprove({ guarded: () => true });
+  guardedOne.auto.set(true);
+  assert.match(guardedOne.auto.decide(edit(path.join(guardedOne.project, 'plc', 'a.st'))).why, /только SYSAI/);
+  // kept between starts of the window; a damaged file means off
+  assert.equal(make().on, true);
+  fs.writeFileSync(path.join(base, 'desk', 'autoapprove.json'), '{"on": "yes"');
+  assert.equal(make().on, false);
+});
+
+test('edits without questions: a link out of the projects is asked', { skip: process.platform === 'win32' }, () => {
+  const { base, project, auto } = autoApprove();
+  auto.set(true);
+  fs.mkdirSync(path.join(base, 'elsewhere'));
+  fs.symlinkSync(path.join(base, 'elsewhere'), path.join(project, 'plc', 'out'));
+  const d = auto.decide(edit(path.join(project, 'plc', 'out', 'a.st')));
+  assert.equal(d.auto, false);
+  assert.match(d.why, /ссылка ведёт из папки проектов/);
+});
+
+test('edits without questions: the old file is copied aside, the edit is in the journal, a runaway agent is asked', () => {
+  const { base, project, state, auto } = autoApprove();
+  auto.set(true);
+  const file = path.join(project, 'plc', 'Main.st');
+  fs.writeFileSync(file, Buffer.from([0xef, 0xbb, 0xbf, 0x61, 0x0d, 0x0a]));
+  const params = edit(file);
+  const d = auto.decide(params);
+  assert.equal(auto.allow(params, d), true);
+  assert.equal(auto.state().count, 1);
+  const audit = path.join(base, 'desk', 'audit');
+  const line = JSON.parse(fs.readFileSync(path.join(audit, '2026-11.jsonl'), 'utf8').trim());
+  assert.equal(line.decision, 'auto');
+  assert.deepEqual(line.paths, [file]);
+  assert.equal(line.session, 's1');
+  assert.deepEqual(fs.readFileSync(line.copies[0]), fs.readFileSync(file), 'the copy is byte for byte');
+  const fresh = edit(path.join(project, 'plc', 'New.st'));
+  assert.equal(auto.allow(fresh, auto.decide(fresh)), true, 'a new file has nothing to copy');
+  // the copies of a month ago go, the journal stays
+  state.now += 40 * 86400000;
+  auto.clean();
+  assert.equal(fs.existsSync(line.copies[0]), false);
+  assert.ok(fs.existsSync(path.join(audit, '2026-11.jsonl')));
+  // more edits in an hour than a person would follow: asked again
+  for (let i = 0; i < MAX_PER_HOUR; i++) auto.recent.push(state.now);
+  assert.match(auto.decide(params).why, /зациклился/);
+  state.now += 3600001;
+  assert.equal(auto.decide(params).auto, true);
+  // switching off and on starts the count anew
+  assert.equal(auto.set(true).count, 0);
+});
+
+test('edits without questions: the window answers the fake Hermes itself inside a project, a person outside', async () => {
+  const { project, auto } = autoApprove();
+  auto.set(true);
+  const answered = [];
+  const run = async (dir) => {
+    const { client, requests } = hermes({ FAKE_HERMES_FILES: dir });
+    try {
+      await client.initialize({ name: 'test', version: '1' }, { timeout: 10000 });
+      const { sessionId } = await client.request('session/new', { cwd: dir, mcpServers: [] });
+      client.on('request', ({ id, params }) => {
+        const d = auto.decide(params, dir);
+        answered.push(d.auto);
+        const ok = d.auto && auto.allow(params, d);
+        client.respond(id, { outcome: { outcome: 'selected', optionId: ok ? d.optionId : 'reject_once' } });
+      });
+      await client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'сводка' }] });
+      return requests().find((r) => r.permission).permission.outcome.optionId;
+    } finally {
+      client.stop();
+    }
+  };
+  assert.equal(await run(path.join(project, 'docs')), 'allow_once');
+  assert.equal(await run(tmp()), 'reject_once');
+  assert.deepEqual(answered, [true, false]);
+  assert.equal(auto.state().count, 1);
 });

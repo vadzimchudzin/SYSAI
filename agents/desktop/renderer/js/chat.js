@@ -383,6 +383,7 @@ export class Conversation {
       h('div', { class: 'q' }, icon(isQuestion ? 'help' : 'shield', 'lg'), h('div', {},
         h('b', { text: isQuestion ? 'Агент спрашивает' : 'Агенту нужно разрешение' }),
         h('span', { text: isQuestion ? (tc.title || d.detail) : [d.label, d.detail].filter(Boolean).join(': ') }))));
+    if (params._auto) el.append(h('div', { class: 'auto-why', text: `Правки без вопросов включены, но здесь нужен ваш ответ — ${params._auto}` }));
     for (const c of tc.content || []) if (c.type === 'diff') el.append(diffView(c.path, c.oldText, c.newText, this.hooks.openPath));
     el.append(opts, verdict);
     const sorted = [...(params.options || [])];

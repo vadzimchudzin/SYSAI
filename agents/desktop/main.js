@@ -22,6 +22,7 @@ const { Projects, prompts: projectPrompts, STAGES: projectStages } = require('./
 const shortcuts = require('./lib/shortcuts');
 const { Bridge } = require('./lib/bridge');
 const rules = require('./lib/rules');
+const { AutoApprove } = require('./lib/autoapprove');
 const pkg = require('./package.json');
 
 const VERSION = pkg.version;
@@ -49,6 +50,8 @@ let acp = null;
 let generation = 0;
 let restarts = [];
 let acpInfo = { state: 'starting', message: '', generation: 0 };
+let auto = null; // «правки без вопросов» (lib/autoapprove.js)
+const sessionCwd = new Map(); // sessionId → the folder the session was opened in
 const pending = new Map(); // questions of the agent waiting for the person: id → {id, method, params}
 const queue = []; // what waits for the page: [channel, payload]
 
@@ -146,6 +149,7 @@ async function start() {
   Menu.setApplicationMenu(null);
   guard(session.defaultSession);
   startCanvas();
+  startAuto();
   ipc();
   createWindow();
   cleanPaste();
@@ -230,6 +234,9 @@ function keys(wc, e, input) {
     e.preventDefault();
   } else if (ctrl && input.shift && key === 'r') {
     wc.reloadIgnoringCache();
+    e.preventDefault();
+  } else if (ctrl && input.shift && (key === 'a' || key === 'ф')) {
+    send('auto:toggle', {}); // the page asks before the first switching on
     e.preventDefault();
   }
 }
@@ -397,9 +404,42 @@ function restartAcp() {
   return true;
 }
 
+// «Правки без вопросов»: an edit inside a project folder is allowed by the window itself; the rest is asked.
+function projectsRoot() {
+  return path.join(app.getPath('documents'), 'SYSAI Проекты');
+}
+
+function startAuto() {
+  auto = new AutoApprove({
+    file: path.join(DESK, 'autoapprove.json'), root: projectsRoot(), audit: path.join(DESK, 'audit'), log,
+    loadRules: () => rules.load(HOME), pathAllowed: rules.pathAllowed,
+    guarded: (p) => rules.guardedPath(p, HOME, config.load(HOME).profileDir),
+  });
+  auto.clean();
+}
+
+function autoAnswer(client, id, params) {
+  const decision = auto.decide(params, sessionCwd.get(params && params.sessionId) || os.homedir());
+  if (!decision.auto) return decision.why;
+  if (!auto.allow(params, decision)) return 'не удалось сохранить копию файла перед правкой';
+  try {
+    client.respond(id, { outcome: { outcome: 'selected', optionId: decision.optionId } });
+  } catch (err) {
+    log('правки без вопросов: ответ агенту не ушёл:', err.message);
+    return 'ответ агенту не ушёл';
+  }
+  send('auto:state', auto.state());
+  return null;
+}
+
 function onAgentRequest(client, { id, method, params }) {
   if (acp !== client) return;
   if (method === 'session/request_permission' || method === 'elicitation/create') {
+    if (method === 'session/request_permission') {
+      const why = autoAnswer(client, id, params || {});
+      if (why === null) return; // answered here
+      if (why) params = { ...params, _auto: why }; // the switch is on, but this one is asked: the card says why
+    }
     pending.set(id, { id, method, params });
     send('acp:request', { id, method, params });
     attention();
@@ -421,12 +461,17 @@ async function acpRequest(method, params) {
     const server = windowServer();
     p.mcpServers = server ? [server] : [];
   }
+  const keep = (res) => {
+    const sid = (res && res.sessionId) || p.sessionId;
+    if (sid) sessionCwd.set(sid, p.cwd);
+    return res;
+  };
   try {
-    return await client.request(method, p, { timeout: 300000 });
+    return keep(await client.request(method, p, { timeout: 300000 }));
   } catch (err) {
     if (!p.mcpServers.length || !/mcp/i.test(`${err.message} ${JSON.stringify(err.data || '')}`)) throw err;
     log(`${method}: Hermes не принял MCP окна (${err.message}) — без него`);
-    return client.request(method, { ...p, mcpServers: [] }, { timeout: 300000 });
+    return keep(await client.request(method, { ...p, mcpServers: [] }, { timeout: 300000 }));
   }
 }
 
@@ -688,7 +733,7 @@ function ipc() {
     return res.canceled ? [] : res.filePaths;
   });
   // «Проекты»: folders of projects in the person's documents
-  const projects = new Projects(path.join(app.getPath('documents'), 'SYSAI Проекты'));
+  const projects = new Projects(projectsRoot());
   handle('projects:list', () => projects.list());
   handle('projects:create', (name) => projects.create(String(name || '')));
   handle('projects:info', async (name) => {
@@ -697,6 +742,12 @@ function ipc() {
     return { ...info, prompts: { ...pr, stages: Object.fromEntries(projectStages.map(([key]) => [key, stage(key)])) } };
   });
   handle('projects:add', (name, paths) => projects.add(String(name || ''), Array.isArray(paths) ? paths.map(need) : []));
+  handle('auto:get', () => auto.state());
+  handle('auto:set', (on) => {
+    const state = auto.set(Boolean(on));
+    send('auto:state', state);
+    return state;
+  });
   handle('clipboard:text', (text) => {
     clipboard.writeText(String(text));
     return true;

@@ -241,6 +241,11 @@ body.resizing { cursor: col-resize; } body.resizing iframe { pointer-events: non
 .picker { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 8px; border-radius: var(--r-sm); color: var(--muted); font-size: 12.5px; max-width: 220px; }
 .picker:hover { background: var(--hover); color: var(--text); }
 .picker span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker.auto-toggle { flex: none; max-width: 260px; }
+.picker.auto-toggle.on { color: var(--clay); background: var(--clay-bg); }
+.picker.auto-toggle.on:hover { color: var(--clay); background: color-mix(in srgb, var(--clay) 20%, transparent); }
+.composer.auto { border-color: var(--clay-line); }
+.ask .auto-why { margin: 6px 0 2px; font-size: 12.5px; color: var(--muted); }
 .send { width: 32px; height: 32px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; background: var(--clay); color: #1a1412; transition: background .12s, opacity .12s; flex: none; }
 .send:hover { background: var(--clay2); } .send:disabled { opacity: .35; pointer-events: none; }
 .send.stop { background: var(--card2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line2); } .send.stop:hover { background: #2f2d28; }
@@ -249,6 +254,7 @@ body.resizing { cursor: col-resize; } body.resizing iframe { pointer-events: non
 .composer-wrap { container-type: inline-size; }
 @container (max-width: 640px) { .hint .more { display: none; } }
 @container (max-width: 520px) { .composer .pickers .picker:not(:first-child) span { display: none; } }
+@container (max-width: 440px) { .picker.auto-toggle span { display: none; } }
 .slash { position: absolute; left: 10px; right: 10px; bottom: calc(100% + 6px); max-height: 260px; overflow-y: auto; }
 
 /* ---------- menus, toasts ---------- */

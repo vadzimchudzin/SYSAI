@@ -1,5 +1,6 @@
 // The message box under the conversation: text (Enter sends, Shift+Enter — a new line), files (the paperclip,
-// dragging, pasting a picture), the pickers of the session (model, thinking, edits), «/» commands, send and stop;
+// dragging, pasting a picture), «правки без вопросов» (the window allows the agent's edits inside the project
+// folders itself — lib/autoapprove.js), the pickers of the session (model, thinking), «/» commands, send and stop;
 // above it the agent's plan while it works.
 import { h, icon, clear, basename } from './dom.js';
 import { openMenu, menuOpenFor, closeMenu, toast } from './ui.js';
@@ -8,16 +9,12 @@ const api = window.sysai;
 
 const EFFORT_RU = { default: 'обычно', none: 'без размышлений', minimal: 'минимально', low: 'немного', medium: 'средне',
   high: 'глубоко', xhigh: 'очень глубоко', max: 'максимум', ultra: 'ультра' };
-const EDITS_RU = { ask: 'спрашивать', workspace_session: 'без вопросов в рабочей папке', session: 'без вопросов' };
-const EDITS_SUB = { ask: 'Агент спросит перед каждой правкой файла', workspace_session: 'Правки в рабочей папке — сразу, остальные — с вопросом',
-  session: 'Правки файлов — без вопросов до конца разговора' };
+const AUTO_OFF = 'Агент спросит перед каждой правкой файла';
+const AUTO_ON = 'Правки в папках проектов — сразу. Материалы (materials/), секреты, удаление и файлы вне проектов — с вопросом';
 const PICKERS = [
   { id: 'model', icon: 'cube', title: 'Модель', label: (o, v) => (v && v.name) || o.currentValue || 'модель' },
   { id: 'reasoning_effort', icon: 'spark', title: 'Глубина размышлений', label: (o) => `Мышление: ${EFFORT_RU[o.currentValue] || o.currentValue}`,
     name: (v) => (EFFORT_RU[v.value] ? EFFORT_RU[v.value][0].toUpperCase() + EFFORT_RU[v.value].slice(1) : v.name || v.value) },
-  { id: 'edit_approval_policy', icon: 'shield', title: 'Правки файлов', label: (o) => `Правки: ${EDITS_RU[o.currentValue] || o.currentValue}`,
-    name: (v) => (EDITS_RU[v.value] ? EDITS_RU[v.value][0].toUpperCase() + EDITS_RU[v.value].slice(1) : v.name || v.value),
-    sub: (v) => EDITS_SUB[v.value] || v.description || '' },
 ];
 
 function flat(options) {
@@ -31,7 +28,9 @@ function flat(options) {
 
 export class Composer {
   constructor(hooks = {}) {
-    this.hooks = hooks; // send({text, files}) → Promise<bool>, stop(), setConfig(conv, id, value), ready() → bool
+    // send({text, files}) → Promise<bool>, stop(), setConfig(conv, id, value), ready() → bool,
+    // auto() → {on, count} of «правки без вопросов», setAuto(on)
+    this.hooks = hooks;
     this.conv = null;
     this.files = [];
     this.drafts = new Map();
@@ -41,11 +40,13 @@ export class Composer {
     this.list = h('div', { class: 'attach-list', hidden: true });
     this.input = h('textarea', { rows: '1', placeholder: 'Напишите агенту…', spellcheck: 'true', 'aria-label': 'Сообщение агенту' });
     this.attachBtn = h('button', { class: 'icon-btn', title: 'Прикрепить файлы' }, icon('paperclip'));
+    this.autoText = h('span');
+    this.autoBtn = h('button', { class: 'picker auto-toggle' }, icon('shield', 'sm'), this.autoText);
     this.pickers = h('div', { class: 'pickers' });
     this.sendBtn = h('button', { class: 'send', title: 'Отправить (Enter)' }, icon('up'));
     this.slash = null;
     this.box = h('div', { class: 'composer' }, this.list, this.input,
-      h('div', { class: 'bar' }, this.attachBtn, this.pickers, h('span', { class: 'grow' }), this.sendBtn));
+      h('div', { class: 'bar' }, this.attachBtn, this.autoBtn, this.pickers, h('span', { class: 'grow' }), this.sendBtn));
     this.hint = h('div', { class: 'hint' }, h('span', { text: 'Enter — отправить · Shift+Enter — новая строка' }),
       h('span', { class: 'more', text: ' · агент работает в пределах доступов SYSAI' }));
     this.el = h('div', { class: 'composer-inner' }, this.plan, this.box, this.hint);
@@ -71,11 +72,32 @@ export class Composer {
       const paths = await api.dialog.files({ title: 'Прикрепить к сообщению' }).catch(() => []);
       this.attachMany(paths || []);
     });
+    this.autoBtn.addEventListener('click', () => {
+      if (menuOpenFor(this.autoBtn)) { closeMenu(); return; }
+      const on = this._auto().on;
+      openMenu(this.autoBtn, [{ header: 'Правки файлов' },
+        { label: 'Спрашивать', sub: AUTO_OFF, value: false, checked: !on },
+        { label: 'Без вопросов в папках проектов', sub: `${AUTO_ON}. Старый файл копируется, правка пишется в журнал`, value: true, checked: on }],
+      { above: true, minWidth: 320, onPick: (value) => { if (value !== on) this.hooks.setAuto(value); } });
+    });
     this.sendBtn.addEventListener('click', () => (this.conv && this.conv.running ? this.hooks.stop() : this.submit()));
   }
 
   get text() {
     return this.input.value;
+  }
+
+  _auto() {
+    return (this.hooks.auto && this.hooks.auto()) || { on: false, count: 0 };
+  }
+
+  _drawAuto() {
+    const { on, count } = this._auto();
+    this.autoBtn.classList.toggle('on', on);
+    this.box.classList.toggle('auto', on);
+    this.autoText.textContent = on ? `Правки: без вопросов${count ? ` · ${count}` : ''}` : 'Правки: спрашивать';
+    this.autoBtn.title = on ? `${AUTO_ON}.${count ? ` Разрешено без вопроса: ${count}.` : ''} Ctrl+Shift+A — выключить`
+      : `${AUTO_OFF}. Нажмите, чтобы разрешить правки в папках проектов без вопросов (Ctrl+Shift+A)`;
   }
 
   focus() {
@@ -161,6 +183,7 @@ export class Composer {
     this.sendBtn.title = running ? 'Остановить (Esc)' : 'Отправить (Enter)';
     this.sendBtn.disabled = running ? false : !ready || (!this.input.value.trim() && !this.files.length);
     this.input.placeholder = !ready ? (this.hooks.idle ? this.hooks.idle() : 'Агент запускается…') : running ? 'Агент работает — можно писать следующее сообщение' : 'Напишите агенту…';
+    this._drawAuto();
     this._pickers();
   }
 
