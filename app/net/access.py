@@ -17,6 +17,8 @@ from types import SimpleNamespace
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+from pathlib import Path
+
 from .. import config
 from ..db import Department, SessionLocal, User, now
 from . import journal
@@ -83,7 +85,8 @@ _ENGINEER = {
     "commands": {"run": True, "deny": ["git push --force*", "Remove-Item * -Recurse*", "del /s *"]},
     "folders": {"read": [WHOLE_PC], "write": [WHOLE_PC], "deny": []},
     "programs": ["EcoStruxure Machine Expert", "ODA File Converter", "Excel", "Acrobat Reader"],
-    "mcp": {"sysai": ["*"], "plc-kit": ["*"], "machine-expert": ["*"], "pic-index": ["*"], "doc-kit": ["*"], "cad": ["*"]},
+    # plus every MCP tool shipped in hub/seed (plc-kit, machine-expert, ebpro-cmtp, …) — see builtin_rules
+    "mcp": {"sysai": ["*"], "cad": ["*"]},
     "data": {"projects": "own", "to_base": "read", "tags": "write", "questions": True, "people": True},
     "internet": {"mode": "all", "sites": []},
     # the main model is one for the whole conversation: a model that changes between requests (sysai/auto) reads
@@ -117,12 +120,46 @@ _VIEWER["mcp"] = {"sysai": ["whoami", "departments", "hub_search", "hub_get", "n
 _VIEWER["data"].update(tags="read")
 _VIEWER["folders"] = {"read": [WHOLE_PC], "write": [], "deny": []}
 
-BUILTIN = (
+# The profiles of the department the shipped tools are made for: a tool added to hub/seed is theirs without anyone
+# writing its name into «Доступы».
+SEED_TOOL_PROFILES = ("opo-engineer", "opo-lead")
+_SEED = Path(__file__).resolve().parents[2] / "hub" / "seed"
+
+
+def seed_tools() -> list:
+    """The MCP tools shipped with the server (hub/seed/<name>/TOOL.md, kind: mcp), by name."""
+    out = []
+    try:
+        folders = sorted(p for p in _SEED.iterdir() if p.is_dir())
+    except OSError:
+        return out
+    for folder in folders:
+        try:
+            head = (folder / "TOOL.md").read_text(encoding="utf-8")[:2000]
+        except OSError:
+            continue
+        if re.search(r"^kind:\s*mcp\s*$", head, re.M) and re.fullmatch(r"[a-z0-9-]{1,40}", folder.name):
+            out.append(folder.name)
+    return out
+
+
+def builtin_rules(code: str, rules: dict) -> dict:
+    """The rules a built-in profile has in the code: what BUILTIN says plus, for the profiles of the department, every
+    shipped MCP tool."""
+    rules = copy.deepcopy(rules)
+    if code in SEED_TOOL_PROFILES:
+        for name in seed_tools():
+            rules["mcp"].setdefault(name, ["*"])
+    return rules
+
+
+_BUILTIN = (
     ("opo-engineer", "Инженер ОПО", "Свои проекты ПЛК: чертежи ТО, теги, генерация и сборка в Machine Expert.", _ENGINEER),
     ("opo-lead", "Руководитель ОПО", "Все проекты отдела, проверка тегов и кода, больший бюджет.", _LEAD),
     ("to", "ТО", "Технический отдел: база чертежей и ответы на вопросы ОПО.", _TO),
     ("viewer", "Наблюдатель", "Только смотреть: без команд на ПК, интернета и записи.", _VIEWER),
 )
+BUILTIN = tuple((code, name, description, builtin_rules(code, rules)) for code, name, description, rules in _BUILTIN)
 
 
 # The first built-in folders and sites were placeholders of the ОПО department; the agent sees the whole computer and
@@ -300,17 +337,45 @@ def path_allowed(rules: dict, path: str, write: bool = False) -> bool:
 
 
 # ----------------------------------------------------------------------------- profiles
+def _give_new_defaults(s, p, fresh: dict) -> None:
+    """What the code gives a built-in profile and the profile was never given yet, once: a new MCP server (a tool was
+    added — nobody has to write its name into every profile) and the main model «mid» in place of «auto», the default
+    before it. `given` remembers it, so what a person takes away or changes afterwards stays as the person left it."""
+    given = p.given if isinstance(p.given, dict) else {}
+    known = set(given.get("mcp") or [])
+    was = normalize(p.rules)
+    now_rules = copy.deepcopy(was)
+    for server, tools in fresh["mcp"].items():
+        if server not in known and server not in now_rules["mcp"] and len(now_rules["mcp"]) < 20:
+            now_rules["mcp"][server] = list(tools)
+    main = fresh["models"].get("main") or ""
+    if main and given.get("main") != main and now_rules["models"].get("main") == "auto" and main in now_rules["models"]["tiers"]:
+        now_rules["models"]["main"] = main
+    told = {"mcp": sorted(known | set(fresh["mcp"])), "main": main}
+    if told != given:
+        p.given = told
+    if now_rules != was:
+        p.rules = now_rules
+        p.version = (p.version or 0) + 1
+        p.updated_at, p.updated_by = now(), "SYSAI"
+        journal.log("access.profile", f"profile:{p.code}", {"версия": p.version, "изменения": journal.changes(
+            {k: was[k] for k in ("mcp", "models")}, {k: now_rules[k] for k in ("mcp", "models")})}, actor="SYSAI", session=s)
+
+
 def ensure_builtin(session=None) -> None:
     own = session is None
     s = session or SessionLocal()
     try:
         rows = {p.code: p for p in s.query(NetAccessProfile).all()}
         for code, name, description, rules in BUILTIN:
+            rules = builtin_rules(code, rules)
             p = rows.get(code)
             if p is None:
-                s.add(NetAccessProfile(code=code, name=name, description=description, rules=normalize(rules), builtin=True,
-                                       updated_by="SYSAI"))
+                fresh = normalize(rules)
+                s.add(NetAccessProfile(code=code, name=name, description=description, rules=fresh, builtin=True,
+                                       updated_by="SYSAI", given={"mcp": sorted(fresh["mcp"]), "main": fresh["models"].get("main", "")}))
             elif p.builtin and isinstance(p.rules, dict):
+                _give_new_defaults(s, p, normalize(rules))
                 first = FIRST_DEFAULTS.get(code) or {}
                 stale = [k for k, v in first.items() if p.rules.get(k) == v]
                 if stale:

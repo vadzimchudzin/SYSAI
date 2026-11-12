@@ -54,6 +54,9 @@ class NetAccessProfile(Base):
     builtin = Column(Boolean, default=False)
     updated_at = Column(DateTime(timezone=True), default=now)
     updated_by = Column(String(64), default="")
+    # what of the defaults in the code this built-in profile was already given: {"mcp": [servers], "main": "mid"}.
+    # A new default is given once; what a person took away afterwards is not brought back (access.ensure_builtin)
+    given = Column(JSON, nullable=True)
 
 
 class NetAgentAccess(Base):

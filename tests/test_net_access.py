@@ -250,3 +250,50 @@ def test_the_signed_document_offers_the_synchronizer_to_update_to(client, net_ag
     settings_store.set_many({"agents_auto_update": False})
     later = access.document(net_agent["id"])
     assert later["doc"]["synchronizer"]["auto_update"] is False and later["rev"] != doc["rev"]  # the computers learn
+
+
+def test_a_tool_added_to_the_seed_is_given_to_the_department_profiles_once(client, net_agent, monkeypatch):
+    """Nobody writes «ebpro-gui: *» into every profile: a shipped MCP tool the profile was never given is added by the
+    server, the old default main model «auto» becomes «mid» — once; what a person changes afterwards stays."""
+    shipped = access.seed_tools()
+    assert {"plc-kit", "machine-expert", "ebpro-cmtp", "ebpro-gui", "pic-index", "doc-kit"} <= set(shipped)
+    assert "plc-project" not in shipped                      # a skill is not an MCP server
+    access.ensure_builtin()
+    fresh = _profile("opo-engineer")
+    assert set(shipped) | {"sysai", "cad"} == set(fresh.rules["mcp"]) and fresh.rules["models"]["main"] == "mid"
+    assert not set(shipped) & set(_profile("to").rules["mcp"]) and not set(shipped) & set(_profile("viewer").rules["mcp"])
+
+    # a profile of a database made before: fewer servers, the main model «auto», nothing remembered
+    with SessionLocal() as s:
+        for code in ("opo-engineer", "opo-lead"):
+            row = s.query(NetAccessProfile).filter(NetAccessProfile.code == code).one()
+            rules = copy.deepcopy(row.rules)
+            rules["mcp"] = {"sysai": ["*"], "plc-kit": ["plc_info"], "machine-expert": ["*"], "cad": ["*"], "ebpro-cmtp": ["*"]}
+            rules["models"]["main"] = "auto"
+            row.rules, row.given, row.version = rules, None, 5
+        s.commit()
+    access.ensure_builtin()
+    access.ensure_builtin()
+    old = _profile("opo-engineer")
+    assert set(old.rules["mcp"]) == set(shipped) | {"sysai", "cad"} and old.version == 6 and old.updated_by == "SYSAI"
+    assert old.rules["mcp"]["plc-kit"] == ["plc_info"]       # what the profile says about a server it has is kept
+    assert old.rules["models"]["main"] == "mid" and old.rules["models"]["budget_day_usd"] == 3.0
+    assert _profile("opo-lead").rules["mcp"]["ebpro-gui"] == ["*"]
+    doc = access.document(net_agent["id"])["doc"]
+    assert "ebpro-gui" in doc["rules"]["mcp"]                # the computer gets it with the next sync
+
+    # a person takes a server away and chooses «auto» again: it stays
+    rules = access.normalize(old.rules)
+    del rules["mcp"]["ebpro-gui"]
+    rules["models"]["main"] = "auto"
+    access.save_profile(old.id, old.name, old.description, rules, by="admin")
+    access.ensure_builtin()
+    kept = _profile("opo-engineer")
+    assert "ebpro-gui" not in kept.rules["mcp"] and kept.rules["models"]["main"] == "auto" and kept.updated_by == "admin"
+
+    # a tool added to hub/seed later reaches the profile by itself
+    monkeypatch.setattr(access, "seed_tools", lambda: shipped + ["plc-live"])
+    access.ensure_builtin()
+    after = _profile("opo-engineer")
+    assert after.rules["mcp"]["plc-live"] == ["*"] and "ebpro-gui" not in after.rules["mcp"]
+    assert "plc-live" not in _profile("to").rules["mcp"]

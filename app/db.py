@@ -1216,6 +1216,8 @@ def init_db():
                         ("tok_last_result", "INTEGER DEFAULT 0"), ("last_result_tool", "VARCHAR(64) DEFAULT ''"),
                         ("n_images", "INTEGER DEFAULT 0"), ("turn", "INTEGER DEFAULT 0"), ("conv", "VARCHAR(12) DEFAULT ''")):
         _add_column_if_missing("net_spend", column, f"{column} {ddl}")
+    # which defaults of the code a built-in access profile was already given (access.ensure_builtin)
+    _add_column_if_missing("net_access_profiles", "given", "given JSON")
     _add_column_if_missing("net_agents", "debug_until", "debug_until TIMESTAMP")
     _add_column_if_missing("net_agents", "debug_by", "debug_by VARCHAR(64) DEFAULT ''")
     _add_column_if_missing("meetings", "options", "options JSON")
