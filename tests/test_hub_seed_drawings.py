@@ -80,6 +80,7 @@ def test_the_tool_passes_the_hub_check():
 def test_cyrillic_a_cad_wrote_as_bytes_is_put_back():
     broken = "".join(chr(int.from_bytes(ch.encode("utf-8"), "big")) for ch in "Нория") + " НС-А.10.08 10KM1"
     assert drawkit.fix_text(broken) == "Нория НС-А.10.08 10KM1"
+    assert drawkit.fix_text("\u84961") == "№1"
     assert drawkit.fix_text("Нория 10KM1 한글") == "Нория 10KM1 한글"   # what is not such a pair stays
     assert drawkit.designator("10КМ1")[:3] == ("10", "KM", "1") and drawkit.designator("10km1")[3] == "контактор"   # Cyrillic «КМ»
     assert drawkit.designator("QF2")[:3] == ("", "QF", "2") and drawkit.designator("L11") is None and drawkit.designator("2.5") is None
@@ -126,7 +127,7 @@ def test_the_server_answers_in_pages(scheme, tmp_path):
                          capture_output=True, text=True, timeout=120, encoding="utf-8",
                          env={**os.environ, "SYSAI_DRAWING_CACHE": str(tmp_path / "c")}).stdout.splitlines()
     replies = [json.loads(x) for x in out]
-    assert replies[0]["result"]["serverInfo"] == {"name": "drawing-kit", "title": "Схемы и чертежи в PDF", "version": "1.0.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "drawing-kit", "title": "Схемы и чертежи в PDF", "version": "1.1.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     assert len(json.dumps(replies[1]["result"]["tools"], ensure_ascii=False)) < 7000     # the definitions stay small
     data = [json.loads(r["result"]["content"][0]["text"]) for r in replies[2:8]]
@@ -135,3 +136,21 @@ def test_the_server_answers_in_pages(scheme, tmp_path):
     assert data[2]["count"] == 5 and data[2]["returned"] == 2 and data[2]["next_offset"] == 2 and data[2]["with_device"] == 4
     assert data[3]["found"][0]["page"] == 1 and data[4]["lines"] and data[5]["rows"]
     assert replies[8]["result"]["isError"] and "листа 7 нет" in replies[8]["result"]["content"][0]["text"]
+
+
+def test_channels_named_x_and_y_are_read_on_a_scheme_that_uses_them(tmp_path):
+    """Haiwell, Mitsubishi, Delta name inputs X… and outputs Y…; on a scheme with I… / Q… the same «Y3» is a terminal."""
+    xy = [(600, 80, "H40S2R"), *[(100 + 60 * i, 440, f"X{i}") for i in range(8)], *[(100 + 60 * i, 600, f"Y{i}") for i in range(6)],
+          (100, 300, "4SB1"), (160, 300, "4SQ1"), (100, 700, "4K1")]
+    file = tmp_path / "hw.pdf"
+    file.write_bytes(_pdf([xy]))
+    doc = drawkit.load(str(file))
+    assert doc["style"] == "xy" and drawkit.sheets(doc)["channel_style"] == "xy" and drawkit.sheets(doc)["sheets"][0]["channels"] == 14
+    chan = {c["channel"]: c for c in drawkit.channel_map(doc["pages"][0], style="xy")}
+    assert chan["X0"]["dir"] == "in" and chan["X0"]["device"] == "4SB1" and chan["X1"]["device"] == "4SQ1"
+    assert chan["Y0"]["dir"] == "out" and chan["Y0"]["device"] == "4K1"
+    iq = [(100 + 60 * i, 440, f"I{i}") for i in range(12)] + [(100 + 60 * i, 600, f"Y{i}") for i in range(4)]
+    other = tmp_path / "se.pdf"
+    other.write_bytes(_pdf([iq]))
+    doc = drawkit.load(str(other))
+    assert doc["style"] == "iq" and {c["name"] for c in drawkit.card(doc["pages"][0])["channels"]} == {f"I{i}" for i in range(12)}

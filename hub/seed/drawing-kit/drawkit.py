@@ -18,7 +18,7 @@ import os
 import re
 
 MAX_PAGES = 400
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 GAP = 0.45  # letters of one word stand closer than this part of their height
 # A designator of the scheme: optional number of the mechanism, letters of the kind, a number — 10KM1, 1SF3, QF2, HL1.
 # Kinds by GOST 2.710 as the schemes of the customer use them.
@@ -37,6 +37,9 @@ _DESIGNATOR = re.compile(r'^(\d{0,3})([A-Z]{1,2})(\d{1,3})$')
 _LOOKALIKE = str.maketrans('АВЕКМНОРСТУХ', 'ABEKMHOPCTYX')
 _MODULE = re.compile(r'^(TM\d{3}[A-Z0-9]{2,12}|TM[23][A-Z]{2,4}\d{1,2}[A-Z0-9]{0,6}|TMC\d[A-Z0-9]{2,6}|BMX[A-Z0-9]{4,12})$')
 _CHANNEL = re.compile(r'^%?([IQ])(\d{1,2})(?:\.(\d{1,2}))?$')
+# controllers that name their channels X… (inputs) and Y… (outputs): Haiwell, Mitsubishi, Delta. Latin letters only —
+# a Cyrillic «Х2» is a terminal block
+_CHANNEL_XY = re.compile(r'^([XY])(\d{1,3})$')
 _WORD = re.compile(r'[0-9A-Za-zА-Яа-яЁё]{2,}')
 
 
@@ -47,6 +50,7 @@ class DrawError(Exception):
 def fix_text(text: str) -> str:
     """A PDF from some CAD exports keeps Cyrillic as the two bytes of UTF-8 read as one UTF-16 unit («Н», bytes D0 9D,
     comes out as U+D09D «킝»). Such pairs are put back; everything else is left as it is."""
+    text = text.replace('\u8496', '№')  # «№» (three bytes of UTF-8) loses its first byte the same way
     if not any('퀀' <= ch <= '폿' for ch in text):
         return text
     out = []
@@ -201,7 +205,22 @@ def lines_of(page: dict, gap: float = 14.0) -> list:
              'text': ' '.join(w['t'] for w in p)} for p in out]
 
 
-def card(page: dict) -> dict:
+def channel_style(pages: list) -> str:
+    """'iq' — the channels of the scheme are I… / Q… (Schneider, Siemens); 'xy' — X… / Y… (Haiwell, Mitsubishi, Delta).
+    Decided for the whole file: a scheme uses one way, and «Y3» on a Schneider scheme is a terminal of a module."""
+    iq = xy = 0
+    for page in pages:
+        for w in page['words']:
+            for piece in re.split(r'[\s,;()]+', w['t']):
+                word = piece.strip().upper()
+                if _CHANNEL.match(word):
+                    iq += 1
+                elif _CHANNEL_XY.match(piece.strip()):
+                    xy += 1
+    return 'xy' if xy >= 10 and iq < xy / 4 else 'iq'
+
+
+def card(page: dict, style: str = 'iq') -> dict:
     """What a sheet holds: its designators, the modules of the controller, the channels and how much text there is."""
     width = page['width']
     devices, modules, channels = {}, [], []
@@ -211,10 +230,10 @@ def card(page: dict) -> dict:
         cyr += sum(1 for ch in t if 'а' <= ch.lower() <= 'я' or ch in 'ёЁ')
         for piece in re.split(r'[\s,;()]+', t):
             word = piece.strip().upper()
-            m = _CHANNEL.match(word)
+            m = _CHANNEL_XY.match(piece.strip()) if style == 'xy' else _CHANNEL.match(word)
             d = None if m else designator(piece)   # «Q3» next to a module is its output, not a switch
             if m:
-                channels.append({'name': word.lstrip('%'), 'dir': 'in' if m.group(1) == 'I' else 'out',
+                channels.append({'name': word.lstrip('%'), 'dir': 'in' if m.group(1) in ('I', 'X') else 'out',
                                  'x': round(w['x']), 'y': round(w['y'])})
             elif d:
                 name = word.translate(_LOOKALIKE)
@@ -233,12 +252,12 @@ _ON_INPUT = {'SQ', 'SR', 'SL', 'SP', 'SK', 'SB', 'SA', 'S', 'B', 'BK', 'BP', 'BL
 _ON_OUTPUT = {'K', 'KM', 'HL', 'HA', 'Y', 'YA', 'UZ', 'KT'}
 
 
-def channel_map(page: dict, reach: float = 26.0) -> list:
+def channel_map(page: dict, reach: float = 26.0, style: str = 'iq') -> list:
     """For a sheet with a module of the controller: every channel label with what is drawn in its column — the nearest
     sensor, button or contact (an input) or relay, contactor, lamp (an output) within `reach` points sideways, and the
     caption written in that column. A guess from the geometry: `distance` says how far the device is, the scheme
     itself is the judge."""
-    c = card(page)
+    c = card(page, style)
     phrases = [p for p in lines_of(page) if len(re.findall('[А-Яа-яЁё]', p['text'])) >= 3]
     # a sheet with inputs above and outputs below: a caption belongs to the half its channel is in
     ins = sorted(ch['y'] for ch in c['channels'] if ch['dir'] == 'in')
@@ -298,7 +317,8 @@ def load(path: str, cache_dir: str = '') -> dict:
                 return data
         except (OSError, ValueError):
             pass
-    data = {'version': CACHE_VERSION, 'file': path, 'sha256': digest, 'pages': read_pages(path)}
+    pages = read_pages(path)
+    data = {'version': CACHE_VERSION, 'file': path, 'sha256': digest, 'style': channel_style(pages), 'pages': pages}
     if cache_dir:
         try:
             os.makedirs(cache_dir, exist_ok=True)
@@ -328,7 +348,7 @@ def sheets(doc: dict) -> dict:
     """The file sheet by sheet, compact: what kinds of devices each sheet holds and whether it has words at all."""
     rows = []
     for page in doc['pages']:
-        c = card(page)
+        c = card(page, doc.get('style', 'iq'))
         kinds = {}
         for d in c['devices']:
             kinds[d['kind']] = kinds.get(d['kind'], 0) + 1
@@ -337,7 +357,7 @@ def sheets(doc: dict) -> dict:
                      'devices': len(c['devices']), 'kinds': dict(sorted(kinds.items(), key=lambda kv: -kv[1])),
                      'mechanisms': mech[:20], 'modules': sorted({m['name'] for m in c['modules']}),
                      'channels': len(c['channels']), 'title': title_of(page)})
-    return {'file': doc['file'], 'sha256': doc['sha256'], 'pages': len(rows), 'scans': sum(1 for r in rows if r['scan']),
+    return {'file': doc['file'], 'sha256': doc['sha256'], 'channel_style': doc.get('style', 'iq'), 'pages': len(rows), 'scans': sum(1 for r in rows if r['scan']),
             'sheets': rows}
 
 
@@ -354,7 +374,7 @@ def devices(doc: dict, kind: str = '', mechanism: str = '') -> list:
     the number before the letters («10» of 10KM1)."""
     found = {}
     for page in doc['pages']:
-        for d in card(page)['devices']:
+        for d in card(page, doc.get('style', 'iq'))['devices']:
             if kind and d['kind'] != kind.upper():
                 continue
             if mechanism and d['mechanism'] != str(mechanism):

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import drawkit  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PAGE = 60
 PAGE_MAX = 500
 FILE = {"type": "string", "description": r"Файл PDF: схема Э3, технологическая схема, спецификация, например "
@@ -125,7 +125,7 @@ def _call(name, args):
                 return _text(_json({**meta, "files": part}))
             s = drawkit.sheets(_doc(args))
             part, meta = _page(s["sheets"], args)
-            return _text(_json({"file": s["file"], "pages": s["pages"], "scans": s["scans"], **meta, "sheets": part}))
+            return _text(_json({"file": s["file"], "pages": s["pages"], "scans": s["scans"], "channel_style": s["channel_style"], **meta, "sheets": part}))
         if name == "draw_devices":
             doc = _doc(args)
             if args.get("mechanisms"):
@@ -144,7 +144,7 @@ def _call(name, args):
                 pages = [pages[int(args["page"]) - 1]]
             rows = []
             for page in pages:
-                for row in drawkit.channel_map(page):
+                for row in drawkit.channel_map(page, style=doc.get("style", "iq")):
                     rows.append({"page": page["page"], **{k: v for k, v in row.items() if k not in ("x", "y")}})
             part, meta = _page(rows, args)
             return _text(_json({**meta, "with_device": sum(1 for r in rows if r.get("device")), "channels": part}))
