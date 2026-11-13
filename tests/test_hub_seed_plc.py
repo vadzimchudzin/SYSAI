@@ -349,7 +349,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.6.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "1.6.1"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3

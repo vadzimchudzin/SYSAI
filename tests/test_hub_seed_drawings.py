@@ -127,7 +127,7 @@ def test_the_server_answers_in_pages(scheme, tmp_path):
                          capture_output=True, text=True, timeout=120, encoding="utf-8",
                          env={**os.environ, "SYSAI_DRAWING_CACHE": str(tmp_path / "c")}).stdout.splitlines()
     replies = [json.loads(x) for x in out]
-    assert replies[0]["result"]["serverInfo"] == {"name": "drawing-kit", "title": "Схемы и чертежи в PDF", "version": "1.1.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "drawing-kit", "title": "Схемы и чертежи в PDF", "version": "1.1.1"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     assert len(json.dumps(replies[1]["result"]["tools"], ensure_ascii=False)) < 7000     # the definitions stay small
     data = [json.loads(r["result"]["content"][0]["text"]) for r in replies[2:8]]

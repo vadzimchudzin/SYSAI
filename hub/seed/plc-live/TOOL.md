@@ -2,7 +2,7 @@
 name: plc-live
 kind: mcp
 description: Читает живой контроллер по сети через OPC UA — только чтение: кто отвечает в сети, значения переменных проекта сейчас, что менялось за время наблюдения (фронты, min и max). Писать, загружать, пускать и останавливать не умеет.
-version: 1.0.0
+version: 1.0.1
 run: python server.py
 platform: any
 tools: plc_scan, plc_read, plc_watch

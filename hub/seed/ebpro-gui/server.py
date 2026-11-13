@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gui import Driver, GuiError, _public  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 DRIVER = None          # tests put a Driver with a fake backend here
 
 
@@ -204,7 +204,7 @@ def _call(name, args):
 
 
 def _out(msg):
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 

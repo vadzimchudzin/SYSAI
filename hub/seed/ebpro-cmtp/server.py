@@ -713,7 +713,7 @@ def _edit(args):
 
 
 def _out(msg):
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 
@@ -728,7 +728,7 @@ def _handle(msg):
         if method == "initialize":
             _out({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": str(params.get("protocolVersion") or PROTOCOL),
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.8.0"},
+                  "serverInfo": {"name": "ebpro-cmtp", "title": "EasyBuilder Pro .cmtp/.emtp", "version": "1.8.1"},
                   "instructions": INSTRUCTIONS}})
         elif method == "ping":
             _out({"jsonrpc": "2.0", "id": mid, "result": {}})

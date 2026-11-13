@@ -362,12 +362,12 @@ def test_bundled_easybuilder_packages_download_without_publishing(client, net_ag
     before = client.get('/agents/api/hub/manifest', headers=net_agent['headers']).json()
     page = client.get('/hub')
     assert page.status_code == 200
-    for name, version, doc in [('ebpro-cmtp', '1.8.0', 'TOOL.md'),
+    for name, version, doc in [('ebpro-cmtp', '1.8.1', 'TOOL.md'),
                                ('ebpro-mnemoscheme', '1.1.0', 'SKILL.md'),
-                               ('ebpro-gui', '1.0.0', 'TOOL.md'), ('plc-kit', '1.6.0', 'TOOL.md'),
-                               ('machine-expert', '0.1.2', 'TOOL.md'), ('pic-index', '1.0.2', 'TOOL.md'),
-                               ('doc-kit', '1.1.0', 'TOOL.md'), ('plc-project', '2.6.0', 'SKILL.md'),
-                               ('project-docs', '1.1.0', 'SKILL.md'), ('drawing-kit', '1.1.0', 'TOOL.md'), ('plc-live', '1.0.0', 'TOOL.md')]:
+                               ('ebpro-gui', '1.0.1', 'TOOL.md'), ('plc-kit', '1.6.1', 'TOOL.md'),
+                               ('machine-expert', '0.1.3', 'TOOL.md'), ('pic-index', '1.0.3', 'TOOL.md'),
+                               ('doc-kit', '1.1.1', 'TOOL.md'), ('plc-project', '2.6.0', 'SKILL.md'),
+                               ('project-docs', '1.1.0', 'SKILL.md'), ('drawing-kit', '1.1.1', 'TOOL.md'), ('plc-live', '1.0.1', 'TOOL.md')]:
         assert f'/hub/bundled/{name}.zip' in page.text
         result = client.get(f'/hub/bundled/{name}.zip')
         assert result.status_code == 200

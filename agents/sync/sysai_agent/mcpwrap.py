@@ -175,7 +175,7 @@ def serve(name: str, home: Path | None = None, stdin=None, stdout=None) -> int:
 
     def say(obj) -> None:
         with lock:
-            stdout.write(json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n")
+            stdout.write(json.dumps(obj).encode("ascii") + b"\n")  # ASCII only: Hermes on Windows reads it with a locale code page that has no arrows
             stdout.flush()
 
     def upstream() -> None:

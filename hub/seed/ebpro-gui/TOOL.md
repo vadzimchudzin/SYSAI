@@ -2,7 +2,7 @@
 name: ebpro-gui
 kind: mcp
 description: Агент ведёт настоящий Weintek EasyBuilder Pro на ПК, как человек, — открывает проект, смотрит на окна (PNG), жмёт мышь и клавиши, печатает текст, заполняет поля диалогов, ждёт окна. Для того, чего не умеет ebpro-cmtp: новые виды объектов, настройки проекта, компиляция, офлайн-симуляция, проверка правок в самом EasyBuilder. Один ведущий за раз (остальные агенты ждут); окна загрузки в панель, паролей и прошивки — только человеку. Только Windows. Основа навыка ebpro-easybuilder.
-version: 1.0.0
+version: 1.0.1
 run: python server.py
 platform: windows
 tools: eb_edit, eb_windows, eb_shot, eb_controls, eb_click, eb_drag, eb_keys, eb_write, eb_wait, eb_close, eb_free

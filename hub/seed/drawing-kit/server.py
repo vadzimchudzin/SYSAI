@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import drawkit  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 PAGE = 60
 PAGE_MAX = 500
 FILE = {"type": "string", "description": r"Файл PDF: схема Э3, технологическая схема, спецификация, например "
@@ -182,7 +182,7 @@ def _call(name, args):
 
 
 def _out(msg):
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 

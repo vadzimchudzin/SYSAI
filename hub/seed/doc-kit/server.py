@@ -12,7 +12,7 @@ import dockit  # noqa: E402
 import docxout  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 FILE = {"type": "string", "description": r"Документ: .docx (или .md), например C:\Projects\line\docs\Руководство.docx"}
 INSTRUCTIONS = (
     "Документация проекта (руководство оператора, технический паспорт) в Word по образцу. Образец .docx: doc_outline — "
@@ -133,7 +133,7 @@ def _call(name, args):
 
 
 def _out(msg):
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 

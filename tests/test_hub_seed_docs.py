@@ -204,7 +204,7 @@ def _server(calls):
 
 def test_the_tool_passes_the_hub_check():
     meta, report = hub.check(_files())
-    assert report["errors"] == [] and meta["name"] == "doc-kit" and meta["kind"] == "mcp" and meta["version"] == "1.1.0"
+    assert report["errors"] == [] and meta["name"] == "doc-kit" and meta["kind"] == "mcp" and meta["version"] == "1.1.1"
     # the only remarks: the XML namespace names in the code look like addresses (the tool opens no connection)
     assert {w["what"] for w in report["warnings"]} == {"внешний адрес schemas.openxmlformats.org", "внешний адрес schemas.microsoft.com",
                                                        "внешний адрес purl.org", "внешний адрес www.w3.org"}
@@ -449,7 +449,7 @@ def test_server_reads_exports_and_checks(tmp_path):
         ("doc_export", {"md_file": str(tmp_path / "nope.md"), "out_file": str(tmp_path / "out" / "x.docx")}),
         ("doc_export", {"md_file": md}), ("doc_text", {"file": str(tmp_path / "old.doc")}), ("doc_nope", {}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "doc-kit", "title": "Документы Word по образцу", "version": "1.1.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "doc-kit", "title": "Документы Word по образцу", "version": "1.1.1"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     assert [t["annotations"]["readOnlyHint"] for t in replies[1]["result"]["tools"]] == [True, True, False, True]
     r = [x["result"] for x in replies[2:]]

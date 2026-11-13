@@ -101,7 +101,7 @@ def _server(calls):
 def test_the_tool_passes_the_hub_check():
     meta, report = hub.check(_files())
     assert report == {"errors": [], "warnings": []} and meta["name"] == "pic-index" and meta["kind"] == "mcp"
-    assert meta["platform"] == "any" and meta["version"] == "1.0.2" and meta["run"] == "python server.py"
+    assert meta["platform"] == "any" and meta["version"] == "1.0.3" and meta["run"] == "python server.py"
     assert [t.strip() for t in meta["tools"].split(",")] == TOOLS
     assert not any(w in src for src in (f.read_text(encoding="utf-8") for f in SEED.glob("*.py"))
                    for w in ("import socket", "urllib", "http.client", "requests", "subprocess"))

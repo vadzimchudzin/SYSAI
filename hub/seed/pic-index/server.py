@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import picindex  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 DIR = {"type": "string", "description": r"Папка с картинками (вложенные папки тоже), например C:\Projects\line\hmi\pictures"}
 STATE = {"type": "string", "description": "Состояние: " + ", ".join(picindex.STATES)}
 INSTRUCTIONS = (
@@ -110,7 +110,7 @@ def _call(name, args):
 
 
 def _out(msg):
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 

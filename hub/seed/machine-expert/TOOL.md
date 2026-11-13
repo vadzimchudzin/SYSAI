@@ -2,7 +2,7 @@
 name: machine-expert
 kind: mcp
 description: Ведёт EcoStruxure Machine Expert на ПК инженера его же скриптовым интерфейсом — создаёт файл .project из папки ST (plc-kit), компилирует и возвращает ошибки компилятора с файлом и строкой, достаёт программу из любого .project (и закрытого), находит контроллеры в сети, входит в контроллер или симуляцию, загружает проект, читает и пишет переменные. Только Windows, нужен установленный Machine Expert.
-version: 0.1.2
+version: 0.1.3
 run: python server.py
 platform: windows
 tools: me_find, me_devices, me_create, me_update, me_build, me_export, me_scan, me_online, me_open

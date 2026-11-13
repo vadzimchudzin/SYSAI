@@ -19,7 +19,7 @@ import plcspec  # noqa: E402
 import plcstage  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 PATH = {"type": "string", "description": r"Проект ПЛК: файл .project Machine Expert, .export или PLCopen .xml из него, "
                                          r"либо папка с файлами .st (plc_export_st), например C:\Projects\line\plc"}
 PROJECT = {"type": "string", "description": r"Файл проекта Machine Expert, например C:\Projects\line\plc\Line.project"}
@@ -564,7 +564,7 @@ def _call(name, args):
 
 
 def _out(msg):
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 
