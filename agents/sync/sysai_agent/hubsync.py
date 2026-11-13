@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import shutil
+import stat
 import subprocess
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -63,11 +64,43 @@ def install(target: Path, blob: bytes, readonly: bool) -> None:
     if target.exists():
         try:
             os.replace(target, old)
-        except OSError as exc:
-            fsutil.rmtree(new)
-            raise HubError(f"папка занята (открыта программой?): {exc}") from exc
+        except OSError:
+            # Windows does not let a folder be renamed while a program works in it — the MCP server of this very tool,
+            # started by the agent. Its files are not held, so the new version is put over the old one file by file;
+            # the running server goes on with the code it has loaded and takes the new one when it is started again.
+            try:
+                _overlay(new, target, readonly)
+            except OSError as exc:
+                raise HubError(f"папка занята, и заменить в ней файлы не удалось (закройте окно агента и повторите): {exc}") from exc
+            finally:
+                fsutil.rmtree(new)
+            return
     os.replace(new, target)
     fsutil.rmtree(old)
+
+
+def _overlay(new: Path, target: Path, readonly: bool) -> None:
+    """The files of `new` are put into `target` one by one and what `new` does not have goes — for a folder that
+    cannot be swapped whole. Each file is replaced at once (os.replace), so none is ever half written."""
+    fresh = {p.relative_to(new).as_posix() for p in new.rglob("*") if p.is_file()}
+    for rel in sorted(fresh):
+        src, dst = new.joinpath(*rel.split("/")), target.joinpath(*rel.split("/"))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            os.chmod(dst, stat.S_IWRITE | stat.S_IREAD)
+        os.replace(src, dst)
+    for path in sorted(target.rglob("*"), reverse=True):
+        rel = path.relative_to(target).as_posix()
+        if path.is_file() and rel not in fresh:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            path.unlink()
+        elif path.is_dir() and path != target:
+            try:
+                path.rmdir()  # a folder left empty
+            except OSError:
+                pass
+    if readonly:
+        fsutil.make_readonly(target)
 
 
 def _download(client, item: dict) -> bytes:

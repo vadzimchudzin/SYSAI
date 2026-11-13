@@ -645,3 +645,32 @@ def test_windows_installer_is_downloadable_from_agent_page(client, net_agent):
     assert "$Server = 'http://testserver'" in script and '__SYSAI_' not in script
     assert 'sysai-agent desktop --install-only' in script and "Read-Host 'Код подключения" in script
     assert 'окно и ярлык ещё не установлены' in script
+
+
+def test_a_tool_that_is_running_is_updated_file_by_file(tmp_path, monkeypatch):
+    """Windows does not rename a folder a program works in (the MCP server of the tool itself): the new version is put
+    over the old one, and nothing of the old one is left behind."""
+    def blob(files):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for name, text in files.items():
+                z.writestr(name, text)
+        return buf.getvalue()
+    target = tmp_path / "tools" / "plc-kit"
+    hubsync.install(target, blob({"server.py": "v1", "old_module.py": "gone later", "sub/a.py": "a1"}), True)
+    assert (target / "server.py").read_text() == "v1"
+    real = os.replace
+
+    def busy(src, dst):
+        if Path(src) == target:   # the folder itself cannot be moved aside
+            raise PermissionError(32, "Процесс не может получить доступ к файлу", str(src))
+        return real(src, dst)
+    monkeypatch.setattr(hubsync.os, "replace", busy)
+    hubsync.install(target, blob({"server.py": "v2", "new_module.py": "n", "sub/a.py": "a2"}), True)
+    assert (target / "server.py").read_text() == "v2" and (target / "sub" / "a.py").read_text() == "a2"
+    assert (target / "new_module.py").is_file() and not (target / "old_module.py").exists()
+    assert not target.with_name("plc-kit.new").exists() and not target.with_name("plc-kit.old").exists()
+    # the server is started outside the folder of the tool, its script by the full path: the folder is not held
+    args = mcpwrap.command({"run": "python server.py"}, target, "C:/venv/python.exe")
+    assert args == ["C:/venv/python.exe", str(target / "server.py")]
+    assert mcpwrap.command({"run": "python -u server.py --x"}, target)[1:] == ["-u", str(target / "server.py"), "--x"]

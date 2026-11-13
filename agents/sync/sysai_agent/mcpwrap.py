@@ -118,6 +118,13 @@ def command(spec: dict, folder: Path, python: str = "") -> list:
         raise ValueError("у инструмента нет команды запуска (run)")
     if args[0].lower() in ("python", "python3", "py", "python.exe", "pythonw"):
         args[0] = python or sys.executable
+        # the script by its full path: the server is started outside its folder (see serve), so that the folder is
+        # not held and the synchronizer can swap it for a new version while the agent works
+        for i in range(1, len(args)):
+            if not args[i].startswith("-"):
+                if not os.path.isabs(args[i]) and (folder / args[i]).exists():
+                    args[i] = str(folder / args[i])
+                break
     elif not os.path.isabs(args[0]) and (folder / args[0]).exists():
         args[0] = str(folder / args[0])
     return args
@@ -148,7 +155,8 @@ def serve(name: str, home: Path | None = None, stdin=None, stdout=None) -> int:
         sys.stderr.write(f"SYSAI: {exc}\n")
         return 2
     env = {**os.environ, "SYSAI_HOME": str(home), "SYSAI_TOOL_DIR": str(folder)}
-    proc = subprocess.Popen(args, cwd=str(folder), stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env,
+    # not in the folder of the tool: a program working in a folder keeps Windows from renaming it
+    proc = subprocess.Popen(args, cwd=str(home), stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env,
                             creationflags=0x08000000 if paths.WINDOWS else 0)
     lock = threading.Lock()
     lists = set()  # ids of tools/list requests: their answers are filtered
