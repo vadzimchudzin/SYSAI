@@ -122,6 +122,18 @@ def action_line(action) -> str:
 tpl.env.filters["action_line"] = action_line
 
 
+def give_new_defaults_to_profiles() -> bool:
+    """A tool shipped with this build reaches the built-in access profiles when the server starts — not when somebody
+    happens to open «Доступы» (the page was the only place that looked). True — done."""
+    try:
+        from .net import access
+        access.ensure_builtin()
+        return True
+    except Exception:  # noqa: BLE001  the profiles are brought up to date on the page all the same; the service starts
+        log.exception("the built-in access profiles were not brought up to date at the start")
+        return False
+
+
 def _probe_jev_later() -> None:
     """Whether the router of sysai/auto answers is known from the start, not from the first request an agent loses
     time on: one tiny request a minute after the server is up («Доступы» shows what came back)."""
@@ -155,6 +167,7 @@ def startup():
         return
     server_watch.start()
     pipeline.start_background()
+    give_new_defaults_to_profiles()
     _probe_jev_later()
     notion.start_worker()
     if userbot.ai_mode():

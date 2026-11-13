@@ -313,3 +313,17 @@ def test_the_profile_says_how_far_edits_without_questions_may_go(client, net_age
     assert access.document(net_agent["id"])["doc"]["rules"]["edits"] == {"auto": "off"}
     page = client.get("/agents/access").text
     assert 'name="edits_auto"' in page and "в одном проекте за раз" in page and 'name="plc_hosts"' in page
+
+
+def test_a_shipped_tool_reaches_the_profiles_when_the_server_starts(client, net_agent, monkeypatch):
+    """Nobody has to open «Доступы» for it: the start of the server gives the built-in profiles what the build ships."""
+    from app import main
+    access.ensure_builtin()
+    shipped = access.seed_tools()
+    monkeypatch.setattr(access, "seed_tools", lambda: shipped + ["new-kit"])
+    assert "new-kit" not in _profile("opo-engineer").rules["mcp"]
+    assert main.give_new_defaults_to_profiles() is True
+    assert _profile("opo-engineer").rules["mcp"]["new-kit"] == ["*"]
+    assert "new-kit" in access.document(net_agent["id"])["doc"]["rules"]["mcp"]      # and the computer gets it with the next sync
+    monkeypatch.setattr(access, "ensure_builtin", lambda: 1 / 0)
+    assert main.give_new_defaults_to_profiles() is False                             # a failure here never stops the start
