@@ -192,6 +192,9 @@ def test_the_character_of_the_agents_soul(client, net_agent):
     assert r.headers["location"].startswith("/agents/access?msg=") and r.headers["location"].endswith("#soul")
     after = access.document(net_agent["id"], "https://sysai.example")
     assert "Отвечай коротко." in after["doc"]["soul"] and "Сначала сверяй адреса." in after["doc"]["soul"]
+    # how the tools are reached is not a matter of character: it stays whatever the text of the network is
+    for soul_text in (text, after["doc"]["soul"]):
+        assert "## Инструменты SYSAI" in soul_text and "tool_search" in soul_text and "не авторизуй" in soul_text
     assert after["rev"] != doc["rev"] and soul.texts()["common"] == "Отвечай коротко."
     page = client.get(f"/agents/{net_agent['id']}").text
     assert "SOUL.md" in page and "Отвечай коротко." in page

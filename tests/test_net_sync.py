@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import stat
 import sys
 import zipfile
@@ -16,6 +17,8 @@ yaml = pytest.importorskip("yaml")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents" / "sync"))
 
 from sysai_agent import __version__ as SYNC_VERSION, cli, core, desktop, hermes, hook, hubsync, mcpwrap, paths, rules as R, signing, update  # noqa: E402,E501
+
+mcpwrap.WAIT_STEP = 0  # the tests do not wait for a synchronizer in mid-work
 
 from app import settings_store  # noqa: E402
 from app.db import Department, SessionLocal, User  # noqa: E402
@@ -674,3 +677,77 @@ def test_a_tool_that_is_running_is_updated_file_by_file(tmp_path, monkeypatch):
     args = mcpwrap.command({"run": "python server.py"}, target, "C:/venv/python.exe")
     assert args == ["C:/venv/python.exe", str(target / "server.py")]
     assert mcpwrap.command({"run": "python -u server.py --x"}, target)[1:] == ["-u", str(target / "server.py"), "--x"]
+
+
+def test_the_environment_of_a_tool_is_kept_while_its_requirements_are_the_same(tmp_path, monkeypatch):
+    """A tool with requirements.txt has an environment named by them: a new version with the same requirements builds
+    nothing, other requirements get a new folder, and an environment that is held (a running tool has loaded a library
+    of it — «[WinError 5] Отказано в доступе … _rust.pyd») is left where it is instead of failing the update."""
+    home, folder = tmp_path / "home", tmp_path / "home" / "tools" / "plc-live"
+    folder.mkdir(parents=True)
+    (folder / "requirements.txt").write_text("asyncua>=1.1\n", encoding="utf-8")
+    runs = []
+    exe = "Scripts/python.exe" if paths.WINDOWS else "bin/python"
+
+    def run(args, **kw):
+        runs.append(args[1:3])
+        if args[1] == "venv":
+            (Path(args[-1]) / exe).parent.mkdir(parents=True)
+            (Path(args[-1]) / exe).write_text("python")
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(hubsync.shutil, "which", lambda name: "uv")
+    monkeypatch.setattr(hubsync.subprocess, "run", run)
+    old = home / "venvs" / "plc-live"                         # what a synchronizer before this one made
+    (old / "Lib").mkdir(parents=True)
+    first = hubsync._tool_env(home, "plc-live", folder)
+    assert Path(first).parent.parent.name.startswith("plc-live-") and (Path(first).parent.parent / hubsync.READY).is_file()
+    assert not old.exists() and runs == [["venv", "--quiet"], ["pip", "install"]]
+    assert hubsync._tool_env(home, "plc-live", folder) == first and len(runs) == 2          # the same requirements: nothing is built
+
+    # other requirements while the old environment is held by the running tool: a new one next to it, no error
+    (folder / "requirements.txt").write_text("asyncua>=2\n", encoding="utf-8")
+    held = Path(first).parent.parent
+    real = hubsync.fsutil.rmtree
+
+    def rmtree(path):
+        if Path(path) == held:
+            raise PermissionError(5, "Отказано в доступе", str(held / "Lib" / "_rust.pyd"))
+        return real(path)
+    monkeypatch.setattr(hubsync.fsutil, "rmtree", rmtree)
+    second = hubsync._tool_env(home, "plc-live", folder)
+    assert second != first and Path(second).exists() and held.exists()
+    monkeypatch.setattr(hubsync.fsutil, "rmtree", real)
+    assert hubsync._tool_env(home, "plc-live", folder) == second and not held.exists()      # freed later: now it goes
+
+    # a build cut short leaves no mark and is not used: it is built again
+    (Path(second).parent.parent / hubsync.READY).unlink()
+    before = len(runs)
+    assert hubsync._tool_env(home, "plc-live", folder) == second and len(runs) == before + 2
+    # the tool no longer has requirements: its environments go, it runs on the synchronizer's Python
+    (folder / "requirements.txt").unlink()
+    assert hubsync._tool_env(home, "plc-live", folder) == "" and not list((home / "venvs").iterdir())
+
+
+def test_a_tool_started_while_the_synchronizer_is_in_mid_work_waits_instead_of_giving_up(pc, monkeypatch):
+    """Hermes starts a server once; one that exits is «not connected» for the whole session. A state file being written
+    anew or a folder being swapped at that very moment is waited for."""
+    reads = {"n": 0}
+    real = mcpwrap.fsutil.read_json
+
+    def read_json(path, default=None):
+        if Path(path).name == "state.json":
+            reads["n"] += 1
+            if reads["n"] <= 3:
+                return default       # caught between the old file and the new one
+        return real(path, default)
+    monkeypatch.setattr(mcpwrap.fsutil, "read_json", read_json)
+    seen = []
+    monkeypatch.setattr(mcpwrap.Guard, "server_allowed", lambda self: True)
+    monkeypatch.setattr(mcpwrap, "command", lambda spec, folder, python="": seen.append(folder) or [sys.executable, "-c", "pass"])
+    state = real(pc["home"] / "state.json", {}) or {}
+    state.setdefault("tools", {})["wait-kit"] = {"version": "1.0.0", "sha256": "x", "spec": {"run": "python server.py"}}
+    mcpwrap.fsutil.write_json(pc["home"] / "state.json", state)
+    (pc["home"] / "tools" / "wait-kit").mkdir(parents=True, exist_ok=True)
+    assert mcpwrap.serve("wait-kit", pc["home"], stdin=io.BytesIO(b""), stdout=io.BytesIO()) != 2
+    assert reads["n"] >= 4 and seen                                   # it was started after the file came back
+    assert mcpwrap.serve("нет-такого", pc["home"], stdin=io.BytesIO(b""), stdout=io.BytesIO()) == 2   # really absent: still refused

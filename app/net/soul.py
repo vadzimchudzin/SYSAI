@@ -42,6 +42,18 @@ COMMON = """## Как ты работаешь
   сообщи своему человеку (`notify_me`) и не повторяй запрос по кругу.
 """
 
+# Not a matter of character and not edited in the settings: how the tools SYSAI gives are reached. A model that does
+# not find `plc_stage_update` among its tools must look for it, not try to install, enable or authorize the server.
+TOOLS = """## Инструменты SYSAI
+- Инструменты SYSAI (`sysai`, `plc-kit`, `drawing-kit`, `ebpro-cmtp`, `machine-expert` и другие из хаба) уже подключены
+  синхронизатором. Никогда не устанавливай, не включай и не авторизуй MCP-серверы и не проси для них ключей и
+  паролей: их не существует.
+- Нужного инструмента нет в твоём списке — он выдаётся по запросу: найди его `tool_search` по имени
+  (`plc_stage_update`, `whoami`), посмотри параметры `tool_describe`, вызови `tool_call`.
+- Сервер SYSAI «не подключён» (`not_connected`) или инструмент так и не нашёлся — не ищи обходных путей: скажи своему
+  человеку одной фразой «перезапустите окно агента — инструмент <имя> не подключился» и остановись.
+"""
+
 DEPARTMENTS = {
     "ОПО": """Ты помогаешь инженеру ОПО делать проекты ПЛК в EcoStruxure Machine Expert: от пакета чертежей ТО до
 собранного проекта.
@@ -89,6 +101,7 @@ def for_agent(agent: str, person: str = "", login: str = "", department: str = "
     parts = [f"# {agent}", who]
     if table["common"]:
         parts.append(table["common"])
+    parts.append(TOOLS.strip())
     extra = addition(department, table)
     if extra:
         parts.append(f"## Отдел {department}\n\n{extra}")

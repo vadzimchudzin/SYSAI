@@ -5,6 +5,7 @@ the rules allow; a person in SYSAI reviews them."""
 import hashlib
 import io
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -111,22 +112,63 @@ def _download(client, item: dict) -> bytes:
     return blob
 
 
+READY = ".sysai-ready"  # written into an environment when its packages are in: a half-built one is never used
+
+
+def _venvs(home: Path, name: str) -> list:
+    """The environments of a tool on this computer: «venvs/<name>» of older synchronizers and «venvs/<name>-<hash>»."""
+    root = Path(home) / "venvs"
+    try:
+        return sorted(p for p in root.iterdir() if p.is_dir() and (p.name == name or re.fullmatch(re.escape(name) + r"-[0-9a-f]{8}(-\d+)?", p.name)))
+    except OSError:
+        return []
+
+
+def _drop_venvs(home: Path, name: str, keep: Path | None = None) -> None:
+    """Environments of the tool that are not needed go; one that is held (a library of it is loaded by the server of
+    the tool that is running, or a virus scanner looks at it) stays until the next time — it is not an error."""
+    for path in _venvs(home, name):
+        if keep is not None and path == keep:
+            continue
+        try:
+            fsutil.rmtree(path)
+        except OSError:
+            pass
+
+
 def _tool_env(home: Path, name: str, folder: Path) -> str:
     """A Python tool with requirements.txt: its own environment by uv; the python to start it with ("" — the
-    synchronizer's own)."""
+    synchronizer's own). The environment is named by what it must hold (the hash of requirements.txt): a new version of
+    the tool with the same requirements takes the environment that is there and nothing is rebuilt; other
+    requirements get a new folder, so an environment in use is never deleted from under a running tool."""
     req = folder / "requirements.txt"
     uv = shutil.which("uv")
     if not req.exists() or not uv:
+        _drop_venvs(home, name)
         return ""
-    venv = home / "venvs" / name
-    fsutil.rmtree(venv)
+    digest = hashlib.sha256(req.read_bytes()).hexdigest()[:8]
+    bin_python = "Scripts/python.exe" if paths.WINDOWS else "bin/python"
+    base = Path(home) / "venvs" / f"{name}-{digest}"
+    for venv in (base, *(base.with_name(f"{base.name}-{n}") for n in (2, 3, 4))):
+        if (venv / READY).is_file() and (venv / bin_python).exists():
+            _drop_venvs(home, name, keep=venv)
+            return str(venv / bin_python)
+        try:
+            fsutil.rmtree(venv)  # left half-built by a run that was cut short
+        except OSError:
+            continue             # held by something: build next to it
+        break
+    else:
+        raise HubError("не удалось освободить папку окружения инструмента (venvs): закройте окно агента и повторите")
     run = dict(capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
                creationflags=hermes.NO_WINDOW)
     r = subprocess.run([uv, "venv", "--quiet", str(venv)], **run)
     if r.returncode == 0:
-        python = venv / ("Scripts/python.exe" if paths.WINDOWS else "bin/python")
+        python = venv / bin_python
         r = subprocess.run([uv, "pip", "install", "--quiet", "--python", str(python), "-r", str(req)], **run)
         if r.returncode == 0:
+            (venv / READY).write_text(digest, encoding="utf-8")
+            _drop_venvs(home, name, keep=venv)
             return str(python)
     raise HubError("не поставились зависимости (requirements.txt): " + (r.stderr or r.stdout).strip()[-300:])
 
@@ -163,7 +205,7 @@ def sync(home: Path, client, manifest: dict, state: dict, profile_dir: Path | No
         for name in [n for n in have if n not in want]:
             try:
                 fsutil.rmtree(folder / name)
-                fsutil.rmtree(home / "venvs" / name)
+                _drop_venvs(home, name)
                 del have[name]
                 report["removed"].append(name)
             except OSError as exc:

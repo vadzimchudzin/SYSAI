@@ -9,12 +9,14 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from . import fsutil, paths, rules as R, signing
 
 PATH_KEYS = ("path", "file", "dir", "folder", "cwd", "directory")
 COMMAND_KEYS = ("command", "cmd", "commandline", "command_line", "shell", "powershell")
+WAIT_TRIES, WAIT_STEP = 16, 0.5  # up to eight seconds for the synchronizer to finish what it is doing
 PLC_KEYS = {"plc", "plcs", "plc_host", "plc_hosts", "plc_network"}  # arguments that name a controller or its network
 WRITE_TOKENS = {"write", "save", "delete", "remove", "move", "rename", "create", "put", "edit", "update", "export",
                 "out", "output", "dest", "destination", "target"}
@@ -140,12 +142,22 @@ def serve(name: str, home: Path | None = None, stdin=None, stdout=None) -> int:
     stdout = stdout or sys.stdout.buffer
     access_file = Path(os.environ.get("SYSAI_ACCESS_FILE") or home / "access.json")
     guard = Guard(home, name, access_file)
+    folder = Path(os.environ.get("SYSAI_TOOL_DIR") or home / "tools" / name)
+    # The synchronizer may be in the middle of its work at this very moment: writing state.json or access.json anew,
+    # swapping the folder of the tool for a new version. Hermes starts a server once and marks it «not connected» for
+    # the whole session when it exits — so what is missing is waited for a little before giving up.
+    tool = {}
+    for attempt in range(WAIT_TRIES):
+        state = fsutil.read_json(home / "state.json", {}) or {}
+        tool = (state.get("tools") or {}).get(name) or {}
+        if guard.server_allowed() and tool and folder.is_dir():
+            break
+        guard.mtime = None  # read access.json again next time
+        if attempt + 1 < WAIT_TRIES:
+            time.sleep(WAIT_STEP)
     if not guard.server_allowed():
         sys.stderr.write(f"SYSAI: MCP-сервер {name} агенту не разрешён (или нет подписанных доступов)\n")
         return 2
-    state = fsutil.read_json(home / "state.json", {}) or {}
-    tool = (state.get("tools") or {}).get(name) or {}
-    folder = Path(os.environ.get("SYSAI_TOOL_DIR") or home / "tools" / name)
     if not tool or not folder.is_dir():
         sys.stderr.write(f"SYSAI: инструмента {name} нет на компьютере — синхронизатор поставит его из SYSAI_Hub\n")
         return 2
