@@ -214,6 +214,22 @@ def _pid_of(record) -> int:
         return 0
 
 
+def stage_acp_patch(home: Path) -> bool:
+    """Stage the ACP-only MCP scope compatibility shim under the SYSAI home.
+
+    The file is loaded through PYTHONPATH by the Desktop ACP child only; it
+    patches imported Hermes modules in memory and never edits Hermes files.
+    True means the staged file changed.
+    """
+    source = Path(__file__).with_name("acp_sitecustomize.py")
+    target = Path(home) / "hermes-acp-patch" / "sitecustomize.py"
+    content = source.read_text(encoding="utf-8")
+    if target.is_file() and target.read_text(encoding="utf-8") == content:
+        return False
+    fsutil.atomic_write(target, content)
+    return True
+
+
 def gateway_running(profile_dir: Path) -> bool:
     """A gateway serves this profile: its own (gateway.pid in the profile) or — Hermes 0.22 and later — the one
     multiplexing gateway of the computer, started from the default profile: it keeps gateway.pid and
