@@ -238,12 +238,6 @@ def _patch_gateway_vbs(text: str, shim_dir: Path, sysai_home: Path) -> tuple[str
         begin,
         f"env.Item({q('SYSAI_HERMES_ACP_PATCH')}) = {q('1')}",
         f"env.Item({q('SYSAI_HOME')}) = {q(str(sysai_home))}",
-        f"existing_pp = env.Item({q('PYTHONPATH')})",
-        "If Len(existing_pp) > 0 Then",
-        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))} & {q(';')} & existing_pp",
-        "Else",
-        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))}",
-        "End If",
         end,
     ))
     updated, changed = _replace_managed_block(text, begin, end, block)
@@ -253,7 +247,27 @@ def _patch_gateway_vbs(text: str, shim_dir: Path, sysai_home: Path) -> tuple[str
             raise ValueError("Hermes gateway VBS launcher has no supported environment insertion point")
         updated = text.replace(anchor, anchor + "\r\n" + block, 1)
         changed = True
-    return updated, changed
+
+    priority_begin = "' SYSAI ACP MCP PATH PRIORITY BEGIN"
+    priority_end = "' SYSAI ACP MCP PATH PRIORITY END"
+    priority = "\r\n".join((
+        priority_begin,
+        f"existing_pp = env.Item({q('PYTHONPATH')})",
+        "If Len(existing_pp) > 0 Then",
+        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))} & {q(';')} & existing_pp",
+        "Else",
+        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))}",
+        "End If",
+        priority_end,
+    ))
+    prioritized, priority_changed = _replace_managed_block(updated, priority_begin, priority_end, priority)
+    if priority_begin not in updated:
+        anchor = "sh.CurrentDirectory = "
+        if updated.count(anchor) != 1:
+            raise ValueError("Hermes gateway VBS launcher has no supported final PYTHONPATH insertion point")
+        prioritized = updated.replace(anchor, priority + "\r\n" + anchor, 1)
+        priority_changed = True
+    return prioritized, changed or priority_changed
 
 
 def _patch_gateway_cmd(text: str, shim_dir: Path, sysai_home: Path) -> tuple[str, bool]:
@@ -263,7 +277,6 @@ def _patch_gateway_cmd(text: str, shim_dir: Path, sysai_home: Path) -> tuple[str
         begin,
         'set "SYSAI_HERMES_ACP_PATCH=1"',
         f'set "SYSAI_HOME={sysai_home}"',
-        f'set "PYTHONPATH={shim_dir};%PYTHONPATH%"',
         end,
     ))
     updated, changed = _replace_managed_block(text, begin, end, block)
@@ -276,7 +289,26 @@ def _patch_gateway_cmd(text: str, shim_dir: Path, sysai_home: Path) -> tuple[str
         lines[insert_at:insert_at] = [line + "\r\n" for line in block.split("\r\n")]
         updated = "".join(lines)
         changed = True
-    return updated, changed
+
+    priority_begin = "rem SYSAI ACP MCP PATH PRIORITY BEGIN"
+    priority_end = "rem SYSAI ACP MCP PATH PRIORITY END"
+    priority = "\r\n".join((
+        priority_begin,
+        f'set "PYTHONPATH={shim_dir};%PYTHONPATH%"',
+        priority_end,
+    ))
+    prioritized, priority_changed = _replace_managed_block(updated, priority_begin, priority_end, priority)
+    if priority_begin not in updated:
+        lines = prioritized.splitlines(keepends=True) if prioritized else updated.splitlines(keepends=True)
+        indexes = [i for i, line in enumerate(lines)
+                   if "gateway run" in line.casefold() and not line.lstrip().lower().startswith("rem ")]
+        if len(indexes) != 1:
+            raise ValueError("Hermes gateway CMD launcher has no supported gateway command insertion point")
+        insert_at = indexes[0]
+        lines[insert_at:insert_at] = [line + "\r\n" for line in priority.split("\r\n")]
+        prioritized = "".join(lines)
+        priority_changed = True
+    return prioritized, changed or priority_changed
 
 
 def _same_path_in_text(text: str, path: Path) -> bool:
