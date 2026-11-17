@@ -283,7 +283,7 @@ def _same_path_in_text(text: str, path: Path) -> bool:
     return expected in actual
 
 
-def _patch_gateway_launchers(home: Path) -> bool:
+def _patch_gateway_launchers(home: Path, profile_dir: Path | None = None) -> bool:
     """Wire the shim into this Hermes root's generated Windows Gateway launchers.
 
     ACP is only a viewer when a Gateway is already running. Its session MCP
@@ -293,7 +293,11 @@ def _patch_gateway_launchers(home: Path) -> bool:
     """
     if not paths.WINDOWS:
         return False
-    hermes_root = paths.hermes_root()
+    if profile_dir is None:
+        hermes_root = paths.hermes_root()
+    else:
+        profile_dir = Path(profile_dir)
+        hermes_root = profile_dir.parent.parent if profile_dir.parent.name == "profiles" else profile_dir
     folder = Path(hermes_root) / "gateway-service"
     if not folder.is_dir():
         return False
@@ -323,7 +327,7 @@ def _patch_gateway_launchers(home: Path) -> bool:
     return changed
 
 
-def stage_acp_patch(home: Path) -> bool:
+def stage_acp_patch(home: Path, profile_dir: Path | None = None) -> bool:
     """Stage the shim and wire it into Hermes' Windows Gateway launcher.
 
     Desktop ACP also receives the shim environment as a cold-start fallback.
@@ -338,7 +342,7 @@ def stage_acp_patch(home: Path) -> bool:
     if not target.is_file() or target.read_text(encoding="utf-8") != content:
         fsutil.atomic_write(target, content)
         changed = True
-    return _patch_gateway_launchers(Path(home)) or changed
+    return _patch_gateway_launchers(Path(home), profile_dir) or changed
 
 
 def gateway_running(profile_dir: Path) -> bool:
