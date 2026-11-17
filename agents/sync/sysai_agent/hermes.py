@@ -214,20 +214,131 @@ def _pid_of(record) -> int:
         return 0
 
 
-def stage_acp_patch(home: Path) -> bool:
-    """Stage the ACP-only MCP scope compatibility shim under the SYSAI home.
+def _vbs_quote(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
 
-    The file is loaded through PYTHONPATH by the Desktop ACP child only; it
-    patches imported Hermes modules in memory and never edits Hermes files.
-    True means the staged file changed.
+
+def _replace_managed_block(text: str, begin: str, end: str, block: str) -> tuple[str, bool]:
+    if begin in text:
+        start = text.index(begin)
+        stop = text.find(end, start)
+        if stop < 0:
+            raise ValueError("incomplete SYSAI ACP gateway launcher block")
+        stop += len(end)
+        updated = text[:start] + block + text[stop:]
+        return updated, updated != text
+    return "", False
+
+
+def _patch_gateway_vbs(text: str, shim_dir: Path) -> tuple[str, bool]:
+    begin = "' SYSAI ACP MCP PATCH BEGIN"
+    end = "' SYSAI ACP MCP PATCH END"
+    q = _vbs_quote
+    block = "\r\n".join((
+        begin,
+        f"env.Item({q('SYSAI_HERMES_ACP_PATCH')}) = {q('1')}",
+        f"existing_pp = env.Item({q('PYTHONPATH')})",
+        "If Len(existing_pp) > 0 Then",
+        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))} & {q(os.pathsep)} & existing_pp",
+        "Else",
+        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))}",
+        "End If",
+        end,
+    ))
+    updated, changed = _replace_managed_block(text, begin, end, block)
+    if begin not in text:
+        anchor = 'Set env = sh.Environment("PROCESS")'
+        if text.count(anchor) != 1:
+            raise ValueError("Hermes gateway VBS launcher has no supported environment insertion point")
+        updated = text.replace(anchor, anchor + "\r\n" + block, 1)
+        changed = True
+    return updated, changed
+
+
+def _patch_gateway_cmd(text: str, shim_dir: Path) -> tuple[str, bool]:
+    begin = "rem SYSAI ACP MCP PATCH BEGIN"
+    end = "rem SYSAI ACP MCP PATCH END"
+    block = "\r\n".join((
+        begin,
+        'set "SYSAI_HERMES_ACP_PATCH=1"',
+        f'set "PYTHONPATH={shim_dir};%PYTHONPATH%"',
+        end,
+    ))
+    updated, changed = _replace_managed_block(text, begin, end, block)
+    if begin not in text:
+        lines = text.splitlines(keepends=True)
+        indexes = [i for i, line in enumerate(lines) if line.strip().lower().startswith('set "hermes_home=')]
+        if len(indexes) != 1:
+            raise ValueError("Hermes gateway CMD launcher has no supported HERMES_HOME line")
+        insert_at = indexes[0] + 1
+        lines[insert_at:insert_at] = [line + "\r\n" for line in block.split("\r\n")]
+        updated = "".join(lines)
+        changed = True
+    return updated, changed
+
+
+def _same_path_in_text(text: str, path: Path) -> bool:
+    expected = os.path.normcase(os.path.normpath(str(path))).replace("/", "\\").casefold()
+    actual = text.replace("/", "\\").casefold()
+    return expected in actual
+
+
+def _patch_gateway_launchers(home: Path) -> bool:
+    """Wire the shim into this Hermes root's generated Windows Gateway launchers.
+
+    ACP is only a viewer when a Gateway is already running. Its session MCP
+    connections and tool calls live in that Gateway process, so patching only
+    the Desktop child would miss the actual runtime. Only generated launchers
+    under this Hermes root are touched; originals get one-time backups.
+    """
+    if not paths.WINDOWS:
+        return False
+    hermes_root = paths.hermes_root()
+    folder = Path(hermes_root) / "gateway-service"
+    if not folder.is_dir():
+        return False
+    shim_dir = Path(home) / "hermes-acp-patch"
+    changed = False
+    for launcher in [*folder.glob("*.vbs"), *folder.glob("*.cmd")]:
+        try:
+            raw = launcher.read_bytes()
+            is_vbs = launcher.suffix.lower() == ".vbs"
+            text = raw.decode("utf-16" if is_vbs else "utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        if not _same_path_in_text(text, Path(hermes_root)) or "gateway run" not in text.casefold():
+            continue
+        try:
+            updated, did_change = (_patch_gateway_vbs(text, shim_dir) if is_vbs
+                                   else _patch_gateway_cmd(text, shim_dir))
+        except ValueError:
+            continue
+        if not did_change:
+            continue
+        backup = launcher.with_name(launcher.name + ".before-sysai")
+        if not backup.exists():
+            fsutil.atomic_write(backup, raw)
+        fsutil.atomic_write(launcher, updated.encode("utf-16") if is_vbs else updated.encode("utf-8"))
+        changed = True
+    return changed
+
+
+def stage_acp_patch(home: Path) -> bool:
+    """Stage the shim and wire it into Hermes' Windows Gateway launcher.
+
+    Desktop ACP also receives the shim environment as a cold-start fallback.
+    For an already-running Gateway, the generated VBS/CMD launcher must carry
+    PYTHONPATH into the Gateway process before Python imports sitecustomize.
+    True means the staged file or a supported launcher changed.
     """
     source = Path(__file__).with_name("acp_sitecustomize.py")
     target = Path(home) / "hermes-acp-patch" / "sitecustomize.py"
     content = source.read_text(encoding="utf-8")
-    if target.is_file() and target.read_text(encoding="utf-8") == content:
-        return False
-    fsutil.atomic_write(target, content)
-    return True
+    changed = False
+    if not target.is_file() or target.read_text(encoding="utf-8") != content:
+        fsutil.atomic_write(target, content)
+        changed = True
+    return _patch_gateway_launchers(Path(home)) or changed
 
 
 def gateway_running(profile_dir: Path) -> bool:
