@@ -1,16 +1,16 @@
-"""Runtime compatibility for Hermes ACP editor sessions.
+"""Runtime compatibility for Hermes Gateway sessions opened through ACP.
 
-Loaded only by the SYSAI Desktop ACP child through PYTHONPATH. The two source
-transformations mirror the session/profile MCP fix and its trust-key follow-up:
-profile connection lookup is visible in a session overlay, and profile trust
-metadata remains the caller's policy when the session has no trust record.
+Loaded by the Hermes Gateway process through its generated launcher and by a
+cold-start ACP child. It chains any existing sitecustomize, then patches only
+the MCP resolver and trust-key lookup in memory when explicitly enabled.
 
-No Hermes files are modified on disk. Unsupported upstream source layouts fail
-open to the original module and are recorded in the SYSAI log.
+No Hermes Python source files are modified. Unsupported layouts fall back to
+the original modules and are recorded in the SYSAI log.
 """
 from __future__ import annotations
 
 import importlib.machinery
+import importlib.util
 import os
 import re
 import sys
@@ -170,6 +170,44 @@ class _PatchFinder:
         return spec
 
 
+def _chain_existing_sitecustomize() -> None:
+    """Run an existing sitecustomize from later sys.path entries before installing our finder.
+
+    Python imports only the first sitecustomize it finds. Because the SYSAI shim is prepended
+    for the Gateway process, deliberately chain the user's later hook instead of shadowing it.
+    """
+    current = sys.modules.get("sitecustomize")
+    own_dir = Path(__file__).resolve().parent
+    search = []
+    for entry in sys.path:
+        try:
+            if Path(entry or os.getcwd()).resolve() == own_dir:
+                continue
+        except OSError:
+            pass
+        search.append(entry)
+    try:
+        spec = importlib.machinery.PathFinder.find_spec("sitecustomize", search)
+        if spec is None or spec.loader is None or not spec.origin:
+            return
+        if Path(spec.origin).resolve() == Path(__file__).resolve():
+            return
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["sitecustomize"] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            if current is not None:
+                sys.modules["sitecustomize"] = current
+            else:
+                sys.modules.pop("sitecustomize", None)
+        _log(f"chained existing sitecustomize: {spec.origin}")
+    except Exception as exc:
+        if current is not None:
+            sys.modules["sitecustomize"] = current
+        _log(f"existing sitecustomize could not be chained ({type(exc).__name__}: {exc})")
+
+
 def install() -> None:
     global _INSTALLED
     if _INSTALLED:
@@ -179,6 +217,8 @@ def install() -> None:
     _INSTALLED = True
     _log("SYSAI Hermes ACP MCP compatibility loader active")
 
+
+_chain_existing_sitecustomize()
 
 if os.environ.get("SYSAI_HERMES_ACP_PATCH") == "1":
     install()
