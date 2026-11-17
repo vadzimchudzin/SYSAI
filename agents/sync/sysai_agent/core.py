@@ -206,6 +206,13 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
         report["errors"].append(
             f"MCP-сервер {name} не добавлен в Hermes: инструмент не установлен в версии из манифеста SYSAI_Hub")
 
+    if doc.get("harness") == "hermes":
+        try:
+            hermes.stage_acp_patch(home)
+        except OSError as exc:
+            applied = False
+            report["errors"].append(f"ACP Hermes (MCP session scope): {exc}")
+
     if doc.get("harness") == "hermes" and harness:
         try:
             report["changed"] = hermes.apply(profile_dir, safe_harness, doc.get("soul") or "", home, token,
