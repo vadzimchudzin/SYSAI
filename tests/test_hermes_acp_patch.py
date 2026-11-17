@@ -166,6 +166,7 @@ def test_gateway_vbs_launcher_carries_the_shim_into_the_gateway_process():
         'If Len(existing_pp) > 0 Then\r\n'
         '  env.Item("PYTHONPATH") = "hermes-static" & ";" & existing_pp\r\n'
         'Else\r\n  env.Item("PYTHONPATH") = "hermes-static"\r\nEnd If\r\n'
+        f'sh.CurrentDirectory = "{root}"\r\n'
         'sh.Run "python.exe -m hermes_cli.main -p opo gateway run", 0, True\r\n'
     )
     patched, changed = hermes._patch_gateway_vbs(source, Path(shim_dir), Path(sysai_home))
@@ -173,6 +174,8 @@ def test_gateway_vbs_launcher_carries_the_shim_into_the_gateway_process():
     assert 'env.Item("SYSAI_HERMES_ACP_PATCH") = "1"' in patched
     assert f'env.Item("SYSAI_HOME") = "{sysai_home}"' in patched
     assert f'env.Item("PYTHONPATH") = "{shim_dir}" & ";" & existing_pp' in patched
+    assert patched.index("' SYSAI ACP MCP PATH PRIORITY BEGIN") > patched.index('env.Item("PYTHONPATH") = "hermes-static"')
+    assert patched.index("' SYSAI ACP MCP PATH PRIORITY BEGIN") < patched.index("sh.CurrentDirectory = ")
     assert patched.index("SYSAI ACP MCP PATCH BEGIN") < patched.index('env.Item("HERMES_HOME")')
     again, changed_again = hermes._patch_gateway_vbs(patched, Path(shim_dir), Path(sysai_home))
     assert again == patched and not changed_again
@@ -192,6 +195,7 @@ def test_gateway_cmd_launcher_carries_the_shim_and_is_idempotent():
     assert changed and 'set "SYSAI_HERMES_ACP_PATCH=1"' in patched
     assert f'set "SYSAI_HOME={sysai_home}"' in patched
     assert f'set "PYTHONPATH={shim_dir};%PYTHONPATH%"' in patched
+    assert patched.index("rem SYSAI ACP MCP PATH PRIORITY BEGIN") < patched.index("python.exe -m hermes_cli.main -p opo gateway run")
     again, changed_again = hermes._patch_gateway_cmd(patched, shim_dir, sysai_home)
     assert again == patched and not changed_again
 
@@ -221,6 +225,7 @@ def test_sync_stages_the_sitecustomize_shim_and_patches_only_matching_gateway_la
         'Set env = sh.Environment("PROCESS")\r\n'
         f'env.Item("HERMES_HOME") = "{hermes_home}"\r\n'
         'existing_pp = env.Item("PYTHONPATH")\r\n'
+        f'sh.CurrentDirectory = "{hermes_home}"\r\n'
         'sh.Run "python.exe -m hermes_cli.main -p opo gateway run", 0, True\r\n',
         encoding="utf-16")
     cmd.write_text(
