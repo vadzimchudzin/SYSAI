@@ -88,12 +88,15 @@ Machine Expert и EasyBuilder рядом с проектом (`.~u`, `.opt`, `.p
 ## MCP в ACP-сессиях Hermes
 
 ACP-сессия редактора получает отдельный session scope. В затронутых версиях Hermes поиск соединения и trust gate не
-наследовали профильный MCP-контекст, поэтому вызовы профильных серверов могли сразу отвечать «not connected» либо
-попадать под неверный trust key. Синхронизатор кладёт в `%LOCALAPPDATA%\\SYSAI\\hermes-acp-patch\\sitecustomize.py`
-совместимый shim. Desktop передаёт его только своему процессу Hermes ACP через `PYTHONPATH`; он меняет импортируемые
-функции в памяти, не правит и не заменяет файлы установленного Hermes. Используются профильное живое соединение и
-его trust-политика; session-owned MCP остаётся приоритетным, границы профилей сохраняются, отсутствие trust-записи
-по-прежнему закрывает вызов. Журнал: `logs\\hermes-acp-patch.log`.
+наследовали профильный MCP-контекст, поэтому профильные инструменты могли сразу отвечать «not connected» либо
+попадать под неверный trust key. Синхронизатор кладёт runtime shim в `%LOCALAPPDATA%\\SYSAI\\hermes-acp-patch`.
+Важно: ACP-процесс — только viewer, а выполнение MCP идёт в Gateway. Поэтому Desktop передаёт shim ACP-процессу как
+cold-start fallback, а синхронизатор также добавляет его в `PYTHONPATH` с флагом активации в сгенерированные
+Gateway launchers текущего Hermes root (`gateway-service/*.vbs` и `*.cmd`). Исходные launchers сохраняются рядом
+с суффиксом `.before-sysai`; после изменения Gateway перезапускается синхронизатором. Shim меняет функции Hermes
+в памяти, не исходники Python. Session-owned MCP остаётся приоритетным, профильные границы и trust-политика
+сохраняются; отсутствующая trust-запись по-прежнему закрывает вызов. Существующий пользовательский
+`sitecustomize.py` цепляется до включения shim. Журнал: `logs\\hermes-acp-patch.log`.
 
 ## Холст
 
