@@ -230,13 +230,14 @@ def _replace_managed_block(text: str, begin: str, end: str, block: str) -> tuple
     return "", False
 
 
-def _patch_gateway_vbs(text: str, shim_dir: Path) -> tuple[str, bool]:
+def _patch_gateway_vbs(text: str, shim_dir: Path, sysai_home: Path) -> tuple[str, bool]:
     begin = "' SYSAI ACP MCP PATCH BEGIN"
     end = "' SYSAI ACP MCP PATCH END"
     q = _vbs_quote
     block = "\r\n".join((
         begin,
         f"env.Item({q('SYSAI_HERMES_ACP_PATCH')}) = {q('1')}",
+        f"env.Item({q('SYSAI_HOME')}) = {q(str(sysai_home))}",
         f"existing_pp = env.Item({q('PYTHONPATH')})",
         "If Len(existing_pp) > 0 Then",
         f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))} & {q(';')} & existing_pp",
@@ -255,12 +256,13 @@ def _patch_gateway_vbs(text: str, shim_dir: Path) -> tuple[str, bool]:
     return updated, changed
 
 
-def _patch_gateway_cmd(text: str, shim_dir: Path) -> tuple[str, bool]:
+def _patch_gateway_cmd(text: str, shim_dir: Path, sysai_home: Path) -> tuple[str, bool]:
     begin = "rem SYSAI ACP MCP PATCH BEGIN"
     end = "rem SYSAI ACP MCP PATCH END"
     block = "\r\n".join((
         begin,
         'set "SYSAI_HERMES_ACP_PATCH=1"',
+        f'set "SYSAI_HOME={sysai_home}"',
         f'set "PYTHONPATH={shim_dir};%PYTHONPATH%"',
         end,
     ))
@@ -313,8 +315,8 @@ def _patch_gateway_launchers(home: Path, profile_dir: Path | None = None) -> boo
         if not _same_path_in_text(text, Path(hermes_root)) or "gateway run" not in text.casefold():
             continue
         try:
-            updated, did_change = (_patch_gateway_vbs(text, shim_dir) if is_vbs
-                                   else _patch_gateway_cmd(text, shim_dir))
+            updated, did_change = (_patch_gateway_vbs(text, shim_dir, Path(home)) if is_vbs
+                                   else _patch_gateway_cmd(text, shim_dir, Path(home)))
         except ValueError:
             continue
         if not did_change:
