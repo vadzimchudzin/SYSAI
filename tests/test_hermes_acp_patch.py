@@ -240,6 +240,7 @@ def test_sync_stages_the_sitecustomize_shim_and_patches_only_matching_gateway_la
     assert staged.read_text(encoding="utf-8") == Path(acp_sitecustomize.__file__).read_text(encoding="utf-8")
     assert "SYSAI ACP MCP PATCH BEGIN" in vbs.read_text(encoding="utf-16")
     assert "SYSAI ACP MCP PATCH BEGIN" in cmd.read_text(encoding="utf-8")
-    assert not vbs.with_name(vbs.name + ".before-sysai").exists() is False
+    assert vbs.with_name(vbs.name + ".before-sysai").is_file()
+    assert cmd.with_name(cmd.name + ".before-sysai").is_file()
     assert "SYSAI ACP MCP PATCH BEGIN" not in unrelated.read_text(encoding="utf-16")
     assert not hermes.stage_acp_patch(home)
