@@ -12,6 +12,7 @@ const test = require('node:test');
 const { AcpClient, commandLine } = require('../lib/acp');
 const { Bridge } = require('../lib/bridge');
 const config = require('../lib/config');
+const { withAcpMcpPatch } = require('../lib/hermes-env');
 const files = require('../lib/files');
 const { Projects, prompts: projectPrompts, pipeline: projectPipeline, groupOf, cleanName, isResult, STAGES } = require('../lib/projects');
 const rules = require('../lib/rules');
@@ -99,6 +100,21 @@ test('the Hermes profile folder as the synchronizer finds it', () => {
 });
 
 // ------------------------------------------------------------------------------------------------ ACP
+
+test('ACP Hermes receives the session MCP compatibility shim without losing PYTHONPATH', () => {
+  const home = tmp();
+  const patchDir = path.join(home, 'hermes-acp-patch');
+  fs.mkdirSync(patchDir, { recursive: true });
+  fs.writeFileSync(path.join(patchDir, 'sitecustomize.py'), '# test shim');
+  const env = { PYTHONPATH: 'C:\\existing\\python', SYSAI_HOME: home, PATH: 'unchanged' };
+  const got = withAcpMcpPatch(env, home);
+  assert.equal(got.SYSAI_HERMES_ACP_PATCH, '1');
+  assert.equal(got.PYTHONPATH, [patchDir, env.PYTHONPATH].join(path.delimiter));
+  assert.equal(got.PATH, 'unchanged');
+  assert.equal(env.PYTHONPATH, 'C:\\existing\\python', 'the caller environment is not mutated');
+  fs.unlinkSync(path.join(patchDir, 'sitecustomize.py'));
+  assert.equal(withAcpMcpPatch(env, home).SYSAI_HERMES_ACP_PATCH, undefined, 'no shim before sync stages it');
+});
 test('hermes.cmd goes through cmd.exe with the arguments quoted', () => {
   const line = commandLine('C:\\Program Files\\hermes\\hermes.cmd', ['-p', 'ivan', 'acp'], 'win32');
   assert.equal(line.verbatim, true);
