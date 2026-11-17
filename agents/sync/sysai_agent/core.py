@@ -209,7 +209,7 @@ def sync_once(home: Path | None = None, transport=None, restart: bool = True) ->
     acp_patch_changed = False
     if doc.get("harness") == "hermes":
         try:
-            acp_patch_changed = hermes.stage_acp_patch(home)
+            acp_patch_changed = hermes.stage_acp_patch(home, profile_dir)
         except OSError as exc:
             applied = False
             report["errors"].append(f"ACP Hermes (MCP session scope): {exc}")
