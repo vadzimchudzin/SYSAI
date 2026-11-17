@@ -239,7 +239,7 @@ def _patch_gateway_vbs(text: str, shim_dir: Path) -> tuple[str, bool]:
         f"env.Item({q('SYSAI_HERMES_ACP_PATCH')}) = {q('1')}",
         f"existing_pp = env.Item({q('PYTHONPATH')})",
         "If Len(existing_pp) > 0 Then",
-        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))} & {q(os.pathsep)} & existing_pp",
+        f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))} & {q(';')} & existing_pp",
         "Else",
         f"  env.Item({q('PYTHONPATH')}) = {q(str(shim_dir))}",
         "End If",
