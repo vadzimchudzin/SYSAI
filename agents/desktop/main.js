@@ -14,6 +14,7 @@ const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 const { AcpClient } = require('./lib/acp');
+const { withAcpMcpPatch } = require('./lib/hermes-env');
 const { Canvas, PERSON } = require('./lib/canvas');
 const config = require('./lib/config');
 const files = require('./lib/files');
@@ -342,7 +343,7 @@ function startAcp() {
   }
   const profile = cfg.profile || cfg.agent;
   const args = profile && profile !== 'default' ? ['-p', profile, 'acp'] : ['acp'];
-  const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', SYSAI_HOME: HOME };
+  const env = withAcpMcpPatch({ ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', SYSAI_HOME: HOME }, HOME);
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.NODE_OPTIONS;
   const client = new AcpClient({ command: hermes, args, env, cwd: os.homedir() });

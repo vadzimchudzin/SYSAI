@@ -38,6 +38,19 @@
 Токен — в Windows Credential Manager («SYSAI agent»). Нет хранилища — файл `token`, читать его может только
 пользователь. `SYSAI_AGENT_TOKEN` в окружении важнее обоих (для проверок).
 
+## ACP и профильные MCP-серверы
+
+При синхронизации синхронизатор ставит runtime shim в `hermes-acp-patch\\sitecustomize.py` внутри папки SYSAI.
+ACP-процесс — viewer; сами сессии и вызовы MCP выполняются в Gateway. Поэтому Desktop передаёт shim ACP-процессу
+как fallback на случай холодного старта, а синхронизатор также добавляет каталог в `PYTHONPATH` и устанавливает
+флаг активации в сгенерированные Windows Gateway launchers текущего Hermes root (`gateway-service/*.vbs` и
+`*.cmd`). Оригиналы launchers сохраняются как `.before-sysai`; при изменении launcher синхронизатор помечает
+Gateway к перезапуску. Runtime shim меняет две импортируемые функции Hermes в памяти, а не Python-исходники.
+Session-owned MCP остаётся приоритетным; при отсутствии session trust record применяется trust key профиля, но
+отсутствие trust policy по-прежнему закрывает вызов. Существующий пользовательский `sitecustomize.py` цепляется
+до установки shim. Ошибки и факт применения записываются в `logs\\hermes-acp-patch.log`; после обновления Hermes
+проверяются точки входа, неизвестные исходные структуры не меняются.
+
 ## Что меняется в профиле Hermes
 
 Только ключи SYSAI в `config.yaml`: `model`, `fallback_providers`, `delegation`, `approvals`, `memory`,

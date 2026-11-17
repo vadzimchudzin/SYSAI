@@ -154,6 +154,7 @@ def test_sync_applies_only_its_keys_and_keeps_the_persons(pc, monkeypatch):
     (profile / hermes.ALLOWLIST).write_text(json.dumps({"approvals": [mine, stale]}), encoding="utf-8")
     report = core.sync_once(pc["home"], transport=pc["send"])
     assert report["errors"] == [] and set(report["changed"]) == {"config.yaml", ".env", "SOUL.md", hermes.ALLOWLIST}
+    assert (pc["home"] / "hermes-acp-patch" / "sitecustomize.py").is_file()
     cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
     home = str(pc["home"])
     assert cfg["display"] == {"skin": "mono"} and cfg["skills"]["own"] == 1  # the person's own stays
