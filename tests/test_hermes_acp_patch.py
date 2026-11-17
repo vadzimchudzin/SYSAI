@@ -158,6 +158,7 @@ def test_trust_source_patch_inherits_profile_policy_but_keeps_session_override()
 def test_gateway_vbs_launcher_carries_the_shim_into_the_gateway_process():
     root = r"C:\Users\Vadim\AppData\Local\hermes"
     shim_dir = r"C:\Users\Vadim\AppData\Local\SYSAI\hermes-acp-patch"
+    sysai_home = r"C:\Users\Vadim\AppData\Local\SYSAI"
     source = (
         'Set env = sh.Environment("PROCESS")\r\n'
         f'env.Item("HERMES_HOME") = "{root}"\r\n'
@@ -167,28 +168,31 @@ def test_gateway_vbs_launcher_carries_the_shim_into_the_gateway_process():
         'Else\r\n  env.Item("PYTHONPATH") = "hermes-static"\r\nEnd If\r\n'
         'sh.Run "python.exe -m hermes_cli.main -p opo gateway run", 0, True\r\n'
     )
-    patched, changed = hermes._patch_gateway_vbs(source, Path(shim_dir))
+    patched, changed = hermes._patch_gateway_vbs(source, Path(shim_dir), Path(sysai_home))
     assert changed
     assert 'env.Item("SYSAI_HERMES_ACP_PATCH") = "1"' in patched
+    assert f'env.Item("SYSAI_HOME") = "{sysai_home}"' in patched
     assert f'env.Item("PYTHONPATH") = "{shim_dir}" & ";" & existing_pp' in patched
     assert patched.index("SYSAI ACP MCP PATCH BEGIN") < patched.index('env.Item("HERMES_HOME")')
-    again, changed_again = hermes._patch_gateway_vbs(patched, Path(shim_dir))
+    again, changed_again = hermes._patch_gateway_vbs(patched, Path(shim_dir), Path(sysai_home))
     assert again == patched and not changed_again
 
 
 def test_gateway_cmd_launcher_carries_the_shim_and_is_idempotent():
     root = r"C:\Users\Vadim\AppData\Local\hermes"
     shim_dir = Path(r"C:\Users\Vadim\AppData\Local\SYSAI\hermes-acp-patch")
+    sysai_home = Path(r"C:\Users\Vadim\AppData\Local\SYSAI")
     source = (
         "@echo off\r\n"
         f'set "HERMES_HOME={root}"\r\n'
         'set "VIRTUAL_ENV=C:\\hermes\\.venv"\r\n'
         'python.exe -m hermes_cli.main -p opo gateway run\r\n'
     )
-    patched, changed = hermes._patch_gateway_cmd(source, shim_dir)
+    patched, changed = hermes._patch_gateway_cmd(source, shim_dir, sysai_home)
     assert changed and 'set "SYSAI_HERMES_ACP_PATCH=1"' in patched
+    assert f'set "SYSAI_HOME={sysai_home}"' in patched
     assert f'set "PYTHONPATH={shim_dir};%PYTHONPATH%"' in patched
-    again, changed_again = hermes._patch_gateway_cmd(patched, shim_dir)
+    again, changed_again = hermes._patch_gateway_cmd(patched, shim_dir, sysai_home)
     assert again == patched and not changed_again
 
 
