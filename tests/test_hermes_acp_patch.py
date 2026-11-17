@@ -232,9 +232,10 @@ def test_sync_stages_the_sitecustomize_shim_and_patches_only_matching_gateway_la
         encoding="utf-16")
 
     monkeypatch.setattr(hermes.paths, "WINDOWS", True)
-    monkeypatch.setattr(hermes.paths, "hermes_root", lambda: hermes_home)
     home = tmp_path / "SYSAI"
-    changed = hermes.stage_acp_patch(home)
+    profile_dir = hermes_home / "profiles" / "opo"
+    profile_dir.mkdir(parents=True)
+    changed = hermes.stage_acp_patch(home, profile_dir)
     staged = home / "hermes-acp-patch" / "sitecustomize.py"
     assert changed and staged.is_file()
     assert staged.read_text(encoding="utf-8") == Path(acp_sitecustomize.__file__).read_text(encoding="utf-8")
