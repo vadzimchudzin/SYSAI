@@ -10,7 +10,9 @@
 .net-form textarea { min-height: 84px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .net-form .wide { grid-column: 1 / -1; }
 .net-checks { display: flex; flex-wrap: wrap; gap: 10px 16px; font-size: 13.5px; }
-.net-checks label { display: inline-flex; gap: 6px; align-items: center; } .net-checks input { width: auto; }
+.net-checks label { display: inline-flex; gap: 6px; align-items: center; }
+/* своя галочка на своих размерах: общее input{padding:10px 12px} не растягивает её, 19×19 как в остальном SYSAI */
+.net-checks input[type=checkbox], .net-checks input[type=radio] { width: 19px; height: 19px; padding: 0; min-height: 0; flex: none; }
 .net-editor { min-height: 460px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .net-diff .add { color: #7fc48a; } .net-diff .del { color: #e48b84; } .net-diff .hunk { color: var(--muted); }
 .net-list { list-style: none; padding: 0; margin: 6px 0 0; font-size: 13.5px; } .net-list li { padding: 4px 0; border-bottom: 1px solid var(--line); } .net-list li:last-child { border-bottom: 0; }
@@ -317,16 +319,25 @@ details[open] > .ac-head { border-bottom: 1px solid var(--line); border-radius: 
 .inst-foot .i { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.7; flex: none; }
 
 /* Соты — рой агентов: схема в профиле и в карточке человека. Зелёные работают разом, светлые ждут, тусклые — запас;
-   нечётные ряды сдвинуты на полсоты, и сетка читается как соты, а не как таблица. swarm.js перерисовывает её по ползункам. */
+   нечётные ряды сдвинуты на полсоты, соседние касаются гранями, у каждой соты — рамка-кольцо того же контура.
+   swarm.js перерисовывает её по ползункам. */
 .combs .comb-wrap { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
 .hx-mark, .hx-mini i { clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
-.comb { display: grid; grid-template-columns: repeat(8, 22px); gap: 5px 4px; flex: none; padding: 6px 13px 6px 0; }
-.comb .cell { width: 22px; height: 24px; background: var(--line); transition: background .2s, box-shadow .2s;
+.comb { --cw: 24px; --ch: 28px; display: grid; grid-template-columns: repeat(8, var(--cw)); flex: none;
+  padding: 2px calc(var(--cw) / 2 + 1px) calc(var(--ch) * .25 + 1px) 1px; }
+.comb .cell { width: var(--cw); height: var(--ch); position: relative; background: none; border: 0; padding: 0;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); transition: background .2s; }
+.comb .cell::before, .comb .cell::after { content: ""; position: absolute; inset: 0;
   clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.comb .cell::before { background: color-mix(in srgb, var(--muted) 46%, var(--line)); }
+.comb .cell::after { inset: 1.5px; background: var(--line); }
+/* второй и последующие чётные ряды поднимаются на четверть соты: грани сцепляются, нечётные — сдвиг на полсоты */
+.comb .cell:nth-child(n+9) { margin-top: calc(var(--ch) * -0.25); }
 .comb .cell:nth-child(16n+9), .comb .cell:nth-child(16n+10), .comb .cell:nth-child(16n+11), .comb .cell:nth-child(16n+12),
-.comb .cell:nth-child(16n+13), .comb .cell:nth-child(16n+14), .comb .cell:nth-child(16n+15), .comb .cell:nth-child(16n+16) { transform: translateX(13px); }
-.comb .cell.on { background: color-mix(in srgb, var(--green) 35%, var(--line)); }
-.comb .cell.run { background: var(--green); }
+.comb .cell:nth-child(16n+13), .comb .cell:nth-child(16n+14), .comb .cell:nth-child(16n+15), .comb .cell:nth-child(16n+16) { transform: translateX(calc(var(--cw) / 2)); }
+.comb .cell.on::after { background: color-mix(in srgb, var(--green) 35%, var(--line)); }
+.comb .cell.run::before { background: var(--green); }
+.comb .cell.run::after { background: color-mix(in srgb, var(--green) 78%, var(--card)); }
 .comb-side { min-width: 240px; flex: 1 1 260px; }
 .comb-range { margin: 12px 0; display: flex; flex-direction: column; gap: 4px; }
 .comb-range .f { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; margin: 0; }
@@ -341,10 +352,11 @@ details[open] > .ac-head { border-bottom: 1px solid var(--line); border-radius: 
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent); }
 .live-dot.away { background: var(--line2); box-shadow: none; }
 @media (max-width: 560px) {
-  .comb { grid-template-columns: repeat(6, 22px); }
+  .comb { grid-template-columns: repeat(6, var(--cw)); }
   .comb .cell { transform: none !important; }
+  .comb .cell:nth-child(n+7) { margin-top: calc(var(--ch) * -0.25) !important; }
   .comb .cell:nth-child(12n+7), .comb .cell:nth-child(12n+8), .comb .cell:nth-child(12n+9), .comb .cell:nth-child(12n+10),
-  .comb .cell:nth-child(12n+11), .comb .cell:nth-child(12n+12) { transform: translateX(13px) !important; }
+  .comb .cell:nth-child(12n+11), .comb .cell:nth-child(12n+12) { transform: translateX(calc(var(--cw) / 2)) !important; }
   .comb-live { margin: 8px 0 0; display: flex; }
 }
 
@@ -353,22 +365,35 @@ details[open] > .ac-head { border-bottom: 1px solid var(--line); border-radius: 
 .hive-sum { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: -6px 0 16px; }
 .chip-hx { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 99px; border: 1px solid var(--line2);
   font-size: 12.5px; color: var(--soft); }
-.hive { --w: 170px; --h: 146px; display: flex; flex-direction: column; align-items: flex-start; gap: 14px; margin: 4px 0 18px;
+.hive { --w: 170px; --h: 146px; display: flex; flex-direction: column; align-items: flex-start; margin: 4px 0 18px;
   max-width: 100%; }
-/* ряд никогда не вылезает за страницу: не влезает — переносится; сдвиг сот — только там, где для него есть место */
-.hive-row { display: flex; flex-wrap: wrap; gap: 12px; max-width: 100%; }
-.hive-row.odd { margin-left: calc(var(--w) / 2 + 6px); }
-/* сдвинутый ряд из четырёх сот — ~810px: с боковой панелью (248px) и полями он влезает от 1180px окна; уже — без сдвига */
-@media (max-width: 1180px) { .hive-row.odd { margin-left: 0; } }
+/* ряд никогда не вылезает за страницу: не влезает — переносится; сдвиг сот — только там, где для него есть место.
+   Шестиугольник плоский сверху (pointy-top): соседние в ряду касаются гранями — шаг ряда равен ширине соты,
+   расстояние между рядами — 3/4 высоты; нечётный ряд сдвинут на полсоты. */
+.hive-row { display: flex; flex-wrap: wrap; gap: 0; max-width: 100%; }
+.hive-row + .hive-row { margin-top: calc(var(--h) * -0.25); }
+.hive-row.odd { margin-left: calc(var(--w) / 2); }
+/* сдвиг нечётного ряда — полсоты (85px при соте 170): соты теперь касаются гранями, ряд стал уже прежнего
+   с зазорами 12px, поэтому сдвиг держится на любой широкой странице; узкая раскладка отменяет его в своих правилах */
 .hive form { display: flex; flex-direction: column; align-items: center; gap: 3px; margin: 0; }
+/* большие соты с рамкой-кольцом: контур (::before) и лицо (::after) — тот же шестиугольник, рамка видна у каждой соты.
+   Контур остроконечный (острия сверху и снизу), как у схемы .comb-grid: при gap: 0 соседи касаются вертикальными
+   гранями, ряд поднимается на четверть высоты, нечётный ряд сдвигается на полсоты — соты действительно сцеплены. */
 .hive .hx { width: var(--w); height: var(--h); padding: 0 28px; border: 0; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 2px; text-align: center; cursor: pointer; color: var(--text); font: inherit;
-  background: linear-gradient(160deg, var(--card2), var(--card)); transition: filter .15s, background .15s;
-  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); }
+  position: relative; background: none; transition: filter .15s, background .15s;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.hive .hx::before, .hive .hx::after { content: ""; position: absolute; inset: 0;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.hive .hx::before { background: color-mix(in srgb, var(--muted) 46%, var(--line)); }
+.hive .hx::after { inset: 2px; background: linear-gradient(160deg, var(--card2), var(--card)); }
+.hive .hx > * { position: relative; z-index: 1; }
 .hive .hx:hover, .hive .hx:focus-visible { filter: brightness(1.18); }
-.hive .hx.on { background: linear-gradient(160deg, color-mix(in srgb, var(--green) 34%, var(--card2)), color-mix(in srgb, var(--green) 14%, var(--card))); }
+.hive .hx.on::before { background: var(--green); }
+.hive .hx.on::after { background: linear-gradient(160deg, color-mix(in srgb, var(--green) 34%, var(--card2)), color-mix(in srgb, var(--green) 14%, var(--card))); }
 .hive .hx.off { color: var(--soft); }
-.hive .hx.picked { background: linear-gradient(160deg, color-mix(in srgb, var(--clay) 32%, var(--card2)), color-mix(in srgb, var(--clay) 10%, var(--card))); }
+.hive .hx.picked::before { background: var(--clay); }
+.hive .hx.picked::after { background: linear-gradient(160deg, color-mix(in srgb, var(--clay) 32%, var(--card2)), color-mix(in srgb, var(--clay) 10%, var(--card))); }
 .hive .hx b { font-size: 12.5px; font-weight: 600; line-height: 1.2; max-width: 118px; }
 /* имя агента переносится, а не обрезается с двух сторон: по центру обрезанный текст читается хуже всего */
 .hive .hx .small { color: var(--muted); font-size: 11px; max-width: 118px; overflow-wrap: anywhere; line-height: 1.25; }
@@ -380,8 +405,8 @@ details[open] > .ac-head { border-bottom: 1px solid var(--line); border-radius: 
 .hive .hx.on .hx-st { color: var(--green); }
 .hive .hx-edit { color: var(--muted); text-decoration: underline dotted; text-underline-offset: 2px; } .hive .hx-edit:hover { color: var(--text); }
 @media (max-width: 760px) {
-  .hive { --w: 112px; --h: 100px; gap: 10px; }
-  .hive-row { flex-wrap: wrap; gap: 10px; } .hive-row.odd { margin-left: 0; }
+  .hive { --w: 112px; --h: 100px; }
+  .hive-row { flex-wrap: wrap; gap: 0; } .hive-row + .hive-row { margin-top: calc(var(--h) * -0.25); } .hive-row.odd { margin-left: 0; }
   /* соты узкие: свободная ширина по центру шестиугольника — ~13px от края, иначе имя агента вылезает из соты */
   .hive .hx { padding: 0 10px; } .hive .hx b { font-size: 10.5px; max-width: 70px; }
   .hive .hx .small { font-size: 9px; max-width: 70px; } .hive .hx-st { font-size: 9px; max-width: 70px; line-height: 1.2; }

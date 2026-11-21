@@ -32,7 +32,16 @@ function demo() {
     decisions: { state: 'done', note: 'TM241CE40R + cMT3072X, OPC UA, стиль ОПО' },
     plc: { state: 'done', note: 'ST: 12 FB механизмов, блокировки по ТЗ п.4' },
     build: { state: 'work', note: 'Компилирую в Machine Expert — 2 предупреждения, исправляю' },
-  }, facts: { controller: 'TM241CE40R', panel: 'cMT3072X', resolution: [1024, 600], link: 'opcua', style: 'ОПО' } }, null, 2));
+  }, facts: { scope: 'full', controller: 'TM241CE40R', panel: 'cMT3072X', resolution: [1024, 600], link: 'opcua', language: 'st',
+    style: 'ОПО' } }, null, 2));
+  // ?scene=scope — «только экраны»: шаги ПЛК и компиляции погашены, стиль и контроллер не выбраны — дерево так и говорит
+  const hmi = path.join(DEMO, 'Шкаф СП-2 экраны');
+  for (const p of ['materials', 'plc', 'hmi', 'docs']) fs.mkdirSync(path.join(hmi, p), { recursive: true });
+  if (!fs.existsSync(path.join(hmi, 'materials', 'ТЗ на экраны.pdf'))) fs.writeFileSync(path.join(hmi, 'materials', 'ТЗ на экраны.pdf'), 'x'.repeat(90000));
+  fs.writeFileSync(path.join(hmi, 'pipeline.json'), JSON.stringify({ stages: {
+    materials: { state: 'done', note: '9 механизмов по перечню' }, decisions: { state: 'done' },
+    hmi: { state: 'work', note: 'Окна из пака «ОПО»; теги беру из программы, которая уже есть в materials' },
+  }, facts: { scope: 'hmi', panel: 'cMT3072X', resolution: [1024, 600], link: 'modbus_tcp' } }, null, 2));
   return new Projects(DEMO);
 }
 
@@ -44,7 +53,7 @@ const RPC = {
     const { stage, ...pr } = prompts(info);
     return { ...info, prompts: { ...pr, stages: Object.fromEntries(STAGES.map(([key]) => [key, stage(key)])) } };
   },
-  'projects:create': (name) => projects.create(String(name || '')),
+  'projects:create': (name, scope) => projects.create(String(name || ''), String(scope || 'full')),
   'projects:dialog': () => ({}),
 };
 

@@ -18,7 +18,20 @@ STAGES = [
     ('docs', 'Документы', 'Руководство пользователя и паспорт в docs/'),
 ]
 STATES = ('todo', 'work', 'done', 'problem')
-FACTS = ('controller', 'panel', 'resolution', 'link', 'style', 'machine_expert', 'project_file', 'hmi_file', 'doc_file')
+FACTS = ('scope', 'controller', 'panel', 'resolution', 'link', 'language', 'style', 'machine_expert', 'project_file', 'hmi_file',
+         'doc_file')
+# The scope of a project, chosen when it is created: the whole of it, only the PLC program, only the panel screens.
+# The stages a scope leaves out are skipped: they are not work to do, and a later stage closes without them.
+# No scope written down — the whole project (projects made before the scope existed).
+SCOPES = ('full', 'plc', 'hmi')
+SKIP = {'full': (), 'plc': ('hmi',), 'hmi': ('plc', 'build')}
+# The language of the PLC program: ST (text) or LD (ladder). Which one a controller's program accepts — plc_formats.
+LANGUAGES = ('st', 'ld')
+
+
+def skipped(facts: dict) -> tuple:
+    """The stages the scope of the project leaves out."""
+    return SKIP.get(facts.get('scope') or 'full', ())
 
 
 class StageError(ValueError):
@@ -59,7 +72,8 @@ def update(project_dir: str, stage: str = '', state: str = '', note=None, facts=
             raise StageError('state: todo (не начат), work (идёт), done (готов), problem (нужен инженер)')
         order = [k for k, _, _ in STAGES]
         if state == 'done':
-            late = [k for k in order[:order.index(stage)] if data['stages'][k]['state'] not in ('done',)]
+            skip = skipped(dict(data['facts'], **(facts if isinstance(facts, dict) else {})))
+            late = [k for k in order[:order.index(stage)] if data['stages'][k]['state'] not in ('done',) and k not in skip]
             # the documentation may be made without the build: the engineer may compile later
             late = [k for k in late if not (stage in ('hmi', 'docs') and k == 'build')]
             if late:
@@ -72,6 +86,10 @@ def update(project_dir: str, stage: str = '', state: str = '', note=None, facts=
         for k, v in facts.items():
             if k not in FACTS:
                 raise StageError(f'нет такого поля «{k}»; поля: ' + ', '.join(FACTS))
+            if k == 'scope' and v not in (None, '') and v not in SCOPES:
+                raise StageError('scope: full (проект полностью), plc (только ПЛК), hmi (только экраны)')
+            if k == 'language' and v not in (None, '') and v not in LANGUAGES:
+                raise StageError('language: st или ld')
             if v in (None, ''):
                 data['facts'].pop(k, None)
             else:
@@ -110,6 +128,7 @@ def extra(project_dir: str, limit: int = 200) -> list:
 
 def view(data: dict) -> dict:
     """The pipeline with the titles of the stages and the stage to do next."""
-    rows = [{'stage': k, 'title': title, 'goal': goal, **data['stages'][k]} for k, title, goal in STAGES]
-    nxt = next((r['stage'] for r in rows if r['state'] != 'done'), '')
-    return {'stages': rows, 'facts': data['facts'], 'next': nxt}
+    skip = skipped(data['facts'])
+    rows = [{'stage': k, 'title': title, 'goal': goal, **data['stages'][k], 'skipped': k in skip} for k, title, goal in STAGES]
+    nxt = next((r['stage'] for r in rows if r['state'] != 'done' and not r['skipped']), '')
+    return {'stages': rows, 'facts': data['facts'], 'next': nxt, 'scope': data['facts'].get('scope') or 'full'}

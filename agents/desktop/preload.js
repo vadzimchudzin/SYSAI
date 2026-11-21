@@ -93,7 +93,7 @@ contextBridge.exposeInMainWorld('sysai', {
   },
   projects: {
     list: () => call('projects:list'),
-    create: (name) => call('projects:create', name),
+    create: (name, scope) => call('projects:create', name, scope),
     info: (name) => call('projects:info', name),
     add: (name, paths) => call('projects:add', name, paths),
     tidy: (name) => call('projects:tidy', name),

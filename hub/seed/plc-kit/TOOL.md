@@ -2,7 +2,7 @@
 name: plc-kit
 kind: mcp
 description: Читает, проверяет и собирает программу ПЛК Schneider Machine Expert / CODESYS на языке ST без Machine Expert — в том числе сам файл .project (читает любой и пишет настоящий из папки ST и шаблона), программы, блоки, переменные, адреса Modbus, каналы ввода-вывода, теги для панели (Modbus и OPC UA), стиль проекта, PLCopen XML; спецификация объекта и программа по ней; решает связь панели и контроллера по моделям из ТЗ и ведёт этапы проекта «под ключ». Экраны панели — не здесь: ONI это oni-project, EasyBuilder это ebpro-cmtp, Haiwell Happy это haiwell-happy.
-version: 2.0.0
+version: 2.1.0
 run: python server.py
 platform: any
 tools: plc_info, plc_pous, plc_pou, plc_variables, plc_addresses, plc_hmi_tags, plc_tag_check, plc_check, plc_style, plc_style_save, plc_style_list, plc_style_show, plc_link, plc_stage_update, plc_spec_new, plc_spec_check, plc_generate, plc_export_st, plc_build, plc_formats, plc_export, plc_project_build, plc_project_template, plc_io, plc_io_map
@@ -125,9 +125,16 @@ XML в Machine Expert тоже не проверен.
 ## Этапы проекта
 
 `plc_stage_update` `{project_dir, stage, state, note, facts}` пишет `pipeline.json` в папке проекта: этап `work` /
-`done` / `problem` / `todo` и короткая заметка; `facts` — решения (`controller`, `panel`, `resolution`, `link`,
-`style`) и итоги (`machine_expert`, `project_file`, `hmi_file`, `doc_file`). Этап не закрывается раньше предыдущих
-(экраны и документы — можно без компиляции: её может сделать инженер). Только `project_dir` — прочитать ход.
+`done` / `problem` / `todo` и короткая заметка; `facts` — решения (`scope`, `controller`, `panel`, `resolution`,
+`link`, `language`, `style`) и итоги (`machine_expert`, `project_file`, `hmi_file`, `doc_file`). Этап не закрывается
+раньше предыдущих (экраны и документы — можно без компиляции: её может сделать инженер). Только `project_dir` —
+прочитать ход.
+- `scope` — объём проекта, его выбирает человек при создании проекта в окне: `full` (полностью), `plc` (только ПЛК —
+  этап `hmi` пропущен), `hmi` (только экраны — пропущены `plc` и `build`). Пропущенный этап не мешает закрыть
+  следующие, `next` его перескакивает, в ответе у него `skipped: true`. Нет `scope` — проект полностью.
+- `language` — язык программы ПЛК: `st` или `ld`. Что понимает среда контроллера — `plc_formats {kind: "plc"}`:
+  Machine Expert — генератор пишет ST (LD для него пока не генерируется), Haiwell — LD списком инструкций
+  (`haiwell-happy`).
 В папках результата лежит только результат: `plc/` — `.project`, `hmi/` — проект панели, `docs/` — `.docx`. Всё
 остальное (исходники `.st`, шаблоны, таблицы, скрипты, заметки) — в `_work/`; закрывая этап, инструмент называет
 лишние файлы (`extra`), их переносят в `_work/`. Служебные файлы Machine Expert и EasyBuilder рядом с проектом (`.~u`,

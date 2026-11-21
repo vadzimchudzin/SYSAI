@@ -952,7 +952,7 @@ function ipc() {
   // «Проекты»: folders of projects in the person's documents
   const projects = new Projects(projectsRoot());
   handle('projects:list', () => projects.list());
-  handle('projects:create', (name) => projects.create(String(name || '')));
+  handle('projects:create', (name, scope) => projects.create(String(name || ''), String(scope || 'full')));
   handle('projects:info', async (name) => {
     const info = await projects.info(String(name || ''));
     const { stage, ...pr } = projectPrompts(info);

@@ -1,6 +1,7 @@
 // Соты: рой агентов. Один значок в композере, панель на всю ширину разговора, и каждая сота — один живой агент:
 // работает — светится, нашёл — горит ровно, ошибся — красная, не успел — серая, спорит — жёлтая.
 import { h, clear, icon } from './dom.js';
+import { perRow, rowsOf, isOdd } from './combs.mjs';
 
 const STATE_RU = { idle: 'не начинал', working: 'ищет', done: 'готово', error: 'ошибка', timeout: 'не успел' };
 
@@ -70,18 +71,21 @@ export class SwarmPanel {
   drawGrid() {
     const cells = (this.state && this.state.cells) || [];
     const bad = this.conflictCells();
-    const grid = h('div', { class: 'comb-grid' });
-    if (!cells.length) {
-      for (let i = 0; i < this.cellsWanted; i += 1) grid.append(h('span', { class: 'cell idle' }));
-      return grid;
-    }
-    for (const cell of cells) {
-      const cls = `cell ${bad.has(cell.i) ? 'conflict' : cell.state}`;
-      const node = h('button', { class: cls, title: `${cell.i + 1}. ${cell.title} — ${STATE_RU[cell.state] || cell.state}`,
-        onclick: () => { this.picked = this.picked === cell.i ? null : cell.i; this.draw(); } });
-      node.append(h('span', { class: 'n', text: String(cell.i + 1) }));
-      grid.append(node);
-    }
+    // Соты рядами: шестиугольники касаются гранями, нечётный ряд — на полсоты (combs.mjs). Сколько влезает — по
+    // ширине панели, чтобы узкое окно не прятало соты за прокрутку. Нет живых сот — место, которое они займут.
+    const width = this.box.clientWidth || 640;
+    const inRow = perRow(width - 24, 46);
+    const list = cells.length
+      ? cells.map((cell) => {
+        const cls = `cell ${bad.has(cell.i) ? 'conflict' : cell.state}`;
+        const node = h('button', { class: cls, title: `${cell.i + 1}. ${cell.title} — ${STATE_RU[cell.state] || cell.state}`,
+          onclick: () => { this.picked = this.picked === cell.i ? null : cell.i; this.draw(); } });
+        node.append(h('span', { class: 'n', text: String(cell.i + 1) }));
+        return node;
+      })
+      : Array.from({ length: this.cellsWanted }, () => h('span', { class: 'cell idle' }));
+    const grid = h('div', { class: 'comb-grid' }, ...rowsOf(list.length, inRow).map((row, r) =>
+      h('div', { class: `comb-row${isOdd(r) ? ' odd' : ''}` }, ...row.map((i) => list[i]))));
     return grid;
   }
 

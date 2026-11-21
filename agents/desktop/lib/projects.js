@@ -70,7 +70,18 @@ const STAGES = [
   ['docs', 'Документы', 'Руководство пользователя и паспорт'],
 ];
 const STATES = ['todo', 'work', 'done', 'problem'];
-const FACTS = ['controller', 'panel', 'resolution', 'link', 'style', 'machine_expert', 'project_file', 'hmi_file', 'doc_file'];
+const FACTS = ['scope', 'controller', 'panel', 'resolution', 'link', 'language', 'style', 'machine_expert', 'project_file', 'hmi_file', 'doc_file'];
+// The scope of a project, chosen when it is created (the same as SCOPES and SKIP of plcstage.py: a test compares).
+// The stages a scope leaves out are skipped: not work to do. No scope written down — the whole project.
+const SCOPES = [
+  ['full', 'Проект полностью', 'ПЛК → компиляция → экраны → документы'],
+  ['plc', 'Только ПЛК', 'программа контроллера и компиляция, без экранов'],
+  ['hmi', 'Только экраны', 'экраны панели по готовой программе ПЛК'],
+];
+const SKIP = { full: [], plc: ['hmi'], hmi: ['plc', 'build'] };
+// a scope is one of SKIP's own keys — never a name inherited from Object.prototype («constructor», «__proto__»…)
+const isScope = (scope) => typeof scope === 'string' && Object.prototype.hasOwnProperty.call(SKIP, scope);
+const LANGUAGES = { st: 'ST', ld: 'LD' };
 const LINKS = { opcua: 'OPC UA', modbus_tcp: 'Modbus TCP', modbus_rtu: 'Modbus RTU' };
 const MAX_COPY = 2 * 1024 * 1024 * 1024; // one file
 const MAX_FILES = 3000;
@@ -132,8 +143,12 @@ function pipeline(dir) {
   for (const k of FACTS) if (f[k] !== undefined && f[k] !== null && f[k] !== '') facts[k] = f[k];
   if (typeof facts.link === 'string') facts.link_title = LINKS[facts.link] || facts.link;
   if (Array.isArray(facts.resolution)) facts.resolution = facts.resolution.join('×');
-  const next = stages.find((s) => s.state !== 'done');
-  return { stages, facts, next: next ? next.stage : '', done: stages.filter((s) => s.state === 'done').length,
+  if (typeof facts.language === 'string') facts.language_title = LANGUAGES[facts.language] || facts.language;
+  const scope = isScope(facts.scope) ? facts.scope : 'full';
+  facts.scope_title = SCOPES.find(([k]) => k === scope)[1];
+  for (const s of stages) s.skipped = SKIP[scope].includes(s.stage);
+  const next = stages.find((s) => s.state !== 'done' && !s.skipped);
+  return { stages, facts, scope, next: next ? next.stage : '', done: stages.filter((s) => s.state === 'done').length,
     started: stages.some((s) => s.state !== 'todo') };
 }
 
@@ -189,7 +204,9 @@ class Projects {
         updated: Math.max(st ? st.mtimeMs : 0, ...files.map((f) => f.mtime)),
         style: fs.existsSync(path.join(dir, 'style.md')),
         plc: files.some((f) => f.rel.startsWith('plc/')), hmi: files.some((f) => f.rel.startsWith('hmi/')),
-        docs: files.some((f) => f.rel.startsWith('docs/')), stages: pipeline(dir).stages.map((s) => s.state) });
+        docs: files.some((f) => f.rel.startsWith('docs/')),
+        // a stage the scope leaves out is not a dot in the list: it is not work to do
+        stages: pipeline(dir).stages.map((s) => (s.skipped ? 'skip' : s.state)) });
     }
     out.sort((a, b) => b.updated - a.updated);
     return { root: this.root, projects: out };
@@ -219,11 +236,17 @@ class Projects {
     return { name: clean, mode: 'trash', path: to };
   }
 
-  async create(name) {
+  // A new project: the folders, the memory and the scope the person chose — the fact `scope` in pipeline.json, where
+  // the agent's plc_stage_update reads it and keeps it. The whole project needs no file: no scope means the whole one.
+  async create(name, scope = 'full') {
     const dir = this.dir(name);
+    if (!isScope(scope)) throw new ProjectsError(`нет такого объёма проекта: ${scope}`);
     if (fs.existsSync(dir)) throw new ProjectsError(`проект «${cleanName(name)}» уже есть`);
     for (const part of PARTS) await fsp.mkdir(path.join(dir, part), { recursive: true });
     await fsp.writeFile(path.join(dir, 'project.md'), template(cleanName(name)), 'utf8');
+    if (scope !== 'full') {
+      await fsp.writeFile(path.join(dir, 'pipeline.json'), `${JSON.stringify({ version: 1, stages: {}, facts: { scope } }, null, 2)}\n`, 'utf8');
+    }
     return this.info(name);
   }
 
@@ -514,15 +537,36 @@ function prompts(info) {
   const resume = pl.started && next
     ? `Работа уже начата: продолжай с этапа «${next.title}» (ход — в pipeline.json, решения — в project.md).`
     : 'Начни с материалов.';
+  const scope = isScope(pl.scope) ? pl.scope : 'full';
+  const head = scope === 'plc' ? `Сделай для проекта «${info.name}» только программу ПЛК, с нуля, по навыку plc-project.`
+    : scope === 'hmi' ? `Сделай для проекта «${info.name}» только экраны панели, по навыку plc-project.`
+      : `Создай проект «${info.name}» полностью, с нуля, по навыку plc-project.`;
+  // what the scope leaves out is said in the request too: the agent does not start a stage nobody asked for
+  const route = scope === 'plc'
+    ? 'Объём — только ПЛК (факт scope: plc): этап «Экраны» пропущен, после компиляции предложи мне документацию. '
+    : scope === 'hmi'
+      ? 'Объём — только экраны (факт scope: hmi): этапы «Программа ПЛК» и «Компиляция» пропущены — программа ПЛК уже '
+        + 'есть в materials или plc, теги для экранов бери из неё (plc_hmi_tags). '
+      : '';
+  // the stages of the request, only those the scope has: an agent following the list never starts a skipped stage
+  const steps = [
+    ['materials', 'материалы'],
+    ['decisions', 'решения (контроллер, панель и связь OPC UA или Modbus — plc_link по ТЗ; шаблон проекта)'],
+    ['plc', 'программа ПЛК на ST'],
+    ['build', 'файл проекта Machine Expert (plc_project_build по шаблону; компиляция — me_build, без шаблона — '
+      + 'me_create; исправляй ошибки до нуля)'],
+    ['hmi', 'экраны панели (картинки — pic-index, теги — plc_hmi_tags)'],
+  ].filter(([key]) => !SKIP[scope].includes(key)).map(([, text]) => text).join(' → ');
+  // a decision not recorded yet: the window asks the agent to put the question to the person — a card, not a guess
+  const ask = (what, how) => `Проект «${info.name}», навык plc-project. ${where}
+В решениях проекта не записано: ${what}. `
+    + `Спроси меня карточкой (${how}), запиши ответ в факты pipeline (plc_stage_update) и в project.md, ничего не додумывай.`;
   return {
     analyze: `Проанализируй проект «${info.name}» по навыку plc-project. ${where}\n`
       + 'В materials лежит готовый проект: программа ПЛК и экраны панели. Разбери, как он устроен (plc_style, plc_check, '
       + 'экраны — ebpro-cmtp), запиши стиль в style.md, что сделано неудачно — отдельным разделом, и предложи стиль в Хаб.',
-    create: `Создай проект «${info.name}» полностью, с нуля, по навыку plc-project. ${where}\n`
-      + 'В materials — всё, что есть: ТЗ, схемы, чертежи. Иди по этапам и отмечай каждый (plc_stage_update): материалы → '
-      + 'решения (контроллер, панель и связь OPC UA или Modbus — plc_link по ТЗ; шаблон проекта) → программа ПЛК на ST → файл '
-      + 'проекта Machine Expert (plc_project_build по шаблону; компиляция — me_build, без шаблона — me_create; исправляй ошибки '
-      + 'до нуля) → экраны панели (картинки — pic-index, теги — plc_hmi_tags) → '
+    create: `${head} ${where}\n${route}`
+      + `В materials — всё, что есть: ТЗ, схемы, чертежи. Иди по этапам и отмечай каждый (plc_stage_update): ${steps} → `
       + 'в конце предложи мне документацию. В plc, hmi и docs — только готовые файлы (.project, проект панели, .docx); '
       + 'Среда — часть решений, а не догадка: назови контроллер и панель по ТЗ (марка, серия), чем каждый открывается '
       + '(Schneider M2xx/M5xx — Machine Expert; Haiwell — Haiwell Happy; панели Weintek cMT/eMT — EasyBuilder Pro; '
@@ -539,6 +583,21 @@ function prompts(info) {
       + 'снимки экранов — cmtp_render. Если в materials есть пример руководства (.docx) — сделай по нему (doc_outline, '
       + 'style_from); если нет — спроси меня, по какому образцу. Готовые .docx — в docs, текст и рисунки к ним — в '
       + '_work/docs; этап docs отметь (plc_stage_update).',
+    // «Компиляция»: the person compiled in the vendor's program and says how it went
+    compiled: `Проект «${info.name}», навык plc-project. ${where}\nДа, окей: я скомпилировал программу ПЛК в среде — ошибок нет. `
+      + 'Отметь этап «Компиляция» готовым (plc_stage_update build done) и переходи к следующему этапу.',
+    compileErrors: `Проект «${info.name}», навык plc-project. ${where}\nКомпиляция в среде не прошла — есть ошибки. `
+      + 'Отметь этап «Компиляция» как problem, спроси меня текст ошибок (или прочитай их me_build, если Machine Expert на этом '
+      + 'ПК есть), разбери каждую, исправь программу и собери проект заново; потом я скомпилирую ещё раз.',
+    decide: {
+      scope: ask('объём проекта', 'полностью / только ПЛК / только экраны'),
+      controller: ask('контроллер (марка и серия)', 'по ТЗ; не нашёл — спроси'),
+      panel: ask('панель оператора (марка, серия, разрешение)', 'по ТЗ; формат экранов — plc_formats {kind: "hmi"} с лого x-icons'),
+      link: ask('связь панели и контроллера', 'plc_link по моделям: OPC UA или Modbus TCP/RTU'),
+      language: ask('язык программы ПЛК', 'варианты с лого x-icons, только те, что умеет среда контроллера (plc_formats {kind: "plc"}); '
+        + 'Machine Expert: генератор пишет ST, LD для него пока не генерируется — так и скажи; Haiwell: список инструкций, LD собирается в Happy'),
+      style: ask('стиль проекта', 'навыки style-… в Хабе: hub_search; нет — предложи разобрать готовый проект'),
+    },
     stage: (stage) => {
       const s = pl.stages.find((x) => x.stage === stage);
       return s ? `Проект «${info.name}», навык plc-project. ${where}\nЗаймись этапом «${s.title}» (${s.goal.toLowerCase()})`
@@ -548,4 +607,4 @@ function prompts(info) {
 }
 
 module.exports = { Projects, ProjectsError, prompts, pipeline, groupOf, cleanName, storageFiles, isResult, isService, workPlace, guessRole, PARTS, STAGES, RESULTS, SERVICE, WORK,
-  ROLES, SOURCES, DIALOGS };
+  ROLES, SOURCES, DIALOGS, SCOPES, SKIP };

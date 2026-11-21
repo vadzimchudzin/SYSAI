@@ -183,6 +183,42 @@ def test_stages_are_the_same_in_the_tool_and_in_the_window():
     assert {k: tuple(re.findall(r"'([^']+)'", v)) for k, v in re.findall(r"(\w+): \[([^\]]+)\]", results)} == plcstage.RESULTS
     service = re.search(r"const SERVICE = \[([^\]]+)\];", js).group(1)
     assert tuple(re.findall(r"'([^']+)'", service)) == plcstage.SERVICE
+    # the scope of a project and the stages it leaves out: the window shows them skipped, the tool lets the later close
+    skip = re.search(r"const SKIP = \{(.+?)\};", js).group(1)
+    assert {k: tuple(re.findall(r"'([^']+)'", v)) for k, v in re.findall(r"(\w+): \[([^\]]*)\]", skip)} == plcstage.SKIP
+    scopes = js[js.index("const SCOPES = ["):js.index("];", js.index("const SCOPES = ["))]
+    assert tuple(re.findall(r"\['(\w+)', ", scopes)) == plcstage.SCOPES
+
+
+def test_the_scope_of_a_project_skips_the_stages_it_leaves_out(tmp_path):
+    """«Только экраны»: no PLC program and no compilation to wait for — the screens close after the decisions, and
+    «только ПЛК» goes from the build to the documents. A project without a scope is the whole of it, as before."""
+    hmi = tmp_path / "hmi"
+    hmi.mkdir()
+    plcstage.update(str(hmi), facts={"scope": "hmi"})
+    plcstage.update(str(hmi), "materials", "done")
+    v = plcstage.update(str(hmi), "decisions", "done", facts={"panel": "cMT3072X", "language": "st"})
+    assert v["next"] == "hmi" and v["scope"] == "hmi"
+    assert [r["stage"] for r in v["stages"] if r["skipped"]] == ["plc", "build"]
+    v = plcstage.update(str(hmi), "hmi", "done")
+    assert v["next"] == "docs"
+    plc = tmp_path / "plc"
+    plc.mkdir()
+    for stage in ("materials", "decisions", "plc", "build"):
+        v = plcstage.update(str(plc), stage, "done", facts={"scope": "plc"} if stage == "materials" else None)
+    assert v["next"] == "docs" and [r["stage"] for r in v["stages"] if r["skipped"]] == ["hmi"]
+    v = plcstage.update(str(plc), "docs", "done")
+    assert v["next"] == ""
+    full = tmp_path / "full"
+    full.mkdir()
+    plcstage.update(str(full), "materials", "done")
+    with pytest.raises(plcstage.StageError, match="не готовы decisions, plc"):
+        plcstage.update(str(full), "hmi", "done")
+    assert plcstage.update(str(full))["scope"] == "full"
+    with pytest.raises(plcstage.StageError, match="scope: full"):
+        plcstage.update(str(full), facts={"scope": "screens"})
+    with pytest.raises(plcstage.StageError, match="language: st или ld"):
+        plcstage.update(str(full), facts={"language": "fbd"})
 
 
 def test_closing_a_stage_names_what_does_not_belong_among_the_results(tmp_path):
@@ -353,7 +389,7 @@ def test_server_reads_checks_and_builds(tmp_path):
         ("plc_build", {"src_dir": str(out / "st"), "out_file": str(out / "plc.xml")}), ("plc_info", {"path": str(out / "st")}),
         ("plc_info", {"path": str(tmp_path / "x.project")}), ("plc_pou", {"path": exp, "name": "Nope"}),
     ])
-    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "2.0.0"}
+    assert replies[0]["result"]["serverInfo"] == {"name": "plc-kit", "title": "ПЛК: Machine Expert, ST", "version": "2.1.0"}
     assert [t["name"] for t in replies[1]["result"]["tools"]] == TOOLS
     r = [x["result"] for x in replies[2:]]
     assert json.loads(r[0]["content"][0]["text"])["pous"] == 3

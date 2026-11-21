@@ -22,7 +22,7 @@ import plcstage  # noqa: E402
 import plcstyle  # noqa: E402
 
 PROTOCOL = "2025-06-18"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 PATH = {"type": "string", "description": r"Проект ПЛК: файл .project Machine Expert, .export или PLCopen .xml из него, "
                                          r"либо папка с файлами .st (plc_export_st), например C:\Projects\line\plc"}
 PROJECT = {"type": "string", "description": r"Файл проекта Machine Expert, например C:\Projects\line\plc\Line.project"}
@@ -143,8 +143,11 @@ TOOLS = [
     _rw("plc_stage_update", "Отметить этап проекта",
         "Ход проекта «под ключ» в pipeline.json папки проекта — его показывает окно «Агент SYSAI» полосой этапов: "
         "materials, decisions, plc, build, hmi, docs. state: work (начал), done (готов), problem (нужен инженер — в "
-        "note что именно), todo. facts — решения и итоги: controller, panel, resolution, link, style, machine_expert, "
-        "project_file, hmi_file, doc_file. Без stage — только прочитать ход и записать facts. В ответе extra — лишние "
+        "note что именно), todo. facts — решения и итоги: scope, controller, panel, resolution, link, language, style, "
+        "machine_expert, project_file, hmi_file, doc_file. scope — объём проекта, его выбирает человек при создании: "
+        "full (полностью), plc (только ПЛК — этап hmi пропущен), hmi (только экраны — пропущены plc и build); "
+        "пропущенный этап (skipped) не мешает закрыть следующие и не бывает next. language — st или ld. "
+        "Без stage — только прочитать ход и записать facts. В ответе extra — лишние "
         "файлы в plc/, hmi/, docs/ (там только результат: .project, проект панели, .docx): перенесите их в _work/.",
         {"project_dir": {"type": "string", "description": r"Папка проекта, например C:\Users\me\Documents\SYSAI Проекты\Линия 1"},
          "stage": {"type": "string", "enum": [k for k, _, _ in plcstage.STAGES]},

@@ -1012,8 +1012,8 @@ html[data-theme="light"] .card.note { background: #fbfbfa; }
 html[data-theme="light"] .card.note.warn { border-left-color: var(--amber); }
 
 /* ---------- свои галочки и переключатели: не стоковый квадрат браузера ---------- */
-input[type=checkbox], input[type=radio] { appearance: none; -webkit-appearance: none; margin: 0; flex: none;
-  width: 19px; height: 19px; border: 1.5px solid var(--muted); background: var(--card); border-radius: 6px;
+input[type=checkbox], input[type=radio] { appearance: none; -webkit-appearance: none; margin: 0; flex: none; padding: 0;
+  width: 19px; height: 19px; min-height: 0; border: 1.5px solid var(--muted); background: var(--card); border-radius: 6px;
   cursor: pointer; position: relative; display: inline-grid; place-content: center; vertical-align: -3px;
   transition: border-color .15s, background .15s, box-shadow .15s, transform .12s; }
 input[type=radio] { border-radius: 50%; }

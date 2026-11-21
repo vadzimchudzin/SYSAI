@@ -184,16 +184,21 @@
           const list = openers.filter((o) => o.kind === kind);
           const want = kind === 'hmi' ? (/c?mt|weintek/i.test(fact) ? 'easybuilder' : 'oni') : (/haiwell/i.test(fact) ? 'hawell' : 'me');
           const hit = list.find((o) => o.id === want) || list[0] || {};
-          return { what: kind === 'plc' ? 'ПЛК' : 'Экраны', fact, program: hit.title || '', vendor: hit.vendor || '',
+          const out = { what: kind === 'plc' ? 'ПЛК' : 'Экраны', id: hit.id || '', fact, program: hit.title || '', vendor: hit.vendor || '',
             serves: hit.serves || '', file: hit.file || '', ready: Boolean(hit.title) };
+          if (hit.id === 'me') Object.assign(out, { languages: ['st', 'ld'], writes: ['st'], languageNote: 'LD для Machine Expert пока не генерируется — программа идёт на ST' });
+          return out;
         };
-        return { openers, environment: { plc: side('plc', 'TM241CE40R'), hmi: side('hmi', 'cMT3072X'), resolution: '1024×600', link: 'opcua' } };
+        const scoped = scene === 'scope';
+        return { openers, environment: { plc: side('plc', scoped ? '' : 'TM241CE40R'), hmi: side('hmi', 'cMT3072X'), resolution: '1024×600',
+          link: scoped ? 'modbus_tcp' : 'opcua', linkWhy: scoped ? 'Modbus TCP по Ethernet: адреса %M в программе и на экранах'
+            : 'оба умеют OPC UA: переменные по именам, адреса %M не нужны' } };
       },
     },
     dialog: { files: async () => [] }, conv: { export: async () => '' }, clipboard: { write: async () => {} },
     storage: { list: async () => ({ items: [] }), fetch: async () => '', upload: async () => ({}) },
     projects: {
-      list: () => rpc('projects:list'), create: (n) => rpc('projects:create', n), info: (n) => rpc('projects:info', n),
+      list: () => rpc('projects:list'), create: (n, s) => rpc('projects:create', n, s), info: (n) => rpc('projects:info', n),
       add: async () => ({}), tidy: async () => [], dialog: (n, d) => rpc('projects:dialog', n, d), role: async () => ({}), attach: async () => ({}),
       delete: async (n, mode) => ({ name: n, mode, dialogs: 0, path: `/проекты/.trash/${n}` }),
     },
@@ -219,9 +224,17 @@
     pathForFile: () => '',
   };
   localStorage.setItem('sysai.session.last', scene === 'empty' ? '' : scene === 'kept' ? 's-kept' : 's-work');
-  localStorage.setItem('sysai.project', 'Элеватор Благовещенск');
+  localStorage.setItem('sysai.project', scene === 'scope' ? 'Шкаф СП-2 экраны' : 'Элеватор Благовещенск');
   localStorage.removeItem('sysai.pane.open');
-  if (scene === 'work') addEventListener('load', () => setTimeout(() => document.getElementById('nav-projects').click(), 200));
+  if (scene === 'work' || scene === 'scope') addEventListener('load', () => setTimeout(() => document.getElementById('nav-projects').click(), 200));
+  // ?scene=new — «Новый проект»: имя и выбор объёма (полностью / только ПЛК / только экраны)
+  if (scene === 'new') {
+    localStorage.removeItem('sysai.project');
+    addEventListener('load', () => setTimeout(() => {
+      document.getElementById('nav-projects').click();
+      setTimeout(() => { const b = [...document.querySelectorAll('.btn')].find((x) => /Новый проект/.test(x.textContent || '')); if (b) b.click(); }, 500);
+    }, 200));
+  }
   // ?scene=job&upd=1 — нажать «Установить» и посмотреть полосу обновления
   if (scene === 'job') addEventListener('load', () => setTimeout(() => {
     const b = [...document.querySelectorAll('.upd-bar .btn')].find((x) => /Установить/.test(x.textContent || ''));

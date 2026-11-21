@@ -316,6 +316,21 @@ html[data-theme="light"] .upd-text span { color: var(--muted); }
 .ask .choice label .opt-ico { width: 22px; height: 22px; border-radius: 5px; flex: none; object-fit: contain; }
 .ask .choice label:has(.opt-ico) { padding: 6px 8px; border: 1px solid var(--line); border-radius: 9px; }
 .ask .choice label:has(.opt-ico):hover { border-color: var(--clay); }
+/* Свои галочки и радио в вопросах агента — те же, что на сайте SYSAI: тёплый акцент, белая птичка, 19×19.
+   Стоковый квадрат браузера — синий и из другой вселенной; здесь он не в тон теме. */
+.ask .choice input[type=checkbox], .ask .choice input[type=radio] { appearance: none; -webkit-appearance: none;
+  margin: 0; flex: none; width: 19px; height: 19px; padding: 0; border: 1.5px solid var(--muted); background: var(--card);
+  border-radius: 6px; cursor: pointer; position: relative; display: inline-grid; place-content: center; flex-basis: auto;
+  transition: border-color .15s, background .15s, box-shadow .15s, transform .12s; }
+.ask .choice input[type=radio] { border-radius: 50%; }
+.ask .choice input[type=checkbox]:hover, .ask .choice input[type=radio]:hover { border-color: var(--clay); }
+.ask .choice input[type=checkbox]:active, .ask .choice input[type=radio]:active { transform: scale(.93); }
+.ask .choice input[type=checkbox]:checked, .ask .choice input[type=radio]:checked { border-color: transparent;
+  background: linear-gradient(155deg, var(--clay) 0%, var(--clay2) 55%, var(--sblue) 100%);
+  box-shadow: 0 2px 8px -3px var(--clay), inset 0 1px 0 rgba(255,255,255,.35); }
+.ask .choice input[type=checkbox]:checked::after { content: ""; width: 10px; height: 5px; border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff; transform: rotate(-45deg) translate(1px, -1px); }
+.ask .choice input[type=radio]:checked::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #fff; }
 .ask textarea { width: 100%; min-height: 64px; resize: vertical; background: var(--bg2); border: 1px solid var(--line2); border-radius: var(--r-sm); padding: 8px 10px; outline: none; font-size: 13.5px; user-select: text; }
 .ask textarea:focus { border-color: var(--clay-line); }
 .ask.done { border-color: var(--line); box-shadow: none; padding: 8px 14px; } .ask.done .opts, .ask.done .choice, .ask.done textarea { display: none; }
@@ -470,9 +485,34 @@ html[data-theme="light"] .upd-text span { color: var(--muted); }
 .pj-step.cur.todo { color: var(--soft); } .pj-step.cur.todo .n { box-shadow: inset 0 0 0 1.5px var(--clay-line); color: var(--clay); }
 @keyframes pj-pulse { 0%, 100% { box-shadow: inset 0 0 0 1.5px var(--clay), 0 0 0 0 rgba(217,142,138,.35); } 50% { box-shadow: inset 0 0 0 1.5px var(--clay), 0 0 0 6px rgba(217,142,138,0); } }
 @media (prefers-reduced-motion: reduce) { .pj-step.work .n { animation: none; } }
-.pj-facts { display: flex; flex-wrap: wrap; gap: 6px; }
-.pj-fact { display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 9px; border-radius: 99px; background: var(--card2); font-size: 11.5px; max-width: 100%; }
-.pj-fact i { font-style: normal; color: var(--faint); } .pj-fact b { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pj-step.skipped { opacity: .45; cursor: default; } .pj-step.skipped::before { background: var(--line); }
+.pj-step.skipped .n { background: transparent; box-shadow: inset 0 0 0 1px var(--line2); }
+.pj-step.skipped .t { text-decoration: line-through; text-decoration-color: var(--faint); }
+/* «Что выбрано» — the decisions of the project as a tree */
+.pj-tree { flex: none; margin: 10px 12px 0; padding: 9px 11px 10px; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--line); font-size: 12px; }
+.pj-tree-hd { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 6px; color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.pj-tree ul { list-style: none; margin: 0; padding: 0 0 0 14px; }
+.pj-tree > ul { padding-left: 0; }
+.pj-tree li { position: relative; padding-left: 16px; }
+.pj-tree > ul > li { padding-left: 0; }
+.pj-tree li li::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--line2); }
+.pj-tree li li:last-child::before { bottom: auto; height: 12px; }
+.pj-tree li li::after { content: ""; position: absolute; left: 0; top: 12px; width: 11px; height: 1px; background: var(--line2); }
+.pj-tree-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 7px; padding: 2px 4px; margin-left: -4px; border-radius: 5px; text-align: left; line-height: 1.45; width: calc(100% + 4px); }
+.pj-tree-row .k { color: var(--muted); } .pj-tree-row .v { color: var(--text); font-weight: 600; }
+.pj-tree-row .why { color: var(--faint); font-size: 11.5px; flex-basis: auto; min-width: 0; }
+.pj-tree-row.none .v { color: var(--faint); font-weight: 400; }
+.pj-tree-row.ask .v { color: var(--clay); } .pj-tree-row.ask:hover { background: var(--clay-bg); }
+.pj-tree-row.ask:focus-visible { outline: 2px solid var(--clay-line); outline-offset: 1px; }
+/* «Компиляция» — the person compiles in the vendor's program and says how it went */
+.pj-compile { flex: none; margin: 10px 12px 0; padding: 10px 12px; border-radius: var(--r); background: var(--card2); box-shadow: inset 0 0 0 1px var(--line); display: flex; flex-direction: column; gap: 8px; }
+.pj-compile-q { display: flex; gap: 9px; align-items: flex-start; } .pj-compile-q > .ico { color: var(--amber); margin-top: 2px; }
+.pj-compile-q > div { display: flex; flex-direction: column; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.pj-compile-q b { color: var(--text); font-size: 12.5px; font-weight: 600; }
+.pj-compile-acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.btn.ok { color: var(--green); box-shadow: inset 0 0 0 1px var(--green); background: var(--green-bg); }
+.btn.warn { color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); background: var(--amber-bg); }
+.btn.ok:hover, .btn.warn:hover { filter: brightness(1.08); }
 .pj-note { display: flex; flex-direction: column; gap: 1px; padding: 7px 10px; border-radius: var(--r-sm); background: var(--card); font-size: 12px; line-height: 1.45; color: var(--soft); border-left: 2px solid var(--line2); }
 .pj-note b { font-weight: 600; color: var(--text); font-size: 12px; }
 .pj-note.work { border-left-color: var(--clay); } .pj-note.done { border-left-color: var(--green); }
@@ -482,9 +522,17 @@ html[data-theme="light"] .upd-text span { color: var(--muted); }
 .pj-offer b { color: var(--text); font-size: 13px; font-weight: 600; } .pj-offer .btn { flex: none; min-width: 0; }
 .pj-dots { display: inline-flex; gap: 3px; flex: none; } .pj-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--line2); }
 .pj-dots i.done { background: var(--green); } .pj-dots i.work { background: var(--clay); } .pj-dots i.problem { background: var(--amber); }
+.pj-dots i.skip { display: none; }
 .pj-group { padding: 12px 8px 4px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
-.pj-new { display: flex; align-items: center; gap: 6px; padding: 6px 6px 10px; }
+.pj-new { display: flex; flex-direction: column; gap: 8px; padding: 6px 6px 10px; }
+.pj-new-row { display: flex; align-items: center; gap: 6px; }
 .pj-new .field { flex: 1; }
+.pj-scope { display: flex; flex-wrap: wrap; gap: 6px; }
+.pj-scope-b { flex: 1 1 140px; display: flex; flex-direction: column; gap: 1px; padding: 7px 10px; border-radius: var(--r-sm); background: var(--card); box-shadow: inset 0 0 0 1px var(--line); text-align: left; font-size: 12px; color: var(--soft); }
+.pj-scope-b b { font-weight: 600; color: var(--text); font-size: 12.5px; } .pj-scope-b span { color: var(--faint); font-size: 11px; }
+.pj-scope-b:hover { background: var(--card2); }
+.pj-scope-b.on { background: var(--clay-bg); box-shadow: inset 0 0 0 1.5px var(--clay); } .pj-scope-b.on span { color: var(--clay); }
+.pj-scope-b:focus-visible { outline: 2px solid var(--clay-line); outline-offset: 1px; }
 .pj-empty { margin: 0 auto; }
 .ex-msg { padding: 28px 18px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .ex-msg b { display: block; color: var(--text); margin-bottom: 4px; font-weight: 600; }
@@ -664,19 +712,37 @@ html[data-theme="light"] .stage-pill, html[data-theme="light"] .chip { backgroun
 .swarm-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
 .comb-done { color: var(--faint); font-size: 12px; }
 
-/* Соты: сетка шестиугольников. Цвет — состояние, форма — тоже: точка внутри отличает «нашёл» от «ошибки» */
-.comb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 6px; margin: 6px 0 12px; }
-.comb-grid .cell { position: relative; aspect-ratio: 1 / .88; border: none; padding: 0; cursor: pointer;
-  background: var(--line); clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
-  display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 11px; transition: background .25s; }
+/* Соты: шестиугольники правильные (46×53), касаются гранями, нечётный ряд — на полсоты: сетка читается как соты,
+   а не как таблица квадратов. Рамка — внутреннее кольцо того же контура (::before), цвет состояния — внутри (::after). */
+.comb-grid { --cw: 46px; --ch: 53px; margin: 6px 0 12px; }
+.comb-row { display: flex; }
+.comb-row + .comb-row { margin-top: calc(var(--ch) * -0.25); }
+.comb-row.odd { margin-left: calc(var(--cw) / 2); }
+.comb-grid .cell { position: relative; flex: none; width: var(--cw); height: var(--ch); border: none; padding: 0; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 11px;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.comb-grid .cell::before, .comb-grid .cell::after { content: ""; position: absolute; inset: 0; transition: background .25s;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.comb-grid .cell::before { background: var(--line2); }
+.comb-grid .cell::after { inset: 2px; background: var(--card2); }
 .comb-grid .cell .n { position: relative; z-index: 1; }
-.comb-grid .cell.idle { background: var(--card2); box-shadow: inset 0 0 0 1px var(--line); }
-.comb-grid .cell.working { background: var(--green); color: #0d1a0d; animation: comb-work 1.6s ease-in-out infinite; }
-.comb-grid .cell.done { background: var(--green); color: #0d1a0d; }
-.comb-grid .cell.error { background: var(--red); color: #fff; }
-.comb-grid .cell.timeout { background: var(--line); color: var(--muted); }
-.comb-grid .cell.conflict { background: var(--amber); color: #22160a; }
-.comb-grid .cell:hover { filter: brightness(1.12); }
+.comb-grid .cell.idle::before { background: color-mix(in srgb, var(--muted) 40%, var(--line2)); }
+.comb-grid .cell.working::before { background: var(--green); }
+.comb-grid .cell.working::after { background: color-mix(in srgb, var(--green) 62%, var(--card)); animation: comb-work 1.6s ease-in-out infinite; }
+.comb-grid .cell.working { color: #0d1a0d; }
+.comb-grid .cell.done::before { background: var(--green); }
+.comb-grid .cell.done::after { background: color-mix(in srgb, var(--green) 78%, var(--card)); }
+.comb-grid .cell.done { color: #0d1a0d; }
+.comb-grid .cell.error::before { background: var(--red); }
+.comb-grid .cell.error::after { background: color-mix(in srgb, var(--red) 74%, var(--card)); }
+.comb-grid .cell.error { color: #fff; }
+.comb-grid .cell.timeout::before { background: var(--line2); }
+.comb-grid .cell.timeout::after { background: var(--card); }
+.comb-grid .cell.timeout { color: var(--muted); }
+.comb-grid .cell.conflict::before { background: var(--amber); }
+.comb-grid .cell.conflict::after { background: color-mix(in srgb, var(--amber) 74%, var(--card)); }
+.comb-grid .cell.conflict { color: #22160a; }
+.comb-grid .cell:hover::before { filter: brightness(1.22); }
 @keyframes comb-work { 0%, 100% { opacity: .62; } 50% { opacity: 1; } }
 .comb-tail { color: var(--muted); font-size: 12.5px; margin-bottom: 8px; }
 .comb-answer { padding: 10px 12px; border-radius: 10px; background: var(--card2); box-shadow: inset 0 0 0 1px var(--line);
@@ -689,5 +755,5 @@ html[data-theme="light"] .stage-pill, html[data-theme="light"] .chip { backgroun
 .comb-err { color: var(--red); font-size: 12.5px; }
 .swarm-q-said { color: var(--soft); font-size: 13px; margin: 0 0 8px; }
 @media (prefers-reduced-motion: reduce) {
-  .comb-btn.busy, .comb-grid .cell.working { animation: none; }
+  .comb-btn.busy, .comb-grid .cell.working::after { animation: none; }
 }

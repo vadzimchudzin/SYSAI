@@ -7,10 +7,16 @@
 // project-docs.
 import { h, icon, clear, size, when, basename, kindIcon } from './dom.js';
 import { openMenu, toast } from './ui.js';
+import { decisions, compileCard, workBeforeDocs } from './decisions.mjs';
 
 const api = window.sysai;
 const STATE_TEXT = { todo: 'не начат', work: 'идёт', done: 'готов', problem: 'нужен инженер' };
-const FACTS = [['controller', 'Контроллер'], ['panel', 'Панель'], ['resolution', 'Экран'], ['link_title', 'Связь'], ['style', 'Стиль']];
+// the scope of a new project: the same keys as SCOPES of lib/projects.js and plcstage.py
+const SCOPES = [
+  ['full', 'Проект полностью', 'ПЛК → компиляция → экраны → документы'],
+  ['plc', 'Только ПЛК', 'программа и компиляция'],
+  ['hmi', 'Только экраны', 'по готовой программе ПЛК'],
+];
 const GROUPS = [['plc', 'Программа ПЛК', 'code'], ['hmi', 'Экраны панели', 'canvas'], ['scheme', 'Схемы', 'pdf'],
   ['doc', 'Документы', 'doc'], ['image', 'Картинки', 'image'], ['other', 'Прочее', 'file']];
 
@@ -100,11 +106,26 @@ export class ProjectsView {
 
   create() {
     const input = h('input', { type: 'text', placeholder: 'Название проекта, например «ЕФБШ-621 Достоево»', maxlength: '80', spellcheck: 'false' });
+    // what to make: the whole project, only the PLC program or only the screens — chosen before the folder is made
+    let scope = 'full';
+    const scopes = h('div', { class: 'pj-scope', role: 'radiogroup', 'aria-label': 'Что делаем' }, ...SCOPES.map(([key, label, sub]) => {
+      const b = h('button', { class: `pj-scope-b${key === scope ? ' on' : ''}`, type: 'button', role: 'radio', 'aria-checked': String(key === scope),
+        onclick: () => {
+          scope = key;
+          for (const x of scopes.children) {
+            const on = x === b;
+            x.classList.toggle('on', on);
+            x.setAttribute('aria-checked', String(on));
+          }
+          input.focus();
+        } }, h('b', { text: label }), h('span', { text: sub }));
+      return b;
+    }));
     const go = async () => {
       const name = input.value.trim();
       if (!name) return;
       try {
-        const info = await api.projects.create(name);
+        const info = await api.projects.create(name, scope);
         this.open(info.name);
       } catch (err) {
         toast(err.message, 'err');
@@ -114,9 +135,9 @@ export class ProjectsView {
       if (e.key === 'Enter') go();
       else if (e.key === 'Escape') this.list();
     });
-    const form = h('div', { class: 'pj-new' }, h('label', { class: 'field' }, icon('folder', 'sm'), input),
+    const form = h('div', { class: 'pj-new' }, h('div', { class: 'pj-new-row' }, h('label', { class: 'field' }, icon('folder', 'sm'), input),
       h('button', { class: 'btn sm primary', onclick: go }, h('span', { text: 'Создать' })),
-      h('button', { class: 'btn sm', onclick: () => this.list() }, h('span', { text: 'Отмена' })));
+      h('button', { class: 'btn sm', onclick: () => this.list() }, h('span', { text: 'Отмена' }))), scopes);
     const list = this.el.querySelector('.ex-list');
     if (!list) return;
     const old = list.querySelector('.pj-new');
@@ -155,7 +176,15 @@ export class ProjectsView {
       h('button', { class: 'icon-btn sm', title: 'Обновить', onclick: () => this.open(info.name) }, icon('refresh', 'sm')),
       h('button', { class: 'icon-btn sm danger', title: 'Удалить проект…', onclick: () => this.remove() }, icon('trash', 'sm')));
     const list = h('div', { class: 'ex-list' });
-    clear(this.el).append(bar, this._pipeline(info), this._where(info), this._openers(info), this._actions(info), list);
+    // what will open where and what the person chose: one answer of the main process for the tree, the compilation
+    // card and the where-block. A failure of apps.detect/environment is not silence: the blocks would stay hidden and
+    // the person would read it as «ничего не выбрано» — say it in a toast and in the where-block.
+    const plan = api.apps.plan(info.path, info.pipeline.facts || {}).catch((err) => {
+      toast(`Не удалось определить программы: ${err.message}`, 'err');
+      return { error: err.message || String(err) };
+    });
+    clear(this.el).append(bar, this._pipeline(info), this._decisions(info, plan), this._compile(info, plan), this._where(info, plan),
+      this._openers(info), this._actions(info), list);
     this._drop(list);
     if (!info.materials.length) {
       list.append(message('Материалов пока нет', 'Перетащите сюда всё, что есть по объекту: ТЗ, схемы, чертежи, таблицы '
@@ -212,10 +241,17 @@ export class ProjectsView {
   // программу в буфер обмена. Нет ни одного результата — строки нет вовсе, чтобы не занимать место.
   // «Где и что будет»: контроллер → программа, панель → программа и разрешение — до начала работы, а не после
   // первого нажатия. Строки берутся из фактов проекта (pipeline.json) и из файлов, которые в нём есть.
-  _where(info) {
-    const facts = (info.pipeline && info.pipeline.facts) || {};
+  _where(info, planned) {
     const box = h('div', { class: 'pj-where', hidden: true });
-    api.apps.plan(info.path, facts).then((plan) => {
+    planned.then((plan) => {
+      if (!plan) return;
+      if (plan.error) {   // the main process could not say what opens where: say why, do not stay silent
+        box.append(h('div', { class: 'pj-where-row' }, icon('alert', 'sm'),
+          h('span', { class: 'what', text: `Программы не определить: ${plan.error}` }),
+          h('button', { class: 'btn sm', text: 'Повторить', onclick: () => this.open(info.name) })));
+        box.hidden = false;
+        return;
+      }
       const env = (plan && plan.environment) || {};
       const openers = (plan && plan.openers) || [];
       const row = (side) => h('div', { class: 'pj-where-row' },
@@ -275,31 +311,95 @@ export class ProjectsView {
     }
   }
 
-  // The strip of stages: a step per stage (done — a tick, in work — a pulse, a problem — an alert), under it what
-  // the agent decided (controller, panel, link) and the note of the stage in hand. A click on a step asks the agent
-  // to take that stage.
+  // The strip of stages: a step per stage (done — a tick, in work — a pulse, a problem — an alert, left out by the
+  // scope — a dash) and the note of the stage in hand. A click on a step asks the agent to take that stage; a skipped
+  // step is not work to do and is not a button.
   _pipeline(info) {
     const pl = info.pipeline;
-    const current = pl.stages.find((s) => s.state === 'problem') || pl.stages.find((s) => s.state === 'work')
-      || pl.stages.find((s) => s.stage === pl.next);
-    const steps = h('div', { class: 'pj-steps' }, ...pl.stages.map((s, i) => h('button', {
-      class: `pj-step ${s.state}${current && current.stage === s.stage ? ' cur' : ''}`,
-      title: `${s.title}: ${STATE_TEXT[s.state]}. ${s.goal}.${s.note ? `\n${s.note}` : ''}\nНажмите — поручить этот этап агенту.`,
-      onclick: () => this.hooks.ask && this.hooks.ask(info.prompts.stages[s.stage], { name: info.name, path: info.path }),
-    }, h('span', { class: 'n' }, s.state === 'done' ? icon('check', 'sm') : s.state === 'problem' ? icon('alert', 'sm') : h('i', { text: String(i + 1) })),
-    h('span', { class: 't', text: s.title }))));
-    const facts = FACTS.filter(([k]) => pl.facts[k]).map(([k, label]) => h('span', { class: 'pj-fact' },
-      h('i', { text: label }), h('b', { text: String(pl.facts[k]) })));
+    const live = pl.stages.filter((s) => !s.skipped);
+    const current = live.find((s) => s.state === 'problem') || live.find((s) => s.state === 'work')
+      || live.find((s) => s.stage === pl.next);
+    let n = 0;
+    const steps = h('div', { class: 'pj-steps' }, ...pl.stages.map((s) => {
+      if (s.skipped) {
+        return h('div', { class: 'pj-step skipped', title: `${s.title}: не делаем — объём проекта «${pl.facts.scope_title || ''}»` },
+          h('span', { class: 'n' }, h('i', { text: '–' })), h('span', { class: 't', text: s.title }));
+      }
+      n += 1;
+      return h('button', {
+        class: `pj-step ${s.state}${current && current.stage === s.stage ? ' cur' : ''}`,
+        title: `${s.title}: ${STATE_TEXT[s.state]}. ${s.goal}.${s.note ? `\n${s.note}` : ''}\nНажмите — поручить этот этап агенту.`,
+        onclick: () => this.hooks.ask && this.hooks.ask(info.prompts.stages[s.stage], { name: info.name, path: info.path }),
+      }, h('span', { class: 'n' }, s.state === 'done' ? icon('check', 'sm') : s.state === 'problem' ? icon('alert', 'sm') : h('i', { text: String(n) })),
+      h('span', { class: 't', text: s.title }));
+    }));
     const note = current && (current.note || pl.started) ? h('div', { class: `pj-note ${current.state}` },
       h('b', { text: `${current.title}: ${STATE_TEXT[current.state]}` }), current.note ? h('span', { text: current.note }) : null) : null;
-    return h('div', { class: 'pj-pipe' }, steps, facts.length ? h('div', { class: 'pj-facts' }, ...facts) : null, note);
+    return h('div', { class: 'pj-pipe' }, steps, note);
+  }
+
+  // «Что выбрано»: the decisions of the project as a tree (decisions.mjs). A row that is not decided yet is a button: it
+  // asks the agent to put that question to the person — a card, not a guess.
+  _decisions(info, planned) {
+    const box = h('div', { class: 'pj-tree', hidden: true });
+    planned.then((plan) => {
+      // The plan failed: the where-block below says why and offers to retry. An empty environment would draw
+      // every row as «не выбран» — a lie about the project, not a state of it.
+      if (!plan || plan.error) return;
+      const pictures = (info.sources || []).filter((x) => x.role === 'picture-library').map((x) => basename(x.path));
+      const root = decisions(info.pipeline, (plan && plan.environment) || {}, pictures);
+      const decide = (info.prompts && info.prompts.decide) || {};
+      let open = 0;
+      const draw = (r) => {
+        if (r.missing && r.ask) open += 1;
+        const head = [h('span', { class: 'k', text: r.label }), h('span', { class: 'v', text: r.value }),
+          r.why ? h('span', { class: 'why', text: r.why }) : null];
+        const line = r.missing && r.ask && decide[r.ask]
+          ? h('button', { class: 'pj-tree-row ask', type: 'button', title: 'Не решено. Нажмите — агент спросит карточкой',
+            onclick: () => this.hooks.ask && this.hooks.ask(decide[r.ask], { name: info.name, path: info.path }) }, ...head)
+          : h('div', { class: `pj-tree-row${r.missing ? ' none' : ''}` }, ...head);
+        return h('li', {}, line, r.children.length ? h('ul', {}, ...r.children.map(draw)) : null);
+      };
+      const tree = h('ul', {}, draw(root));
+      box.append(h('div', { class: 'pj-tree-hd' }, h('span', { text: 'Что выбрано' }),
+        h('span', { text: open ? `не решено: ${open}` : 'всё решено' })), tree);
+      box.hidden = false;
+    });
+    return box;
+  }
+
+  // «Компиляция»: the window does not compile. It opens the program of the controller with our project and asks the
+  // person how it went; the answer goes to the agent — «да, окей», the next stage; errors, it goes through them.
+  _compile(info, planned) {
+    const box = h('div', { class: 'pj-compile', hidden: true });
+    planned.then((plan) => {
+      // The plan failed: there is no environment to lean on. An empty one would claim the project file
+      // does not exist yet — the reason lives in the where-block, with a way to retry.
+      if (!plan || plan.error) return;
+      const card = compileCard(info.pipeline, (plan && plan.environment) || {});
+      if (!card) return;
+      const send = (what) => this.ask(what);
+      box.append(h('div', { class: 'pj-compile-q' }, icon(card.state === 'problem' ? 'alert' : 'code', 'sm'),
+        h('div', {}, h('b', { text: card.state === 'problem' ? 'Компиляция не прошла' : `Компиляция в ${card.program}` }),
+          h('span', { text: card.open ? 'Откройте среду, скомпилируйте и скажите агенту, что вышло.'
+            : 'Файла проекта ещё нет: агент соберёт его, потом — компиляция в среде.' }))),
+      h('div', { class: 'pj-compile-acts' },
+        card.open ? h('button', { class: 'open-app', onclick: () => this.openIn(card.open) },
+          h('img', { src: `img/format-${card.open.id}.svg`, alt: '' }), h('span', { text: `Открыть ${card.open.title}` })) : null,
+        h('button', { class: 'btn sm ok', onclick: () => send('compiled') }, icon('check', 'sm'), h('span', { text: 'Скомпилировалось' })),
+        h('button', { class: 'btn sm warn', onclick: () => send('compileErrors') }, icon('alert', 'sm'), h('span', { text: 'Есть ошибки' }))));
+      box.hidden = false;
+    });
+    return box;
   }
 
   _actions(info) {
     const pl = info.pipeline;
     const stage = (key) => pl.stages.find((s) => s.stage === key);
     const next = stage(pl.next);
-    const ready = stage('hmi').state === 'done';
+    // the work before the documents is done: the last stage the scope has (the screens, or the build for «только ПЛК») —
+    // decisions.mjs: workBeforeDocs, covered by a unit test
+    const ready = workBeforeDocs(pl);
     const docsDone = stage('docs').state === 'done';
     const acts = h('div', { class: 'pj-acts' });
     if (ready && !docsDone) {

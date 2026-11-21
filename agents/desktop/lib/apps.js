@@ -39,6 +39,20 @@ const VENDORS = {
   oni: { vendor: 'ONI (Flexem)', serves: 'панели ONI/Flexem — экраны и мнемосхемы' },
 };
 
+// Языки программы ПЛК: какие понимает среда (`languages`) и какие наш генератор умеет писать (`writes`) — то же, что
+// plc_formats в plc-kit. Machine Expert умеет LD и ST, но генератор пишет только ST; Haiwell — только LD, собирается он в Happy из
+// списка инструкций (STL → LD по F7).
+const LANGUAGES = {
+  me: { languages: ['st', 'ld'], writes: ['st'], note: 'LD для Machine Expert пока не генерируется — программа идёт на ST' },
+  hawell: { languages: ['ld'], writes: ['ld'], note: 'список инструкций STL, лестницу LD собирает Haiwell Happy (F7)' },
+};
+// Что значит связь — одной строкой для дерева решений (решает её plc_link по моделям, а не окно).
+const LINK_WHY = {
+  opcua: 'оба умеют OPC UA: переменные по именам, адреса %M не нужны',
+  modbus_tcp: 'Modbus TCP по Ethernet: адреса %M в программе и на экранах',
+  modbus_rtu: 'Modbus RTU по последовательной линии: адреса %M',
+};
+
 const IDS = Object.keys(FORMATS);
 const SKIP = new Set(['_work', 'materials', '.sysai', '.git', 'node_modules']);
 
@@ -170,12 +184,17 @@ function environment(facts = {}, openers = []) {
       ready: Boolean(open),
     };
   };
+  const plc = side('plc', 'ПЛК', facts.controller);
+  const lang = LANGUAGES[plc.id];
+  if (lang) Object.assign(plc, { languages: lang.languages, writes: lang.writes, languageNote: lang.note });
+  const link = String(facts.link || '');
   return {
-    plc: side('plc', 'ПЛК', facts.controller),
+    plc,
     hmi: side('hmi', 'Экраны', facts.panel),
     resolution: String(facts.resolution || ''),
-    link: String(facts.link || ''),
+    link,
+    linkWhy: LINK_WHY[link] || '',
   };
 }
 
-module.exports = { FORMATS, IDS, VENDORS, format, candidates, detect, projectRoot, pasteScript, plan, environment, pickFor };
+module.exports = { FORMATS, IDS, VENDORS, LANGUAGES, format, candidates, detect, projectRoot, pasteScript, plan, environment, pickFor };

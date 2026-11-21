@@ -488,3 +488,44 @@ def test_only_an_admin_opens_the_honeycomb(client, net_on):
         assert 'href="/agents/swarm"' not in c.get("/app").text
         assert c.get("/agents/swarm", follow_redirects=False).status_code != 200
         assert c.post("/agents/swarm/1", data={"on": "1"}, follow_redirects=False).status_code != 303
+
+
+def test_the_cells_of_the_swarm_sit_edge_to_edge_with_a_rim(client):
+    """Соты на странице — правильные шестиугольники, сцепленные гранями: следующая строка поднята на четверть соты,
+    нечётная сдвинута на полсоты, у каждой соты рамка-кольцо того же контура. Иначе это таблица квадратов."""
+    css = client.get("/static/net.css").text
+    assert "--cw: 24px; --ch: 28px" in css, "сота схемы: ширина и высота заданы вместе, форма считается из них"
+    assert ".comb-row + .comb-row" in css or ".comb .cell:nth-child(n+9)" in css, "следующий ряд поднимается к предыдущему"
+    assert "calc(var(--ch) * -0.25)" in css, "ряд поднят на четверть соты: грани соседей сцеплены"
+    assert "translateX(calc(var(--cw) / 2))" in css, "нечётный ряд сдвинут на полсоты, а не на глаз"
+    assert ".comb .cell::before" in css and ".hive .hx::before" in css, "рамка есть и у схемы, и у больших сот"
+
+
+def test_the_checkbox_of_the_swarm_keeps_its_own_size(client):
+    """Галочка в настройках роя: общее правило поля input{padding:10px 12px} её не растягивает — 19×19, как везде."""
+    css = client.get("/static/net.css").text
+    assert ".net-checks input[type=checkbox]" in css, "галочка в блоке проверок — своё правило, а не общее поле"
+    block = css.split(".net-checks input[type=checkbox]", 1)[1].split("}", 1)[0]
+    assert "width: 19px" in block and "padding: 0" in block, f"галочка держит свои 19 px без полей: {block.strip()}"
+
+
+def test_the_big_cells_of_the_hive_touch_their_neighbours(client):
+    """Крупные соты страницы: соседние в ряду касаются гранями (зазора нет), следующий ряд поднят на четверть высоты,
+    нечётный сдвинут на полсоты. С зазором 12px они читались как отдельные плитки, а не как соты."""
+    css = client.get("/static/net.css").text
+    row = css[css.index(".hive-row {"):]
+    row = row[:row.index("}")]
+    assert "gap: 0" in row, f"в ряду нет зазора между сотами: {row}"
+    nxt = css[css.index(".hive-row + .hive-row"):]
+    nxt = nxt[:nxt.index("}")]
+    assert "calc(var(--h) * -0.25)" in nxt, f"следующий ряд поднят на четверть высоты: {nxt}"
+    odd = css[css.index(".hive-row.odd"):]
+    odd = odd[:odd.index("}")]
+    assert "calc(var(--w) / 2)" in odd and "+ 6px" not in odd, f"нечётный ряд сдвинут ровно на полсоты: {odd}"
+    # Контур соты должен совпадать с числами раскладки: они считаны для остроконечного шестиугольника
+    # (острия сверху и снизу). Плосковерхий соседствует вершиной, а не гранью — при gap: 0 остаётся ромбовидная щель.
+    hx = css[css.index(".hive .hx {"):]
+    hx = hx[:hx.index("}")]
+    assert "polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)" in hx, \
+        f"сота остроконечная, та же форма, под которую посчитаны шаг ряда и сдвиг: {hx}"
+    assert "25% 0, 75% 0" not in hx, "плосковерхий контур оставляет ромбовидный зазор между соседями"

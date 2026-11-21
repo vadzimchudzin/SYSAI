@@ -4,6 +4,7 @@ __pycache__/
 data/
 *.db
 .venv/
+.tmp/
 .pytest_cache/
 .hoplite/cache/
 .hoplite/artifacts/
